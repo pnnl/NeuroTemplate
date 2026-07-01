@@ -1,0 +1,68 @@
+"""Unified `nt` command-line entry point.
+
+Dispatches `nt <group> <verb> [args...]` to the matching subcommand `main()`.
+The dispatcher only consumes the two leading tokens (group + verb); everything
+after is left in `sys.argv` so the subcommand parses its own flags exactly as
+before. Groups mirror the package layout:
+
+    nt model train          # neurotemplate.modeling.cli.train
+    nt model optuna         # neurotemplate.modeling.cli.optuna
+    nt model load           # neurotemplate.modeling.cli.load
+    nt model debug-heads    # neurotemplate.modeling.cli.debug_heads
+    nt control train        # neurotemplate.control.cli.train
+"""
+from __future__ import annotations
+
+import sys
+from importlib import import_module
+from typing import Optional
+
+# (group, verb) -> "module:function". One line per console command that used
+# to live in [project.scripts]; this dict is the single source of truth and
+# the help text is derived from it.
+COMMANDS: dict[tuple[str, str], str] = {
+    ("model", "train"):       "neurotemplate.modeling.cli.train:main",
+    ("model", "optuna"):      "neurotemplate.modeling.cli.optuna:main",
+    ("model", "load"):        "neurotemplate.modeling.cli.load:main",
+    ("model", "debug-heads"): "neurotemplate.modeling.cli.debug_heads:main",
+    ("control", "train"):     "neurotemplate.control.cli.train:main",
+}
+
+
+def _help_text() -> str:
+    lines = ["Usage: nt <group> <verb> [args...]", "", "Commands:"]
+    for group, verb in COMMANDS:
+        lines.append(f"  nt {group} {verb}")
+    lines.append("")
+    lines.append("Pass --help after a command for its own flags, e.g. `nt model train --help`.")
+    return "\n".join(lines)
+
+
+def main(argv: Optional[list[str]] = None) -> None:
+    argv = list(sys.argv[1:] if argv is None else argv)
+
+    if not argv or argv[0] in ("-h", "--help"):
+        print(_help_text())
+        return
+
+    if len(argv) < 2:
+        print(_help_text(), file=sys.stderr)
+        raise SystemExit(f"nt: '{argv[0]}' needs a verb (e.g. `nt {argv[0]} train`).")
+
+    group, verb = argv[0], argv[1]
+    target = COMMANDS.get((group, verb))
+    if target is None:
+        print(_help_text(), file=sys.stderr)
+        raise SystemExit(f"nt: unknown command '{group} {verb}'.")
+
+    module_name, func_name = target.split(":")
+    func = getattr(import_module(module_name), func_name)
+
+    # Hand the subcommand a clean argv: drop the two dispatch tokens, keep the
+    # rest. The subcommands all read sys.argv themselves, so rewrite it here.
+    sys.argv = [f"nt {group} {verb}", *argv[2:]]
+    func()
+
+
+if __name__ == "__main__":
+    main()

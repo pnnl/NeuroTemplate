@@ -1,93 +1,233 @@
-# Neurotemplate
+# NeuroTemplate
 
+A library of generic, time-series, data-driven black-box modeling and control building blocks, layered on top of [Neuromancer](https://github.com/pnnl/neuromancer).
 
+The repo contains two sister subsystems:
 
-## Getting started
+- **Modeling** — train a system-identification surrogate `y_{k+1} = f(y_k, u_k, d_k) [+ y_k]` from data, with optional physics-informed losses (gradient sign penalties, equilibrium / step-response / free-decay scenarios), Optuna search, MLflow tracking.
+- **Control** — train a differentiable predictive control (DPC) policy against a frozen surrogate. Closed-loop rollouts, comfort-band penalties, optional energy/effort objectives, setpoint quantization.
 
-To make it easy for you to get started with GitLab, here's a list of recommended next steps.
+Both sides share a thin `common/` layer (YAML/CLI loader, CSV + sliding-window data utilities, per-channel metrics).
 
-Already a pro? Just edit this README.md and make it your own. Want to make it easy? [Use the template at the bottom](#editing-this-readme)!
+NeuroTemplate is meant to be installed as a dependency in an application repo. You bring the data and the two user-defined hook files; the library brings everything else. New framework features land here once, get tagged, and downstream apps pick them up via a version bump.
 
-## Add your files
+## Status
 
-- [ ] [Create](https://docs.gitlab.com/ee/user/project/repository/web_editor.html#create-a-file) or [upload](https://docs.gitlab.com/ee/user/project/repository/web_editor.html#upload-a-file) files
-- [ ] [Add files using the command line](https://docs.gitlab.com/topics/git/add_files/#add-files-to-a-git-repository) or push an existing Git repository with the following command:
+Restructured from a flat script collection into an installable library. Phase A complete.
+
+- ✅ Package + install + console script wired (`uv add "NeuroTemplate @ file://..."` works)
+- ✅ YAML + CLI override machinery, multi-path data fields (`Union[str, list[str]]`)
+- ✅ Hook discovery via `neurotemplate.hooks` (CWD + `cfg.user_hooks_path` override)
+- ✅ Single `nt <group> <verb>` dispatcher (replaces the five flat console scripts)
+- ✅ 102 / 102 tests passing
+- ☐ Phase B (scrub remaining HVAC vocabulary from library code; relocate runtime artifacts off CWD)
+- ☐ Phase C (ship `examples/rtu_mall/`, README templates, end-to-end smoke test)
+
+Open work tracked in [audit.md](audit.md). The restructure plan is in `.claude/plans/toasty-toasting-glade.md`.
+
+## Installing as a dependency
+
+Add NeuroTemplate to an application's `pyproject.toml`:
+
+```toml
+[project]
+dependencies = [
+    "NeuroTemplate @ git+ssh://git@github.com/<owner>/sys_id_framework.git@v0.1.0",
+]
+
+# Until upstream Neuromancer ships a macOS arm64 wheel for torch-harmonics,
+# every downstream app needs this same override. The framework's own
+# pyproject has the same block, but uv overrides don't propagate to consumers.
+[tool.uv]
+override-dependencies = [
+    "torch-harmonics; sys_platform != 'darwin'",
+]
+```
+
+For local development against an in-progress framework checkout, swap the dep source to an editable local install:
+
+```toml
+[tool.uv.sources]
+NeuroTemplate = { path = "../sys_id_framework", editable = true }
+```
+
+Then `uv sync` and a single `nt` console script is on your `PATH`. It dispatches
+`nt <group> <verb>` to the subcommands below.
+
+## What lands on PATH
+
+| Command | Purpose |
+|---|---|
+| `nt model train` | Train a system-ID surrogate |
+| `nt model optuna` | Optuna hyperparameter search + retrain |
+| `nt model load` | Re-evaluate a saved MLflow run on new data |
+| `nt model debug-heads` | Diagnostic for output-head behaviour |
+| `nt control train` | Train a DPC policy against a frozen surrogate |
+
+`nt` with no arguments (or `nt -h`) prints the command list. Each command takes
+the same standard flags (parsed by [common/config.py](src/neurotemplate/common/config.py)):
 
 ```
-cd existing_repo
-git remote add origin https://tanuki.pnnl.gov/buildings-technology/neurotemplate.git
-git branch -M main
-git push -uf origin main
+--config PATH         YAML config path or short name resolved against the command's config directory
+--set key=value       Override any YAML field (repeatable)
+--print-config        Render the resolved config to stdout and exit
+--dump-config PATH    Write resolved config to YAML and exit
+--list-configs        List available configs in the config directory and exit
 ```
 
-## Integrate with your tools
+## What an application repo looks like
 
-- [ ] [Set up project integrations](https://tanuki.pnnl.gov/buildings-technology/neurotemplate/-/settings/integrations)
+```
+my_app/
+├── pyproject.toml              # depends on NeuroTemplate + the torch-harmonics override
+├── modeling_user_defined.py    # six modeling hooks
+├── control_user_defined.py     # four control hooks (only if you train policies)
+├── model_configs/
+│   └── modeling.yaml
+├── control_configs/
+│   └── control.yaml
+└── data/                       # whatever your YAML paths point at
+```
 
-## Collaborate with your team
+`nt model train` looks for configs in `model_configs/`; `nt control train` looks in `control_configs/`. Keep them separate so each folder only contains the configs relevant to that subsystem.
 
-- [ ] [Invite team members and collaborators](https://docs.gitlab.com/ee/user/project/members/)
-- [ ] [Create a new merge request](https://docs.gitlab.com/ee/user/project/merge_requests/creating_merge_requests.html)
-- [ ] [Automatically close issues from merge requests](https://docs.gitlab.com/ee/user/project/issues/managing_issues.html#closing-issues-automatically)
-- [ ] [Enable merge request approvals](https://docs.gitlab.com/ee/user/project/merge_requests/approvals/)
-- [ ] [Set auto-merge](https://docs.gitlab.com/user/project/merge_requests/auto_merge/)
+The library finds the hook files automatically: by default it looks for `modeling_user_defined.py` / `control_user_defined.py` in the current working directory. If you'd rather keep them elsewhere, set `user_hooks_path` in your YAML (a file path or dotted module name).
 
-## Test and Deploy
+Until Phase C ships `examples/rtu_mall/`, the fastest way to bootstrap an app is to copy [tests/fixtures/modeling_user_defined.py](tests/fixtures/modeling_user_defined.py) + [tests/fixtures/control_user_defined.py](tests/fixtures/control_user_defined.py) into a new directory and create `model_configs/modeling.yaml` and `control_configs/control.yaml`.
 
-Use the built-in continuous integration in GitLab.
+## Hook contracts
 
-- [ ] [Get started with GitLab CI/CD](https://docs.gitlab.com/ee/ci/quick_start/)
-- [ ] [Analyze your code for known vulnerabilities with Static Application Security Testing (SAST)](https://docs.gitlab.com/ee/user/application_security/sast/)
-- [ ] [Deploy to Kubernetes, Amazon EC2, or Amazon ECS using Auto Deploy](https://docs.gitlab.com/ee/topics/autodevops/requirements.html)
-- [ ] [Use pull-based deployments for improved Kubernetes management](https://docs.gitlab.com/ee/user/clusters/agent/)
-- [ ] [Set up protected environments](https://docs.gitlab.com/ee/ci/environments/protected_environments.html)
+### Modeling (`modeling_user_defined.py`)
 
-***
+| Function | Required | Used by |
+|---|---|---|
+| `data_mapping(df, cfg) -> {Y, U, D, t: [col]}` | yes | pipeline at data-prep time |
+| `data_head_config(nm_mapping) -> {col: HeadSpec}` | optional, default `{}` | output-head construction |
+| `column_norm_config(nm_mapping) -> {col: norm_type \| None}` | optional, default `{}` | per-column norm override |
+| `synth_cfg(nm_mapping, norm_stats) -> dict \| None` | required, return `None` to disable | synthetic-scenario penalties |
+| `hyper_args(trial, base_cfg) -> Config` | required only for `*-modeling-optuna` | Optuna trial setup |
+| `sub_plot(df_true, col_name) -> tuple \| None` | optional, default `None` | per-column subplot guidance |
 
-# Editing this README
+### Control (`control_user_defined.py`)
 
-When you're ready to make this README your own, just edit this file and use the handy template below (or feel free to structure it however you want - this is just a starting point!). Thanks to [makeareadme.com](https://www.makeareadme.com/) for this template.
+| Function | Required | Used by |
+|---|---|---|
+| `controlled_channels(nm_mapping) -> ([col], [idx])` | yes | comfort objective |
+| `comfort_band_signal(nm_mapping, norm_stats, n_samples, nsteps, band, generator) -> (ymin, ymax)` | yes | scenarios |
+| `actuation_bounds(nm_mapping, norm_stats) -> (umin, umax)` | yes | policy bounds |
+| `power_metric(yn, U, nm_mapping, norm_stats) -> Tensor` + `POWER_METRIC_IMPLEMENTED: bool` | optional, gated | effort objective |
 
-## Suggestions for a good README
+Once Phase C lands, `docs/HOOKS.md` will hold the canonical contract reference with signatures + examples.
 
-Every project is different, so consider which of these sections apply to yours. The sections used in the template are suggestions for most open source projects. Also keep in mind that while a README can be too long and detailed, too long is better than too short. If you think your README is too long, consider utilizing another form of documentation rather than cutting out information.
+## Typical session
 
-## Name
-Choose a self-explaining name for your project.
+```bash
+cd my_app/
 
-## Description
-Let people know what your project can do specifically. Provide context and add a link to any reference visitors might be unfamiliar with. A list of Features or a Background subsection can also be added here. If there are alternatives to your project, this is a good place to list differentiating factors.
+# 1. Train a system-ID surrogate. (--config defaults to model_configs/modeling.yaml.)
+nt model train
 
-## Badges
-On some READMEs, you may see small images that convey metadata, such as whether or not all the tests are passing for the project. You can use Shields to add some to your README. Many services also have instructions for adding a badge.
+# Watch for `Finished run: <run_id>` — that's the MLflow id of the surrogate.
 
-## Visuals
-Depending on what you are making, it can be a good idea to include screenshots or even a video (you'll frequently see GIFs rather than actual videos). Tools like ttygif can help, but check out Asciinema for a more sophisticated method.
+# 2. Train a control policy against it.
+nt control train --config control_configs/control.yaml \
+    --set sysid_run_id=<run_id>
 
-## Installation
-Within a particular ecosystem, there may be a common way of installing things, such as using Yarn, NuGet, or Homebrew. However, consider the possibility that whoever is reading your README is a novice and would like more guidance. Listing specific steps helps remove ambiguity and gets people to using your project as quickly as possible. If it only runs in a specific context like a particular programming language version or operating system or has dependencies that have to be installed manually, also add a Requirements subsection.
+# 3. Re-evaluate the surrogate on different data later.
+nt model load --run_id <run_id> --id_data path/to/test.csv
 
-## Usage
-Use examples liberally, and show the expected output if you can. It's helpful to have inline the smallest example of usage that you can demonstrate, while providing links to more sophisticated examples if they are too long to reasonably include in the README.
+# Hyperparameter search instead of a single train:
+nt model optuna --config model_configs/modeling.yaml \
+    --set n_trials=50 --set trial_epochs=30
+```
 
-## Support
-Tell people where they can go to for help. It can be any combination of an issue tracker, a chat room, an email address, etc.
+One-off overrides without editing YAML:
 
-## Roadmap
-If you have ideas for releases in the future, it is a good idea to list them in the README.
+```bash
+nt model train --config model_configs/modeling.yaml \
+    --set epochs=1 \
+    --set log2_hidden_size=4 \
+    --set grad_gain=0.5
+```
 
-## Contributing
-State if you are open to contributions and what your requirements are for accepting them.
+The `--set` parser handles `true`/`false`, `null`/`none`, quoted strings, JSON lists/dicts, floats (anything with `.`/`e`/`E`), and ints. Unknown keys fail fast with `ConfigError: Override target does not exist: <key>`.
 
-For people who want to make changes to your project, it's helpful to have some documentation on how to get started. Perhaps there is a script that they should run or some environment variables that they need to set. Make these steps explicit. These instructions could also be useful to your future self.
+Inspect a fully-resolved config without running anything:
 
-You can also document commands to lint the code or run tests. These steps help to ensure high code quality and reduce the likelihood that the changes inadvertently break something. Having instructions for running tests is especially helpful if it requires external setup, such as starting a Selenium server for testing in a browser.
+```bash
+nt model train --config model_configs/modeling.yaml \
+    --set epochs=10 --print-config
+```
 
-## Authors and acknowledgment
-Show your appreciation to those who have contributed to the project.
+## Programmatic use
 
-## License
-For open source projects, say how it is licensed.
+If you'd rather drive things from your own Python instead of the CLIs:
 
-## Project status
-If you have run out of energy or time for your project, put a note at the top of the README saying that development has slowed down or stopped completely. Someone may choose to fork your project or volunteer to step in as a maintainer or owner, allowing your project to keep going. You can also make an explicit request for maintainers.
+```python
+from neurotemplate.common.config import load_config_from_cli, MODEL_CONFIG_DIR
+from neurotemplate.modeling.config import ModelingConfig
+from neurotemplate.modeling.pipeline import train_and_evaluate
+
+cfg, _ = load_config_from_cli(
+    ["--config", "model_configs/modeling.yaml", "--set", "epochs=1"],
+    cls=ModelingConfig,
+    config_dir=MODEL_CONFIG_DIR,
+)
+# ...then call train_and_evaluate(cfg, ...) etc.
+```
+
+The CLI wrappers ([modeling/cli/train.py](src/neurotemplate/modeling/cli/train.py), [control/cli/train.py](src/neurotemplate/control/cli/train.py)) are short enough — ~30 lines each — that they're worth reading as a template if you want to write your own driver.
+
+## Package layout
+
+```
+src/neurotemplate/
+├── hooks.py             # load_modeling_hooks(cfg), load_control_hooks(cfg)
+├── common/
+│   ├── config.py        # YAML, --set, dict_to_dataclass, CLI parser
+│   ├── data_utils.py    # CSV load, sliding windows, norm/denorm
+│   └── metrics.py       # ChannelMetrics, per_channel_metrics
+├── modeling/
+│   ├── config.py        # ModelingConfig
+│   ├── dynamics.py      # SSMGrad, GRUBlock, get_dynamics  (NSSM/LSSM/MLP/TCN/GRU)
+│   ├── heads.py         # HeadStack (regression / binary / bounded / ordinal)
+│   ├── loss.py          # build_loss
+│   ├── gradient_sampling.py  # SampledGradientPenalty
+│   ├── scenarios.py     # synthetic-physics penalties (equilibrium / step / free-decay)
+│   ├── experiment.py    # train_with_curriculum, build_trainer
+│   ├── pipeline.py      # train_and_evaluate, evaluate_and_plot
+│   ├── plotting.py
+│   ├── reportcard.py
+│   └── cli/             # train, optuna, load, debug_heads
+└── control/
+    ├── config.py        # ControlConfig
+    ├── policy.py        # build_policy, STEQuantize
+    ├── closed_loop.py   # build_closed_loop, build_control_loss
+    ├── scenarios.py     # BandSpec, build_window_dict, build_loaders
+    ├── pipeline.py      # train_policy, evaluate_closed_loop, render_control_reportcard
+    ├── load.py          # load_frozen_dynamics
+    └── cli/             # train
+```
+
+Module names inside `modeling/` and `control/` are unprefixed (the directory disambiguates). Anything *outside* those subpackages that is specific to one side carries an explicit `modeling_*` / `control_*` prefix — the two hook files at the app root, and the five console scripts.
+
+## Relationship to Neuromancer
+
+NeuroTemplate is a layer **on top of** Neuromancer, not a replacement. We reuse `Node`, `SystemPreview`, `SSM`, `Block` / `MLP` / `MLP_bounds`, `LitTrainer`, `LitProblem`, `PenaltyLoss`, `DictDataset`, and `MLFlowLogger` directly. What NeuroTemplate adds that Neuromancer does not ship:
+
+- `SSMGrad` plus a vmap-compatible `GRUBlock` (manual GRU unroll for `jacrev` / `vmap`)
+- `SampledGradientPenalty` — off-trajectory Jacobian sign sampling
+- Synthetic physics-scenario penalties (equilibrium / step response / free decay)
+- `HeadStack` per-channel output heads (regression / binary / bounded / ordinal)
+- Per-channel metrics + markdown reportcards
+- Control-side: `STEQuantize`, `BandSpec` + comfort-band penalties, closed-loop assembly
+
+If you find yourself shadowing a Neuromancer class, prefer the import.
+
+## Tests
+
+```bash
+uv run pytest tests/
+```
+
+All 102 pass today, against the current local Neuromancer checkout. The suite covers config, data utilities, metrics, heads, reportcard, hook contracts, and the Neuromancer-touching dynamics/loss/closed-loop paths.

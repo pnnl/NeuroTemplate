@@ -1,0 +1,89 @@
+# Ignore markdown reports
+*.md
+
+# Ignore configuration files
+*.yaml
+
+# Results directories and files
+mlruns/
+plots/
+optuna_dbs/
+data/
+*.db
+
+# Ignore PDFs and PNGs
+*.pdf
+*.png
+
+# Ignore Jupyter notebook checkpoints
+.ipynb_checkpoints/
+
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# macOS system files
+.DS_Store
+
+# VSCode and JetBrains IDE files
+.vscode/
+.idea/
+
+# Log files and temporary files
+*.log
+*.tmp
+*.swp
+*.bak
+
+# Python virtual environments
+venv/
+env/
+.venv/
+.env/
+
+# Compiled C/C++ files
+*.o
+*.so
+*.out
+*.a
+*.dylib
+
+# Shell scripts
+*.sh
+
+# Coverage reports
+htmlcov/
+.coverage
+.cache/
+nosetests.xml
+coverage.xml
+
+# Pytest and test artifacts
+.pytest_cache/
+*.cover
+
+# MyPy and Pylint artifacts
+.mypy_cache/
+.dmypy.json
+pylint-report.txt
+
+# Jupyter notebooks (optional, uncomment to ignore notebooks)
+# *.ipynb
+
+# Build and dist folders
+build/
+dist/
+*.egg-info/
+
+# Node/npm artifacts
+node_modules/
+npm-debug.log
+yarn-debug.log
+yarn-error.log
+
+# Rust target directory
+target/
+
+# Backup files
+*~

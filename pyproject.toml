@@ -1,0 +1,73 @@
+[project]
+name = "NeuroTemplate"
+version = "0.1.0"
+description = "Neuromancer-based template for system identification and differentiable predictive control."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "beartype>=0.22.3",
+    "darts>=0.38.0",
+    "jupyter>=1.1.1",
+    "matplotlib>=3.10.7",
+    "mlflow>=3.9.0",
+    # Pinned to the exact neuromancer-lite fork commit that ships the
+    # preview/logging API this framework targets (branch
+    # feature/past_future_preview). This is the required state for consumers
+    # installing from git. Bump the SHA when neuromancer-lite advances.
+    # NOTE: this commit does NOT include the still-untracked `neuromancer.hvac`
+    # package (nor the staged-but-uncommitted system.py edits), so a clean
+    # install from this ref will fail the Tier-A hvac models (hvac_adapter.py)
+    # until hvac/ is committed and the SHA is bumped.
+    "neuromancer @ git+ssh://git@github.com/EladMichael/neuromancer-lite.git@434b1b98ff7755267ce47ff6b5a751bc9ae5e52a",
+    "numpy>=2.2.6",
+    "optuna>=4.8.0",
+    "optuna-dashboard>=0.20.0",
+    "pandas>=2.3.3",
+    "pytorch-tcn>=1.2.3",
+    "scipy>=1.15.3",
+    "statsmodels>=0.14.5",
+    "torch>=2.9.0",
+    "torchsummary>=1.5.1",
+    "wandb>=0.24.1",
+    "xgboost>=3.1.1",
+]
+
+[project.scripts]
+# Single dispatcher: `nt <group> <verb>`. See neurotemplate/cli.py for the
+# command table (nt model train, nt control train, ...).
+nt = "neurotemplate.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/neurotemplate"]
+
+# Required so the git-pinned `neuromancer @ git+ssh://...` direct reference in
+# project.dependencies is accepted by hatchling at build time.
+[tool.hatch.metadata]
+allow-direct-references = true
+
+# Local-dev override: build against an editable neuromancer checkout instead of
+# the pinned git ref above. This is a uv-only convenience that does NOT
+# propagate to downstream consumers (they get the git ref from dependencies).
+# Comment this out to exercise the real git pin locally.
+[tool.uv.sources]
+neuromancer = { path = "../../neuromancer-lite", editable = true }
+
+[tool.uv]
+# torch-harmonics ships no macOS arm64 wheel and is a transitive dep
+# pulled in by neuromancer. Skip it on darwin; nothing in this repo
+# uses it directly.
+override-dependencies = [
+    "torch-harmonics; sys_platform != 'darwin'",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
