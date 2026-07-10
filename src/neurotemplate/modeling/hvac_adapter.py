@@ -1,6 +1,13 @@
 """
 Gray-box HVAC dynamics for the modeling catalog.
 
+ALPHA: the gray-box models and this adapter are under active development.
+Physics coverage, the `building_spec` contract, and neuromancer-lite's
+`neuromancer.hvac` package itself are all still changing (see the pinned
+commit note in pyproject.toml). Expect breaking changes between framework
+versions; treat gray-box results as a research comparison against the
+black-box surrogates, not a production-ready model.
+
 Registers two physics models from neuromancer-lite alongside the neural models
 (`mlp`/`nssm`/...), so the framework can fit their *physical* parameters and
 benchmark gray-box vs. black-box on the same data with a one-word config toggle:

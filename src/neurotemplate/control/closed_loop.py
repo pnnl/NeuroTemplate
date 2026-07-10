@@ -74,6 +74,7 @@ def build_control_loss(
     ymin = variable("ymin")
     ymax = variable("ymax")
     u = variable("U")
+    d = variable("D")
 
     # Predicted controlled channels over the horizon vs. the band.
     y_ctrl = yn[:, hmax:, ctrl_idx]      # [b, P, n_ctrl]
@@ -83,11 +84,11 @@ def build_control_loss(
     objectives = []
 
     if cfg.comfort_weight > 0:
-        lower_violation = torch.mean(relu(ymin_h - y_ctrl))
+        lower_violation = torch.mean(relu(ymin_h - y_ctrl)**2)
         comfort_lower_loss = cfg.comfort_weight * lower_violation == 0
         comfort_lower_loss.update_name("comfort_lower_loss")
 
-        upper_violation = torch.mean(relu(y_ctrl - ymax_h))
+        upper_violation = torch.mean(relu(y_ctrl - ymax_h)**2)
         comfort_upper_loss = cfg.comfort_weight * upper_violation == 0
         comfort_upper_loss.update_name("comfort_upper_loss")
 
@@ -108,12 +109,13 @@ def build_control_loss(
                 "with --set effort_weight=0 until a power model exists."
             )
 
-        def _power(yn_v, u_v):
+        def _power(yn_v, u_v, d_v):
             return hooks.power_metric(
-                yn_v[:, hmax:, :], u_v[:, hmax:, :], nm_mapping, norm_stats,
+                yn_v[:, hmax:, :], u_v[:, hmax:, :], d_v[:, hmax:, :],
+                nm_mapping, norm_stats,
             )
 
-        power = variable([yn, u], _power, display_name="power")
+        power = variable([yn, u, d], _power, display_name="power")
         mean_power = torch.mean(power)
         effort_loss = cfg.effort_weight * mean_power == 0
         effort_loss.update_name("effort_loss")

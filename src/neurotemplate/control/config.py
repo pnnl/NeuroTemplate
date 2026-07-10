@@ -105,8 +105,8 @@ class ControlConfig:
     # ── Logging ──────────────────────────────────────────────────
     savedir: str = "temp"
     location: str = "sqlite:///mlflow.db"
-    exp: str = "DPC Control"
-    run: str = "DPC"
+    exp: str = "DPC Training"
+    run: str = ""
     plots_dir: str = "plots"
     plot: bool = True
 

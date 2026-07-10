@@ -1,11 +1,62 @@
+from types import SimpleNamespace
+
 import pytest
 import torch
 
 from neurotemplate.control.scenarios import build_window_dict, horizons
-from neurotemplate.control.policy import build_policy, STEQuantize
+from neurotemplate.control.policy import build_policy, STEQuantize, _preview_steps
 from neurotemplate.control.closed_loop import build_closed_loop
 from control_user_defined import actuation_bounds
 from control_fixtures import full_setup
+
+_NM = {"Y": ["z"], "U": ["sp"], "D": ["outdoor", "irr"], "t": ["sec"]}
+
+
+def test_preview_steps_falls_back_to_d_preview_without_hook():
+    hooks = SimpleNamespace()  # no preview_config attribute
+    cfg = SimpleNamespace(d_preview=2)
+    assert _preview_steps(hooks, cfg, _NM) == (2, 0)
+
+
+def test_preview_steps_reads_hook_and_takes_max_d():
+    # outdoor asks for 1 future step, band for 3; the single D window takes the
+    # largest per-column D request.
+    hooks = SimpleNamespace(preview_config=lambda nm: {"band": 3, "outdoor": 1})
+    cfg = SimpleNamespace(d_preview=0)
+    assert _preview_steps(hooks, cfg, _NM) == (1, 3)
+
+
+def test_preview_steps_rejects_unknown_signal():
+    hooks = SimpleNamespace(preview_config=lambda nm: {"bogus": 1})
+    cfg = SimpleNamespace(d_preview=0)
+    with pytest.raises(ValueError, match="not a D column or 'band'"):
+        _preview_steps(hooks, cfg, _NM)
+
+
+def test_preview_steps_rejects_negative():
+    hooks = SimpleNamespace(preview_config=lambda nm: {"band": -1})
+    cfg = SimpleNamespace(d_preview=0)
+    with pytest.raises(ValueError, match="non-negative int"):
+        _preview_steps(hooks, cfg, _NM)
+
+
+def test_band_preview_widens_policy_input(monkeypatch):
+    """A band-preview hook must grow the policy MLP's input width by the extra
+    ymin/ymax steps (n_ctrl per side, per previewed step)."""
+    import control_user_defined as cud
+    s = full_setup(setpoint_step=0.0)
+    cfg, sysid_cfg, nm = s["cfg"], s["sysid_cfg"], s["nm"]
+
+    def insize_of(policy):
+        return policy.callable.linear[0].in_features
+
+    base = insize_of(build_policy(cfg, sysid_cfg, nm, s["norm_stats"]))
+    monkeypatch.setattr(cud, "preview_config", lambda nm: {"band": 2},
+                        raising=False)
+    grown = insize_of(build_policy(cfg, sysid_cfg, nm, s["norm_stats"]))
+
+    n_ctrl = 1  # single controlled zone temp in the fixture
+    assert grown == base + 2 * n_ctrl * 2
 
 
 def test_policy_node_io():

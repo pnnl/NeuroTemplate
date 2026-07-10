@@ -75,8 +75,8 @@ class ModelingConfig:
     # ---- LOGGING -------------------------------------------------------------
     savedir: str = "temp"
     location: str = "sqlite:///mlflow.db"
-    exp: str = "System ID Assistant"
-    run: str = "SysID"
+    exp: str = "Model Training"
+    run: str = ""
     plots_dir: str = "plots"
     plot: bool = True
     save_config: str = "last_step"
@@ -99,13 +99,16 @@ class ModelingConfig:
     def validate(self) -> None:
         for name in [
             "batch_size", "in_steps", "log2_hidden_size", "num_layers",
-            "epochs", "epoch_verbose", "train_pred_steps", "lr",
+            "epochs", "epoch_verbose", "train_pred_steps",
             "dev_pred_steps", "test_window", "test_stride",
             "curriculum_ratio",
         ]:
             check_positive(self, name)
 
         for name in [
+            # lr=0 is valid: it mints a fixed-model checkpoint without any
+            # parameter updates (used by the `dummy` passthrough surrogate).
+            "lr",
             "warmup", "patience", "curriculum_steps",
             "ref_gain", "vel_gain", "sgn_gain", "sgn_steepness",
             "n_trials", "grad_gain", "synth_gain", "trial_epochs",
@@ -114,7 +117,7 @@ class ModelingConfig:
         ]:
             check_non_negative(self, name)
 
-        check_one_of(self, "model", ["mlp", "nssm", "lssm", "gru", "hvac_envelope", "hvac_rtu"])
+        check_one_of(self, "model", ["mlp", "nssm", "lssm", "gru", "hvac_envelope", "hvac_rtu", "dummy"])
         check_one_of(self, "save_config", ["last_step", "all", "None", None])
 
         if (self.grad_gain > 0) and (self.grad_path is None):

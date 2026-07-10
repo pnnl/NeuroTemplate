@@ -161,12 +161,9 @@ def evaluate_closed_loop(
     mean_abs_du = (U[:, 1:, :] - U[:, :-1, :]).abs().mean().item()
 
     energy_proxy = None
-    if (
-        getattr(hooks, "POWER_METRIC_IMPLEMENTED", False)
-        and hooks.has_power_channels(nm_mapping)
-    ):
+    if getattr(hooks, "POWER_METRIC_IMPLEMENTED", False):
         power = hooks.power_metric(
-            out["yn"][:, hmax:, :], out["U"][:, hmax:, :],
+            out["yn"][:, hmax:, :], out["U"][:, hmax:, :], out["D"][:, hmax:, :],
             nm_mapping, norm_stats,
         )
         energy_proxy = power.mean().item()

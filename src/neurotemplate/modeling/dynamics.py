@@ -283,12 +283,58 @@ def get_gru(cfg: ModelingConfig, nm_mapping: dict[str, list[str]]) -> SSMGrad:
     return SSMGrad(fy, None, None, ny, nu, nd, 1, cfg.residual, separable=False)
 
 
+class _SetpointPassthrough(nn.Module):
+    """Dummy dynamics: next zone temp = current cooling setpoint.
+
+    Given the inseparable [y | u | d] row, returns the U (setpoint) block as
+    the next state. `bias` is an ordinary output offset kept at zero — it only
+    exists so the sys-id optimizer has a trainable parameter to hold; mint the
+    dummy checkpoint with lr=0 and it stays zero, so the prediction is exactly
+    the setpoint.
+    """
+
+    def __init__(self, ny: int, nu: int):
+        super().__init__()
+        self.ny = ny
+        self.nu = nu
+        self.bias = nn.Parameter(torch.zeros(ny))
+
+    def forward(self, cat_yud: torch.Tensor) -> torch.Tensor:
+        setpoint = cat_yud[:, self.ny:self.ny + self.nu]
+        return setpoint + self.bias
+
+
+@beartype
+def get_dummy(cfg: ModelingConfig, nm_mapping: dict[str, list[str]]) -> SSMGrad:
+    """Content-free surrogate that predicts zone temp = cooling setpoint.
+
+    Used to test whether the DPC policy can be trained against a trivially
+    invertible model (no real sys-id needed). Requires ny == nu (each zone
+    temp is driven by its own setpoint) and must run in physical units
+    (norm_type=None) so setpoint and zone temp share units.
+    """
+    ny = len(nm_mapping['Y'])
+    nu = len(nm_mapping['U'])
+    nd = len(nm_mapping['D'])
+    if ny != nu:
+        raise ValueError(
+            f"dummy model needs one setpoint per zone temp: ny ({ny}) must "
+            f"equal nu ({nu}). Y={nm_mapping['Y']}, U={nm_mapping['U']}."
+        )
+    # in_steps=1: a passthrough only needs the current setpoint (no windowing).
+    return SSMGrad(
+        _SetpointPassthrough(ny, nu), None, None, ny, nu, nd,
+        in_steps=1, residual=False, separable=False,
+    )
+
+
 model_catalog = {
     "mlp": get_mlp,
     "nssm": get_nssm,
     "lssm": get_lssm,
     "tcn": get_tcn,
     "gru": get_gru,
+    "dummy": get_dummy,
 }
 
 

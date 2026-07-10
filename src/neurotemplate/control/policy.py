@@ -76,6 +76,37 @@ class _QuantizedPolicy(nn.Module):
         return self.quantize(self.base(*args))
 
 
+def _preview_steps(hooks, cfg, nm_mapping: dict[str, list[str]]) -> tuple[int, int]:
+    """Resolve (disturbance_future, band_future) preview widths for the policy.
+
+    If the use case defines `preview_config(nm_mapping) -> {signal: n_steps}`,
+    use it: keys may be D column names (per-column disturbance preview) or the
+    literal "band" (future comfort-band preview). The disturbance window is one
+    block, so it is sized to the largest per-column D value requested (columns
+    asking for less just see harmless extra lookahead). With no hook, fall back
+    to the global `cfg.d_preview` for disturbances and no band preview.
+    """
+    preview = getattr(hooks, "preview_config", None)
+    if preview is None:
+        return cfg.d_preview, 0
+
+    spec = preview(nm_mapping)
+    allowed = set(nm_mapping["D"]) | {"band"}
+    for key, steps in spec.items():
+        if key not in allowed:
+            raise ValueError(
+                f"preview_config key '{key}' is not a D column or 'band'. "
+                f"Allowed: {sorted(allowed)}"
+            )
+        if not isinstance(steps, int) or steps < 0:
+            raise ValueError(
+                f"preview_config['{key}'] must be a non-negative int, got {steps!r}"
+            )
+
+    d_future = max([spec.get(col, 0) for col in nm_mapping["D"]], default=0)
+    return d_future, spec.get("band", 0)
+
+
 @beartype
 def build_policy(
     cfg,
@@ -91,11 +122,21 @@ def build_policy(
     n_ctrl = len(hooks.controlled_channels(nm_mapping)[0])
     device = sysid_cfg.device
 
+    # How many future steps each previewed signal feeds the policy. A use case
+    # may define control_user_defined.preview_config for per-column disturbance
+    # preview and comfort-band preview; otherwise fall back to the global
+    # cfg.d_preview (disturbances only, no band preview).
+    d_future, band_future = _preview_steps(hooks, cfg, nm_mapping)
+
     # Flattened window widths (see SystemPreview.get_mapped_data):
-    #   yn : past = H_ctrl-1, future = 0           -> ny * H_ctrl
-    #   D  : past = H_ctrl-1, future = d_preview   -> nd * (H_ctrl + d_preview)
-    #   ymin/ymax: single current step             -> n_ctrl each
-    insize = ny * h_ctrl + 2 * n_ctrl + nd * (h_ctrl + cfg.d_preview)
+    #   yn : past = H_ctrl-1, future = 0                 -> ny * H_ctrl
+    #   D  : past = H_ctrl-1, future = d_future          -> nd * (H_ctrl + d_future)
+    #   ymin/ymax: current + band_future preview steps   -> n_ctrl*(1+band_future) each
+    insize = (
+        ny * h_ctrl
+        + 2 * n_ctrl * (1 + band_future)
+        + nd * (h_ctrl + d_future)
+    )
 
     umin, umax = hooks.actuation_bounds(nm_mapping, norm_stats)
     umin, umax = umin.to(device), umax.to(device)
@@ -131,9 +172,16 @@ def build_policy(
 
     input_map = {
         "yn": {"past": h_ctrl - 1, "future": 0, "pad_mode": "nearest"},
-        "D": {"past": h_ctrl - 1, "future": cfg.d_preview,
-              "pad_mode": "nearest"},
+        "D": {"past": h_ctrl - 1, "future": d_future, "pad_mode": "nearest"},
     }
+    # The comfort band is a known future schedule; previewing it lets the policy
+    # see the band it is steering into (the dynamics have a one-step lag, so
+    # comfort at step i depends on the setpoint chosen at i-1). Only add the
+    # window when previewing — future=0 keeps the legacy single-step behaviour.
+    if band_future > 0:
+        for key in ("ymin", "ymax"):
+            input_map[key] = {"past": 0, "future": band_future,
+                              "pad_mode": "nearest"}
 
     return Node(
         net,

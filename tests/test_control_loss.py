@@ -12,11 +12,12 @@ def _data_dict(s, y_ctrl_value):
     _, _, hmax = horizons(cfg, sysid_cfg)
     P = cfg.train_pred_steps
     b = 2
-    ny, nu, n_ctrl = len(nm["Y"]), len(nm["U"]), 5
+    ny, nu, nd, n_ctrl = len(nm["Y"]), len(nm["U"]), len(nm["D"]), 5
     W = hmax + P
     return {
         "yn": torch.full((b, W, ny), float(y_ctrl_value)),
         "U": torch.zeros(b, W, nu),
+        "D": torch.zeros(b, W, nd),
         "ymin": torch.zeros(b, W, n_ctrl),
         "ymax": torch.ones(b, W, n_ctrl),
     }

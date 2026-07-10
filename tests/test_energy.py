@@ -34,7 +34,9 @@ def test_power_metric_matches_fan_plus_dx():
         s = ns[c]
         yn[:, :, i] = (phys - s["shift"]) / s["stretch"]
 
-    P = power_metric(yn, torch.zeros(b, t, len(nm["U"])), nm, ns)
+    P = power_metric(
+        yn, torch.zeros(b, t, len(nm["U"])), torch.zeros(b, t, len(nm["D"])), nm, ns,
+    )
     assert P.shape == (b, t)
     assert torch.all(P >= 0)
     assert torch.allclose(P, torch.full((b, t), 2400.0), rtol=1e-4)
@@ -52,5 +54,7 @@ def test_power_metric_clamps_negative_to_zero():
         phys = phys_vals.get(c, 0.0)
         s = ns[c]
         yn[:, :, i] = (phys - s["shift"]) / s["stretch"]
-    P = power_metric(yn, torch.zeros(1, 3, len(nm["U"])), nm, ns)
+    P = power_metric(
+        yn, torch.zeros(1, 3, len(nm["U"])), torch.zeros(1, 3, len(nm["D"])), nm, ns,
+    )
     assert torch.allclose(P, torch.zeros_like(P))

@@ -199,6 +199,7 @@ def _unnorm(col_idx: int, col_name: str, yn: torch.Tensor,
 def power_metric(
     yn: torch.Tensor,
     U: torch.Tensor,
+    D: torch.Tensor,
     nm_mapping: dict[str, list[str]],
     norm_stats: dict[str, dict[str, float]],
 ) -> torch.Tensor:
@@ -209,6 +210,8 @@ def power_metric(
         yn: predicted state trajectory [batch, time, ny] (normalized)
         U:  control trajectory         [batch, time, nu] (unused here;
             the policy influences power through the dynamics)
+        D:  disturbance trajectory     [batch, time, nd] (unused here;
+            both power channels are metered directly in Y)
     Returns:
         P [batch, time] in Watts (>= 0). The effort objective drives the
         closed-loop mean of this toward zero.

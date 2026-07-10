@@ -4,7 +4,7 @@ A library of generic, time-series, data-driven black-box modeling and control bu
 
 The repo contains two sister subsystems:
 
-- **Modeling** — train a system-identification surrogate `y_{k+1} = f(y_k, u_k, d_k) [+ y_k]` from data, with optional physics-informed losses (gradient sign penalties, equilibrium / step-response / free-decay scenarios), Optuna search, MLflow tracking.
+- **Modeling** — train a system-identification surrogate `y_{k+1} = f(y_k, u_k, d_k) [+ y_k]` from data, with optional physics-informed losses (gradient sign penalties, equilibrium / step-response / free-decay scenarios), Optuna search, MLflow tracking. Model families: `mlp`, `nssm`, `lssm`, `gru`, plus two **alpha-quality** gray-box HVAC models (`hvac_envelope`, `hvac_rtu`) built on neuromancer-lite physics components — see the disclaimer below.
 - **Control** — train a differentiable predictive control (DPC) policy against a frozen surrogate. Closed-loop rollouts, comfort-band penalties, optional energy/effort objectives, setpoint quantization.
 
 Both sides share a thin `common/` layer (YAML/CLI loader, CSV + sliding-window data utilities, per-channel metrics).
@@ -19,11 +19,20 @@ Restructured from a flat script collection into an installable library. Phase A 
 - ✅ YAML + CLI override machinery, multi-path data fields (`Union[str, list[str]]`)
 - ✅ Hook discovery via `neurotemplate.hooks` (CWD + `cfg.user_hooks_path` override)
 - ✅ Single `nt <group> <verb>` dispatcher (replaces the five flat console scripts)
+- 🧪 Gray-box HVAC models (`hvac_envelope`, `hvac_rtu`) wired through the `building_spec` hook — **alpha**, see disclaimer below
 - ✅ 102 / 102 tests passing
 - ☐ Phase B (scrub remaining HVAC vocabulary from library code; relocate runtime artifacts off CWD)
-- ☐ Phase C (ship `examples/rtu_mall/`, README templates, end-to-end smoke test)
+- ☐ Phase C (ship an in-repo `examples/rtu_mall/`, README templates, end-to-end smoke test)
 
-Open work tracked in [audit.md](audit.md). The restructure plan is in `.claude/plans/toasty-toasting-glade.md`.
+Open work tracked in [audit.md](audit.md).
+
+> **⚠️ Gray-box HVAC models are alpha.** `hvac_envelope` / `hvac_rtu` (and the
+> `neuromancer.hvac` physics package they depend on) are under active
+> development in all three places they live: this adapter, the pinned
+> neuromancer-lite fork, and any downstream app that turns them on. Contracts
+> (`building_spec`, component parameterization, learnable-parameter sets) are
+> expected to change without notice. Treat results as a research comparison
+> against the black-box surrogates, not a production control model.
 
 ## Installing as a dependency
 
@@ -102,11 +111,14 @@ Until Phase C ships `examples/rtu_mall/`, the fastest way to bootstrap an app is
 | Function | Required | Used by |
 |---|---|---|
 | `data_mapping(df, cfg) -> {Y, U, D, t: [col]}` | yes | pipeline at data-prep time |
-| `data_head_config(nm_mapping) -> {col: HeadSpec}` | optional, default `{}` | output-head construction |
-| `column_norm_config(nm_mapping) -> {col: norm_type \| None}` | optional, default `{}` | per-column norm override |
-| `synth_cfg(nm_mapping, norm_stats) -> dict \| None` | required, return `None` to disable | synthetic-scenario penalties |
-| `hyper_args(trial, base_cfg) -> Config` | required only for `*-modeling-optuna` | Optuna trial setup |
-| `sub_plot(df_true, col_name) -> tuple \| None` | optional, default `None` | per-column subplot guidance |
+| `data_head_config(nm_mapping, norm_stats) -> HeadStack` | must be defined; return `HeadStack([RegressionHead() for _ in Y], Y)` for plain regression | output-head construction |
+| `column_norm_config(nm_mapping) -> {col: norm_type \| None}` | must be defined; return `{}` for no overrides | per-column norm override |
+| `synth_cfg(nm_mapping, norm_stats) -> dict \| None` | must be defined; return `None` to disable | synthetic-scenario penalties |
+| `sub_plot(df_true, col_name) -> tuple \| None` | must be defined; return `None` for default | per-column subplot guidance |
+| `hyper_args(trial, base_cfg) -> Config` | required only for `nt model optuna` | Optuna trial setup |
+| `building_spec(cfg, nm_mapping) -> dict` | required only for `model: hvac_envelope` / `hvac_rtu` | gray-box HVAC component wiring |
+
+The library imports each hook by attribute (no defaulting), so every row above except `hyper_args` and `building_spec` must exist in `modeling_user_defined.py`, even when the body just returns a trivial value. The two conditionally-required hooks are only looked up on the code path that needs them.
 
 ### Control (`control_user_defined.py`)
 
@@ -115,9 +127,10 @@ Until Phase C ships `examples/rtu_mall/`, the fastest way to bootstrap an app is
 | `controlled_channels(nm_mapping) -> ([col], [idx])` | yes | comfort objective |
 | `comfort_band_signal(nm_mapping, norm_stats, n_samples, nsteps, band, generator) -> (ymin, ymax)` | yes | scenarios |
 | `actuation_bounds(nm_mapping, norm_stats) -> (umin, umax)` | yes | policy bounds |
-| `power_metric(yn, U, nm_mapping, norm_stats) -> Tensor` + `POWER_METRIC_IMPLEMENTED: bool` | optional, gated | effort objective |
+| `has_power_channels(nm_mapping) -> bool` | yes | closed-loop reportcard (power row) |
+| `power_metric(yn, U, D, nm_mapping, norm_stats) -> Tensor` + `POWER_METRIC_IMPLEMENTED: bool` | required only when `effort_weight > 0` | effort objective + energy reportcard |
 
-Once Phase C lands, `docs/HOOKS.md` will hold the canonical contract reference with signatures + examples.
+The tables above are the canonical hook contract. For worked-through implementations of every hook (including the gray-box `building_spec` and an ordinal/bounded `data_head_config`), read [tests/fixtures/modeling_user_defined.py](tests/fixtures/modeling_user_defined.py) and [tests/fixtures/control_user_defined.py](tests/fixtures/control_user_defined.py).
 
 ## Typical session
 
@@ -220,6 +233,7 @@ NeuroTemplate is a layer **on top of** Neuromancer, not a replacement. We reuse 
 - Synthetic physics-scenario penalties (equilibrium / step response / free decay)
 - `HeadStack` per-channel output heads (regression / binary / bounded / ordinal)
 - Per-channel metrics + markdown reportcards
+- Gray-box HVAC surrogates (`hvac_envelope` / `hvac_rtu`, **alpha**) — an adapter over neuromancer-lite's `neuromancer.hvac` physics components, wired to your data through the `building_spec` hook
 - Control-side: `STEQuantize`, `BandSpec` + comfort-band penalties, closed-loop assembly
 
 If you find yourself shadowing a Neuromancer class, prefer the import.
