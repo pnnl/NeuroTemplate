@@ -34,6 +34,45 @@ def test_real_string_not_coerced():
     assert cfg.norm_type == "min_max"
 
 
+# ── Float format normalization ───────────────────────────────────
+# PyYAML leaves 1e5/1E5/1.0e5 as strings and 10000 as int; all should
+# resolve to the same float for a float-typed field.
+
+
+@pytest.mark.parametrize("value", [100000, 100000.0, "10000.0", "1e5", "1E5", "1.0e5", "1.0E5"])
+def test_float_formats_resolve_equal(value):
+    cfg = dict_to_dataclass({"ref_gain": value}, Config)
+    assert isinstance(cfg.ref_gain, float)
+    assert cfg.ref_gain == float(value)
+
+
+def test_optional_float_still_coerced():
+    from neurotemplate.control.config import ControlConfig
+    cfg = dict_to_dataclass({"test_band_lo": "1e1"}, ControlConfig)
+    assert cfg.test_band_lo == 10.0
+
+
+def test_optional_float_null_stays_none():
+    from neurotemplate.control.config import ControlConfig
+    cfg = dict_to_dataclass({"test_band_lo": "none"}, ControlConfig)
+    assert cfg.test_band_lo is None
+
+
+def test_bad_float_raises_config_error():
+    with pytest.raises(ConfigError, match="float"):
+        dict_to_dataclass({"ref_gain": "not_a_number"}, Config)
+
+
+def test_set_override_float_scientific_notation():
+    """--set ref_gain=1e5 → _parse_value floats it; --set ref_gain=100000
+    parses to int, then dict_to_dataclass coerces the float field."""
+    from neurotemplate.common.config import apply_overrides
+    for text in ("1e5", "1E5", "1.0e5", "100000", "100000.0"):
+        merged = apply_overrides({"ref_gain": 1.0}, [f"ref_gain={text}"])
+        cfg = dict_to_dataclass(merged, Config)
+        assert cfg.ref_gain == 100000.0
+
+
 def test_unknown_key_raises():
     with pytest.raises(ConfigError):
         dict_to_dataclass({"not_a_real_field": 1}, Config)

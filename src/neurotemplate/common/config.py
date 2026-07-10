@@ -60,6 +60,26 @@ def _coerce_null(value: Any, field_type: Any) -> Any:
     return value
 
 
+def _coerce_float(value: Any, field_type: Any) -> Any:
+    """Normalize float-typed config values written in any float format.
+
+    PyYAML's `safe_load` only recognizes floats with a decimal point and a
+    signed exponent, so `1e5`, `1E5`, `1.0e5`, `1.0E5` all load as strings
+    and `10000` loads as an int. For fields declared `float` (or
+    `Optional[float]`) this coerces string/int inputs so every one of
+    `10000`, `10000.0`, `1e5`, `1E5`, `1.0e5`, `1.0E5` resolves to the same
+    float. Booleans are left alone (a `float` field never wants True/False).
+    """
+    if _unwrap_optional(field_type) is not float:
+        return value
+    if isinstance(value, bool) or not isinstance(value, (int, str)):
+        return value
+    try:
+        return float(value)
+    except ValueError as exc:
+        raise ConfigError(f"Expected a float value, got {value!r}") from exc
+
+
 def dict_to_dataclass(data: dict, cls: Type[T], path: str = "") -> T:
     if not is_dataclass(cls):
         raise ConfigError(f"{cls} is not a dataclass")
@@ -79,7 +99,9 @@ def dict_to_dataclass(data: dict, cls: Type[T], path: str = "") -> T:
     for f in fields(cls):
         key = f.name
         if key in data:
-            kwargs[key] = _coerce_null(data[key], type_hints.get(key, f.type))
+            field_type = type_hints.get(key, f.type)
+            value = _coerce_null(data[key], field_type)
+            kwargs[key] = _coerce_float(value, field_type)
         else:
             if f.default is not MISSING:
                 kwargs[key] = f.default
