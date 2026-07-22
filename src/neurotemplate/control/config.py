@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from typing import Optional, Union
 
 from neurotemplate.common.config import (  # noqa: F401  re-exported
     _check_paths_field,
     check_non_negative,
     check_positive,
+    default_savedir,
     load_config_from_cli,
     paths_as_list,
     CONTROL_CONFIG_DIR,
@@ -103,7 +104,7 @@ class ControlConfig:
     verbose: bool = True
 
     # ── Logging ──────────────────────────────────────────────────
-    savedir: str = "temp"
+    savedir: str = field(default_factory=default_savedir)
     location: str = "sqlite:///mlflow.db"
     exp: str = "DPC Training"
     run: str = ""

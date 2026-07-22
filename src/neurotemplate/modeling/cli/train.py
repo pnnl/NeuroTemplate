@@ -80,6 +80,10 @@ def main() -> None:
     norm_stats = compute_norm_stats(
         df=train_pool, norm_type=cfg.norm_type, column_overrides=norm_overrides,
     )
+    # Optional user hook: post-process norm_stats (e.g. tie two columns to a
+    # shared shift/stretch). No-op unless the hooks module defines it.
+    if hasattr(hooks, "tie_norm_stats"):
+        norm_stats = hooks.tie_norm_stats(nm_mapping, norm_stats, cfg)
     train_dfs = [normalize_df(r, norm_stats) for r in train_raws]
     dev_dfs = [normalize_df(r, norm_stats) for r in dev_raws]
     test_dfs = [normalize_df(r, norm_stats) for r in test_raws]

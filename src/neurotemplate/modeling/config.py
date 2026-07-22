@@ -8,6 +8,7 @@ from neurotemplate.common.config import (
     check_non_negative,
     check_one_of,
     check_positive,
+    default_savedir,
 )
 
 
@@ -73,7 +74,7 @@ class ModelingConfig:
     verbose: bool = True
 
     # ---- LOGGING -------------------------------------------------------------
-    savedir: str = "temp"
+    savedir: str = field(default_factory=default_savedir)
     location: str = "sqlite:///mlflow.db"
     exp: str = "Model Training"
     run: str = ""

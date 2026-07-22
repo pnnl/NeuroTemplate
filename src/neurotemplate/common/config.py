@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import uuid
 from dataclasses import MISSING, fields, is_dataclass
 from pathlib import Path
 from typing import Any, Optional, Type, TypeVar, get_args, get_origin, get_type_hints, Union
@@ -111,6 +112,12 @@ def dict_to_dataclass(data: dict, cls: Type[T], path: str = "") -> T:
                 raise ConfigError(f"Missing required config key: {path}{key}")
 
     return cls(**kwargs)
+
+
+def default_savedir(prefix: str = "temp") -> str:
+    """Per-process-unique scratch dir so concurrent runs (e.g. separate
+    terminals) never share/clobber the same savedir."""
+    return f"{prefix}_{uuid.uuid4().hex[:8]}"
 
 
 def paths_as_list(value: Union[str, list[str]]) -> list[str]:
