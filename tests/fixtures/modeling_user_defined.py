@@ -435,42 +435,5 @@ def make_all_gradient_mappings(
     return rel_path
 
 
-# ---------------------------------------------------------------------
-# Optional: gray-box HVAC building spec (consumed by hvac_adapter factories)
-# ---------------------------------------------------------------------
-@beartype
-def building_spec(cfg: Config, nm_mapping: dict) -> dict:
-    """
-    Dataset-specific wiring for the neuromancer-lite gray-box HVAC models
-    (`model: hvac_envelope` / `hvac_rtu`).
-
-    Binds each physical component variable to a column in `nm_mapping`, declares
-    which channels arrive in degC (so the adapter converts to Kelvin), and sets
-    component construction kwargs (initial params + which are learnable).
-    Single-zone: the lone Y column is the zone air temperature the model predicts.
-    """
-    return {
-        "dt": 300.0,        # 5-minute sampling [s]
-        "n_zones": 1,
-        # Temperature channels carried in degC; converted to K at the boundary.
-        "to_kelvin": ["T_zones", "T_outdoor", "T_setpoint"],
-        # component variable -> column present in nm_mapping (Y/U/D).
-        "channel_map": {
-            "T_zones": "Air Temperature [°C]",
-            "T_outdoor": "Outdoor Dry-Bulb Temperature [°C]",
-            "irradiance": "Global Horizontal Irradiance [W/m²]",
-            "occupancy": "Occupancy Signal [-]",
-            "Q_hvac": "HVAC Heat Delivered [W]",   # hvac_envelope: measured/derived column
-            "T_setpoint": "Cooling Setpoint [°C]",  # hvac_rtu: raw control
-        },
-        "envelope": {
-            "R_env": 0.1, "C_env": 1.0e6,
-            "learnable": ["solar_gain", "internal_gain"],
-        },
-        "plant": {"n_stages": 2, "learnable": []},
-        "controller": {"n_stages": 2, "stage_thresholds": [0.5, 0.7], "learnable": []},
-    }
-
-
 if __name__ == "__main__":
     make_all_gradient_mappings()

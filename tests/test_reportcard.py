@@ -89,7 +89,7 @@ def test_render_returns_string():
 
 
 def test_render_handles_missing_optional_blocks():
-    """fu/fd may be None for non-separable models (mlp/tcn/gru)."""
+    """fu/fd may be None for non-separable models (mlp/gru)."""
     arch = _make_arch()
     arch["separable"] = False
     arch["blocks"]["fu"] = None

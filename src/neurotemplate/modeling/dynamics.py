@@ -15,7 +15,7 @@ get_dynamics() wraps SSMGrad in a Neuromancer Node + SystemPreview:
   - SystemPreview with start_iter=in_steps-1 skips the first timesteps
     (the model needs in_steps of history). The input_map on the Node
     handles temporal windowing: at each step i, the model receives
-    data[:, i-past:i+1, :] flattened (or as a 3D window for TCN).
+    data[:, i-past:i+1, :] flattened.
 
   - The data loader provides 'yn' initialized to the first in_steps
     of ground truth (see data_utils.get_sw_dict). The System then
@@ -147,8 +147,6 @@ class SSMGrad(nn.Module):
         self.residual = residual
         self.head_stack = head_stack
 
-        self.is_tcn = not separable and hasattr(fy, 'tcn')
-
         if separable:
             self.compute_output = self.compute_separable
         else:
@@ -162,19 +160,17 @@ class SSMGrad(nn.Module):
 
     def _last_y(self, y: torch.Tensor) -> torch.Tensor:
         """Extract the most recent in_steps slice as [batch, ny]."""
-        if y.ndim == 2:
-            in_steps, ny = self.in_steps, self.ny
-            return y[:, (in_steps - 1) * ny : in_steps * ny]
-        return y[:, -1]
+        in_steps, ny = self.in_steps, self.ny
+        return y[:, (in_steps - 1) * ny : in_steps * ny]
 
     def forward(self, y, u, d):
         """
         Forward pass: predict next state from current inputs.
 
         Args:
-            y: [batch, in_steps*ny] or [batch, in_steps, ny] (TCN)
-            u: [batch, in_steps*nu] or [batch, in_steps, nu]
-            d: [batch, in_steps*nd] or [batch, in_steps, nd]
+            y: [batch, in_steps*ny]
+            u: [batch, in_steps*nu]
+            d: [batch, in_steps*nd]
 
         Returns:
             [batch, ny] next state — activated (post-head) if a head_stack
@@ -253,23 +249,6 @@ def get_lssm(cfg: ModelingConfig, nm_mapping: dict[str, list[str]]) -> SSMGrad:
 
 
 @beartype
-def get_tcn(cfg: ModelingConfig, nm_mapping: dict[str, list[str]]) -> SSMGrad:
-    ny = len(nm_mapping['Y'])
-    nu = len(nm_mapping['U'])
-    nd = len(nm_mapping['D'])
-
-    fy = blocks.CausalTCN(
-        insize=ny + nu + nd, outsize=ny, bias=True,
-        linear_map=nn.Linear, nonlin=nn.ReLU,
-        hsizes=cfg.num_layers * [(2**cfg.log2_hidden_size)],
-    )
-    return SSMGrad(
-        fy, None, None, ny, nu, nd,
-        cfg.in_steps, cfg.residual, separable=False,
-    )
-
-
-@beartype
 def get_gru(cfg: ModelingConfig, nm_mapping: dict[str, list[str]]) -> SSMGrad:
     ny = len(nm_mapping['Y'])
     nu = len(nm_mapping['U'])
@@ -332,7 +311,6 @@ model_catalog = {
     "mlp": get_mlp,
     "nssm": get_nssm,
     "lssm": get_lssm,
-    "tcn": get_tcn,
     "gru": get_gru,
     "dummy": get_dummy,
 }
@@ -370,7 +348,7 @@ def describe_dynamics(dyn_sys: SystemPreview, cfg: ModelingConfig) -> dict:
     Describe the trained dynamics system for the reportcard.
 
     Returns a dict with:
-      - factory: model family name (mlp/nssm/lssm/tcn/gru)
+      - factory: model family name (mlp/nssm/lssm/gru)
       - separable: whether the SSM is separable (fy + fu + fd)
       - residual: whether y_{k+1} adds y_k as a residual base
       - in_steps / ny / nu / nd: shape parameters
@@ -419,7 +397,7 @@ def get_dynamics(
 
     SystemPreview handles temporal windowing via input_map: at each rollout
     step i, the Node receives a window of in_steps past values for each input,
-    flattened to [batch, in_steps*features] (or kept 3D for TCN).
+    flattened to [batch, in_steps*features].
     """
     if cfg.model not in model_catalog:
         raise ValueError(
@@ -450,9 +428,6 @@ def get_dynamics(
                 "past": cfg.in_steps - 1,
                 "future": 0,
                 "pad_mode": "nearest",
-                # MLP/NSSM/LSSM want flattened [batch, steps*features]
-                # TCN wants 3D [batch, steps, features]
-                "flatten": cfg.model != "tcn",
             }
             for key in ["yn", "U", "D"]
         }

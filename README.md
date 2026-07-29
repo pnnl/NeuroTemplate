@@ -4,7 +4,7 @@ A library of generic, time-series, data-driven black-box modeling and control bu
 
 The repo contains two sister subsystems:
 
-- **Modeling** — train a system-identification surrogate `y_{k+1} = f(y_k, u_k, d_k) [+ y_k]` from data, with optional physics-informed losses (gradient sign penalties, equilibrium / step-response / free-decay scenarios), Optuna search, MLflow tracking. Model families: `mlp`, `nssm`, `lssm`, `gru`, plus two **alpha-quality** gray-box HVAC models (`hvac_envelope`, `hvac_rtu`) built on neuromancer-lite physics components — see the disclaimer below.
+- **Modeling** — train a system-identification surrogate `y_{k+1} = f(y_k, u_k, d_k) [+ y_k]` from data, with optional physics-informed losses (gradient sign penalties, equilibrium / step-response / free-decay scenarios), Optuna search, MLflow tracking. Model families: `mlp`, `nssm`, `lssm`, `gru`.
 - **Control** — train a differentiable predictive control (DPC) policy against a frozen surrogate. Closed-loop rollouts, comfort-band penalties, optional energy/effort objectives, setpoint quantization.
 
 Both sides share a thin `common/` layer (YAML/CLI loader, CSV + sliding-window data utilities, per-channel metrics).
@@ -19,20 +19,11 @@ Restructured from a flat script collection into an installable library. Phase A 
 - ✅ YAML + CLI override machinery, multi-path data fields (`Union[str, list[str]]`)
 - ✅ Hook discovery via `neurotemplate.hooks` (CWD + `cfg.user_hooks_path` override)
 - ✅ Single `nt <group> <verb>` dispatcher (replaces the five flat console scripts)
-- 🧪 Gray-box HVAC models (`hvac_envelope`, `hvac_rtu`) wired through the `building_spec` hook — **alpha**, see disclaimer below
-- ✅ 102 / 102 tests passing
+- ✅ 117 / 117 tests passing
 - ☐ Phase B (scrub remaining HVAC vocabulary from library code; relocate runtime artifacts off CWD)
 - ☐ Phase C (ship an in-repo `examples/rtu_mall/`, README templates, end-to-end smoke test)
 
 Open work tracked in [audit.md](audit.md).
-
-> **⚠️ Gray-box HVAC models are alpha.** `hvac_envelope` / `hvac_rtu` (and the
-> `neuromancer.hvac` physics package they depend on) are under active
-> development in all three places they live: this adapter, the pinned
-> neuromancer-lite fork, and any downstream app that turns them on. Contracts
-> (`building_spec`, component parameterization, learnable-parameter sets) are
-> expected to change without notice. Treat results as a research comparison
-> against the black-box surrogates, not a production control model.
 
 ## Installing as a dependency
 
@@ -116,9 +107,8 @@ Until Phase C ships `examples/rtu_mall/`, the fastest way to bootstrap an app is
 | `synth_cfg(nm_mapping, norm_stats) -> dict \| None` | must be defined; return `None` to disable | synthetic-scenario penalties |
 | `sub_plot(df_true, col_name) -> tuple \| None` | must be defined; return `None` for default | per-column subplot guidance |
 | `hyper_args(trial, base_cfg) -> Config` | required only for `nt model optuna` | Optuna trial setup |
-| `building_spec(cfg, nm_mapping) -> dict` | required only for `model: hvac_envelope` / `hvac_rtu` | gray-box HVAC component wiring |
 
-The library imports each hook by attribute (no defaulting), so every row above except `hyper_args` and `building_spec` must exist in `modeling_user_defined.py`, even when the body just returns a trivial value. The two conditionally-required hooks are only looked up on the code path that needs them.
+The library imports each hook by attribute (no defaulting), so every row above except `hyper_args` must exist in `modeling_user_defined.py`, even when the body just returns a trivial value. `hyper_args` is only looked up on the code path that needs it.
 
 ### Control (`control_user_defined.py`)
 
@@ -130,7 +120,7 @@ The library imports each hook by attribute (no defaulting), so every row above e
 | `has_power_channels(nm_mapping) -> bool` | yes | closed-loop reportcard (power row) |
 | `power_metric(yn, U, D, nm_mapping, norm_stats) -> Tensor` + `POWER_METRIC_IMPLEMENTED: bool` | required only when `effort_weight > 0` | effort objective + energy reportcard |
 
-The tables above are the canonical hook contract. For worked-through implementations of every hook (including the gray-box `building_spec` and an ordinal/bounded `data_head_config`), read [tests/fixtures/modeling_user_defined.py](tests/fixtures/modeling_user_defined.py) and [tests/fixtures/control_user_defined.py](tests/fixtures/control_user_defined.py).
+The tables above are the canonical hook contract. For worked-through implementations of every hook (including an ordinal/bounded `data_head_config`), read [tests/fixtures/modeling_user_defined.py](tests/fixtures/modeling_user_defined.py) and [tests/fixtures/control_user_defined.py](tests/fixtures/control_user_defined.py).
 
 ## Typical session
 
@@ -202,7 +192,7 @@ src/neurotemplate/
 │   └── metrics.py       # ChannelMetrics, per_channel_metrics
 ├── modeling/
 │   ├── config.py        # ModelingConfig
-│   ├── dynamics.py      # SSMGrad, GRUBlock, get_dynamics  (NSSM/LSSM/MLP/TCN/GRU)
+│   ├── dynamics.py      # SSMGrad, GRUBlock, get_dynamics  (NSSM/LSSM/MLP/GRU)
 │   ├── heads.py         # HeadStack (regression / binary / bounded / ordinal)
 │   ├── loss.py          # build_loss
 │   ├── gradient_sampling.py  # SampledGradientPenalty
@@ -233,7 +223,6 @@ NeuroTemplate is a layer **on top of** Neuromancer, not a replacement. We reuse 
 - Synthetic physics-scenario penalties (equilibrium / step response / free decay)
 - `HeadStack` per-channel output heads (regression / binary / bounded / ordinal)
 - Per-channel metrics + markdown reportcards
-- Gray-box HVAC surrogates (`hvac_envelope` / `hvac_rtu`, **alpha**) — an adapter over neuromancer-lite's `neuromancer.hvac` physics components, wired to your data through the `building_spec` hook
 - Control-side: `STEQuantize`, `BandSpec` + comfort-band penalties, closed-loop assembly
 
 If you find yourself shadowing a Neuromancer class, prefer the import.
@@ -244,4 +233,4 @@ If you find yourself shadowing a Neuromancer class, prefer the import.
 uv run pytest tests/
 ```
 
-All 102 pass today, against the current local Neuromancer checkout. The suite covers config, data utilities, metrics, heads, reportcard, hook contracts, and the Neuromancer-touching dynamics/loss/closed-loop paths.
+All 117 pass today, against the current local Neuromancer checkout. The suite covers config, data utilities, metrics, heads, reportcard, hook contracts, and the Neuromancer-touching dynamics/loss/closed-loop paths.

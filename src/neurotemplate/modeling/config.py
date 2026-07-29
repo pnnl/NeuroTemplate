@@ -118,7 +118,7 @@ class ModelingConfig:
         ]:
             check_non_negative(self, name)
 
-        check_one_of(self, "model", ["mlp", "nssm", "lssm", "gru", "hvac_envelope", "hvac_rtu", "dummy"])
+        check_one_of(self, "model", ["mlp", "nssm", "lssm", "gru", "dummy"])
         check_one_of(self, "save_config", ["last_step", "all", "None", None])
 
         if (self.grad_gain > 0) and (self.grad_path is None):

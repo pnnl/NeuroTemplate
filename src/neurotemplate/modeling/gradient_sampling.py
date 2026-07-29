@@ -5,8 +5,8 @@ Computes gradient sign violations at randomly sampled input points,
 decoupled from the Neuromancer System rollout.
 
 Instead of computing Jacobians along the training trajectory (coupled to
-the System, tricky shapes, TCN issues), we sample random points in the
-normalized input space and evaluate gradient sign constraints there.
+the System, tricky shapes), we sample random points in the normalized
+input space and evaluate gradient sign constraints there.
 
 Sampling distribution is chosen to match the normalization strategy:
   - min_max  → Uniform[0, 1]
@@ -76,12 +76,8 @@ class SampledGradientPenalty:
         def full_step(y, u, d):
             out = model.compute_output(y, u, d)
             if model.residual:
-                if model.is_tcn:
-                    # Under vmap y is 2D: [in_steps, ny]. Last row = most recent state.
-                    out = out + y[-1]
-                else:
-                    # Under vmap y is 1D: [in_steps * ny]. Last ny elements = most recent state.
-                    out = out + y[-ny:]
+                # Under vmap y is 1D: [in_steps * ny]. Last ny elements = most recent state.
+                out = out + y[-ny:]
             return out
 
         self.jac_fn = torch.vmap(
@@ -97,10 +93,7 @@ class SampledGradientPenalty:
         else:  # z_score
             sample = torch.randn(self.n_samples, nx, device=self.device)
 
-        if self.model.is_tcn:
-            return sample.unsqueeze(1).expand(-1, self.model.in_steps, -1)
-        else:
-            return sample.repeat(1, self.model.in_steps)
+        return sample.repeat(1, self.model.in_steps)
 
     def compute(self):
         """
@@ -130,12 +123,8 @@ class SampledGradientPenalty:
             nx = mask.shape[-1]
 
             # Only care about the most recent input step.
-            # TCN Jacobian: [n_samples, ny, in_steps, nx] — slice last timestep.
-            # MLP Jacobian: [n_samples, ny, in_steps*nx] — slice last nx columns.
-            if self.model.is_tcn:
-                j_last = j_mat[:, :, -1, :]     # [n_samples, ny, nx]
-            else:
-                j_last = j_mat[:, :, -nx:]      # [n_samples, ny, nx]
+            # Jacobian: [n_samples, ny, in_steps*nx] — slice last nx columns.
+            j_last = j_mat[:, :, -nx:]           # [n_samples, ny, nx]
             m = mask.squeeze()                   # [ny, nx]
 
             # Penalize sign violations:

@@ -14,16 +14,11 @@ dependencies = [
     # preview/logging API this framework targets (branch
     # feature/past_future_preview). This is the required state for consumers
     # installing from git. Bump the SHA when neuromancer-lite advances.
-    # NOTE: this commit does NOT include the still-untracked `neuromancer.hvac`
-    # package (nor the staged-but-uncommitted system.py edits), so a clean
-    # install from this ref will fail the Tier-A hvac models (hvac_adapter.py)
-    # until hvac/ is committed and the SHA is bumped.
     "neuromancer @ git+ssh://git@github.com/EladMichael/neuromancer-lite.git@434b1b98ff7755267ce47ff6b5a751bc9ae5e52a",
     "numpy>=2.2.6",
     "optuna>=4.8.0",
     "optuna-dashboard>=0.20.0",
     "pandas>=2.3.3",
-    "pytorch-tcn>=1.2.3",
     "scipy>=1.15.3",
     "statsmodels>=0.14.5",
     "torch>=2.9.0",
