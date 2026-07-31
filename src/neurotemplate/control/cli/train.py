@@ -32,6 +32,7 @@ from neurotemplate.control.pipeline import (
     train_policy,
     evaluate_baseline,
     evaluate_closed_loop,
+    log_control_results,
     write_reportcard,
     plot_closed_loop,
 )
@@ -145,6 +146,7 @@ def main() -> None:
         best_dev_loss=best_dev, train_time_s=train_time_s,
     )
     write_reportcard(md, Path(cfg.savedir), logger=logger)
+    log_control_results(logger, results, baseline=baseline)
 
     print(f"Comfort violation rate: "
           f"{results.comfort_violation_rate * 100:.2f}%")

@@ -192,3 +192,74 @@ def test_comfort_dict_is_keyed_by_channel_without_name_field():
     assert set(d) == {"zone"}
     assert "name" not in d["zone"]
     assert "degree_hours" in d["zone"]
+
+
+# ── MLflow logging ───────────────────────────────────────────────
+
+
+class _FakeLogger:
+    def __init__(self):
+        self.metrics = {}
+        self.dicts = {}
+
+    def log_metrics(self, flat):
+        self.metrics.update(flat)
+
+    def log_dict(self, payload, name):
+        self.dicts[name] = payload
+
+
+def _results(violation_rate=0.5, power=1000.0):
+    from neurotemplate.common.metrics import per_channel_metrics
+    from neurotemplate.control.pipeline import ControlResults
+
+    y = torch.full((2, 4, 1), 26.0)
+    ymin = torch.full((2, 4, 1), 20.0)
+    ymax = torch.full((2, 4, 1), 25.0)
+    return ControlResults(
+        comfort_violation_rate=violation_rate,
+        comfort=comfort_metrics(y, ymin, ymax, ["zone [°C]"], 0.25),
+        mean_abs_du=0.25,
+        tracking=per_channel_metrics(y, 0.5 * (ymin + ymax), ["zone [°C]"]),
+        energy=energy_metrics(torch.full((2, 4), power), 0.25),
+        eval_time_s=0.1,
+    )
+
+
+def test_log_control_results_flattens_metrics():
+    from neurotemplate.control.pipeline import log_control_results
+
+    logger = _FakeLogger()
+    log_control_results(logger, _results())
+
+    assert logger.metrics["control_violation_rate"] == pytest.approx(0.5)
+    assert logger.metrics["control_peak_power"] == pytest.approx(1000.0)
+    # Channel names are sanitized into MLflow-safe keys (no brackets/degree sign).
+    assert "control_zone_C_degree_hours" in logger.metrics
+    assert logger.dicts["control_metrics.json"]["learned"]["comfort"]
+
+
+def test_log_control_results_prefixes_baseline():
+    from neurotemplate.control.pipeline import log_control_results
+
+    logger = _FakeLogger()
+    log_control_results(logger, _results(0.5, 1000.0),
+                        baseline=_results(0.9, 1500.0))
+
+    assert logger.metrics["control_violation_rate"] == pytest.approx(0.5)
+    assert logger.metrics["baseline_violation_rate"] == pytest.approx(0.9)
+    assert logger.metrics["baseline_peak_power"] == pytest.approx(1500.0)
+    assert set(logger.dicts["control_metrics.json"]) == {"learned", "baseline"}
+
+
+def test_log_control_results_handles_missing_energy_and_logger():
+    from neurotemplate.control.pipeline import log_control_results
+
+    r = _results()
+    r.energy = None
+    logger = _FakeLogger()
+    log_control_results(logger, r)
+    assert "control_peak_power" not in logger.metrics
+    assert logger.dicts["control_metrics.json"]["learned"]["energy"] is None
+
+    log_control_results(None, r)  # must be a no-op, not a crash

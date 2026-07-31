@@ -7,7 +7,7 @@ frozen, so the optimizer is built over requires_grad params only.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from time import perf_counter as tic
 from typing import Optional
@@ -16,12 +16,18 @@ import torch
 
 from neuromancer.trainer import Trainer
 
-from neurotemplate.common.metrics import ChannelMetrics, per_channel_metrics
+from neurotemplate.common.metrics import (
+    ChannelMetrics,
+    _safe_metric_key,
+    metrics_to_dict,
+    per_channel_metrics,
+)
 from neurotemplate.common.reportcard import write_reportcard as _write_reportcard
 from neurotemplate.control.metrics import (
     ComfortMetrics,
     EnergyMetrics,
     comfort_metrics,
+    comfort_to_dict,
     energy_metrics,
     hours_per_step,
 )
@@ -192,6 +198,63 @@ def evaluate_closed_loop(
         energy=energy,
         eval_time_s=eval_time_s,
     ), out
+
+
+# ── MLflow metric logging ────────────────────────────────────────
+
+
+def log_control_results(
+    logger,
+    results: ControlResults,
+    baseline: Optional[ControlResults] = None,
+) -> None:
+    """Flatten closed-loop metrics into MLflow-safe metric keys + log dict.
+
+    Mirrors modeling.pipeline.log_test_results. Baseline metrics are logged
+    under a `baseline_` prefix so a single run holds both sides of the
+    comparison and they can be diffed across runs in the MLflow UI.
+    """
+    if logger is None:
+        return
+
+    flat = _flat_control_metrics(results, prefix="control")
+    payload = {"learned": _control_metrics_dict(results)}
+    if baseline is not None:
+        flat.update(_flat_control_metrics(baseline, prefix="baseline"))
+        payload["baseline"] = _control_metrics_dict(baseline)
+
+    logger.log_metrics(flat)
+    if hasattr(logger, "log_dict"):
+        logger.log_dict(payload, name="control_metrics.json")
+
+
+def _flat_control_metrics(results: ControlResults, prefix: str) -> dict:
+    flat = {
+        f"{prefix}_violation_rate": results.comfort_violation_rate,
+        f"{prefix}_mean_abs_du": results.mean_abs_du,
+    }
+    for m in results.comfort:
+        safe = _safe_metric_key(m.name)
+        flat[f"{prefix}_{safe}_violation_rate"] = m.violation_rate
+        flat[f"{prefix}_{safe}_mean_violation"] = m.mean_violation
+        flat[f"{prefix}_{safe}_max_violation"] = m.max_violation
+        flat[f"{prefix}_{safe}_degree_hours"] = m.degree_hours
+    if results.energy is not None:
+        flat[f"{prefix}_mean_power"] = results.energy.mean_power
+        flat[f"{prefix}_total_energy"] = results.energy.total_energy
+        flat[f"{prefix}_peak_power"] = results.energy.peak_power
+        flat[f"{prefix}_mean_window_peak"] = results.energy.mean_window_peak
+    return flat
+
+
+def _control_metrics_dict(results: ControlResults) -> dict:
+    return {
+        "violation_rate": results.comfort_violation_rate,
+        "mean_abs_du": results.mean_abs_du,
+        "comfort": comfort_to_dict(results.comfort),
+        "energy": None if results.energy is None else asdict(results.energy),
+        "tracking": metrics_to_dict(results.tracking),
+    }
 
 
 # ── Rule-based baseline (optional) ───────────────────────────────
