@@ -271,33 +271,26 @@ def plot_closed_loop(
     ymax = (out["ymax"][:, hmax:, :] * y_stretch + y_shift).cpu()
     U = (out["U"][:, hmax:, :] * u_stretch + u_shift).cpu()
 
-    # Outdoor dry-bulb temp for context (denormalized).
+    # Context traces overlaid on the temperature axis (denormalized), and the
+    # optional power row. Both come from the use case — the library has no
+    # opinion about which columns are interesting.
     d_cols = nm_mapping["D"]
-    od_idx = next(
-        (i for i, c in enumerate(d_cols)
-         if "outdoor" in c.lower() and "dry-bulb" in c.lower()),
-        None,
-    )
-    if od_idx is not None:
-        od_col = d_cols[od_idx]
-        s = norm_stats[od_col]
-        D_od = (out["D"][:, hmax:, od_idx] * s["stretch"] + s["shift"]).cpu()
-    else:
-        od_col, D_od = None, None
+    context = {}
+    for name in hooks.plot_context_channels(nm_mapping):
+        s = norm_stats[name]
+        idx = d_cols.index(name)
+        context[name] = (
+            out["D"][:, hmax:, idx] * s["stretch"] + s["shift"]
+        ).cpu()
 
-    # Optional third row: HVAC fan + DX power (denormalized W).
-    if hooks.has_power_channels(nm_mapping):
-        fan_idx, dx_idx = hooks._power_channel_indices(nm_mapping)
-        y_cols = nm_mapping["Y"]
-        fan_name, dx_name = y_cols[fan_idx], y_cols[dx_idx]
-        s_fan, s_dx = norm_stats[fan_name], norm_stats[dx_name]
-        P_fan = (out["yn"][:, hmax:, fan_idx] * s_fan["stretch"]
-                 + s_fan["shift"]).clamp_min(0.0).cpu()
-        P_dx = (out["yn"][:, hmax:, dx_idx] * s_dx["stretch"]
-                + s_dx["shift"]).clamp_min(0.0).cpu()
-    else:
-        fan_name = dx_name = None
-        P_fan = P_dx = None
+    y_cols = nm_mapping["Y"]
+    power = {}
+    for name in hooks.power_channels(nm_mapping):
+        s = norm_stats[name]
+        idx = y_cols.index(name)
+        power[name] = (
+            out["yn"][:, hmax:, idx] * s["stretch"] + s["shift"]
+        ).clamp_min(0.0).cpu()
 
     # Per-step real timestamps (sec_elapsed is POSIX seconds; see
     # data_utils._engineer_features).
@@ -310,7 +303,7 @@ def plot_closed_loop(
     tick_labels = [str(i // steps_per_hour) for i in tick_steps]
 
     plot_dir.mkdir(parents=True, exist_ok=True)
-    n_rows = 3 if P_fan is not None else 2
+    n_rows = 3 if power else 2
     n_windows = y.shape[0]
     for w in range(n_windows):
         ts = pd.to_datetime(t_unix[w], unit="s")
@@ -328,11 +321,10 @@ def plot_closed_loop(
             csv_data[f"{name} ymax"] = ymax[w, :, j].numpy()
         for j, name in enumerate(u_cols):
             csv_data[name] = U[w, :, j].numpy()
-        if D_od is not None:
-            csv_data[od_col] = D_od[w].numpy()
-        if P_fan is not None:
-            csv_data[fan_name] = P_fan[w].numpy()
-            csv_data[dx_name] = P_dx[w].numpy()
+        for name, series in context.items():
+            csv_data[name] = series[w].numpy()
+        for name, series in power.items():
+            csv_data[name] = series[w].numpy()
         pd.DataFrame(csv_data, index=ts).rename_axis("timestamp").to_csv(
             day_dir / f"closed_loop_{date_str}.csv"
         )
@@ -347,9 +339,8 @@ def plot_closed_loop(
             steps, ymin[w, :, 0], ymax[w, :, 0],
             color="green", alpha=0.12, label="comfort band",
         )
-        if D_od is not None:
-            ax0.plot(steps, D_od[w], label=od_col, lw=0.9,
-                     color="tab:orange", linestyle="--")
+        for name, series in context.items():
+            ax0.plot(steps, series[w], label=name, lw=0.9, linestyle="--")
         ax0.set_ylabel("Temp [°C]")
         ax0.set_title(f"Closed loop — {ts[0].strftime('%Y-%m-%d')}")
         ax0.legend(fontsize=6, ncol=2)
@@ -357,11 +348,11 @@ def plot_closed_loop(
             ax1.plot(steps, U[w, :, j], label=name, lw=1.0)
         ax1.set_ylabel("Setpoint [°C]")
         ax1.legend(fontsize=6, ncol=2)
-        if P_fan is not None:
+        if power:
             ax2 = axes[2]
-            ax2.plot(steps, P_fan[w], label=fan_name, lw=1.0)
-            ax2.plot(steps, P_dx[w], label=dx_name, lw=1.0)
-            ax2.set_ylabel("Power [W]")
+            for name, series in power.items():
+                ax2.plot(steps, series[w], label=name, lw=1.0)
+            ax2.set_ylabel("Power")
             ax2.legend(fontsize=6, ncol=2)
             bottom_ax = ax2
         else:

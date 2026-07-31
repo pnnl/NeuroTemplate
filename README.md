@@ -21,6 +21,7 @@ Restructured from a flat script collection into an installable library. Phase A 
 - ✅ Single `nt <group> <verb>` dispatcher (replaces the five flat console scripts)
 - ✅ 117 / 117 tests passing
 - ☐ Phase B (scrub remaining HVAC vocabulary from library code; relocate runtime artifacts off CWD)
+  - ⚠️ **Breaking hook change:** `plot_closed_loop` no longer greps D columns for `"outdoor"`/`"dry-bulb"` and no longer reaches into a private `_power_channel_indices`. Apps must add `power_channels` and `plot_context_channels` to `control_user_defined.py`; `has_power_channels` is removed (it is now the truthiness of `power_channels`).
 - ☐ Phase C (ship an in-repo `examples/rtu_mall/`, README templates, end-to-end smoke test)
 
 Open work tracked in [audit.md](audit.md).
@@ -117,7 +118,8 @@ The library imports each hook by attribute (no defaulting), so every row above e
 | `controlled_channels(nm_mapping) -> ([col], [idx])` | yes | comfort objective |
 | `comfort_band_signal(nm_mapping, norm_stats, n_samples, nsteps, band, generator) -> (ymin, ymax)` | yes | scenarios |
 | `actuation_bounds(nm_mapping, norm_stats) -> (umin, umax)` | yes | policy bounds |
-| `has_power_channels(nm_mapping) -> bool` | yes | closed-loop reportcard (power row) |
+| `power_channels(nm_mapping) -> [col]` | must be defined; return `[]` when nothing is metered | closed-loop plot power row + energy metrics |
+| `plot_context_channels(nm_mapping) -> [col]` | must be defined; return `[]` for none | D traces overlaid on the closed-loop temperature axis |
 | `power_metric(yn, U, D, nm_mapping, norm_stats) -> Tensor` + `POWER_METRIC_IMPLEMENTED: bool` | required only when `effort_weight > 0` | effort objective + energy reportcard |
 
 The tables above are the canonical hook contract. For worked-through implementations of every hook (including an ordinal/bounded `data_head_config`), read [tests/fixtures/modeling_user_defined.py](tests/fixtures/modeling_user_defined.py) and [tests/fixtures/control_user_defined.py](tests/fixtures/control_user_defined.py).

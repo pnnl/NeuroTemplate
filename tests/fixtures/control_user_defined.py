@@ -160,33 +160,29 @@ def actuation_bounds(
 POWER_METRIC_IMPLEMENTED = True
 
 
-def _power_channel_indices(
-    nm_mapping: dict[str, list[str]],
-) -> tuple[int, int]:
-    """Indices of (fan_power, dx_power) within nm_mapping['Y']."""
+@beartype
+def power_channels(nm_mapping: dict[str, list[str]]) -> list[str]:
+    """Y columns that meter electrical power, in plot order.
+
+    For this dataset: RTU Fan Power and RTU DX Power. Returns [] when the
+    surrogate's Y does not expose them, which turns off the power row on
+    closed-loop plots.
+    """
     y = nm_mapping["Y"]
-    fan_idx = dx_idx = None
-    for i, c in enumerate(y):
-        cl = c.lower()
-        if "fan power" in cl:
-            fan_idx = i
-        elif "dx power" in cl:
-            dx_idx = i
-    if fan_idx is None or dx_idx is None:
-        raise ValueError(
-            "Cannot compute HVAC power: need 'RTU Fan Power' and 'RTU DX "
-            f"Power' channels in Y. Got Y = {y}"
-        )
-    return fan_idx, dx_idx
+    return [c for c in y if "fan power" in c.lower() or "dx power" in c.lower()]
 
 
-def has_power_channels(nm_mapping: dict[str, list[str]]) -> bool:
-    """Whether the surrogate's Y exposes both power channels we need."""
-    try:
-        _power_channel_indices(nm_mapping)
-        return True
-    except ValueError:
-        return False
+@beartype
+def plot_context_channels(nm_mapping: dict[str, list[str]]) -> list[str]:
+    """D columns to overlay on the temperature axis of closed-loop plots.
+
+    Outdoor dry-bulb is the driver that makes a zone-temperature trace
+    legible. Returns [] to plot zone temperatures with no context trace.
+    """
+    return [
+        c for c in nm_mapping["D"]
+        if "outdoor" in c.lower() and "dry-bulb" in c.lower()
+    ]
 
 
 def _unnorm(col_idx: int, col_name: str, yn: torch.Tensor,
@@ -217,8 +213,14 @@ def power_metric(
         closed-loop mean of this toward zero.
     """
     y = nm_mapping["Y"]
-    fan_idx, dx_idx = _power_channel_indices(nm_mapping)
-    fan = _unnorm(fan_idx, y[fan_idx], yn, norm_stats)
-    dx = _unnorm(dx_idx, y[dx_idx], yn, norm_stats)
+    metered = power_channels(nm_mapping)
+    if not metered:
+        raise ValueError(
+            "Cannot compute HVAC power: need 'RTU Fan Power' and 'RTU DX "
+            f"Power' channels in Y. Got Y = {y}"
+        )
 
-    return (fan + dx).clamp_min(0.0)
+    total = sum(
+        _unnorm(y.index(name), name, yn, norm_stats) for name in metered
+    )
+    return total.clamp_min(0.0)
