@@ -31,6 +31,7 @@ import pandas as pd
 from neurotemplate.modeling.config import ModelingConfig
 from neurotemplate.modeling.heads import BoundedHead, HeadStack
 from neurotemplate.common.metrics import ChannelMetrics, metrics_to_markdown
+from neurotemplate.common.reportcard import _fmt_float, _section
 
 from neurotemplate._typing import beartype
 
@@ -45,16 +46,6 @@ def _head_label(head) -> str:
     if hasattr(head, "n_levels"):
         label += f" K={head.n_levels}"
     return label
-
-
-def _fmt_float(x: Optional[float], precision: int = 6) -> str:
-    if x is None:
-        return "n/a"
-    return f"{x:.{precision}f}"
-
-
-def _section(title: str, body: str) -> str:
-    return f"## {title}\n\n{body}\n"
 
 
 def _summary_section(

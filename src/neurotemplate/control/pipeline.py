@@ -17,6 +17,7 @@ import torch
 from neuromancer.trainer import Trainer
 
 from neurotemplate.common.metrics import ChannelMetrics, per_channel_metrics, metrics_to_markdown
+from neurotemplate.common.reportcard import write_reportcard as _write_reportcard
 from neurotemplate.control.scenarios import horizons, build_window_dict_multi
 from neurotemplate.hooks import load_control_hooks
 
@@ -374,9 +375,7 @@ def plot_closed_loop(
 
 
 def write_reportcard(markdown: str, out_dir: Path, logger=None) -> Path:
-    out_dir.mkdir(parents=True, exist_ok=True)
-    path = out_dir / "control_reportcard.md"
-    path.write_text(markdown)
-    if logger is not None and hasattr(logger, "_mlflow"):
-        logger._mlflow.log_text(markdown, "control_reportcard.md")
-    return path
+    """Write the control reportcard to <out_dir>/control_reportcard.md + MLflow."""
+    return _write_reportcard(
+        markdown, out_dir, "control_reportcard.md", logger=logger
+    )

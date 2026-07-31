@@ -15,11 +15,20 @@ channel range. If a channel is constant (max == min), NRMSE is set to
 NaN to signal it's undefined.
 """
 
+import re
 from dataclasses import dataclass
 
 import torch
 
 from neurotemplate._typing import beartype
+
+
+_METRIC_KEY_SANITIZER = re.compile(r"[^A-Za-z0-9_.\-]+")
+
+
+def _safe_metric_key(name: str) -> str:
+    """Sanitize a column name into something MLflow accepts as a metric key."""
+    return _METRIC_KEY_SANITIZER.sub("_", name).strip("_")
 
 
 @dataclass
