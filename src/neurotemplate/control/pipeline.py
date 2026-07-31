@@ -18,6 +18,13 @@ from neuromancer.trainer import Trainer
 
 from neurotemplate.common.metrics import ChannelMetrics, per_channel_metrics, metrics_to_markdown
 from neurotemplate.common.reportcard import write_reportcard as _write_reportcard
+from neurotemplate.control.metrics import (
+    ComfortMetrics,
+    EnergyMetrics,
+    comfort_metrics,
+    energy_metrics,
+    hours_per_step,
+)
 from neurotemplate.control.scenarios import horizons, build_window_dict_multi
 from neurotemplate.hooks import load_control_hooks
 
@@ -31,11 +38,17 @@ EVAL_BAND_SEED = 12345
 
 @dataclass
 class ControlResults:
-    comfort_violation_rate: float      # fraction of (zone, step) outside band
+    comfort_violation_rate: float      # pooled fraction of (zone, step) outside band
+    comfort: list[ComfortMetrics]      # per-zone comfort detail
     mean_abs_du: float                 # mean |Δsetpoint| (physical units)
     tracking: list[ChannelMetrics]     # per-zone error vs band midpoint
-    energy_proxy: Optional[float]      # mean power if power_metric exists
+    energy: Optional[EnergyMetrics]    # None if power_metric not implemented
     eval_time_s: float
+
+    @property
+    def energy_proxy(self) -> Optional[float]:
+        """Mean power, or None when the use case meters no power."""
+        return None if self.energy is None else self.energy.mean_power
 
 
 def _phys(norm_stats, cols, device):
@@ -149,9 +162,10 @@ def evaluate_closed_loop(
     ymin = data["ymin"][:, hmax:, :] * y_stretch + y_shift
     ymax = data["ymax"][:, hmax:, :] * y_stretch + y_shift
 
-    below = y_ctrl < ymin
-    above = y_ctrl > ymax
-    violation_rate = (below | above).float().mean().item()
+    step_hours = hours_per_step(out["t"][:, hmax:, :])
+    comfort = comfort_metrics(y_ctrl, ymin, ymax, controlled, step_hours)
+    # Pooled headline rate across all controlled channels.
+    violation_rate = ((y_ctrl < ymin) | (y_ctrl > ymax)).float().mean().item()
 
     mid = 0.5 * (ymin + ymax)
     tracking = per_channel_metrics(y_ctrl, mid, controlled)
@@ -161,19 +175,20 @@ def evaluate_closed_loop(
     U = out["U"][:, hmax:, :] * u_stretch + u_shift
     mean_abs_du = (U[:, 1:, :] - U[:, :-1, :]).abs().mean().item()
 
-    energy_proxy = None
+    energy = None
     if getattr(hooks, "POWER_METRIC_IMPLEMENTED", False):
         power = hooks.power_metric(
             out["yn"][:, hmax:, :], out["U"][:, hmax:, :], out["D"][:, hmax:, :],
             nm_mapping, norm_stats,
         )
-        energy_proxy = power.mean().item()
+        energy = energy_metrics(power, step_hours)
 
     return ControlResults(
         comfort_violation_rate=violation_rate,
+        comfort=comfort,
         mean_abs_du=mean_abs_du,
         tracking=tracking,
-        energy_proxy=energy_proxy,
+        energy=energy,
         eval_time_s=eval_time_s,
     ), out
 
