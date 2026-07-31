@@ -16,7 +16,7 @@ import torch
 
 from neuromancer.trainer import Trainer
 
-from neurotemplate.common.metrics import ChannelMetrics, per_channel_metrics, metrics_to_markdown
+from neurotemplate.common.metrics import ChannelMetrics, per_channel_metrics
 from neurotemplate.common.reportcard import write_reportcard as _write_reportcard
 from neurotemplate.control.metrics import (
     ComfortMetrics,
@@ -191,64 +191,6 @@ def evaluate_closed_loop(
         energy=energy,
         eval_time_s=eval_time_s,
     ), out
-
-
-# ── Reportcard ───────────────────────────────────────────────────
-
-
-@beartype
-def render_control_reportcard(
-    cfg,
-    sysid_cfg,
-    nm_mapping: dict[str, list[str]],
-    results: ControlResults,
-    *,
-    best_dev_loss: Optional[float] = None,
-    train_time_s: Optional[float] = None,
-) -> str:
-    h_sys, h_ctrl, hmax = horizons(cfg, sysid_cfg)
-    controlled, _ = load_control_hooks(cfg).controlled_channels(nm_mapping)
-    energy = (
-        f"{results.energy_proxy:.4g}" if results.energy_proxy is not None
-        else "n/a (power_metric not implemented)"
-    )
-    lines = [
-        f"# DPC Control Reportcard — {cfg.run}",
-        "",
-        "## Setup",
-        f"- Sys-id run: `{cfg.sysid_run_id}`  (model: {sysid_cfg.model})",
-        f"- Horizons: H_sys={h_sys}, H_ctrl={h_ctrl}, "
-        f"train_pred_steps={cfg.train_pred_steps}, test_window={cfg.test_window}",
-        f"- Controlled channels ({len(controlled)}): "
-        f"{', '.join(controlled)}",
-        f"- Control U ({len(nm_mapping['U'])}): "
-        f"{', '.join(nm_mapping['U'])}",
-        f"- Train band: lo ~ U[{cfg.train_band().lo}, "
-        f"{cfg.train_band().hi}] °C, width ~ U[{cfg.train_band().width_min}, "
-        f"{cfg.train_band().width_max}] °C, segments={cfg.train_band().sub_samples}",
-        f"- Test band:  lo ~ U[{cfg.test_band().lo}, "
-        f"{cfg.test_band().hi}] °C, width ~ U[{cfg.test_band().width_min}, "
-        f"{cfg.test_band().width_max}] °C, segments={cfg.test_band().sub_samples}",
-        f"- Weights: comfort={cfg.comfort_weight}, du={cfg.du_weight}, "
-        f"effort={cfg.effort_weight}",
-        "",
-        "## Closed-loop performance (physical units)",
-        f"- Comfort violation rate: "
-        f"**{results.comfort_violation_rate * 100:.2f}%**",
-        f"- Mean |Δsetpoint|: {results.mean_abs_du:.4g}",
-        f"- Energy proxy: {energy}",
-        f"- Eval rollout time: {results.eval_time_s:.2f}s",
-    ]
-    if best_dev_loss is not None:
-        lines.append(f"- Best dev loss: {best_dev_loss:.6g}")
-    if train_time_s is not None:
-        lines.append(f"- Train time: {train_time_s:.1f}s")
-    lines += [
-        "",
-        "## Tracking error vs. comfort-band midpoint",
-        metrics_to_markdown(results.tracking),
-    ]
-    return "\n".join(lines)
 
 
 @beartype

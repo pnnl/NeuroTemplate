@@ -1,0 +1,167 @@
+"""
+Control reportcard renderer tests.
+
+Includes a snapshot test against a golden file. To regenerate it (e.g. after
+an intentional rendering change), run:
+
+    REGEN_GOLDEN=1 uv run pytest tests/test_control_reportcard.py -k snapshot
+"""
+
+import os
+from pathlib import Path
+
+import torch
+
+from neurotemplate.common.metrics import per_channel_metrics
+from neurotemplate.control.metrics import comfort_metrics, energy_metrics
+from neurotemplate.control.pipeline import ControlResults
+from neurotemplate.control.reportcard import render_control_reportcard
+from control_fixtures import make_control_cfg, make_sysid_cfg
+
+GOLDEN_DIR = Path(__file__).parent / "golden"
+
+_NM = {"Y": ["zone [°C]"], "U": ["setpoint [°C]"], "D": ["outdoor [°C]"],
+       "t": ["sec_elapsed"]}
+_CONTROLLED = ["zone [°C]"]
+
+
+def _make_arch():
+    """Architecture dict shaped like control.policy.describe_policy output."""
+    return {
+        "family": "mlp",
+        "nonlin": "gelu",
+        "bound_method": "sigmoid_scale",
+        "insize": 27,
+        "outsize": 1,
+        "h_ctrl": 12,
+        "d_preview": 0,
+        "band_preview": 0,
+        "hsizes": [64, 64],
+        "param_count": 6017,
+        "u_cols": ["setpoint [°C]"],
+        "umin_phys": [22.0],
+        "umax_phys": [28.0],
+        "quantized": True,
+        "setpoint_step": 0.5,
+    }
+
+
+def _make_results(offset: float = 1.0, power_level: float = 1500.0):
+    """ControlResults for a trajectory held `offset` above a fixed band."""
+    n = 8
+    y = torch.full((2, n, 1), 22.0)
+    y[:, n // 2:, :] = 25.0 + offset
+    ymin = torch.full((2, n, 1), 20.0)
+    ymax = torch.full((2, n, 1), 25.0)
+    mid = 0.5 * (ymin + ymax)
+    power = torch.full((2, n), power_level)
+
+    return ControlResults(
+        comfort_violation_rate=0.5,
+        comfort=comfort_metrics(y, ymin, ymax, _CONTROLLED, step_hours=0.25),
+        mean_abs_du=0.375,
+        tracking=per_channel_metrics(y, mid, _CONTROLLED),
+        energy=energy_metrics(power, step_hours=0.25),
+        eval_time_s=0.5,
+    )
+
+
+def _render(**kwargs):
+    cfg = make_control_cfg()
+    cfg.run = "snapshot-control"
+    defaults = dict(
+        cfg=cfg,
+        sysid_cfg=make_sysid_cfg(),
+        arch=_make_arch(),
+        nm_mapping=_NM,
+        controlled=_CONTROLLED,
+        results=_make_results(),
+        eval_band_seed=12345,
+        run_name="snapshot-control",
+        timestamp="2026-05-08T12:00:00",
+        best_dev_loss=0.0123456,
+        train_time_s=42.0,
+    )
+    defaults.update(kwargs)
+    return render_control_reportcard(**defaults)
+
+
+def test_all_sections_present():
+    md = _render()
+    for title in (
+        "## Summary",
+        "## Policy architecture",
+        "## Scenario",
+        "## Closed-loop performance",
+        "## Baseline comparison",
+        "## Tracking error vs. comfort-band midpoint",
+        "## Hyperparameters",
+    ):
+        assert title in md, f"missing section: {title}"
+
+
+def test_actuation_bounds_reported_in_physical_units():
+    md = _render()
+    assert "`setpoint [°C]`: [22, 28]" in md
+
+
+def test_linear_policy_renders_without_hidden_sizes():
+    arch = _make_arch()
+    arch.update(family="linear", nonlin="n/a (linear)", hsizes=[],
+                quantized=False)
+    md = _render(arch=arch)
+    assert "single affine map" in md
+    assert "**Setpoint quantization:** off" in md
+
+
+def test_missing_baseline_says_why():
+    md = _render(baseline=None)
+    assert "build_baseline_policy" in md
+    assert "| Baseline |" not in md
+
+
+def test_baseline_comparison_renders_signed_delta():
+    """A baseline that violates twice as often must show a negative Δ on the
+    violation column (the learned policy is better) and a positive Δ on power."""
+    learned = _make_results(offset=1.0, power_level=1500.0)
+    baseline = _make_results(offset=2.0, power_level=1000.0)
+    baseline.comfort_violation_rate = 1.0
+
+    md = _render(results=learned, baseline=baseline)
+
+    assert "| Learned policy |" in md
+    assert "| Baseline |" in md
+    delta_row = next(l for l in md.splitlines() if l.startswith("| Δ "))
+    cells = [c.strip() for c in delta_row.strip("|").split("|")]
+    assert cells[1] == "-50"       # violation rate delta, percentage points
+    assert cells[4] == "+500"      # mean power delta
+
+
+def test_energy_marked_unavailable_without_power_metric():
+    results = _make_results()
+    results.energy = None
+    md = _render(results=results)
+    assert "power_metric not implemented" in md
+    assert results.energy_proxy is None
+
+
+def test_snapshot_matches_golden():
+    """Pin the rendered output. Update via REGEN_GOLDEN=1."""
+    md = _render(baseline=_make_results(offset=2.0, power_level=1000.0))
+
+    GOLDEN_DIR.mkdir(parents=True, exist_ok=True)
+    golden_path = GOLDEN_DIR / "control_reportcard_baseline.md"
+
+    if os.environ.get("REGEN_GOLDEN"):
+        golden_path.write_text(md)
+
+    if not golden_path.exists():
+        # First run: write it and pass with a clear note.
+        golden_path.write_text(md)
+        return
+
+    expected = golden_path.read_text()
+    assert md == expected, (
+        f"Control reportcard rendering changed.\n"
+        f"If intentional, regenerate via: REGEN_GOLDEN=1 pytest {__file__}"
+    )

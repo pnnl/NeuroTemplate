@@ -24,15 +24,17 @@ from neurotemplate.modeling.experiment import resolve_device, set_seeds
 from neurotemplate.control.config import ControlConfig, load_config_from_cli, CONTROL_CONFIG_DIR
 from neurotemplate.control.load import load_frozen_dynamics
 from neurotemplate.control.scenarios import build_loaders, horizons
-from neurotemplate.control.policy import build_policy
+from neurotemplate.control.policy import build_policy, describe_policy
 from neurotemplate.control.closed_loop import build_closed_loop, build_control_loss, build_problem
+from neurotemplate.control.reportcard import render_control_reportcard
 from neurotemplate.control.pipeline import (
+    EVAL_BAND_SEED,
     train_policy,
     evaluate_closed_loop,
-    render_control_reportcard,
     write_reportcard,
     plot_closed_loop,
 )
+from neurotemplate.hooks import load_control_hooks
 
 
 @beartype
@@ -122,8 +124,11 @@ def main() -> None:
             Path(cfg.savedir) / "plots",
         )
 
+    controlled, _ = load_control_hooks(cfg).controlled_channels(nm_mapping)
+    arch = describe_policy(policy_node, cfg, sysid_cfg, nm_mapping, norm_stats)
     md = render_control_reportcard(
-        cfg, sysid_cfg, nm_mapping, results,
+        cfg, sysid_cfg, arch, nm_mapping, controlled, results,
+        eval_band_seed=EVAL_BAND_SEED,
         best_dev_loss=best_dev, train_time_s=train_time_s,
     )
     write_reportcard(md, Path(cfg.savedir), logger=logger)
