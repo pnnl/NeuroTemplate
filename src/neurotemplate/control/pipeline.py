@@ -25,6 +25,7 @@ from neurotemplate.control.metrics import (
     energy_metrics,
     hours_per_step,
 )
+from neurotemplate.control.closed_loop import build_closed_loop
 from neurotemplate.control.scenarios import horizons, build_window_dict_multi
 from neurotemplate.hooks import load_control_hooks
 
@@ -191,6 +192,45 @@ def evaluate_closed_loop(
         energy=energy,
         eval_time_s=eval_time_s,
     ), out
+
+
+# ── Rule-based baseline (optional) ───────────────────────────────
+
+
+@beartype
+def evaluate_baseline(
+    cfg,
+    sysid_cfg,
+    dyn_node,
+    test_dfs: list,
+    nm_mapping: dict[str, list[str]],
+    norm_stats: dict[str, dict[str, float]],
+) -> Optional[ControlResults]:
+    """Score the use case's rule-based controller on the same test rollouts.
+
+    `control_user_defined.build_baseline_policy(cfg, sysid_cfg, nm_mapping,
+    norm_stats) -> Node` is optional: without it there is simply nothing to
+    compare against and this returns None. Same shape as the
+    POWER_METRIC_IMPLEMENTED check — the hook's presence is the switch.
+
+    The comparison is apples-to-apples because evaluate_closed_loop reseeds
+    the band from EVAL_BAND_SEED, so the baseline sees a byte-identical
+    comfort band on byte-identical test windows. The baseline is never
+    trained: it has no trainable parameters by construction.
+    """
+    build = getattr(load_control_hooks(cfg), "build_baseline_policy", None)
+    if build is None:
+        return None
+
+    baseline_node = build(cfg, sysid_cfg, nm_mapping, norm_stats)
+    if baseline_node is None:
+        return None
+
+    cl = build_closed_loop(dyn_node, baseline_node, cfg, sysid_cfg)
+    results, _ = evaluate_closed_loop(
+        cfg, sysid_cfg, cl, test_dfs, nm_mapping, norm_stats,
+    )
+    return results
 
 
 @beartype

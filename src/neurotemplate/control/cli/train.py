@@ -30,6 +30,7 @@ from neurotemplate.control.reportcard import render_control_reportcard
 from neurotemplate.control.pipeline import (
     EVAL_BAND_SEED,
     train_policy,
+    evaluate_baseline,
     evaluate_closed_loop,
     write_reportcard,
     plot_closed_loop,
@@ -118,6 +119,18 @@ def main() -> None:
         cfg, sysid_cfg, cl_system, test_dfs, nm_mapping, norm_stats,
     )
 
+    # Optional rule-based comparison. Scored on the same windows and the same
+    # fixed-seed band; None when the use case defines no baseline.
+    baseline = evaluate_baseline(
+        cfg, sysid_cfg, dyn_node, test_dfs, nm_mapping, norm_stats,
+    )
+    if cfg.verbose:
+        print(
+            "Baseline comfort violation rate: "
+            f"{baseline.comfort_violation_rate * 100:.2f}%" if baseline
+            else "No baseline defined (build_baseline_policy hook absent)."
+        )
+
     if cfg.plot:
         plot_closed_loop(
             cfg, sysid_cfg, out, nm_mapping, norm_stats,
@@ -128,7 +141,7 @@ def main() -> None:
     arch = describe_policy(policy_node, cfg, sysid_cfg, nm_mapping, norm_stats)
     md = render_control_reportcard(
         cfg, sysid_cfg, arch, nm_mapping, controlled, results,
-        eval_band_seed=EVAL_BAND_SEED,
+        eval_band_seed=EVAL_BAND_SEED, baseline=baseline,
         best_dev_loss=best_dev, train_time_s=train_time_s,
     )
     write_reportcard(md, Path(cfg.savedir), logger=logger)

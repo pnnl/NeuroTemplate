@@ -160,6 +160,61 @@ def actuation_bounds(
 POWER_METRIC_IMPLEMENTED = True
 
 
+# ---------------------------------------------------------------------
+# Optional: a rule-based controller to score the learned policy against
+# ---------------------------------------------------------------------
+class _BandMidpointPolicy(torch.nn.Module):
+    """Park the setpoint at the middle of the comfort band.
+
+    The simplest rule that is actually trying: it ignores the disturbances
+    and the zone state entirely and just aims at the centre of whatever band
+    it is handed. Against the `dummy` surrogate (next zone temp = setpoint)
+    this is the exactly-optimal comfort controller, which makes it a sharp
+    check on whether a learned policy is earning its complexity.
+
+    Inputs are the *current* ymin/ymax (no preview window), both in
+    normalized space, and the output is normalized U — the same space the
+    learned policy emits.
+    """
+
+    def __init__(self, umin: torch.Tensor, umax: torch.Tensor, nu: int):
+        super().__init__()
+        self.nu = nu
+        self.register_buffer("umin", umin)
+        self.register_buffer("umax", umax)
+
+    def forward(self, ymin: torch.Tensor, ymax: torch.Tensor) -> torch.Tensor:
+        midpoint = 0.5 * (ymin + ymax)
+        # One controlled channel per actuator for this dataset; broadcast the
+        # single midpoint across U columns if a use case has more.
+        u = midpoint.expand(*midpoint.shape[:-1], self.nu)
+        return torch.clamp(u, self.umin, self.umax)
+
+
+def build_baseline_policy(cfg, sysid_cfg, nm_mapping, norm_stats):
+    """Rule-based controller the framework scores alongside the learned one.
+
+    Returns a Neuromancer Node writing ["U"], or None to skip the
+    comparison. Has no trainable parameters, so it is only ever evaluated.
+    """
+    from neuromancer.system import Node
+
+    controlled, _ = controlled_channels(nm_mapping)
+    nu = len(nm_mapping["U"])
+    if len(controlled) != nu:
+        # One setpoint per comfort-controlled zone is the assumption this
+        # simple rule makes; say so rather than silently broadcasting wrong.
+        raise ValueError(
+            f"Band-midpoint baseline needs one U per controlled channel: "
+            f"{len(controlled)} controlled channels vs {nu} U columns."
+        )
+
+    umin, umax = actuation_bounds(nm_mapping, norm_stats)
+    device = sysid_cfg.device
+    net = _BandMidpointPolicy(umin.to(device), umax.to(device), nu).to(device)
+    return Node(net, ["ymin", "ymax"], ["U"], name="Band-midpoint baseline")
+
+
 @beartype
 def power_channels(nm_mapping: dict[str, list[str]]) -> list[str]:
     """Y columns that meter electrical power, in plot order.
