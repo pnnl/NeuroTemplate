@@ -5,7 +5,7 @@ A library of generic, time-series, data-driven black-box modeling and control bu
 The repo contains two sister subsystems:
 
 - **Modeling** — train a system-identification surrogate `y_{k+1} = f(y_k, u_k, d_k) [+ y_k]` from data, with optional physics-informed losses (gradient sign penalties, equilibrium / step-response / free-decay scenarios), Optuna search, MLflow tracking. Model families: `mlp`, `nssm`, `lssm`, `gru`.
-- **Control** — train a differentiable predictive control (DPC) policy against a frozen surrogate. Closed-loop rollouts, comfort-band penalties, optional energy/effort objectives, setpoint quantization.
+- **Control** — train a differentiable predictive control (DPC) policy against a frozen surrogate. Closed-loop rollouts, comfort-band penalties, optional energy/effort objectives, setpoint quantization. Policy families: `mlp`, `linear` (a saturated affine feedback law). Optionally scores a rule-based baseline alongside the learned policy.
 
 Both sides share a thin `common/` layer (YAML/CLI loader, CSV + sliding-window data utilities, per-channel metrics).
 
@@ -19,7 +19,8 @@ Restructured from a flat script collection into an installable library. Phase A 
 - ✅ YAML + CLI override machinery, multi-path data fields (`Union[str, list[str]]`)
 - ✅ Hook discovery via `neurotemplate.hooks` (CWD + `cfg.user_hooks_path` override)
 - ✅ Single `nt <group> <verb>` dispatcher (replaces the five flat console scripts)
-- ✅ 117 / 117 tests passing
+- ✅ 170 / 170 tests passing
+- ✅ Control-side parity with sysid: policy family registry (`mlp` / `linear`), comfort + energy metrics, sectioned reportcard with a golden test, MLflow metric logging, optional rule-based baseline comparison
 - ☐ Phase B (scrub remaining HVAC vocabulary from library code; relocate runtime artifacts off CWD)
   - ⚠️ **Breaking hook change:** `plot_closed_loop` no longer greps D columns for `"outdoor"`/`"dry-bulb"` and no longer reaches into a private `_power_channel_indices`. Apps must add `power_channels` and `plot_context_channels` to `control_user_defined.py`; `has_power_channels` is removed (it is now the truthiness of `power_channels`).
 - ☐ Phase C (ship an in-repo `examples/rtu_mall/`, README templates, end-to-end smoke test)
@@ -121,6 +122,12 @@ The library imports each hook by attribute (no defaulting), so every row above e
 | `power_channels(nm_mapping) -> [col]` | must be defined; return `[]` when nothing is metered | closed-loop plot power row + energy metrics |
 | `plot_context_channels(nm_mapping) -> [col]` | must be defined; return `[]` for none | D traces overlaid on the closed-loop temperature axis |
 | `power_metric(yn, U, D, nm_mapping, norm_stats) -> Tensor` + `POWER_METRIC_IMPLEMENTED: bool` | required only when `effort_weight > 0` | effort objective + energy reportcard |
+| `build_baseline_policy(cfg, sysid_cfg, nm_mapping, norm_stats) -> Node \| None` | optional | rule-based controller scored alongside the learned policy |
+| `preview_config(nm_mapping) -> {signal: n_steps}` | optional | per-column disturbance + comfort-band preview widths |
+
+`power_metric` returns whatever units the use case meters; the library never converts, so the reportcard labels energy as `power·h`.
+
+If `build_baseline_policy` is defined, `nt control train` rolls that controller out on the same test windows against the same fixed-seed comfort band and adds a learned-vs-baseline table to the reportcard. Without it the comparison section just says so. The returned `Node` must write `["U"]` and have no trainable parameters — it is only ever evaluated, never trained.
 
 The tables above are the canonical hook contract. For worked-through implementations of every hook (including an ordinal/bounded `data_head_config`), read [tests/fixtures/modeling_user_defined.py](tests/fixtures/modeling_user_defined.py) and [tests/fixtures/control_user_defined.py](tests/fixtures/control_user_defined.py).
 
@@ -191,7 +198,8 @@ src/neurotemplate/
 ├── common/
 │   ├── config.py        # YAML, --set, dict_to_dataclass, CLI parser
 │   ├── data_utils.py    # CSV load, sliding windows, norm/denorm
-│   └── metrics.py       # ChannelMetrics, per_channel_metrics
+│   ├── metrics.py       # ChannelMetrics, per_channel_metrics
+│   └── reportcard.py    # _section, write_reportcard (shared by both sides)
 ├── modeling/
 │   ├── config.py        # ModelingConfig
 │   ├── dynamics.py      # SSMGrad, GRUBlock, get_dynamics  (NSSM/LSSM/MLP/GRU)
@@ -206,10 +214,12 @@ src/neurotemplate/
 │   └── cli/             # train, optuna, load, debug_heads
 └── control/
     ├── config.py        # ControlConfig
-    ├── policy.py        # build_policy, STEQuantize
+    ├── policy.py        # policy_catalog (MLP/linear), build_policy, describe_policy, STEQuantize
     ├── closed_loop.py   # build_closed_loop, build_control_loss
     ├── scenarios.py     # BandSpec, build_window_dict, build_loaders
-    ├── pipeline.py      # train_policy, evaluate_closed_loop, render_control_reportcard
+    ├── metrics.py       # ComfortMetrics, EnergyMetrics
+    ├── pipeline.py      # train_policy, evaluate_closed_loop, evaluate_baseline
+    ├── reportcard.py    # render_control_reportcard
     ├── load.py          # load_frozen_dynamics
     └── cli/             # train
 ```
@@ -235,4 +245,4 @@ If you find yourself shadowing a Neuromancer class, prefer the import.
 uv run pytest tests/
 ```
 
-All 117 pass today, against the current local Neuromancer checkout. The suite covers config, data utilities, metrics, heads, reportcard, hook contracts, and the Neuromancer-touching dynamics/loss/closed-loop paths.
+All 170 pass today, against the current local Neuromancer checkout. The suite covers config, data utilities, metrics, heads, reportcards (both sides, golden-file pinned), hook contracts, and the Neuromancer-touching dynamics/loss/closed-loop paths.
