@@ -126,11 +126,11 @@ def main() -> None:
         cfg, sysid_cfg, dyn_node, test_dfs, nm_mapping, norm_stats,
     )
     if cfg.verbose:
-        print(
-            "Baseline comfort violation rate: "
-            f"{baseline.comfort_violation_rate * 100:.2f}%" if baseline
-            else "No baseline defined (build_baseline_policy hook absent)."
-        )
+        if baseline is None:
+            print("No baseline defined (build_baseline_policy hook absent).")
+        else:
+            print("Baseline comfort violation rate: "
+                  f"{baseline.comfort_violation_rate * 100:.2f}%")
 
     if cfg.plot:
         plot_closed_loop(
