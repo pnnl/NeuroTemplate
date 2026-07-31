@@ -8,6 +8,7 @@ from typing import Optional, Union
 from neurotemplate.common.config import (  # noqa: F401  re-exported
     _check_paths_field,
     check_non_negative,
+    check_one_of,
     check_positive,
     default_savedir,
     load_config_from_cli,
@@ -78,6 +79,14 @@ class ControlConfig:
     effort_weight: float = 0.1
 
     # ── Policy network ───────────────────────────────────────────
+    # Network family (see control.policy.policy_catalog). "linear" ignores
+    # policy_layers / log2_policy_hidden / policy_nonlin and produces a single
+    # saturated affine feedback law.
+    policy: str = "mlp"
+    policy_nonlin: str = "gelu"
+    # How the network output is squashed into [umin, umax]: "sigmoid_scale"
+    # (smooth, never exactly reaches the limits) or "relu_clamp" (hard clip).
+    policy_bound_method: str = "sigmoid_scale"
     log2_policy_hidden: int = 6
     policy_layers: int = 2
     # Snap policy output to a fixed setpoint grid (°C). E.g. 0.5 = half-degree
@@ -112,9 +121,20 @@ class ControlConfig:
     plot: bool = True
 
     def validate(self) -> None:
+        # Deferred import: policy.py pulls in Neuromancer, and config is
+        # imported by the CLI before anything else. Same pattern as
+        # train_band()/test_band() below.
+        from neurotemplate.control.policy import (
+            POLICY_BOUND_METHODS, POLICY_NONLIN, policy_catalog,
+        )
+
         if not self.sysid_run_id:
             raise ValueError("sysid_run_id must be set (MLflow run id of the "
                              "trained dynamics surrogate)")
+
+        check_one_of(self, "policy", list(policy_catalog))
+        check_one_of(self, "policy_nonlin", list(POLICY_NONLIN))
+        check_one_of(self, "policy_bound_method", POLICY_BOUND_METHODS)
 
         for name in ("train_data_path", "dev_data_path", "test_data_path"):
             _check_paths_field(name, getattr(self, name))

@@ -66,3 +66,31 @@ def test_validate_band_order():
     cfg.band_lo, cfg.band_hi = 24.0, 20.0
     with pytest.raises(ValueError, match="band_lo"):
         cfg.validate()
+
+
+def _runnable_cfg() -> ControlConfig:
+    cfg = ControlConfig()
+    cfg.sysid_run_id = "x"
+    cfg.train_data_path = "train.csv"
+    cfg.dev_data_path = "dev.csv"
+    cfg.test_data_path = "test.csv"
+    return cfg
+
+
+@pytest.mark.parametrize("field,bad", [
+    ("policy", "bogus"),
+    ("policy_nonlin", "swish"),
+    ("policy_bound_method", "clip"),
+])
+def test_validate_rejects_unknown_policy_options(field, bad):
+    cfg = _runnable_cfg()
+    setattr(cfg, field, bad)
+    with pytest.raises(ValueError, match=field):
+        cfg.validate()
+
+
+def test_validate_accepts_linear_policy():
+    cfg = _runnable_cfg()
+    cfg.policy = "linear"
+    cfg.policy_bound_method = "relu_clamp"
+    cfg.validate()  # must not raise

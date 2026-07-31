@@ -4,7 +4,15 @@ import pytest
 import torch
 
 from neurotemplate.control.scenarios import build_window_dict, horizons
-from neurotemplate.control.policy import build_policy, STEQuantize, _preview_steps
+from neurotemplate.control.policy import (
+    POLICY_BOUND_METHODS,
+    POLICY_NONLIN,
+    STEQuantize,
+    _preview_steps,
+    build_policy,
+    describe_policy,
+    policy_catalog,
+)
 from neurotemplate.control.closed_loop import build_closed_loop
 from control_user_defined import actuation_bounds
 from control_fixtures import full_setup
@@ -156,3 +164,100 @@ def test_policy_output_lands_on_physical_grid():
         assert residual.max().item() < 1e-3, (
             f"{col}: max grid residual {residual.max().item()}"
         )
+
+
+# ── Policy family registry ───────────────────────────────────────
+
+
+def test_unknown_policy_lists_available():
+    s = full_setup(policy="bogus")
+    with pytest.raises(ValueError, match="Unknown policy 'bogus'"):
+        build_policy(s["cfg"], s["sysid_cfg"], s["nm"], s["norm_stats"])
+
+
+def test_linear_policy_is_a_single_affine_layer():
+    s = full_setup(policy="linear", setpoint_step=0.0)
+    net = build_policy(s["cfg"], s["sysid_cfg"], s["nm"], s["norm_stats"]).callable
+    assert len(net.linear) == 1
+    assert net.linear[0].out_features == len(s["nm"]["U"])
+
+
+def test_linear_policy_has_fewer_params_than_mlp():
+    kw = dict(setpoint_step=0.0)
+    lin = full_setup(policy="linear", **kw)
+    mlp = full_setup(policy="mlp", **kw)
+
+    def n_params(s):
+        net = build_policy(s["cfg"], s["sysid_cfg"], s["nm"], s["norm_stats"]).callable
+        return sum(p.numel() for p in net.parameters())
+
+    assert n_params(lin) < n_params(mlp)
+
+
+@pytest.mark.parametrize("nonlin", list(POLICY_NONLIN))
+def test_every_nonlin_builds(nonlin):
+    s = full_setup(policy_nonlin=nonlin, setpoint_step=0.0)
+    policy = build_policy(s["cfg"], s["sysid_cfg"], s["nm"], s["norm_stats"])
+    assert isinstance(policy.callable.nonlin[0], POLICY_NONLIN[nonlin])
+
+
+@pytest.mark.parametrize("method", POLICY_BOUND_METHODS)
+@pytest.mark.parametrize("family", list(policy_catalog))
+def test_bounds_respected_for_every_family_and_method(family, method):
+    """Both bound methods, on both families, must keep U inside the actuator
+    limits. setpoint_step=0 because the quantizer sits *after* the bound and
+    can legitimately round a hair past it."""
+    s = full_setup(policy=family, policy_bound_method=method, setpoint_step=0.0)
+    cfg, sysid_cfg, nm = s["cfg"], s["sysid_cfg"], s["nm"]
+    _, _, hmax = horizons(cfg, sysid_cfg)
+
+    policy = build_policy(cfg, sysid_cfg, nm, s["norm_stats"])
+    cl = build_closed_loop(s["dyn_node"], policy, cfg, sysid_cfg)
+    data = build_window_dict(
+        s["norm_df"], cfg, sysid_cfg, nm, s["norm_stats"],
+        P=cfg.train_pred_steps, stride=cfg.in_steps,
+    )
+    U = cl(data)["U"][:, hmax:, :]
+
+    umin, umax = actuation_bounds(nm, s["norm_stats"])
+    tol = 1e-4
+    assert torch.all(U >= umin - tol)
+    assert torch.all(U <= umax + tol)
+
+
+# ── describe_policy ──────────────────────────────────────────────
+
+
+def test_describe_policy_reports_shape_and_physical_bounds():
+    s = full_setup(setpoint_step=0.5)
+    cfg, sysid_cfg, nm, ns = s["cfg"], s["sysid_cfg"], s["nm"], s["norm_stats"]
+    policy = build_policy(cfg, sysid_cfg, nm, ns)
+    d = describe_policy(policy, cfg, sysid_cfg, nm, ns)
+
+    assert d["family"] == "mlp"
+    assert d["quantized"] is True
+    assert d["outsize"] == len(nm["U"])
+    assert d["hsizes"] == cfg.policy_layers * [2**cfg.log2_policy_hidden]
+
+    # insize must equal the documented window sum.
+    n_ctrl = 1  # single controlled zone temp in the fixture
+    assert d["insize"] == (
+        len(nm["Y"]) * d["h_ctrl"]
+        + 2 * n_ctrl * (1 + d["band_preview"])
+        + len(nm["D"]) * (d["h_ctrl"] + d["d_preview"])
+    )
+
+    # Bounds are reported in physical units, matching the hook's own inputs.
+    for i, col in enumerate(nm["U"]):
+        assert d["umin_phys"][i] == pytest.approx(ns[col]["min"], rel=1e-4)
+        assert d["umax_phys"][i] == pytest.approx(ns[col]["max"], rel=1e-4)
+
+
+def test_describe_policy_marks_linear_nonlin_not_applicable():
+    s = full_setup(policy="linear", setpoint_step=0.0)
+    cfg, sysid_cfg, nm, ns = s["cfg"], s["sysid_cfg"], s["nm"], s["norm_stats"]
+    d = describe_policy(build_policy(cfg, sysid_cfg, nm, ns),
+                        cfg, sysid_cfg, nm, ns)
+    assert d["hsizes"] == []
+    assert d["nonlin"] == "n/a (linear)"
+    assert d["quantized"] is False
