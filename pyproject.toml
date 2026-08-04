@@ -10,11 +10,11 @@ dependencies = [
     "jupyter>=1.1.1",
     "matplotlib>=3.10.7",
     "mlflow>=3.9.0",
-    # Pinned to the exact neuromancer-lite fork commit that ships the
-    # preview/logging API this framework targets (branch
-    # feature/past_future_preview). This is the required state for consumers
-    # installing from git. Bump the SHA when neuromancer-lite advances.
-    "neuromancer @ git+ssh://git@github.com/EladMichael/neuromancer-lite.git@434b1b98ff7755267ce47ff6b5a751bc9ae5e52a",
+    # Pinned to the exact neuromancer fork commit that ships the preview/logging
+    # API this framework targets, plus the core rollout/trainer speedups
+    # (branch perf/core-speedups). This is the required state for consumers
+    # installing from git. Bump the SHA when neuromancer advances.
+    "neuromancer @ git+ssh://git@github.com/EladMichael/neuromancer.git@c3a3f2ae5240133e8b9bb6f01f3f85da7eef5c70",
     "numpy>=2.2.6",
     "optuna>=4.8.0",
     "optuna-dashboard>=0.20.0",
@@ -49,14 +49,16 @@ allow-direct-references = true
 # propagate to downstream consumers (they get the git ref from dependencies).
 # Comment this out to exercise the real git pin locally.
 [tool.uv.sources]
-neuromancer = { path = "../../neuromancer-lite", editable = true }
+neuromancer = { path = "../../neuromancer", editable = true }
 
 [tool.uv]
-# torch-harmonics ships no macOS arm64 wheel and is a transitive dep
-# pulled in by neuromancer. Skip it on darwin; nothing in this repo
-# uses it directly.
-override-dependencies = [
-    "torch-harmonics; sys_platform != 'darwin'",
+# neuromancer.modules.operators imports SFNO from neuralop, which was removed
+# in neuraloperator 2.0 and requires torch-harmonics. neuromancer declares both
+# unpinned, so constrain them to the combination that imports on macOS arm64
+# (torch-harmonics 0.9.x ships no darwin wheel; 0.7.3 builds from source).
+constraint-dependencies = [
+    "neuraloperator<2",
+    "torch-harmonics<0.8",
 ]
 
 [project.optional-dependencies]
