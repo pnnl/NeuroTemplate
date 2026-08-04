@@ -2,20 +2,28 @@ import torch
 
 from control_user_defined import (
     power_metric,
-    _power_channel_indices,
+    power_channels,
+    plot_context_channels,
 )
 from control_fixtures import (
     make_nm_mapping, make_raw_df, make_norm_stats,
-    FAN_P, DX_P,
+    FAN_P, DX_P, DIST,
 )
 
 
-def test_power_channel_indices_resolved():
+def test_power_channels_resolved():
+    assert power_channels(make_nm_mapping()) == [FAN_P, DX_P]
+
+
+def test_power_channels_empty_when_unmetered():
+    """No power columns in Y turns the power row off rather than raising."""
     nm = make_nm_mapping()
-    fan_idx, dx_idx = _power_channel_indices(nm)
-    assert nm["Y"][fan_idx] == FAN_P
-    assert nm["Y"][dx_idx] == DX_P
-    assert fan_idx != dx_idx
+    nm["Y"] = [c for c in nm["Y"] if c not in (FAN_P, DX_P)]
+    assert power_channels(nm) == []
+
+
+def test_plot_context_channels_picks_outdoor_drybulb():
+    assert plot_context_channels(make_nm_mapping()) == [DIST[0]]
 
 
 def test_power_metric_matches_fan_plus_dx():

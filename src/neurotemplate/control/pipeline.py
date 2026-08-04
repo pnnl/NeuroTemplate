@@ -7,7 +7,7 @@ frozen, so the optimizer is built over requires_grad params only.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from time import perf_counter as tic
 from typing import Optional
@@ -16,7 +16,22 @@ import torch
 
 from neuromancer.trainer import Trainer
 
-from neurotemplate.common.metrics import ChannelMetrics, per_channel_metrics, metrics_to_markdown
+from neurotemplate.common.metrics import (
+    ChannelMetrics,
+    _safe_metric_key,
+    metrics_to_dict,
+    per_channel_metrics,
+)
+from neurotemplate.common.reportcard import write_reportcard as _write_reportcard
+from neurotemplate.control.metrics import (
+    ComfortMetrics,
+    EnergyMetrics,
+    comfort_metrics,
+    comfort_to_dict,
+    energy_metrics,
+    hours_per_step,
+)
+from neurotemplate.control.closed_loop import build_closed_loop
 from neurotemplate.control.scenarios import horizons, build_window_dict_multi
 from neurotemplate.hooks import load_control_hooks
 
@@ -30,11 +45,17 @@ EVAL_BAND_SEED = 12345
 
 @dataclass
 class ControlResults:
-    comfort_violation_rate: float      # fraction of (zone, step) outside band
+    comfort_violation_rate: float      # pooled fraction of (zone, step) outside band
+    comfort: list[ComfortMetrics]      # per-zone comfort detail
     mean_abs_du: float                 # mean |Δsetpoint| (physical units)
     tracking: list[ChannelMetrics]     # per-zone error vs band midpoint
-    energy_proxy: Optional[float]      # mean power if power_metric exists
+    energy: Optional[EnergyMetrics]    # None if power_metric not implemented
     eval_time_s: float
+
+    @property
+    def energy_proxy(self) -> Optional[float]:
+        """Mean power, or None when the use case meters no power."""
+        return None if self.energy is None else self.energy.mean_power
 
 
 def _phys(norm_stats, cols, device):
@@ -148,9 +169,10 @@ def evaluate_closed_loop(
     ymin = data["ymin"][:, hmax:, :] * y_stretch + y_shift
     ymax = data["ymax"][:, hmax:, :] * y_stretch + y_shift
 
-    below = y_ctrl < ymin
-    above = y_ctrl > ymax
-    violation_rate = (below | above).float().mean().item()
+    step_hours = hours_per_step(out["t"][:, hmax:, :])
+    comfort = comfort_metrics(y_ctrl, ymin, ymax, controlled, step_hours)
+    # Pooled headline rate across all controlled channels.
+    violation_rate = ((y_ctrl < ymin) | (y_ctrl > ymax)).float().mean().item()
 
     mid = 0.5 * (ymin + ymax)
     tracking = per_channel_metrics(y_ctrl, mid, controlled)
@@ -160,79 +182,118 @@ def evaluate_closed_loop(
     U = out["U"][:, hmax:, :] * u_stretch + u_shift
     mean_abs_du = (U[:, 1:, :] - U[:, :-1, :]).abs().mean().item()
 
-    energy_proxy = None
+    energy = None
     if getattr(hooks, "POWER_METRIC_IMPLEMENTED", False):
         power = hooks.power_metric(
             out["yn"][:, hmax:, :], out["U"][:, hmax:, :], out["D"][:, hmax:, :],
             nm_mapping, norm_stats,
         )
-        energy_proxy = power.mean().item()
+        energy = energy_metrics(power, step_hours)
 
     return ControlResults(
         comfort_violation_rate=violation_rate,
+        comfort=comfort,
         mean_abs_du=mean_abs_du,
         tracking=tracking,
-        energy_proxy=energy_proxy,
+        energy=energy,
         eval_time_s=eval_time_s,
     ), out
 
 
-# ── Reportcard ───────────────────────────────────────────────────
+# ── MLflow metric logging ────────────────────────────────────────
+
+
+def log_control_results(
+    logger,
+    results: ControlResults,
+    baseline: Optional[ControlResults] = None,
+) -> None:
+    """Flatten closed-loop metrics into MLflow-safe metric keys + log dict.
+
+    Mirrors modeling.pipeline.log_test_results. Baseline metrics are logged
+    under a `baseline_` prefix so a single run holds both sides of the
+    comparison and they can be diffed across runs in the MLflow UI.
+    """
+    if logger is None:
+        return
+
+    flat = _flat_control_metrics(results, prefix="control")
+    payload = {"learned": _control_metrics_dict(results)}
+    if baseline is not None:
+        flat.update(_flat_control_metrics(baseline, prefix="baseline"))
+        payload["baseline"] = _control_metrics_dict(baseline)
+
+    logger.log_metrics(flat)
+    if hasattr(logger, "log_dict"):
+        logger.log_dict(payload, name="control_metrics.json")
+
+
+def _flat_control_metrics(results: ControlResults, prefix: str) -> dict:
+    flat = {
+        f"{prefix}_violation_rate": results.comfort_violation_rate,
+        f"{prefix}_mean_abs_du": results.mean_abs_du,
+    }
+    for m in results.comfort:
+        safe = _safe_metric_key(m.name)
+        flat[f"{prefix}_{safe}_violation_rate"] = m.violation_rate
+        flat[f"{prefix}_{safe}_mean_violation"] = m.mean_violation
+        flat[f"{prefix}_{safe}_max_violation"] = m.max_violation
+        flat[f"{prefix}_{safe}_degree_hours"] = m.degree_hours
+    if results.energy is not None:
+        flat[f"{prefix}_mean_power"] = results.energy.mean_power
+        flat[f"{prefix}_total_energy"] = results.energy.total_energy
+        flat[f"{prefix}_peak_power"] = results.energy.peak_power
+        flat[f"{prefix}_mean_window_peak"] = results.energy.mean_window_peak
+    return flat
+
+
+def _control_metrics_dict(results: ControlResults) -> dict:
+    return {
+        "violation_rate": results.comfort_violation_rate,
+        "mean_abs_du": results.mean_abs_du,
+        "comfort": comfort_to_dict(results.comfort),
+        "energy": None if results.energy is None else asdict(results.energy),
+        "tracking": metrics_to_dict(results.tracking),
+    }
+
+
+# ── Rule-based baseline (optional) ───────────────────────────────
 
 
 @beartype
-def render_control_reportcard(
+def evaluate_baseline(
     cfg,
     sysid_cfg,
+    dyn_node,
+    test_dfs: list,
     nm_mapping: dict[str, list[str]],
-    results: ControlResults,
-    *,
-    best_dev_loss: Optional[float] = None,
-    train_time_s: Optional[float] = None,
-) -> str:
-    h_sys, h_ctrl, hmax = horizons(cfg, sysid_cfg)
-    controlled, _ = load_control_hooks(cfg).controlled_channels(nm_mapping)
-    energy = (
-        f"{results.energy_proxy:.4g}" if results.energy_proxy is not None
-        else "n/a (power_metric not implemented)"
+    norm_stats: dict[str, dict[str, float]],
+) -> Optional[ControlResults]:
+    """Score the use case's rule-based controller on the same test rollouts.
+
+    `control_user_defined.build_baseline_policy(cfg, sysid_cfg, nm_mapping,
+    norm_stats) -> Node` is optional: without it there is simply nothing to
+    compare against and this returns None. Same shape as the
+    POWER_METRIC_IMPLEMENTED check — the hook's presence is the switch.
+
+    The comparison is apples-to-apples because evaluate_closed_loop reseeds
+    the band from EVAL_BAND_SEED, so the baseline sees a byte-identical
+    comfort band on byte-identical test windows. The baseline is never
+    trained: it has no trainable parameters by construction.
+    """
+    build = getattr(load_control_hooks(cfg), "build_baseline_policy", None)
+    if build is None:
+        return None
+
+    baseline_node = build(cfg, sysid_cfg, nm_mapping, norm_stats)
+    if baseline_node is None:
+        return None
+
+    cl = build_closed_loop(dyn_node, baseline_node, cfg, sysid_cfg)
+    results, _ = evaluate_closed_loop(
+        cfg, sysid_cfg, cl, test_dfs, nm_mapping, norm_stats,
     )
-    lines = [
-        f"# DPC Control Reportcard — {cfg.run}",
-        "",
-        "## Setup",
-        f"- Sys-id run: `{cfg.sysid_run_id}`  (model: {sysid_cfg.model})",
-        f"- Horizons: H_sys={h_sys}, H_ctrl={h_ctrl}, "
-        f"train_pred_steps={cfg.train_pred_steps}, test_window={cfg.test_window}",
-        f"- Controlled channels ({len(controlled)}): "
-        f"{', '.join(controlled)}",
-        f"- Control U ({len(nm_mapping['U'])}): "
-        f"{', '.join(nm_mapping['U'])}",
-        f"- Train band: lo ~ U[{cfg.train_band().lo}, "
-        f"{cfg.train_band().hi}] °C, width ~ U[{cfg.train_band().width_min}, "
-        f"{cfg.train_band().width_max}] °C, segments={cfg.train_band().sub_samples}",
-        f"- Test band:  lo ~ U[{cfg.test_band().lo}, "
-        f"{cfg.test_band().hi}] °C, width ~ U[{cfg.test_band().width_min}, "
-        f"{cfg.test_band().width_max}] °C, segments={cfg.test_band().sub_samples}",
-        f"- Weights: comfort={cfg.comfort_weight}, du={cfg.du_weight}, "
-        f"effort={cfg.effort_weight}",
-        "",
-        "## Closed-loop performance (physical units)",
-        f"- Comfort violation rate: "
-        f"**{results.comfort_violation_rate * 100:.2f}%**",
-        f"- Mean |Δsetpoint|: {results.mean_abs_du:.4g}",
-        f"- Energy proxy: {energy}",
-        f"- Eval rollout time: {results.eval_time_s:.2f}s",
-    ]
-    if best_dev_loss is not None:
-        lines.append(f"- Best dev loss: {best_dev_loss:.6g}")
-    if train_time_s is not None:
-        lines.append(f"- Train time: {train_time_s:.1f}s")
-    lines += [
-        "",
-        "## Tracking error vs. comfort-band midpoint",
-        metrics_to_markdown(results.tracking),
-    ]
-    return "\n".join(lines)
+    return results
 
 
 @beartype
@@ -270,33 +331,26 @@ def plot_closed_loop(
     ymax = (out["ymax"][:, hmax:, :] * y_stretch + y_shift).cpu()
     U = (out["U"][:, hmax:, :] * u_stretch + u_shift).cpu()
 
-    # Outdoor dry-bulb temp for context (denormalized).
+    # Context traces overlaid on the temperature axis (denormalized), and the
+    # optional power row. Both come from the use case — the library has no
+    # opinion about which columns are interesting.
     d_cols = nm_mapping["D"]
-    od_idx = next(
-        (i for i, c in enumerate(d_cols)
-         if "outdoor" in c.lower() and "dry-bulb" in c.lower()),
-        None,
-    )
-    if od_idx is not None:
-        od_col = d_cols[od_idx]
-        s = norm_stats[od_col]
-        D_od = (out["D"][:, hmax:, od_idx] * s["stretch"] + s["shift"]).cpu()
-    else:
-        od_col, D_od = None, None
+    context = {}
+    for name in hooks.plot_context_channels(nm_mapping):
+        s = norm_stats[name]
+        idx = d_cols.index(name)
+        context[name] = (
+            out["D"][:, hmax:, idx] * s["stretch"] + s["shift"]
+        ).cpu()
 
-    # Optional third row: HVAC fan + DX power (denormalized W).
-    if hooks.has_power_channels(nm_mapping):
-        fan_idx, dx_idx = hooks._power_channel_indices(nm_mapping)
-        y_cols = nm_mapping["Y"]
-        fan_name, dx_name = y_cols[fan_idx], y_cols[dx_idx]
-        s_fan, s_dx = norm_stats[fan_name], norm_stats[dx_name]
-        P_fan = (out["yn"][:, hmax:, fan_idx] * s_fan["stretch"]
-                 + s_fan["shift"]).clamp_min(0.0).cpu()
-        P_dx = (out["yn"][:, hmax:, dx_idx] * s_dx["stretch"]
-                + s_dx["shift"]).clamp_min(0.0).cpu()
-    else:
-        fan_name = dx_name = None
-        P_fan = P_dx = None
+    y_cols = nm_mapping["Y"]
+    power = {}
+    for name in hooks.power_channels(nm_mapping):
+        s = norm_stats[name]
+        idx = y_cols.index(name)
+        power[name] = (
+            out["yn"][:, hmax:, idx] * s["stretch"] + s["shift"]
+        ).clamp_min(0.0).cpu()
 
     # Per-step real timestamps (sec_elapsed is POSIX seconds; see
     # data_utils._engineer_features).
@@ -309,7 +363,7 @@ def plot_closed_loop(
     tick_labels = [str(i // steps_per_hour) for i in tick_steps]
 
     plot_dir.mkdir(parents=True, exist_ok=True)
-    n_rows = 3 if P_fan is not None else 2
+    n_rows = 3 if power else 2
     n_windows = y.shape[0]
     for w in range(n_windows):
         ts = pd.to_datetime(t_unix[w], unit="s")
@@ -327,11 +381,10 @@ def plot_closed_loop(
             csv_data[f"{name} ymax"] = ymax[w, :, j].numpy()
         for j, name in enumerate(u_cols):
             csv_data[name] = U[w, :, j].numpy()
-        if D_od is not None:
-            csv_data[od_col] = D_od[w].numpy()
-        if P_fan is not None:
-            csv_data[fan_name] = P_fan[w].numpy()
-            csv_data[dx_name] = P_dx[w].numpy()
+        for name, series in context.items():
+            csv_data[name] = series[w].numpy()
+        for name, series in power.items():
+            csv_data[name] = series[w].numpy()
         pd.DataFrame(csv_data, index=ts).rename_axis("timestamp").to_csv(
             day_dir / f"closed_loop_{date_str}.csv"
         )
@@ -346,9 +399,8 @@ def plot_closed_loop(
             steps, ymin[w, :, 0], ymax[w, :, 0],
             color="green", alpha=0.12, label="comfort band",
         )
-        if D_od is not None:
-            ax0.plot(steps, D_od[w], label=od_col, lw=0.9,
-                     color="tab:orange", linestyle="--")
+        for name, series in context.items():
+            ax0.plot(steps, series[w], label=name, lw=0.9, linestyle="--")
         ax0.set_ylabel("Temp [°C]")
         ax0.set_title(f"Closed loop — {ts[0].strftime('%Y-%m-%d')}")
         ax0.legend(fontsize=6, ncol=2)
@@ -356,11 +408,11 @@ def plot_closed_loop(
             ax1.plot(steps, U[w, :, j], label=name, lw=1.0)
         ax1.set_ylabel("Setpoint [°C]")
         ax1.legend(fontsize=6, ncol=2)
-        if P_fan is not None:
+        if power:
             ax2 = axes[2]
-            ax2.plot(steps, P_fan[w], label=fan_name, lw=1.0)
-            ax2.plot(steps, P_dx[w], label=dx_name, lw=1.0)
-            ax2.set_ylabel("Power [W]")
+            for name, series in power.items():
+                ax2.plot(steps, series[w], label=name, lw=1.0)
+            ax2.set_ylabel("Power")
             ax2.legend(fontsize=6, ncol=2)
             bottom_ax = ax2
         else:
@@ -374,9 +426,7 @@ def plot_closed_loop(
 
 
 def write_reportcard(markdown: str, out_dir: Path, logger=None) -> Path:
-    out_dir.mkdir(parents=True, exist_ok=True)
-    path = out_dir / "control_reportcard.md"
-    path.write_text(markdown)
-    if logger is not None and hasattr(logger, "_mlflow"):
-        logger._mlflow.log_text(markdown, "control_reportcard.md")
-    return path
+    """Write the control reportcard to <out_dir>/control_reportcard.md + MLflow."""
+    return _write_reportcard(
+        markdown, out_dir, "control_reportcard.md", logger=logger
+    )

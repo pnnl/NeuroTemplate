@@ -1,0 +1,33 @@
+# Smallest run that exercises the whole control pipeline. Use it to check the
+# hooks, the closed-loop assembly, and the reportcard before training for real:
+#   nt control train --config control_configs/debug.yaml --set sysid_run_id=<id>
+
+sysid_run_id: ""
+
+train_data_path: data/train.csv
+dev_data_path: data/dev.csv
+test_data_path: data/test.csv
+
+in_steps: 4
+train_pred_steps: 4
+
+band_lo: 20.0
+band_hi: 26.0
+band_width_min: 0.5
+band_width_max: 2.0
+
+effort_weight: 0.0
+
+policy: mlp
+log2_policy_hidden: 3
+policy_layers: 1
+
+epochs: 2
+warmup: 0
+patience: 2
+
+test_window: 47
+test_stride: 48
+
+seed: 1234
+run: "debug"

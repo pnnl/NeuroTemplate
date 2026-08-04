@@ -1,0 +1,105 @@
+# DPC policy training config. `nt control train` reads this file by default.
+# Every field below is shown with its built-in default, commented out —
+# uncomment only what you change. The Y/U/D roles and the normalization are
+# inherited from the frozen surrogate, so they are not repeated here.
+
+# ── SURROGATE ────────────────────────────────────────────────────
+# Required: the MLflow run id printed by `nt model train` ("Finished run: ...").
+# Pass it on the command line instead with --set sysid_run_id=<id>.
+sysid_run_id: ""
+# Override the run's artifact directory.
+# run_dir: null
+# Explicit weights file; unset uses best_model_state_dict.pth from the run.
+# weights: null
+
+# ── DATA ─────────────────────────────────────────────────────────
+# Required, and never inherited from the sys-id run — the policy should be
+# trained on the window distribution you want it to control over.
+train_data_path: data/train.csv
+dev_data_path: data/dev.csv
+test_data_path: data/test.csv
+# batch_size: 256
+# Path or dotted module name of the hooks file. Unset = control_user_defined.py in CWD.
+# user_hooks_path: null
+
+# ── HORIZON ──────────────────────────────────────────────────────
+# Closed-loop rollout length during training.
+# train_pred_steps: 48
+# How much input history the policy sees (H_ctrl).
+# in_steps: 12
+# Future disturbance steps the policy previews. IGNORED if
+# control_user_defined.preview_config exists — that hook replaces it entirely.
+# d_preview: 0
+
+# ── COMFORT BAND ─────────────────────────────────────────────────
+# Physical units of the controlled channel, so these have no sane default:
+# set all four. Per window segment, width ~ U[width_min, width_max] and the
+# lower bound ~ U[band_lo, band_hi - width].
+band_lo: 20.0
+band_hi: 26.0
+band_width_min: 0.5
+band_width_max: 2.0
+# Contiguous segments per window: 1 = constant band, k > 1 = k-1 step jumps.
+# Training on a constant band and evaluating on a jumpy one is a reasonable
+# default — the jumps make training gradients noisy.
+# train_band_sub_samples: 1
+# test_band_sub_samples: 4
+# Evaluate against a different band than you trained on. Unset = train values.
+# test_band_lo: null
+# test_band_hi: null
+# test_band_width_min: null
+# test_band_width_max: null
+
+# ── OBJECTIVE WEIGHTS ────────────────────────────────────────────
+# Penalty for leaving the comfort band.
+# comfort_weight: 50.0
+# Penalty on the step-to-step change in the control signal (anti-chatter).
+# du_weight: 0.1
+# Penalty on control_user_defined.power_metric. Must stay 0.0 until that hook
+# is implemented and POWER_METRIC_IMPLEMENTED is True — otherwise the run
+# fails at problem build.
+effort_weight: 0.0
+
+# ── POLICY ───────────────────────────────────────────────────────
+# Family: mlp | linear ("linear" is a single saturated affine feedback law,
+# u = sat(K x + b) — small enough to read off, and a good sanity baseline).
+# policy: mlp
+# gelu | relu | tanh | silu. Ignored for the linear policy.
+# policy_nonlin: gelu
+# How the output is squashed into the actuator box: sigmoid_scale (smooth,
+# never quite reaches the limits) or relu_clamp (hard clip).
+# policy_bound_method: sigmoid_scale
+# Hidden width is 2**log2_policy_hidden. Ignored for the linear policy.
+# log2_policy_hidden: 6
+# policy_layers: 2
+# Snap the policy output to a grid, in physical units (e.g. 0.5 for
+# half-degree thermostat steps). Straight-through, so gradients still flow.
+# 0 disables. Note a grid coarser than band_width_min cannot fit inside the
+# narrowest band and will cost you violations.
+# setpoint_step: 0.5
+
+# ── TRAINING ─────────────────────────────────────────────────────
+# epochs: 300
+# epoch_verbose: 1
+# warmup: 5
+# patience: 25
+# lr: 0.001
+
+# ── EVAL ─────────────────────────────────────────────────────────
+# Long closed-loop rollout window, warmup included.
+# test_window: 287
+# test_stride: 288
+
+# ── RUNTIME ──────────────────────────────────────────────────────
+# seed: -1
+# device: null
+# verbose: true
+
+# ── LOGGING ──────────────────────────────────────────────────────
+# savedir: temp_<random>
+# Must point at the same store the sys-id run was logged to.
+# location: sqlite:///mlflow.db
+# exp: DPC Training
+run: ""
+# plots_dir: plots
+# plot: true

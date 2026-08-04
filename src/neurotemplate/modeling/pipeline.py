@@ -15,7 +15,6 @@ and passed through everywhere. None means "synth subsystem disabled for
 this run" — the single fact, not a re-check at every callsite.
 """
 
-import re
 from dataclasses import dataclass
 from pathlib import Path
 from time import perf_counter as tic
@@ -32,9 +31,11 @@ from neurotemplate.modeling.experiment import train_with_curriculum
 from neurotemplate.modeling.heads import HeadStack
 from neurotemplate.common.metrics import (
     ChannelMetrics,
+    _safe_metric_key,
     metrics_to_dict,
     per_channel_metrics,
 )
+from neurotemplate.common.reportcard import write_reportcard as _write_reportcard
 from neurotemplate.modeling.dynamics import describe_dynamics
 from neurotemplate.modeling.plotting import plot_predictions, plot_synthetic
 from neurotemplate.modeling.reportcard import render_reportcard as _render_reportcard
@@ -270,19 +271,8 @@ def write_reportcard(
     out_dir: Path,
     logger=None,
 ) -> Path:
-    """
-    Write the reportcard to <out_dir>/reportcard.md and to MLflow.
-
-    The on-disk copy is convenient for local inspection but may be removed
-    by MLFlowLogger.clean_up() (which rmtrees savedir at end of a run);
-    the MLflow copy via log_text is the durable one.
-    """
-    out_dir.mkdir(parents=True, exist_ok=True)
-    path = out_dir / "reportcard.md"
-    path.write_text(markdown)
-    if logger is not None and hasattr(logger, "_mlflow"):
-        logger._mlflow.log_text(markdown, "reportcard.md")
-    return path
+    """Write the sysid reportcard to <out_dir>/reportcard.md and to MLflow."""
+    return _write_reportcard(markdown, out_dir, "reportcard.md", logger=logger)
 
 
 # ── MLflow metric logging ───────────────────────────────────────
@@ -311,14 +301,6 @@ def log_test_results(
         logger.log_dict(
             metrics_to_dict(test_results.metrics), name="test_metrics.json"
         )
-
-
-_METRIC_KEY_SANITIZER = re.compile(r"[^A-Za-z0-9_.\-]+")
-
-
-def _safe_metric_key(name: str) -> str:
-    """Sanitize a column name into something MLflow accepts as a metric key."""
-    return _METRIC_KEY_SANITIZER.sub("_", name).strip("_")
 
 
 # ── Single full training run (consolidates main + optuna Phase 2) ──

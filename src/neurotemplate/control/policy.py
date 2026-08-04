@@ -1,13 +1,24 @@
 """
 DPC control policy.
 
-A bounded MLP wrapped in a Neuromancer Node:
+A bounded network wrapped in a Neuromancer Node:
 
     [yn-window, ymin, ymax, D-window]  ->  U   (per-zone cooling setpoints)
 
 Output is squashed into the actuator limits (normalized U space) by
 blocks.MLP_bounds. Windowing uses the same input_map convention as
 src/models.get_dynamics so the policy composes with the frozen dynamics Node.
+
+`policy_catalog` selects the network family the same way `model_catalog`
+selects a dynamics family on the sys-id side:
+
+  - "mlp"    — bounded MLP, `policy_layers` hidden layers of width
+               2**log2_policy_hidden
+  - "linear" — the same bounded map with no hidden layers, i.e. a single
+               saturated affine feedback law u = sat(K @ x + b) over the
+               flattened feature window. This is the structure of an explicit
+               MPC law inside its unconstrained region, and its gain matrix is
+               small enough to read.
 """
 
 from __future__ import annotations
@@ -23,6 +34,16 @@ from neurotemplate.control.scenarios import horizons
 from neurotemplate.hooks import load_control_hooks
 
 from neurotemplate._typing import beartype
+
+
+# Nonlinearities selectable from YAML. Kept small on purpose — these are the
+# activations that actually get used for control policies.
+POLICY_NONLIN = {
+    "gelu": nn.GELU,
+    "relu": nn.ReLU,
+    "tanh": nn.Tanh,
+    "silu": nn.SiLU,
+}
 
 
 class STEQuantize(nn.Module):
@@ -107,6 +128,50 @@ def _preview_steps(hooks, cfg, nm_mapping: dict[str, list[str]]) -> tuple[int, i
     return d_future, spec.get("band", 0)
 
 
+def _build_mlp_net(cfg, insize: int, nu: int, umin, umax) -> nn.Module:
+    """Bounded MLP with `policy_layers` hidden layers of equal width."""
+    return blocks.MLP_bounds(
+        insize=insize,
+        outsize=nu,
+        bias=True,
+        linear_map=nn.Linear,
+        nonlin=POLICY_NONLIN[cfg.policy_nonlin],
+        hsizes=cfg.policy_layers * [2**cfg.log2_policy_hidden],
+        min=umin,
+        max=umax,
+        method=cfg.policy_bound_method,
+    )
+
+
+def _build_linear_net(cfg, insize: int, nu: int, umin, umax) -> nn.Module:
+    """Saturated affine feedback law: one linear layer, then the bound squash.
+
+    hsizes=[] makes blocks.MLP build a single linear_map(insize, nu) with an
+    Identity nonlinearity, so this is u = sat(K @ x + b) — no hidden layer.
+    """
+    return blocks.MLP_bounds(
+        insize=insize,
+        outsize=nu,
+        bias=True,
+        linear_map=nn.Linear,
+        nonlin=nn.Identity,
+        hsizes=[],
+        min=umin,
+        max=umax,
+        method=cfg.policy_bound_method,
+    )
+
+
+policy_catalog = {
+    "mlp": _build_mlp_net,
+    "linear": _build_linear_net,
+}
+
+# Bound squashing options come from Neuromancer, so read them off the class
+# rather than re-listing them here.
+POLICY_BOUND_METHODS = list(blocks.MLP_bounds.bound_methods)
+
+
 @beartype
 def build_policy(
     cfg,
@@ -114,6 +179,12 @@ def build_policy(
     nm_mapping: dict[str, list[str]],
     norm_stats: dict[str, dict[str, float]],
 ) -> Node:
+    if cfg.policy not in policy_catalog:
+        raise ValueError(
+            f"Unknown policy '{cfg.policy}'. "
+            f"Available: {list(policy_catalog.keys())}"
+        )
+
     ny = len(nm_mapping["Y"])
     nu = len(nm_mapping["U"])
     nd = len(nm_mapping["D"])
@@ -141,17 +212,7 @@ def build_policy(
     umin, umax = hooks.actuation_bounds(nm_mapping, norm_stats)
     umin, umax = umin.to(device), umax.to(device)
 
-    net = blocks.MLP_bounds(
-        insize=insize,
-        outsize=nu,
-        bias=True,
-        linear_map=nn.Linear,
-        nonlin=nn.GELU,
-        hsizes=cfg.policy_layers * [2**cfg.log2_policy_hidden],
-        min=umin,
-        max=umax,
-        method="sigmoid_scale",
-    ).to(device)
+    net = policy_catalog[cfg.policy](cfg, insize, nu, umin, umax).to(device)
 
     if cfg.setpoint_step > 0:
         # Quantization is in physical °C, but the policy emits normalized U;
@@ -190,3 +251,62 @@ def build_policy(
         name="DPC Policy",
         input_map=input_map,
     )
+
+
+# ── Policy description (for reportcard) ──────────────────────────
+
+
+@beartype
+def describe_policy(
+    policy_node: Node,
+    cfg,
+    sysid_cfg,
+    nm_mapping: dict[str, list[str]],
+    norm_stats: dict[str, dict[str, float]],
+) -> dict:
+    """
+    Describe the constructed policy for the reportcard.
+
+    Mirrors modeling.dynamics.describe_dynamics: reads what is available on
+    the built module rather than re-deriving it from cfg, so a mismatch
+    between config and reality shows up on the card.
+
+    Window widths are reported alongside `insize` so a reader can re-check the
+    ny*H_ctrl + 2*n_ctrl*(1+band) + nd*(H_ctrl+d) sum by eye — a wrong window
+    is otherwise an invisible failure.
+    """
+    # Unwrap: Node -> (_QuantizedPolicy) -> MLP_bounds
+    raw = policy_node.callable
+    quantized = isinstance(raw, _QuantizedPolicy)
+    net = raw.base if quantized else raw
+
+    hooks = load_control_hooks(cfg)
+    _, h_ctrl, _ = horizons(cfg, sysid_cfg)
+    d_future, band_future = _preview_steps(hooks, cfg, nm_mapping)
+
+    # Actuator limits are set in normalized U space by the actuation_bounds
+    # hook; report them in physical units, which is what a reader can sanity
+    # check against the building.
+    u_cols = nm_mapping["U"]
+    stretch = torch.tensor([norm_stats[c]["stretch"] for c in u_cols])
+    shift = torch.tensor([norm_stats[c]["shift"] for c in u_cols])
+    umin_phys = (net.min.detach().cpu() * stretch + shift).tolist()
+    umax_phys = (net.max.detach().cpu() * stretch + shift).tolist()
+
+    return {
+        "family": cfg.policy,
+        "nonlin": cfg.policy_nonlin if cfg.policy == "mlp" else "n/a (linear)",
+        "bound_method": cfg.policy_bound_method,
+        "insize": int(net.in_features),
+        "outsize": int(net.out_features),
+        "h_ctrl": h_ctrl,
+        "d_preview": d_future,
+        "band_preview": band_future,
+        "hsizes": [int(lin.out_features) for lin in net.linear[:-1]],
+        "param_count": sum(p.numel() for p in net.parameters()),
+        "u_cols": list(u_cols),
+        "umin_phys": umin_phys,
+        "umax_phys": umax_phys,
+        "quantized": quantized,
+        "setpoint_step": cfg.setpoint_step,
+    }
