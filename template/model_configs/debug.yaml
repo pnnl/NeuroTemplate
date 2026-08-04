@@ -1,0 +1,25 @@
+# Smallest run that exercises the whole modeling pipeline. Use it to check
+# that data_mapping, the heads, and plotting all work before spending GPU
+# hours:  nt model train --config model_configs/debug.yaml
+
+train_data_path: data/train.csv
+dev_data_path: data/dev.csv
+test_data_path: data/test.csv
+
+model: nssm
+in_steps: 4
+log2_hidden_size: 3
+num_layers: 2
+
+epochs: 2
+warmup: 0
+patience: 2
+train_pred_steps: 4
+dev_pred_steps: 4
+curriculum_steps: 0
+
+test_window: 47
+test_stride: 48
+
+seed: 1234
+run: "debug"
