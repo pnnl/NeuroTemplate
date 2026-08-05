@@ -73,7 +73,7 @@ class ControlConfig:
 
     # ── Objective weights ────────────────────────────────────────
     comfort_weight: float = 50.0
-    du_weight: float = 0.1
+    du_weight: float = 10
     # Effort/energy term weight. > 0 requires control_user_defined.power_metric
     # to be implemented (fail-fast at problem build).
     effort_weight: float = 0.1

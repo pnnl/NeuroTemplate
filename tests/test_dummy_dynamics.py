@@ -23,10 +23,10 @@ def single_zone_mapping() -> dict[str, list[str]]:
     return {"Y": [ZONE], "U": [SETPT], "D": [OUT, IRR, OCC], "t": ["sec_elapsed"]}
 
 
-def make_cfg() -> Config:
+def make_cfg(in_steps: int = 1) -> Config:
     cfg = Config()
     cfg.model = "dummy"
-    cfg.in_steps = 1          # single-step passthrough
+    cfg.in_steps = in_steps   # single-step passthrough
     cfg.norm_type = None      # physical units — setpoint and zone temp share °C
     cfg.device = "cpu"
     return cfg
@@ -67,6 +67,29 @@ def test_rollout_tracks_constant_setpoint():
     yn = out["yn"]
     assert yn.shape == (batch, horizon + 1, 1)
     assert torch.allclose(yn[:, 1:, 0], torch.full((batch, horizon), setpoint))
+
+
+def test_passthrough_ignores_in_steps():
+    """The passthrough declares a width-1 input, so it must never be handed a
+    window — otherwise it slices the wrong columns out of the flattened cat."""
+    in_steps, batch, horizon = 4, 4, 6
+    setpoint = 23.0
+    system = get_dynamics(make_cfg(in_steps), single_zone_mapping())
+    assert system.nodes[0].input_map == {}
+
+    data = {
+        "yn": torch.full((batch, in_steps, 1), 30.0),   # seed far from setpoint
+        "U": torch.full((batch, horizon, 1), setpoint),
+        "D": torch.randn(batch, horizon, 3),
+        "Y": torch.zeros(batch, horizon, 1),            # only sets rollout length
+    }
+
+    yn = system(data)["yn"]
+
+    n_pred = yn.shape[1] - in_steps
+    assert torch.allclose(
+        yn[:, in_steps:, 0], torch.full((batch, n_pred), setpoint)
+    )
 
 
 def test_requires_ny_equals_nu():

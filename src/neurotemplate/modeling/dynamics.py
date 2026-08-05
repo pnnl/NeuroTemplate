@@ -23,6 +23,20 @@ get_dynamics() wraps SSMGrad in a Neuromancer Node + SystemPreview:
 
   - 'Y' (ground truth) is only used by the loss for comparison and
     by the System to determine rollout length (nstep_key='Y').
+
+cfg.in_steps is the model's context length, and both model families end up
+with the same information before the first scored prediction:
+
+  - Stateless blocks (mlp/nssm/lssm) get it as a flattened input window —
+    the Node's input_map gathers in_steps past values per input key.
+
+  - Stateful blocks (GRU) keep a width-1 window and instead replay those
+    same in_steps of history through the hidden state before the rollout
+    loop starts. That replay is the init_func built by make_warmup_init().
+
+Because cfg.in_steps is also the sliding-window stride
+(data_utils.get_sw_dict), keeping it meaningful for every family is what
+makes two models trained at the same in_steps see the same training set.
 """
 
 import torch
@@ -82,6 +96,8 @@ class GRUBlock(nn.Module):
         Returns:
             [outsize] output
         """
+        # Always starts cold (h=0), so the sampled gradient penalty measures a
+        # cold-start Jacobian rather than the warmed state the rollout uses.
         h = torch.zeros(self.gru.hidden_size, device=x.device)
 
         for layer in range(self.gru.num_layers):
@@ -258,7 +274,9 @@ def get_gru(cfg: ModelingConfig, nm_mapping: dict[str, list[str]]) -> SSMGrad:
         insize=ny + nu + nd, outsize=ny,
         hidden_size=(2**cfg.log2_hidden_size), num_layers=cfg.num_layers,
     )
-    # GRU is stateful — in_steps=1, no windowing. Temporal memory lives in the hidden state.
+    # GRU is stateful: the Node window stays width-1 (in_steps=1) and temporal
+    # memory lives in the hidden state, which make_warmup_init() primes with
+    # cfg.in_steps of history before each rollout.
     return SSMGrad(fy, None, None, ny, nu, nd, 1, cfg.residual, separable=False)
 
 
@@ -351,12 +369,12 @@ def describe_dynamics(dyn_sys: SystemPreview, cfg: ModelingConfig) -> dict:
       - factory: model family name (mlp/nssm/lssm/gru)
       - separable: whether the SSM is separable (fy + fu + fd)
       - residual: whether y_{k+1} adds y_k as a residual base
-      - in_steps / ny / nu / nd: shape parameters
+      - in_steps: context length (cfg.in_steps) — see below
+      - ny / nu / nd: shape parameters
       - param_count: total trainable parameters
       - blocks: per-block descriptors {fy, fu, fd}
 
-    Used by reportcard.render_reportcard. Reads only what's available on
-    the constructed module — does not re-introspect cfg.
+    Used by reportcard.render_reportcard.
     """
     # Unwrap: SystemPreview -> Node -> SSMGrad
     raw = dyn_sys.nodes[0].callable
@@ -371,7 +389,10 @@ def describe_dynamics(dyn_sys: SystemPreview, cfg: ModelingConfig) -> dict:
         "factory": cfg.model,
         "separable": raw.fu is not None and raw.fd is not None,
         "residual": bool(raw.residual),
-        "in_steps": int(raw.in_steps),
+        # Context length: input-window width for stateless blocks, hidden-state
+        # warmup horizon for stateful ones. The block's own input width
+        # (raw.in_steps, 1 for gru/dummy) is already reported as fy.in_features.
+        "in_steps": int(cfg.in_steps),
         "ny": int(raw.ny),
         "nu": int(raw.nu),
         "nd": int(raw.nd),
@@ -381,6 +402,40 @@ def describe_dynamics(dyn_sys: SystemPreview, cfg: ModelingConfig) -> dict:
 
 
 # ── System construction ──────────────────────────────────────────
+
+def make_warmup_init(model: SSMGrad, in_steps: int, start_iter: int):
+    """
+    Build the SystemPreview init_func for a stateful model, or None.
+
+    A stateful block reads one timestep at a time, so the in_steps of history
+    the data loader seeds would otherwise never reach it — the rollout starts
+    at start_iter with a freshly reset (zero) hidden state. This replays the
+    in_steps-1 steps ending just before start_iter through the model and
+    discards the predictions, so the first scored prediction is made from the
+    same history a stateless model reads through its input window.
+
+    Gradients flow through the replay: the hidden state at start_iter is a
+    function of the block's weights, and that is exactly what we want the loss
+    to shape.
+
+    Returns None for stateless blocks, leaving SystemPreview's identity init.
+
+    Note: unrelated to ModelingConfig.warmup, which counts early-stopping epochs.
+    """
+    # A reset() on the block is what makes it stateful — GRUBlock.reset is the
+    # single source of truth, so a new stateful block gets this for free.
+    reset = getattr(model.fy, "reset", None)
+    if reset is None:
+        return None
+
+    def warmup_init(data):
+        reset()
+        for i in range(start_iter - in_steps + 1, start_iter):
+            model(data["yn"][:, i, :], data["U"][:, i, :], data["D"][:, i, :])
+        return data
+
+    return warmup_init
+
 
 @beartype
 def get_dynamics(
@@ -396,8 +451,11 @@ def get_dynamics(
     timestep — this is the autoregressive loop.
 
     SystemPreview handles temporal windowing via input_map: at each rollout
-    step i, the Node receives a window of in_steps past values for each input,
-    flattened to [batch, in_steps*features].
+    step i, the Node receives a window of model.in_steps past values for each
+    input, flattened to [batch, model.in_steps*features].
+
+    Stateful blocks declare model.in_steps=1 and get their cfg.in_steps of
+    history through the warmup init_func instead (see make_warmup_init).
     """
     if cfg.model not in model_catalog:
         raise ValueError(
@@ -415,17 +473,17 @@ def get_dynamics(
         if head_stack.raw_width != model.ny:
             raise ValueError(
                 f"head_stack.raw_width={head_stack.raw_width} does not match "
-                f"model.ny={model.ny}; first-pass factories assume width-1 heads."
+                f"model.ny={model.ny}; factories (currently) assume width-1 heads."
             )
         model.head_stack = head_stack
 
-    # Temporal windowing: each input gets a window of in_steps past values.
-    # GRU is stateful — hidden state carries across steps, so no windowing ever.
-    # For in_steps=1, no windowing needed (current timestep only).
-    if cfg.in_steps > 1 and cfg.model != "gru":
+    # Temporal windowing: the gathered window must be exactly as wide as the
+    # block's declared input width, and model.in_steps is that width. Stateful
+    # (gru) and passthrough (dummy) blocks declare 1 and get no window.
+    if model.in_steps > 1:
         input_map = {
             key: {
-                "past": cfg.in_steps - 1,
+                "past": model.in_steps - 1,
                 "future": 0,
                 "pad_mode": "nearest",
             }
@@ -442,18 +500,12 @@ def get_dynamics(
         input_map=input_map,
     )
 
-    system = SystemPreview(
+    return SystemPreview(
         [node],
         name=cfg.model.upper() + " System",
         nstep_key="Y",               # rollout length from ground truth
         start_iter=cfg.in_steps - 1,  # skip initial history steps
+        # Stateful blocks only: reset the hidden state and replay steps
+        # [0, in_steps-2] before the rollout. None for stateless blocks.
+        init_func=make_warmup_init(model, cfg.in_steps, cfg.in_steps - 1),
     )
-
-    # GRU: reset hidden state before each system forward pass (i.e. each batch).
-    # This gives a clean computational graph per sequence while carrying state
-    # across rollout steps within a sequence.
-    if cfg.model == "gru":
-        gru_block = model.fy
-        system.register_forward_pre_hook(lambda m, inp: gru_block.reset())
-
-    return system

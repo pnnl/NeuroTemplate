@@ -65,10 +65,14 @@ def build_loss(
     #   'yn' = model predictions accumulated by System [batch, time+1, ny]
     #
     # yn has one extra timestep (the initial condition), so we slice :-1
-    # to align predictions with ground truth.
+    # to align predictions with ground truth. The leading in_steps positions
+    # of yn are the seeded history — copies of Y that contribute exactly zero
+    # error and would only dilute the mean — so both sides drop them. This is
+    # the same slice pipeline.evaluate_and_plot uses, which keeps the training
+    # loss and the reported test metric measuring the same span.
 
-    y = variable("Y")
-    yhat = variable("yn")[:, :-1, :]
+    y = variable("Y")[:, cfg.in_steps:, :]
+    yhat = variable("yn")[:, cfg.in_steps:-1, :]
 
     # Reference tracking
     #
@@ -86,7 +90,9 @@ def build_loss(
         ref_loss.update_name("ref_loss")
     else:
         def head_compute(yn, Y):
-            return head_stack.loss(yn[:, :-1, :], Y)
+            return head_stack.loss(
+                yn[:, cfg.in_steps:-1, :], Y[:, cfg.in_steps:, :]
+            )
 
         ref_loss = Loss(
             input_keys=["yn", "Y"],
@@ -99,7 +105,8 @@ def build_loss(
 
     # Velocity tracking: R2 style on finite differences
     if cfg.vel_gain > 0:
-        # Finite differences for velocity tracking
+        # Finite differences over the prediction span only — y/yhat already
+        # have the seeded history sliced off.
         v = y[:, 1:, :] - y[:, :-1, :]
         vhat = yhat[:, 1:, :] - yhat[:, :-1, :]
         vel_sum_res = torch.mean((vhat - v) ** 2)
