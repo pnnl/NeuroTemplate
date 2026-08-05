@@ -9,9 +9,9 @@ back). With start_iter = Hmax-1 and explicit nsteps = P, predicted yn occupies
 indices [Hmax : Hmax+P], aligned with the comfort-band signal slice
 [Hmax : Hmax+P].
 
-A stateful surrogate reads one timestep at a time, so it is warmed over
-[Hmax-H_sys, Hmax-2] before the rollout starts — it then enters at Hmax-1 with
-the same history a stateless surrogate gathers through its input window.
+A stateful surrogate needs its hidden state cleared between batches, which is
+all init_func does here — it warms itself from the same H_sys-wide window a
+stateless surrogate reads, so the two enter the rollout on equal footing.
 """
 
 from __future__ import annotations
@@ -26,7 +26,7 @@ from neuromancer.constraint import variable
 from neuromancer.loss import PenaltyLoss
 
 from neurotemplate.control.scenarios import horizons
-from neurotemplate.modeling.dynamics import make_warmup_init
+from neurotemplate.modeling.dynamics import make_reset_init
 from neurotemplate.hooks import load_control_hooks
 
 from neurotemplate._typing import beartype
@@ -35,7 +35,7 @@ from neurotemplate._typing import beartype
 @beartype
 def build_closed_loop(dyn_node, policy_node, cfg, sysid_cfg) -> SystemPreview:
     """Policy + frozen dynamics, rolled out for cfg.train_pred_steps steps."""
-    h_sys, _, hmax = horizons(cfg, sysid_cfg)
+    _, _, hmax = horizons(cfg, sysid_cfg)
 
     return SystemPreview(
         [policy_node, dyn_node],
@@ -43,9 +43,9 @@ def build_closed_loop(dyn_node, policy_node, cfg, sysid_cfg) -> SystemPreview:
         nstep_key="D",
         nsteps=cfg.train_pred_steps,
         start_iter=hmax - 1,
-        # Stateful surrogates only: reset the hidden state and replay
-        # [hmax-h_sys, hmax-2] before the rollout. None for stateless ones.
-        init_func=make_warmup_init(dyn_node.callable, h_sys, hmax - 1),
+        # Stateful surrogates only: clear the hidden state so it cannot leak
+        # between batches. None for stateless ones.
+        init_func=make_reset_init(dyn_node.callable),
     )
 
 

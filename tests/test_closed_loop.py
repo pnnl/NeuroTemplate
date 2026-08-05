@@ -97,18 +97,17 @@ def test_gru_surrogate_rolls_out_and_warms_up():
     # Reset: two forwards on the same window must agree.
     assert torch.allclose(out["yn"], cl(dict(data))["yn"])
 
-    # Warmup lands on [hmax-h_sys, hmax-2], so replaying those by hand and
-    # stepping once more reproduces the first prediction.
+    # The surrogate warms from its own h_sys-wide window ending at hmax-1, so
+    # feeding that window to a freshly reset block reproduces the first
+    # prediction. Control never has to know those indices — SystemPreview's
+    # input_map derives the window from the model's declared in_steps.
     model = dyn_node.callable
     model.fy.reset()
     with torch.no_grad():
-        for i in range(hmax - h_sys, hmax - 1):
-            model(data["yn"][:, i, :], data["U"][:, i, :], data["D"][:, i, :])
-        expected = model(
-            data["yn"][:, hmax - 1, :],
-            data["U"][:, hmax - 1, :],
-            data["D"][:, hmax - 1, :],
-        )
+        expected = model(*[
+            data[key][:, hmax - h_sys:hmax, :].reshape(data[key].shape[0], -1)
+            for key in ("yn", "U", "D")
+        ])
     assert torch.allclose(out["yn"][:, hmax, :], expected, atol=1e-6)
 
 
