@@ -24,8 +24,9 @@ test_data_path: data/test.csv
 # mint a checkpoint without identifying anything).
 # model: nssm
 # Context length: how much history the model sees before the first scored
-# prediction, and the stride between training windows. mlp/nssm/lssm read it as
-# a flattened input window; gru replays it through its hidden state instead.
+# prediction, and the stride between training windows. Every family reads it as
+# a flattened input window; gru also carries a hidden state, so during a rollout
+# its memory runs past in_steps.
 # in_steps: 12
 # Hidden width is 2**log2_hidden_size.
 # log2_hidden_size: 8
