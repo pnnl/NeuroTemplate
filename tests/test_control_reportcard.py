@@ -55,10 +55,15 @@ def _make_results(offset: float = 1.0, power_level: float = 1500.0):
     ymax = torch.full((2, n, 1), 25.0)
     mid = 0.5 * (ymin + ymax)
     power = torch.full((2, n), power_level)
+    comfort = comfort_metrics(y, ymin, ymax, _CONTROLLED, step_hours=0.25)
 
     return ControlResults(
         comfort_violation_rate=0.5,
-        comfort=comfort_metrics(y, ymin, ymax, _CONTROLLED, step_hours=0.25),
+        # Single controlled channel, so the pooled figure equals the
+        # per-channel one: half the steps in-band (0 excursion), half
+        # `offset` above -> mean excursion = offset / 2.
+        comfort_mean_exceedance=comfort[0].mean_exceedance,
+        comfort=comfort,
         mean_abs_du=0.375,
         tracking=per_channel_metrics(y, mid, _CONTROLLED),
         energy=energy_metrics(power, step_hours=0.25),
@@ -133,8 +138,10 @@ def test_baseline_comparison_renders_signed_delta():
     assert "| Baseline |" in md
     delta_row = next(l for l in md.splitlines() if l.startswith("| Δ "))
     cells = [c.strip() for c in delta_row.strip("|").split("|")]
-    assert cells[1] == "-50"       # violation rate delta, percentage points
-    assert cells[4] == "+500"      # mean power delta
+    # Column order: label, mean exceedance, violation rate, degree-hours,
+    # mean |Δu|, mean power, peak power.
+    assert cells[2] == "-50"       # violation rate delta, percentage points
+    assert cells[5] == "+500"      # mean power delta
 
 
 def test_energy_marked_unavailable_without_power_metric():

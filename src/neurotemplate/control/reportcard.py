@@ -126,8 +126,12 @@ def _performance_section(results) -> str:
         "the physical units of each channel.\n",
         comfort_to_markdown(results.comfort),
         "",
+        f"- **Pooled mean exceedance:** "
+        f"**{results.comfort_mean_exceedance:.4f}** *(mean over all steps — "
+        "tune on this)*",
         f"- **Pooled violation rate:** "
-        f"**{results.comfort_violation_rate * 100:.2f}%**",
+        f"{results.comfort_violation_rate * 100:.2f}% "
+        "*(acceptance criterion — report it, don't tune on it)*",
         f"- **Mean |Δsetpoint|:** {results.mean_abs_du:.4g}",
     ]
     body += _energy_lines(results.energy)
@@ -135,8 +139,9 @@ def _performance_section(results) -> str:
 
 
 def _comparison_values(results) -> list[Optional[float]]:
-    """The five headline numbers, in table order. None renders as n/a."""
+    """The six headline numbers, in table order. None renders as n/a."""
     return [
+        results.comfort_mean_exceedance,
         results.comfort_violation_rate * 100.0,
         sum(m.degree_hours for m in results.comfort),
         results.mean_abs_du,
@@ -175,9 +180,9 @@ def _baseline_section(results, baseline) -> str:
         "comparable. Degree-hours is summed across controlled channels. "
         "Lower is better in every column, so a negative Δ favours the "
         "learned policy.\n",
-        r"| Controller | Violation rate (%) | Degree-hours | Mean \|Δu\| "
-        r"| Mean power | Peak power |",
-        "|---|---:|---:|---:|---:|---:|",
+        r"| Controller | Mean exceedance | Violation rate (%) | Degree-hours "
+        r"| Mean \|Δu\| | Mean power | Peak power |",
+        "|---|---:|---:|---:|---:|---:|---:|",
         _comparison_row("Learned policy", learned),
         _comparison_row("Baseline", rule),
         _comparison_row("Δ (learned − baseline)", delta, signed=True),

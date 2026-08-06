@@ -46,6 +46,7 @@ EVAL_BAND_SEED = 12345
 @dataclass
 class ControlResults:
     comfort_violation_rate: float      # pooled fraction of (zone, step) outside band
+    comfort_mean_exceedance: float     # pooled mean excursion over ALL steps
     comfort: list[ComfortMetrics]      # per-zone comfort detail
     mean_abs_du: float                 # mean |Δsetpoint| (physical units)
     tracking: list[ChannelMetrics]     # per-zone error vs band midpoint
@@ -171,8 +172,13 @@ def evaluate_closed_loop(
 
     step_hours = hours_per_step(out["t"][:, hmax:, :])
     comfort = comfort_metrics(y_ctrl, ymin, ymax, controlled, step_hours)
-    # Pooled headline rate across all controlled channels.
-    violation_rate = ((y_ctrl < ymin) | (y_ctrl > ymax)).float().mean().item()
+    # Two pooled headline numbers across all controlled channels. The rate is
+    # what an operator asks about; the exceedance is what to tune on, because a
+    # threshold count saturates and, scored against a surrogate rather than the
+    # plant, its argmin can select a substantially worse controller.
+    excursion = (ymin - y_ctrl).clamp_min(0.0) + (y_ctrl - ymax).clamp_min(0.0)
+    violation_rate = (excursion > 0).float().mean().item()
+    mean_exceedance = excursion.mean().item()
 
     mid = 0.5 * (ymin + ymax)
     tracking = per_channel_metrics(y_ctrl, mid, controlled)
@@ -192,6 +198,7 @@ def evaluate_closed_loop(
 
     return ControlResults(
         comfort_violation_rate=violation_rate,
+        comfort_mean_exceedance=mean_exceedance,
         comfort=comfort,
         mean_abs_du=mean_abs_du,
         tracking=tracking,
@@ -231,11 +238,14 @@ def log_control_results(
 def _flat_control_metrics(results: ControlResults, prefix: str) -> dict:
     flat = {
         f"{prefix}_violation_rate": results.comfort_violation_rate,
+        f"{prefix}_mean_exceedance": results.comfort_mean_exceedance,
         f"{prefix}_mean_abs_du": results.mean_abs_du,
     }
     for m in results.comfort:
         safe = _safe_metric_key(m.name)
         flat[f"{prefix}_{safe}_violation_rate"] = m.violation_rate
+        flat[f"{prefix}_{safe}_mean_exceedance"] = m.mean_exceedance
+        flat[f"{prefix}_{safe}_rms_exceedance"] = m.rms_exceedance
         flat[f"{prefix}_{safe}_mean_violation"] = m.mean_violation
         flat[f"{prefix}_{safe}_max_violation"] = m.max_violation
         flat[f"{prefix}_{safe}_degree_hours"] = m.degree_hours
@@ -250,6 +260,7 @@ def _flat_control_metrics(results: ControlResults, prefix: str) -> dict:
 def _control_metrics_dict(results: ControlResults) -> dict:
     return {
         "violation_rate": results.comfort_violation_rate,
+        "mean_exceedance": results.comfort_mean_exceedance,
         "mean_abs_du": results.mean_abs_du,
         "comfort": comfort_to_dict(results.comfort),
         "energy": None if results.energy is None else asdict(results.energy),

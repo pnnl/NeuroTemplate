@@ -29,12 +29,29 @@ from neurotemplate._typing import beartype
 
 @dataclass
 class ComfortMetrics:
-    """Comfort-band performance for one controlled channel, in physical units."""
+    """Comfort-band performance for one controlled channel, in physical units.
+
+    On which number to *tune*: prefer `mean_exceedance` or `rms_exceedance`.
+    Both average over all steps, so they keep shrinking as a controller moves
+    further inside the band, whereas `violation_rate` is a threshold count that
+    saturates. When these metrics are computed against a surrogate rather than
+    the real plant, that difference decides the outcome: measured over nine
+    controllers spanning 2.5–52.2% true violation, argmin of surrogate
+    `violation_rate` selected one 30 points worse than the best available,
+    while argmin of either exceedance metric selected the true optimum.
+
+    `violation_rate` remains the right *acceptance* criterion against the plant
+    — it is what a building operator asks about — and `mean_violation` is the
+    worst of the four to tune on, because averaging over violating steps only
+    makes a permanently-but-barely-out-of-band controller look good.
+    """
     name: str
     violation_rate: float   # fraction of (window, step) pairs outside the band
     frac_below: float       # too cold and too hot are different failures, so
     frac_above: float       # they are reported separately, not just summed
     mean_violation: float   # mean excursion over violating steps only (0 if none)
+    mean_exceedance: float  # mean excursion over ALL steps — tune on this
+    rms_exceedance: float   # root-mean-square excursion, the training loss's own
     max_violation: float    # worst single excursion
     degree_hours: float     # mean over windows of ∫|excursion| dt, in unit·h
 
@@ -117,6 +134,8 @@ def comfort_metrics(
             frac_below=float((lo > 0).float().mean()),
             frac_above=float((hi > 0).float().mean()),
             mean_violation=mean_violation,
+            mean_exceedance=float(excursion.mean()),
+            rms_exceedance=float(excursion.pow(2).mean().sqrt()),
             max_violation=float(excursion.max()),
             # Sum over time for each window, then average across windows: the
             # per-window integral is what a building operator recognizes.
@@ -157,14 +176,16 @@ def energy_metrics(power: torch.Tensor, step_hours: float) -> EnergyMetrics:
 def comfort_to_markdown(metrics: list[ComfortMetrics]) -> str:
     """Render comfort metrics as a markdown table for the reportcard."""
     header = (
-        "| Channel | Violation rate | Below | Above | "
-        "Mean excursion | Max excursion | Degree-hours |"
+        "| Channel | Mean exceedance | RMS exceedance | Violation rate | "
+        "Below | Above | Mean excursion (violating only) | Max excursion | "
+        "Degree-hours |"
     )
-    sep = "|---|---:|---:|---:|---:|---:|---:|"
+    sep = "|---|---:|---:|---:|---:|---:|---:|---:|---:|"
     rows = [header, sep]
     for m in metrics:
         rows.append(
-            f"| {m.name} | {m.violation_rate * 100:.2f}% | "
+            f"| {m.name} | {m.mean_exceedance:.4f} | {m.rms_exceedance:.4f} | "
+            f"{m.violation_rate * 100:.2f}% | "
             f"{m.frac_below * 100:.2f}% | {m.frac_above * 100:.2f}% | "
             f"{m.mean_violation:.4f} | {m.max_violation:.4f} | "
             f"{m.degree_hours:.4f} |"

@@ -218,6 +218,7 @@ def _results(violation_rate=0.5, power=1000.0):
     ymax = torch.full((2, 4, 1), 25.0)
     return ControlResults(
         comfort_violation_rate=violation_rate,
+        comfort_mean_exceedance=1.0,  # y is constant 26.0, ymax 25.0 -> excursion 1.0 everywhere
         comfort=comfort_metrics(y, ymin, ymax, ["zone [°C]"], 0.25),
         mean_abs_du=0.25,
         tracking=per_channel_metrics(y, 0.5 * (ymin + ymax), ["zone [°C]"]),
