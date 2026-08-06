@@ -7,7 +7,8 @@ logged to MLflow. Sections (in order):
   1. Summary                — run name, timestamp, dev_loss, train_time
   2. Architecture           — factory, separable/residual, param count
   3. Data                   — split sizes, Y/U/D classification,
-                              per-column normalization, head kinds
+                              per-column normalization, head kinds, and any
+                              column left in raw units because it was constant
   4. Test metrics           — per-channel RMSE/MAE/R²/NRMSE in physical units
   5. Rollout stability      — per-channel rise fraction and drift vs. the
                               truth's own, flagging models that have stopped
@@ -31,6 +32,7 @@ from typing import Optional
 
 import pandas as pd
 
+from neurotemplate.common.data_utils import degenerate_columns
 from neurotemplate.modeling.config import ModelingConfig
 from neurotemplate.modeling.heads import BoundedHead, HeadStack
 from neurotemplate.common.metrics import (
@@ -165,6 +167,21 @@ def _data_section(
     parts.append(f"- **Y ({len(nm_mapping.get('Y', []))} states):**" + cols("Y"))
     parts.append(f"- **U ({len(nm_mapping.get('U', []))} controls):**" + cols("U"))
     parts.append(f"- **D ({len(nm_mapping.get('D', []))} disturbances):**" + cols("D"))
+    if norm_stats is not None:
+        frozen = degenerate_columns(norm_stats)
+        mapped = {c for key in ("Y", "U", "D") for c in nm_mapping.get(key, [])}
+        frozen = [c for c in frozen if c in mapped]
+        if frozen:
+            parts.append(
+                "\n**⚠️ Constant in this data:** "
+                + ", ".join(f"`{c}`" for c in frozen)
+                + ". Normalization had nothing to scale, so these columns fall "
+                "back to raw physical units. If any of them varies at evaluation "
+                "time — a furnace that never fired here but does there — its "
+                "value arrives orders of magnitude out of range and the rollout "
+                "diverges. Either exclude the column from the mapping or widen "
+                "the excitation so training covers the regime."
+            )
     return _section("Data", "\n".join(parts))
 
 
@@ -244,18 +261,33 @@ def _metrics_section(metrics: list[ChannelMetrics]) -> str:
     return _section("Test Metrics (per channel)", body)
 
 
-def _stability_section(stability: list[RolloutStability]) -> str:
+def _stability_section(
+    stability: list[RolloutStability], test_window: Optional[int] = None
+) -> str:
     """Rollout shape vs. the truth's own shape — catches ramping models.
 
     A model that has stopped responding to its inputs can still post a
     tolerable RMSE on a short test window and then diverge by many degrees in
     closed loop. Comparing rise fraction and drift against the ground truth
     surfaces that before a policy is ever trained on the model.
+
+    Everything here is measured over `test_window` steps, so the horizon is
+    stated alongside the table. Two of four measured submissions passed this
+    check at a 47-step window and diverged past ~300 steps on the same data;
+    the diagnostic was right, it was just asked about a horizon far shorter
+    than the one the controller would be evaluated over.
     """
     if not stability:
         return _section("Rollout stability", "*(no stability computed)*")
     flagged = [s.name for s in stability if s.looks_like_ramp()]
     body = stability_to_markdown(stability)
+    if test_window is not None:
+        body = (
+            f"Measured over a **{test_window}-step** rollout. A model can be "
+            "stable here and diverge over a longer one, so treat a short window "
+            "as a weak check: closed-loop evaluation runs for thousands of "
+            "steps.\n\n"
+        ) + body
     if flagged:
         body += (
             "\n\n**⚠️ Likely ramping:** "
@@ -366,7 +398,7 @@ def render_reportcard(
         _metrics_section(test_metrics),
     ]
     if stability is not None:
-        parts.append(_stability_section(stability))
+        parts.append(_stability_section(stability, cfg.test_window))
     coverage = _bounded_coverage_section(head_stack, test_df)
     if coverage is not None:
         parts.append(coverage)

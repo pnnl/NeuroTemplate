@@ -542,6 +542,17 @@ def compute_norm_stats(
         return norm_type
 
     # Safety wrapper: avoids dividing by zero for constant columns.
+    #
+    # The rescue is silent and has a sharp edge. `stretch = 1` makes
+    # normalization the identity for that column, so it stays in raw physical
+    # units. That is harmless while the column really is constant, but a column
+    # constant in *training* is not necessarily constant later: a furnace that
+    # never fires in the training excitation contributes a constant `Gas Energy
+    # [J]`, and when the evaluator's trajectory does fire it, 1.6e9 J reaches the
+    # model as an input of 1.5e9 rather than something near zero. Two of four
+    # measured surrogates diverged to 1e17 within 48 steps for exactly this
+    # reason. `degenerate_columns` below makes the condition visible instead of
+    # leaving it to be rediscovered from the wreckage.
     def pos(x):
         return x if x > 1e-6 else 1
 
@@ -586,6 +597,22 @@ def compute_norm_stats(
         }
 
     return {col: col_stats(col) for col in df.columns}
+
+
+@beartype
+def degenerate_columns(norm_stats: dict[str, dict[str, float]]) -> list[str]:
+    """Columns that were constant in the data `norm_stats` was fitted on.
+
+    Their `stretch` fell back to 1 (see `pos` in `compute_norm_stats`), so
+    normalization is the identity and they carry raw physical units into the
+    model. Any later data in which the column *does* vary is then wildly out of
+    range — which is how a surrogate that scores 1.0 °C RMSE on its own test
+    split diverges to 1e17 on the evaluator's trajectory.
+
+    Detected from `min == max` rather than from `stretch == 1`, because a column
+    can legitimately have unit spread.
+    """
+    return [col for col, s in norm_stats.items() if s["min"] == s["max"]]
 
 
 # Apply precomputed normalization stats to a dataframe.

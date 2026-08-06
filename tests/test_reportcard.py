@@ -141,3 +141,24 @@ def test_snapshot_matches_golden():
         f"Reportcard rendering changed.\n"
         f"If intentional, regenerate via: REGEN_GOLDEN=1 pytest {__file__}"
     )
+
+
+def test_stability_section_states_the_rollout_horizon():
+    """The gate's horizon must be visible, not inferred from the config section.
+
+    Two of four measured submissions passed the ramp check at a 47-step window
+    and diverged past ~300 steps on the same data. The diagnostic was correct;
+    the reader had no way to see it had been asked about 47 steps.
+    """
+    from neurotemplate.common.metrics import rollout_stability
+
+    cfg = _make_cfg()
+    cfg.test_window = 47
+    y = torch.linspace(20.0, 26.0, 60).reshape(1, 60, 1).repeat(1, 1, 2)
+    md = render_reportcard(
+        cfg=cfg, arch=_make_arch(), test_metrics=_make_metrics(),
+        nm_mapping={"Y": ["zone_a [°C]", "zone_b [°C]"], "U": [], "D": []},
+        stability=rollout_stability(y, y, ["zone_a [°C]", "zone_b [°C]"]),
+        run_name="x", timestamp="2026-01-01T00:00:00",
+    )
+    assert "**47-step**" in md
