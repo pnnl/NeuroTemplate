@@ -42,6 +42,46 @@ class ChannelMetrics:
     n_samples: int
 
 
+@dataclass
+class RolloutStability:
+    """Shape of a free-run rollout for one channel, against the truth it tracks.
+
+    RMSE says how far a prediction is from the truth; it does not say whether
+    the prediction still *behaves* like the system. A model that has stopped
+    responding to its inputs emits a monotone ramp, and a short rollout can
+    hide that behind a tolerable RMSE while a long one diverges by 10 °C.
+
+    Two numbers catch it, both compared against the truth rather than an
+    absolute threshold (a genuinely monotone signal must not be flagged):
+
+      - `rise_fraction`: share of consecutive steps that increase. A model
+        tracking a cycling signal sits near the truth's own value; a ramp sits
+        near 0 or 1.
+      - `drift`: mean |last - first| per window, in physical units. A stable
+        rollout returns near where it started; a ramp does not.
+    """
+    name: str
+    pred_rise_fraction: float
+    true_rise_fraction: float
+    pred_drift: float
+    true_drift: float
+
+    @property
+    def rise_excess(self) -> float:
+        """|pred - true| rise fraction. 0 is perfect; >0.25 means a ramp."""
+        return abs(self.pred_rise_fraction - self.true_rise_fraction)
+
+    @property
+    def drift_ratio(self) -> float:
+        """Predicted drift over true drift. ~1 is healthy; large means a ramp.
+
+        inf when the truth does not drift at all but the prediction does.
+        """
+        if self.true_drift > 0:
+            return self.pred_drift / self.true_drift
+        return float("inf") if self.pred_drift > 0 else 1.0
+
+
 @beartype
 def per_channel_metrics(
     y_pred: torch.Tensor,
@@ -107,6 +147,99 @@ def per_channel_metrics(
         ))
 
     return results
+
+
+@beartype
+def rollout_stability(
+    y_pred: torch.Tensor,
+    y_true: torch.Tensor,
+    channel_names: list[str],
+) -> list[RolloutStability]:
+    """Per-channel rollout shape diagnostics. Same tensor contract as
+    `per_channel_metrics`: [batch, time, ny] in physical units.
+
+    Statistics are computed per window and then averaged across windows, so a
+    single diverging window cannot be hidden by the others' step counts.
+    """
+    if y_pred.shape != y_true.shape:
+        raise ValueError(
+            f"y_pred shape {tuple(y_pred.shape)} != y_true shape "
+            f"{tuple(y_true.shape)}"
+        )
+    if y_pred.ndim != 3:
+        raise ValueError(
+            f"Expected 3D [batch, time, ny] tensors; got {y_pred.ndim}D"
+        )
+    if len(channel_names) != y_pred.shape[-1]:
+        raise ValueError(
+            f"channel_names has {len(channel_names)} entries but tensors have "
+            f"ny={y_pred.shape[-1]}"
+        )
+    if y_pred.shape[1] < 2:
+        raise ValueError(
+            f"Need at least 2 timesteps to measure rollout shape; got "
+            f"{y_pred.shape[1]}"
+        )
+
+    pred = y_pred.detach().cpu()
+    true = y_true.detach().cpu()
+
+    def rise(x: torch.Tensor) -> float:
+        """Mean over windows of the fraction of increasing steps."""
+        return float((x.diff(dim=1) > 0).float().mean(dim=1).mean())
+
+    def drift(x: torch.Tensor) -> float:
+        """Mean over windows of |last - first|, in physical units."""
+        return float((x[:, -1] - x[:, 0]).abs().mean())
+
+    return [
+        RolloutStability(
+            name=name,
+            pred_rise_fraction=rise(pred[:, :, i]),
+            true_rise_fraction=rise(true[:, :, i]),
+            pred_drift=drift(pred[:, :, i]),
+            true_drift=drift(true[:, :, i]),
+        )
+        for i, name in enumerate(channel_names)
+    ]
+
+
+@beartype
+def stability_to_markdown(
+    stability: list[RolloutStability], rise_excess_warn: float = 0.25
+) -> str:
+    """Render rollout stability as a markdown table, flagging likely ramps."""
+    header = (
+        "| Channel | Rise frac (pred / true) | Excess | "
+        "Drift (pred / true) | Ratio | |"
+    )
+    sep = "|---|---:|---:|---:|---:|---|"
+    rows = [header, sep]
+    for s in stability:
+        flag = "⚠️ ramp?" if s.rise_excess > rise_excess_warn else ""
+        rows.append(
+            f"| {s.name} | {s.pred_rise_fraction:.3f} / "
+            f"{s.true_rise_fraction:.3f} | {s.rise_excess:.3f} | "
+            f"{s.pred_drift:.4g} / {s.true_drift:.4g} | "
+            f"{s.drift_ratio:.2f} | {flag} |"
+        )
+    return "\n".join(rows)
+
+
+@beartype
+def stability_to_dict(stability: list[RolloutStability]) -> dict:
+    """JSON-serializable rollout stability (for MLflow / disk)."""
+    return {
+        s.name: {
+            "pred_rise_fraction": s.pred_rise_fraction,
+            "true_rise_fraction": s.true_rise_fraction,
+            "rise_excess": s.rise_excess,
+            "pred_drift": s.pred_drift,
+            "true_drift": s.true_drift,
+            "drift_ratio": s.drift_ratio,
+        }
+        for s in stability
+    }
 
 
 @beartype

@@ -31,9 +31,12 @@ from neurotemplate.modeling.experiment import train_with_curriculum
 from neurotemplate.modeling.heads import HeadStack
 from neurotemplate.common.metrics import (
     ChannelMetrics,
+    RolloutStability,
     _safe_metric_key,
     metrics_to_dict,
     per_channel_metrics,
+    rollout_stability,
+    stability_to_dict,
 )
 from neurotemplate.common.reportcard import write_reportcard as _write_reportcard
 from neurotemplate.modeling.dynamics import describe_dynamics
@@ -49,6 +52,7 @@ from neurotemplate.modeling.scenarios import _unnormalize_y, build_scenarios
 class TestResults:
     """Bundle of test-time outputs. Tensors stay internal to evaluate_and_plot."""
     metrics: list[ChannelMetrics]
+    stability: list[RolloutStability]  # rollout shape, to catch ramping models
     aggregate_rmse: float  # legacy single-number RMSE in normalized space
     test_time_s: float
 
@@ -104,6 +108,9 @@ def evaluate_and_plot(
         test_out["Y"][:, cfg.in_steps:, :], nm_mapping, norm_stats
     )
     metrics = per_channel_metrics(un_pred, un_true, nm_mapping["Y"])
+    # RMSE alone cannot see a model that has stopped responding to its inputs
+    # and is emitting a ramp; compare the rollout's shape to the truth's too.
+    stability = rollout_stability(un_pred, un_true, nm_mapping["Y"])
 
     # Legacy aggregate (averaged across channels in normalized space). Kept
     # for back-compat with the pre-refactor `test_rmse` MLflow key.
@@ -128,6 +135,7 @@ def evaluate_and_plot(
 
     return TestResults(
         metrics=metrics,
+        stability=stability,
         aggregate_rmse=aggregate_rmse,
         test_time_s=test_time_s,
     )
@@ -254,6 +262,7 @@ def render_reportcard(
         cfg=cfg,
         arch=arch,
         test_metrics=test_results.metrics,
+        stability=test_results.stability,
         nm_mapping=nm_mapping,
         head_stack=head_stack,
         norm_stats=norm_stats,
@@ -295,11 +304,19 @@ def log_test_results(
         flat[f"test_{safe}_r2"] = m.r2
         if m.nrmse == m.nrmse:  # not NaN
             flat[f"test_{safe}_nrmse"] = m.nrmse
+    for st in test_results.stability:
+        safe = _safe_metric_key(st.name)
+        flat[f"test_{safe}_rise_excess"] = st.rise_excess
+        flat[f"test_{safe}_drift_ratio"] = st.drift_ratio
 
     logger.log_metrics(flat)
     if hasattr(logger, "log_dict"):
         logger.log_dict(
             metrics_to_dict(test_results.metrics), name="test_metrics.json"
+        )
+        logger.log_dict(
+            stability_to_dict(test_results.stability),
+            name="rollout_stability.json",
         )
 
 

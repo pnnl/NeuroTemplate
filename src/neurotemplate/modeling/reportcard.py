@@ -9,9 +9,12 @@ logged to MLflow. Sections (in order):
   3. Data                   — split sizes, Y/U/D classification,
                               per-column normalization, head kinds
   4. Test metrics           — per-channel RMSE/MAE/R²/NRMSE in physical units
-  5. Bounded channel coverage — for each bounded head, whether any test
+  5. Rollout stability      — per-channel rise fraction and drift vs. the
+                              truth's own, flagging models that have stopped
+                              responding to their inputs and are ramping
+  6. Bounded channel coverage — for each bounded head, whether any test
                               samples fall outside the head's [lo, hi]
-  6. Hyperparameters        — lr, batch_size, train_pred_steps, curriculum, gains
+  7. Hyperparameters        — lr, batch_size, train_pred_steps, curriculum, gains
 
 The "auto-detected anomalies" section listed in updates.md is left for
 a future, more creative pass and intentionally not implemented here.
@@ -30,7 +33,12 @@ import pandas as pd
 
 from neurotemplate.modeling.config import ModelingConfig
 from neurotemplate.modeling.heads import BoundedHead, HeadStack
-from neurotemplate.common.metrics import ChannelMetrics, metrics_to_markdown
+from neurotemplate.common.metrics import (
+    ChannelMetrics,
+    RolloutStability,
+    metrics_to_markdown,
+    stability_to_markdown,
+)
 from neurotemplate.common.reportcard import _fmt_float, _section
 
 from neurotemplate._typing import beartype
@@ -236,6 +244,29 @@ def _metrics_section(metrics: list[ChannelMetrics]) -> str:
     return _section("Test Metrics (per channel)", body)
 
 
+def _stability_section(stability: list[RolloutStability]) -> str:
+    """Rollout shape vs. the truth's own shape — catches ramping models.
+
+    A model that has stopped responding to its inputs can still post a
+    tolerable RMSE on a short test window and then diverge by many degrees in
+    closed loop. Comparing rise fraction and drift against the ground truth
+    surfaces that before a policy is ever trained on the model.
+    """
+    if not stability:
+        return _section("Rollout stability", "*(no stability computed)*")
+    flagged = [s.name for s in stability if s.rise_excess > 0.25]
+    body = stability_to_markdown(stability)
+    if flagged:
+        body += (
+            "\n\n**⚠️ Likely ramping (rise fraction far from the truth's):** "
+            + ", ".join(f"`{n}`" for n in flagged)
+            + ". A monotone rollout means the model is ignoring its inputs; "
+            "RMSE on a short window will not show it. Free-run the model over a "
+            "long horizon before training a controller on it."
+        )
+    return _section("Rollout stability", body)
+
+
 def _hyperparameters_section(cfg: ModelingConfig) -> str:
     rows = [
         f"- **lr:** {cfg.lr}",
@@ -272,6 +303,7 @@ def render_reportcard(
     test_metrics: list[ChannelMetrics],
     nm_mapping: dict[str, list[str]],
     *,
+    stability: Optional[list[RolloutStability]] = None,
     head_stack: Optional[HeadStack] = None,
     norm_stats: Optional[dict] = None,
     test_df: Optional[pd.DataFrame] = None,
@@ -289,6 +321,9 @@ def render_reportcard(
         cfg:           Resolved ModelingConfig used for the run.
         arch:          Output of models.describe_dynamics(dyn_sys, cfg).
         test_metrics:  Output of metrics.per_channel_metrics(...).
+        stability:     Output of metrics.rollout_stability(...). Omitted for
+                       callers that only have per-channel metrics; the section
+                       is then skipped.
         nm_mapping:    {"Y": [...], "U": [...], "D": [...]} from data_mapping.
         head_stack:    Optional HeadStack; when provided, non-regression Y
                        columns are annotated with their head kind in the data
@@ -315,6 +350,8 @@ def render_reportcard(
         _data_section(nm_mapping, split_sizes, head_stack, norm_stats),
         _metrics_section(test_metrics),
     ]
+    if stability is not None:
+        parts.append(_stability_section(stability))
     coverage = _bounded_coverage_section(head_stack, test_df)
     if coverage is not None:
         parts.append(coverage)
