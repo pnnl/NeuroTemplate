@@ -23,6 +23,18 @@ get_dynamics() wraps SSMGrad in a Neuromancer Node + SystemPreview:
 
   - 'Y' (ground truth) is only used by the loss for comparison and
     by the System to determine rollout length (nstep_key='Y').
+
+cfg.in_steps is the model's context length, and every family reads it the
+same way: as a flattened input window of in_steps past values per input key,
+gathered by the Node's input_map. A stateful block (GRU) additionally keeps a
+hidden state so its memory can run past in_steps during a rollout, but it
+still takes the same window — it just skips the steps already folded into that
+state (see GRUBlock). The only thing statefulness costs the caller is a reset
+at each sequence boundary, which make_reset_init() wires into the System.
+
+Because cfg.in_steps is also the sliding-window stride
+(data_utils.get_sw_dict), keeping it meaningful for every family is what
+makes two models trained at the same in_steps see the same training set.
 """
 
 import torch
@@ -40,21 +52,69 @@ from neurotemplate.modeling.heads import HeadStack
 
 class GRUBlock(nn.Module):
     """
-    GRU-based dynamics block. Stateful: hidden state persists across rollout
-    steps within a single sequence, then resets between sequences via reset().
+    GRU-based dynamics block. Reads the same flattened in_steps history window
+    every other block reads, but folds each timestep into its hidden state
+    exactly once:
+
+      - Cold (no hidden state): consume the whole window, so the state
+        summarises the full context before the first prediction.
+      - Warm: the window's earlier steps are already in the hidden state, so
+        consume only its newest step.
+
+    The invariant is that the hidden state summarises every timestep this block
+    has already consumed, and the window supplies whatever it has not. That is
+    what lets memory run past in_steps during a rollout while a single cold
+    call is still correct on its own — instantiate this block anywhere, hand it
+    one window, and you get a properly warmed prediction.
+
+    Call reset() at a sequence boundary (a new batch); the next call re-warms
+    itself from its own window.
 
     Handles two input shapes:
-      - [batch, features]  — normal training/inference path
-      - [features]         — under vmap (jacrev); starts from zeros, no state stored
+      - [batch, in_steps*features]  — normal training/inference path
+      - [in_steps*features]         — under vmap (jacrev); always cold, no
+                                      state stored
     """
 
-    def __init__(self, insize: int, outsize: int, hidden_size: int, num_layers: int, bias: bool = True):
+    def __init__(self, ny: int, nu: int, nd: int, in_steps: int, outsize: int,
+                 hidden_size: int, num_layers: int, bias: bool = True):
         super().__init__()
-        self.in_features = insize
+        self.widths = (ny, nu, nd)
+        self.in_steps = in_steps
+        self.in_features = in_steps * (ny + nu + nd)
         self.out_features = outsize
-        self.gru = nn.GRU(insize, hidden_size, num_layers=num_layers, batch_first=True, bias=bias)
+        self.gru = nn.GRU(ny + nu + nd, hidden_size, num_layers=num_layers,
+                          batch_first=True, bias=bias)
         self.output = nn.Linear(hidden_size, outsize, bias=bias)
         self._h: Optional[torch.Tensor] = None
+
+        # SSMGrad hands us cat([y_window, u_window, d_window]) — key-major:
+        # [y_0..y_{s-1}, u_0..u_{s-1}, d_0..d_{s-1}]. A GRU reads time-major:
+        # [y_0,u_0,d_0, y_1,u_1,d_1, ...]. The reorder is a fixed permutation
+        # of positions — it depends only on (widths, in_steps), never on the
+        # data — so compute it once here instead of on every call.
+        block_starts = []
+        offset = 0
+        for w in self.widths:
+            block_starts.append(offset)
+            offset += in_steps * w
+
+        perm = [
+            start + t * w + j
+            for t in range(in_steps)
+            for start, w in zip(block_starts, self.widths)
+            for j in range(w)
+        ]
+        self.register_buffer(
+            "_seq_perm", torch.tensor(perm, dtype=torch.long), persistent=False
+        )
+
+        # The newest timestep is a contiguous chunk at the end of each
+        # per-key block — no gather needed, just three static slices.
+        self._last_step_slices = [
+            slice(start + (in_steps - 1) * w, start + in_steps * w)
+            for start, w in zip(block_starts, self.widths)
+        ]
 
     def reset(self) -> None:
         """Clear hidden state. Call before each new sequence."""
@@ -64,10 +124,22 @@ class GRUBlock(nn.Module):
         weights = [p.pow(2).mean() for p in self.gru.parameters() if p.dim() > 1]
         return torch.mean(torch.stack(weights))
 
-    def _manual_gru_step(self, x: torch.Tensor) -> torch.Tensor:
+    def _to_sequence(self, x: torch.Tensor) -> torch.Tensor:
+        """[..., in_steps*(ny+nu+nd)] -> [..., in_steps, ny+nu+nd], key-major
+        reordered to time-major via the precomputed permutation."""
+        lead = x.shape[:-1]
+        seq = x.index_select(x.ndim - 1, self._seq_perm)
+        return seq.reshape(*lead, self.in_steps, sum(self.widths))
+
+    def _last_step(self, x: torch.Tensor) -> torch.Tensor:
+        """[..., in_steps*(ny+nu+nd)] -> [..., ny+nu+nd]: just the newest
+        timestep, without touching the rest of the window."""
+        return torch.cat([x[..., s] for s in self._last_step_slices], dim=-1)
+
+    def _manual_gru(self, seq: torch.Tensor) -> torch.Tensor:
         """
-        Manual single-step GRU forward unrolled into vmap-safe primitives
-        (matmul/sigmoid/tanh). nn.GRU's fused CuDNN kernel cannot be
+        Replay a whole window from a zero hidden state using vmap-safe
+        primitives (matmul/sigmoid/tanh). nn.GRU's fused CuDNN kernel cannot be
         batched by vmap, so jacrev under vmap needs this path.
 
         Variable names follow the PyTorch nn.GRU equation:
@@ -78,40 +150,54 @@ class GRUBlock(nn.Module):
         See https://docs.pytorch.org/docs/stable/generated/torch.nn.GRU.html
 
         Args:
-            x: [features] (1D, under vmap)
+            seq: [in_steps, ny+nu+nd] (1D input, under vmap)
         Returns:
             [outsize] output
         """
-        h = torch.zeros(self.gru.hidden_size, device=x.device)
+        # One hidden state per layer, all starting at zero — the sampled
+        # gradient penalty measures d(prediction)/d(window) from cold, the
+        # same object it measures for a stateless block.
+        hidden = [torch.zeros(self.gru.hidden_size, device=seq.device)
+                  for _ in range(self.gru.num_layers)]
 
-        for layer in range(self.gru.num_layers):
-            w_ih = getattr(self.gru, f'weight_ih_l{layer}')  # [3*H, input]
-            w_hh = getattr(self.gru, f'weight_hh_l{layer}')  # [3*H, H]
-            b_ih = getattr(self.gru, f'bias_ih_l{layer}')     # [3*H]
-            b_hh = getattr(self.gru, f'bias_hh_l{layer}')     # [3*H]
+        for step in range(self.in_steps):
+            x = seq[step]
+            for layer in range(self.gru.num_layers):
+                w_ih = getattr(self.gru, f'weight_ih_l{layer}')  # [3*H, input]
+                w_hh = getattr(self.gru, f'weight_hh_l{layer}')  # [3*H, H]
+                b_ih = getattr(self.gru, f'bias_ih_l{layer}')     # [3*H]
+                b_hh = getattr(self.gru, f'bias_hh_l{layer}')     # [3*H]
 
-            gi = x @ w_ih.T + b_ih    # [3*H]
-            gh = h @ w_hh.T + b_hh    # [3*H]
+                gi = x @ w_ih.T + b_ih             # [3*H]
+                gh = hidden[layer] @ w_hh.T + b_hh  # [3*H]
 
-            i_r, i_z, i_n = gi.chunk(3)
-            h_r, h_z, h_n = gh.chunk(3)
+                i_r, i_z, i_n = gi.chunk(3)
+                h_r, h_z, h_n = gh.chunk(3)
 
-            r = torch.sigmoid(i_r + h_r)
-            z = torch.sigmoid(i_z + h_z)
-            n = torch.tanh(i_n + r * h_n)
-            h = (1 - z) * n + z * h
-            x = h  # input to next layer
+                r = torch.sigmoid(i_r + h_r)
+                z = torch.sigmoid(i_z + h_z)
+                n = torch.tanh(i_n + r * h_n)
+                hidden[layer] = (1 - z) * n + z * hidden[layer]
+                x = hidden[layer]  # input to next layer
 
-        return self.output(h)
+        return self.output(hidden[-1])  # last layer, last step
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         if x.ndim == 1:
-            # Under vmap: manual GRU math (fused nn.GRU kernel isn't vmap-safe)
-            return self._manual_gru_step(x)
+            # Under vmap: manual GRU math (fused nn.GRU kernel isn't vmap-safe).
+            # Always cold, so it needs the reordered window regardless.
+            return self._manual_gru(self._to_sequence(x))
 
-        # Batched: [batch, features] → treat as single timestep
-        out, self._h = self.gru(x.unsqueeze(1), self._h)    # [batch, 1, hidden]
-        return self.output(out[:, 0, :])                     # [batch, outsize]
+        if self._h is None:
+            # Cold: fold the whole window in.
+            steps = self._to_sequence(x)
+        else:
+            # Warm: every step but the newest is already in the hidden state —
+            # no need to touch the rest of the window.
+            steps = self._last_step(x).unsqueeze(1)  # [batch, 1, ny+nu+nd]
+
+        out, self._h = self.gru(steps, self._h)   # [batch, len(steps), hidden]
+        return self.output(out[:, -1, :])          # [batch, outsize]
 
 
 class SSMGrad(nn.Module):
@@ -255,11 +341,16 @@ def get_gru(cfg: ModelingConfig, nm_mapping: dict[str, list[str]]) -> SSMGrad:
     nd = len(nm_mapping['D'])
 
     fy = GRUBlock(
-        insize=ny + nu + nd, outsize=ny,
+        ny, nu, nd, cfg.in_steps, outsize=ny,
         hidden_size=(2**cfg.log2_hidden_size), num_layers=cfg.num_layers,
     )
-    # GRU is stateful — in_steps=1, no windowing. Temporal memory lives in the hidden state.
-    return SSMGrad(fy, None, None, ny, nu, nd, 1, cfg.residual, separable=False)
+    # Same in_steps window as every other family. The GRU is additionally
+    # stateful, so its memory outlives the window during a rollout — but the
+    # window is what warms it, so no caller-side priming is needed.
+    return SSMGrad(
+        fy, None, None, ny, nu, nd,
+        cfg.in_steps, cfg.residual, separable=False,
+    )
 
 
 class _SetpointPassthrough(nn.Module):
@@ -351,12 +442,12 @@ def describe_dynamics(dyn_sys: SystemPreview, cfg: ModelingConfig) -> dict:
       - factory: model family name (mlp/nssm/lssm/gru)
       - separable: whether the SSM is separable (fy + fu + fd)
       - residual: whether y_{k+1} adds y_k as a residual base
-      - in_steps / ny / nu / nd: shape parameters
+      - in_steps: context length (cfg.in_steps) — see below
+      - ny / nu / nd: shape parameters
       - param_count: total trainable parameters
       - blocks: per-block descriptors {fy, fu, fd}
 
-    Used by reportcard.render_reportcard. Reads only what's available on
-    the constructed module — does not re-introspect cfg.
+    Used by reportcard.render_reportcard.
     """
     # Unwrap: SystemPreview -> Node -> SSMGrad
     raw = dyn_sys.nodes[0].callable
@@ -371,6 +462,8 @@ def describe_dynamics(dyn_sys: SystemPreview, cfg: ModelingConfig) -> dict:
         "factory": cfg.model,
         "separable": raw.fu is not None and raw.fd is not None,
         "residual": bool(raw.residual),
+        # Context length. Matches cfg.in_steps for every real family; only the
+        # dummy passthrough narrows it to 1, since it reads just the setpoint.
         "in_steps": int(raw.in_steps),
         "ny": int(raw.ny),
         "nu": int(raw.nu),
@@ -381,6 +474,38 @@ def describe_dynamics(dyn_sys: SystemPreview, cfg: ModelingConfig) -> dict:
 
 
 # ── System construction ──────────────────────────────────────────
+
+def make_reset_init(model: SSMGrad):
+    """
+    Build the SystemPreview init_func for a stateful model, or None.
+
+    A hidden state summarises every step the block has already consumed, so it
+    must be cleared at a sequence boundary — otherwise state, and the autograd
+    graph hanging off it, leaks from one batch into the next. This is the whole
+    of what statefulness asks of the caller: the block re-warms itself from its
+    own input window on the first call of the rollout, so nothing here needs to
+    know the rollout's indices or key names.
+
+    Gradients still flow through that warmup: it is an ordinary forward pass, so
+    the hidden state at the first scored step is a function of the block's
+    weights, which is exactly what we want the loss to shape.
+
+    Returns None for stateless blocks, leaving SystemPreview's identity init.
+
+    Note: unrelated to ModelingConfig.warmup, which counts early-stopping epochs.
+    """
+    # A reset() on the block is what makes it stateful — GRUBlock.reset is the
+    # single source of truth, so a new stateful block gets this for free.
+    reset = getattr(model.fy, "reset", None)
+    if reset is None:
+        return None
+
+    def reset_init(data):
+        reset()
+        return data
+
+    return reset_init
+
 
 @beartype
 def get_dynamics(
@@ -396,8 +521,8 @@ def get_dynamics(
     timestep — this is the autoregressive loop.
 
     SystemPreview handles temporal windowing via input_map: at each rollout
-    step i, the Node receives a window of in_steps past values for each input,
-    flattened to [batch, in_steps*features].
+    step i, the Node receives a window of model.in_steps past values for each
+    input, flattened to [batch, model.in_steps*features].
     """
     if cfg.model not in model_catalog:
         raise ValueError(
@@ -415,17 +540,17 @@ def get_dynamics(
         if head_stack.raw_width != model.ny:
             raise ValueError(
                 f"head_stack.raw_width={head_stack.raw_width} does not match "
-                f"model.ny={model.ny}; first-pass factories assume width-1 heads."
+                f"model.ny={model.ny}; factories (currently) assume width-1 heads."
             )
         model.head_stack = head_stack
 
-    # Temporal windowing: each input gets a window of in_steps past values.
-    # GRU is stateful — hidden state carries across steps, so no windowing ever.
-    # For in_steps=1, no windowing needed (current timestep only).
-    if cfg.in_steps > 1 and cfg.model != "gru":
+    # Temporal windowing: the gathered window must be exactly as wide as the
+    # block's declared input width, and model.in_steps is that width. Only the
+    # passthrough (dummy) block declares 1, so it gets no window.
+    if model.in_steps > 1:
         input_map = {
             key: {
-                "past": cfg.in_steps - 1,
+                "past": model.in_steps - 1,
                 "future": 0,
                 "pad_mode": "nearest",
             }
@@ -442,18 +567,12 @@ def get_dynamics(
         input_map=input_map,
     )
 
-    system = SystemPreview(
+    return SystemPreview(
         [node],
         name=cfg.model.upper() + " System",
         nstep_key="Y",               # rollout length from ground truth
         start_iter=cfg.in_steps - 1,  # skip initial history steps
+        # Stateful blocks only: clear the hidden state so it cannot leak
+        # between batches. None for stateless blocks.
+        init_func=make_reset_init(model),
     )
-
-    # GRU: reset hidden state before each system forward pass (i.e. each batch).
-    # This gives a clean computational graph per sequence while carrying state
-    # across rollout steps within a sequence.
-    if cfg.model == "gru":
-        gru_block = model.fy
-        system.register_forward_pre_hook(lambda m, inp: gru_block.reset())
-
-    return system

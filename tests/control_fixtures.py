@@ -64,9 +64,9 @@ def make_norm_stats(raw_df: pd.DataFrame) -> dict:
     return compute_norm_stats(raw_df, norm_type="z_score")
 
 
-def make_sysid_cfg(in_steps: int = 4) -> Config:
+def make_sysid_cfg(in_steps: int = 4, model: str = "mlp") -> Config:
     cfg = Config()
-    cfg.model = "mlp"
+    cfg.model = model
     cfg.in_steps = in_steps
     cfg.log2_hidden_size = 3
     cfg.num_layers = 1

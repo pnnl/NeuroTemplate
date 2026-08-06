@@ -54,7 +54,7 @@ band_width_max: 2.0
 # Penalty for leaving the comfort band.
 # comfort_weight: 50.0
 # Penalty on the step-to-step change in the control signal (anti-chatter).
-# du_weight: 0.1
+# du_weight: 10
 # Penalty on control_user_defined.power_metric. Must stay 0.0 until that hook
 # is implemented and POWER_METRIC_IMPLEMENTED is True — otherwise the run
 # fails at problem build.

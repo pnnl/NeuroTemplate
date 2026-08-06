@@ -23,7 +23,10 @@ test_data_path: data/test.csv
 # Family: mlp | nssm | lssm | gru | dummy ("dummy" is a passthrough used to
 # mint a checkpoint without identifying anything).
 # model: nssm
-# Input history length. Also sets the warmup each window spends before rollout.
+# Context length: how much history the model sees before the first scored
+# prediction, and the stride between training windows. Every family reads it as
+# a flattened input window; gru also carries a hidden state, so during a rollout
+# its memory runs past in_steps.
 # in_steps: 12
 # Hidden width is 2**log2_hidden_size.
 # log2_hidden_size: 8
