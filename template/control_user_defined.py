@@ -246,13 +246,31 @@ def build_baseline_policy(cfg, sysid_cfg, nm_mapping, norm_stats):
         umin, umax = actuation_bounds(nm_mapping, norm_stats)
         net = MyRule(umin.to(sysid_cfg.device), umax.to(sysid_cfg.device))
         return Node(net.to(sysid_cfg.device), ["ymin", "ymax"], ["U"],
-                    name="Band-midpoint baseline")
+                    name="Bracket baseline")
 
-    where `MyRule.forward(ymin, ymax)` returns e.g.
-    `torch.clamp(0.5 * (ymin + ymax), umin, umax)` — aim at the middle of the
-    band. Inputs can be any of the closed-loop signals ("yn", "ymin",
-    "ymax", "D"); see tests/fixtures/control_user_defined.py for a complete
-    worked example.
+    Inputs can be any of the closed-loop signals ("yn", "ymin", "ymax", "D");
+    see tests/fixtures/control_user_defined.py for a complete worked example.
+
+    On what rule to write, for a two-actuator heating/cooling setpoint pair:
+    **bracket the band** — put the heating setpoint at the band floor and the
+    cooling setpoint at (or just inside) the band ceiling, so the two
+    setpoints straddle the band rather than both aiming at one target. Two
+    details decide whether it works, and both are easy to get backwards:
+
+      - **Round each setpoint toward the band interior** (heating up, cooling
+        down) when snapping to a quantization grid. Rounding outward puts a
+        setpoint outside the band it is supposed to hold.
+      - **A small inset on the cooling side is a correction, not a safety
+        margin.** A zone typically floats *above* its cooling setpoint,
+        because the plant's setpoint→zone gain is well under 1 °C/°C. Aiming
+        exactly at the ceiling therefore violates constantly. But the useful
+        inset range can be narrower than one grid step: too large an inset
+        makes the two setpoints collide, and the rule stops bracketing at all.
+        Measure the gain and sweep the inset rather than guessing.
+
+    A plain band-midpoint rule (`0.5 * (ymin + ymax)` on both actuators) is
+    simpler and worth having as a sanity check, but it does not bracket, so it
+    gives up the deadband the two actuators could be holding.
     """
     return None
 

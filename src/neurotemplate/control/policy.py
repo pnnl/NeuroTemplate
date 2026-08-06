@@ -46,6 +46,64 @@ POLICY_NONLIN = {
 }
 
 
+@beartype
+def bracket_band(
+    lo: torch.Tensor,
+    hi: torch.Tensor,
+    step: float,
+    cool_inset: float = 0.0,
+    heat_inset: float = 0.0,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Straddle a comfort band with a (cooling, heating) setpoint pair.
+
+    A reference rule for `build_baseline_policy`, and a strong baseline: it
+    puts heating at the band floor and cooling at the band ceiling so the two
+    actuators bracket the band, instead of both chasing one target.
+
+    Everything is in physical units (°C), and both setpoints are snapped to the
+    `step` grid **toward the band interior** — heating rounds up, cooling rounds
+    down. Rounding outward would place a setpoint outside the band it is meant
+    to hold, which is the easy mistake here.
+
+    The insets pull each setpoint further inside its edge. `cool_inset` is
+    normally the one that matters: a zone floats *above* its cooling setpoint
+    because the plant's setpoint→zone gain is well under 1 °C/°C, so aiming
+    exactly at the ceiling violates constantly. Treat the inset as a
+    *correction* for that gain, measured on the plant — not as a safety margin
+    to be increased for comfort. Overshooting it is actively harmful: once the
+    two setpoints collide the rule stops bracketing and falls back to the
+    collapse branch below, and on a coarse grid that can happen within a single
+    grid step.
+
+    When the band is too narrow to seat both setpoints on the grid, both
+    collapse to one grid point near the band midpoint. Letting heating command
+    *above* cooling would make the two stages fight each other, which is worse
+    than giving up the deadband.
+
+    Args:
+        lo, hi: comfort band edges, any broadcast-compatible shape, in °C.
+        step: setpoint quantization in °C (e.g. 0.5). Must be > 0.
+        cool_inset: °C to pull the cooling setpoint below the band ceiling.
+        heat_inset: °C to pull the heating setpoint above the band floor.
+
+    Returns:
+        (cooling, heating), each the shape of `lo`/`hi` broadcast together.
+    """
+    if step <= 0:
+        raise ValueError(f"step must be > 0, got {step}")
+    if cool_inset < 0 or heat_inset < 0:
+        raise ValueError(
+            f"insets must be >= 0, got cool={cool_inset}, heat={heat_inset}"
+        )
+
+    heat = torch.ceil((lo + heat_inset) / step) * step
+    cool = torch.floor((hi - cool_inset) / step) * step
+
+    mid = torch.round(0.5 * (lo + hi) / step) * step
+    collapse = heat > cool
+    return torch.where(collapse, mid, cool), torch.where(collapse, mid, heat)
+
+
 class STEQuantize(nn.Module):
     """Snap to a setpoint grid in the forward pass; identity in the backward.
 
