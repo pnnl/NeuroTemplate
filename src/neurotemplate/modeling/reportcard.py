@@ -254,15 +254,30 @@ def _stability_section(stability: list[RolloutStability]) -> str:
     """
     if not stability:
         return _section("Rollout stability", "*(no stability computed)*")
-    flagged = [s.name for s in stability if s.rise_excess > 0.25]
+    flagged = [s.name for s in stability if s.looks_like_ramp()]
     body = stability_to_markdown(stability)
     if flagged:
         body += (
-            "\n\n**⚠️ Likely ramping (rise fraction far from the truth's):** "
+            "\n\n**⚠️ Likely ramping:** "
             + ", ".join(f"`{n}`" for n in flagged)
-            + ". A monotone rollout means the model is ignoring its inputs; "
-            "RMSE on a short window will not show it. Free-run the model over a "
-            "long horizon before training a controller on it."
+            + ". These channels move nearly monotonically, unlike the truth. A "
+            "monotone rollout means the model is ignoring its inputs; RMSE on a "
+            "short window will not show it. Free-run the model over a long "
+            "horizon before training a controller on it."
+        )
+    # A high excess with a mid-range rise fraction is the staged-equipment case,
+    # not a ramp: the truth holds a constant value most of the time and the model
+    # jitters instead of holding. Say so, or the table reads as eight failures.
+    noisy = [s.name for s in stability
+             if s.rise_excess > 0.25 and not s.looks_like_ramp()]
+    if noisy:
+        body += (
+            "\n\nHigh rise excess but *not* monotone: "
+            + ", ".join(f"`{n}`" for n in noisy)
+            + ". This is the expected signature for staged equipment (fans, "
+            "compressors, flow), whose truth holds one value for long stretches "
+            "while a continuous model jitters around it. Judge these channels on "
+            "RMSE and R², not on rise excess."
         )
     return _section("Rollout stability", body)
 

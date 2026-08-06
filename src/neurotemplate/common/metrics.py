@@ -59,6 +59,16 @@ class RolloutStability:
         near 0 or 1.
       - `drift`: mean |last - first| per window, in physical units. A stable
         rollout returns near where it started; a ramp does not.
+
+    `rise_excess` alone is not sufficient, which is worth spelling out because
+    the obvious reading of it is wrong. Staged equipment (fan power, DX power,
+    air flow) *holds* a constant value for most of a window — measured on real
+    test data, 57-96% of its consecutive diffs are exactly zero — so its true
+    rise fraction is near 0.03. Any continuous model jitters instead of holding
+    and lands near 0.50, producing a rise excess of ~0.47 while tracking the
+    signal perfectly well. Use `looks_like_ramp`, which additionally requires
+    the prediction's own rise fraction to be *extreme*; jitter sits near 0.5, a
+    ramp does not.
     """
     name: str
     pred_rise_fraction: float
@@ -68,8 +78,30 @@ class RolloutStability:
 
     @property
     def rise_excess(self) -> float:
-        """|pred - true| rise fraction. 0 is perfect; >0.25 means a ramp."""
+        """|pred - true| rise fraction. 0 means the shape matches the truth.
+
+        Large values mean "does not move like the truth", which includes both
+        ramping and jittering on a held signal — see `looks_like_ramp` before
+        concluding a model is ramping.
+        """
         return abs(self.pred_rise_fraction - self.true_rise_fraction)
+
+    def looks_like_ramp(self, excess_warn: float = 0.25,
+                        extreme: float = 0.15) -> bool:
+        """Whether this channel's rollout is monotone rather than merely noisy.
+
+        Two conditions, because either alone gives false positives:
+        the shape must differ from the truth's (`rise_excess > excess_warn`),
+        *and* the prediction must be nearly monotone in one direction
+        (rise fraction within `extreme` of 0 or 1). Measured on synthetic cases
+        against a truth that holds 57% of the time: jitter scores a rise
+        fraction of 0.484 and is not flagged, a genuine ramp scores 1.000 and
+        is.
+        """
+        if self.rise_excess <= excess_warn:
+            return False
+        return (self.pred_rise_fraction < extreme
+                or self.pred_rise_fraction > 1.0 - extreme)
 
     @property
     def drift_ratio(self) -> float:
@@ -216,7 +248,7 @@ def stability_to_markdown(
     sep = "|---|---:|---:|---:|---:|---|"
     rows = [header, sep]
     for s in stability:
-        flag = "⚠️ ramp?" if s.rise_excess > rise_excess_warn else ""
+        flag = "⚠️ ramp?" if s.looks_like_ramp(rise_excess_warn) else ""
         rows.append(
             f"| {s.name} | {s.pred_rise_fraction:.3f} / "
             f"{s.true_rise_fraction:.3f} | {s.rise_excess:.3f} | "
@@ -237,6 +269,7 @@ def stability_to_dict(stability: list[RolloutStability]) -> dict:
             "pred_drift": s.pred_drift,
             "true_drift": s.true_drift,
             "drift_ratio": s.drift_ratio,
+            "looks_like_ramp": s.looks_like_ramp(),
         }
         for s in stability
     }

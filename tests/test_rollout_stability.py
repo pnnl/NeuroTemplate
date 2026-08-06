@@ -6,7 +6,16 @@ its inputs and was emitting a monotone ramp. RMSE cannot see that. These tests
 pin the two properties that can:
 
   - a ramp is flagged even when its RMSE is small,
-  - a genuinely monotone *truth* is NOT flagged (the diagnostic is relative).
+  - a genuinely monotone *truth* is NOT flagged (the diagnostic is relative),
+  - a model that merely *jitters* on a held signal is NOT flagged as ramping.
+
+That last one is the false positive the first version of this diagnostic had.
+Staged equipment (fan power, DX power, air flow) holds one value for long
+stretches — measured on real test data, 57-96% of its consecutive diffs are
+exactly zero — so its true rise fraction is ~0.03. Any continuous model jitters
+instead of holding and lands near 0.50, which is a rise excess of ~0.47 while
+tracking the signal fine. Rise excess alone therefore flagged three healthy
+channels out of eight on a real run.
 """
 
 import pytest
@@ -80,6 +89,75 @@ def test_flat_prediction_is_flagged():
     assert s.rise_excess > 0.25
 
 
+def _staged(n: int = 96) -> torch.Tensor:
+    """Staged equipment: holds one value for long stretches, then steps.
+
+    Mirrors the real signature — most consecutive diffs are exactly zero, so the
+    true rise fraction is small even though nothing is monotone.
+    """
+    x = torch.zeros(1, n, 1)
+    x[:, n // 3: 2 * n // 3, 0] = 800.0
+    x[:, 2 * n // 3:, 0] = 200.0
+    return x
+
+
+def test_jitter_on_a_held_signal_is_not_called_a_ramp():
+    """The false positive that shipped first: high excess, but not monotone.
+
+    A continuous model cannot hold a value exactly, so on staged equipment it
+    jitters and its rise fraction lands near 0.5 against a truth near 0.03.
+    That is a big rise excess and not a ramp, so `looks_like_ramp` must say no.
+    """
+    true = _staged()
+    jitter = true + 40.0 * torch.sin(torch.linspace(0, 60, 96)).reshape(1, 96, 1)
+
+    s = rollout_stability(jitter, true, ["fan power"])[0]
+    assert s.true_rise_fraction < 0.10, "truth should mostly hold"
+    assert s.rise_excess > 0.25, "excess alone would flag this"
+    assert 0.3 < s.pred_rise_fraction < 0.7, "jitter sits mid-range"
+    assert not s.looks_like_ramp(), "jitter is not a ramp"
+
+
+def test_a_real_ramp_on_a_held_signal_is_still_flagged():
+    """The fix must not blunt the true positive it was built for."""
+    true = _staged()
+    ramp = torch.linspace(0.0, 1500.0, 96).reshape(1, 96, 1)
+
+    s = rollout_stability(ramp, true, ["fan power"])[0]
+    assert s.pred_rise_fraction == pytest.approx(1.0)
+    assert s.looks_like_ramp()
+
+
+def test_stuck_flat_prediction_is_flagged_as_a_ramp():
+    """The other monotone degenerate case: rise fraction 0, not 1."""
+    s = rollout_stability(torch.full((1, 96, 1), 400.0), _cycle(96), ["y"])[0]
+    assert s.pred_rise_fraction == pytest.approx(0.0)
+    assert s.looks_like_ramp()
+
+
+def test_looks_like_ramp_requires_both_conditions():
+    """Neither condition alone is sufficient, in both directions."""
+    # Monotone prediction AND monotone truth: extreme, but excess is 0.
+    true = torch.linspace(0.0, 100.0, 50).reshape(1, 50, 1)
+    s = rollout_stability(true + 1.0, true, ["energy"])[0]
+    assert s.pred_rise_fraction == pytest.approx(1.0)
+    assert not s.looks_like_ramp(), "matching a monotone truth is correct"
+
+    # Thresholds are tunable, and tightening `extreme` un-flags a borderline case.
+    ramp = torch.linspace(20.0, 30.0, 96).reshape(1, 96, 1)
+    s = rollout_stability(ramp, _cycle(96), ["zone"])[0]
+    assert s.looks_like_ramp(excess_warn=0.25)
+    assert not s.looks_like_ramp(excess_warn=0.99), "excess gate must apply"
+
+
+def test_markdown_does_not_flag_staged_equipment():
+    """End-to-end: the reportcard table must stay quiet on the jitter case."""
+    true = _staged()
+    jitter = true + 40.0 * torch.sin(torch.linspace(0, 60, 96)).reshape(1, 96, 1)
+    md = stability_to_markdown(rollout_stability(jitter, true, ["fan power"]))
+    assert "ramp?" not in md
+
+
 def test_drift_ratio_is_inf_when_only_prediction_drifts():
     """A drifting prediction against a non-drifting truth is unbounded, not 0/0."""
     true = torch.cat([torch.zeros(1, 50, 1), torch.zeros(1, 50, 1)], dim=1)
@@ -141,8 +219,9 @@ def test_dict_is_json_serializable_and_includes_derived_fields():
     d = stability_to_dict(rollout_stability(y, y, ["zone"]))
     assert set(d["zone"]) == {
         "pred_rise_fraction", "true_rise_fraction", "rise_excess",
-        "pred_drift", "true_drift", "drift_ratio",
+        "pred_drift", "true_drift", "drift_ratio", "looks_like_ramp",
     }
+    assert d["zone"]["looks_like_ramp"] is False
     json.dumps(d)  # must not raise
 
 
