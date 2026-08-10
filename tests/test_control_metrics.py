@@ -2,6 +2,7 @@ import pytest
 import torch
 
 from neurotemplate.control.metrics import (
+    actuation_metrics,
     comfort_metrics,
     comfort_to_dict,
     comfort_to_markdown,
@@ -216,11 +217,16 @@ def _results(violation_rate=0.5, power=1000.0):
     y = torch.full((2, 4, 1), 26.0)
     ymin = torch.full((2, 4, 1), 20.0)
     ymax = torch.full((2, 4, 1), 25.0)
+    u = torch.full((2, 4, 1), 23.0)
     return ControlResults(
         comfort_violation_rate=violation_rate,
         comfort_mean_exceedance=1.0,  # y is constant 26.0, ymax 25.0 -> excursion 1.0 everywhere
         comfort=comfort_metrics(y, ymin, ymax, ["zone [°C]"], 0.25),
         mean_abs_du=0.25,
+        actuation=actuation_metrics(u, ["setpoint [°C]"],
+                                    torch.tensor([22.0]), torch.tensor([28.0])),
+        # A constant band never jumps, so there is nothing to audit.
+        response=[],
         tracking=per_channel_metrics(y, 0.5 * (ymin + ymax), ["zone [°C]"]),
         energy=energy_metrics(torch.full((2, 4), power), 0.25),
         eval_time_s=0.1,

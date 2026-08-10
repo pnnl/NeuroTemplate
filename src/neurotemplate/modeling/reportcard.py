@@ -13,9 +13,11 @@ logged to MLflow. Sections (in order):
   5. Rollout stability      — per-channel rise fraction and drift vs. the
                               truth's own, flagging models that have stopped
                               responding to their inputs and are ramping
-  6. Bounded channel coverage — for each bounded head, whether any test
+  6. Actuator authority     — counterfactual sweep of each control input, and
+                              the achievable envelope of each channel
+  7. Bounded channel coverage — for each bounded head, whether any test
                               samples fall outside the head's [lo, hi]
-  7. Hyperparameters        — lr, batch_size, train_pred_steps, curriculum, gains
+  8. Hyperparameters        — lr, batch_size, train_pred_steps, curriculum, gains
 
 The "auto-detected anomalies" section listed in updates.md is left for
 a future, more creative pass and intentionally not implemented here.
@@ -40,6 +42,11 @@ from neurotemplate.common.metrics import (
     RolloutStability,
     metrics_to_markdown,
     stability_to_markdown,
+)
+from neurotemplate.modeling.probe import (
+    AuthorityReport,
+    authority_to_markdown,
+    envelope_to_markdown,
 )
 from neurotemplate.common.reportcard import _fmt_float, _section
 
@@ -314,6 +321,44 @@ def _stability_section(
     return _section("Rollout stability", body)
 
 
+def _authority_section(report: AuthorityReport) -> str:
+    """Counterfactual actuator sweep — the check RMSE cannot make.
+
+    Two surrogates can fit the same data and disagree completely about what
+    the actuators do. The one that thinks they do nothing trains a policy that
+    does nothing, and its comfort numbers look fine right up until the plant
+    is in the loop.
+    """
+    dead = report.dead_actuators()
+    body = [
+        f"Each control input was held at each end of its range for the whole "
+        f"rollout while the disturbances kept their recorded values, over "
+        f"{report.n_windows} test windows with the first "
+        f"{report.settle_steps} rollout steps dropped as transient. **Δ "
+        f"channel** is how far that swing moved the channel — this is what "
+        f"the policy has to work with.\n",
+        authority_to_markdown(report),
+        "",
+        "Achievable envelope: the span of settled values each channel was "
+        "driven to across the same sweep. A reference band outside this span "
+        "cannot be held by any policy, and the violation rate scored against "
+        "it measures the weather.\n",
+        envelope_to_markdown(report),
+    ]
+    if dead:
+        body += [
+            "",
+            "**⚠️ No authority:** " + ", ".join(f"`{u}`" for u in dead)
+            + ". Swinging these inputs across their full range moves no "
+            "predicted channel by as much as 2% of its own range, so the "
+            "policy has no lever here. Either the plant genuinely does not "
+            "respond, or the training data never excited the input enough to "
+            "identify its effect. Do not train a controller against this "
+            "surrogate expecting that actuator to do work.",
+        ]
+    return _section("Actuator authority", "\n".join(body))
+
+
 def _hyperparameters_section(cfg: ModelingConfig) -> str:
     rows = [
         f"- **lr:** {cfg.lr}",
@@ -351,6 +396,7 @@ def render_reportcard(
     nm_mapping: dict[str, list[str]],
     *,
     stability: Optional[list[RolloutStability]] = None,
+    authority: Optional[AuthorityReport] = None,
     head_stack: Optional[HeadStack] = None,
     norm_stats: Optional[dict] = None,
     test_df: Optional[pd.DataFrame] = None,
@@ -371,6 +417,9 @@ def render_reportcard(
         stability:     Output of metrics.rollout_stability(...). Omitted for
                        callers that only have per-channel metrics; the section
                        is then skipped.
+        authority:     Output of probe.probe_authority(...). Omitted for
+                       callers that did not run the sweep; the section is
+                       then skipped.
         nm_mapping:    {"Y": [...], "U": [...], "D": [...]} from data_mapping.
         head_stack:    Optional HeadStack; when provided, non-regression Y
                        columns are annotated with their head kind in the data
@@ -399,6 +448,8 @@ def render_reportcard(
     ]
     if stability is not None:
         parts.append(_stability_section(stability, cfg.test_window))
+    if authority is not None:
+        parts.append(_authority_section(authority))
     coverage = _bounded_coverage_section(head_stack, test_df)
     if coverage is not None:
         parts.append(coverage)

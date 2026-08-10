@@ -11,9 +11,11 @@ Sections (in order):
   2. Policy architecture   — from control.policy.describe_policy
   3. Scenario              — horizons, controlled channels, bands, weights
   4. Closed-loop performance — comfort table, actuation, energy
-  5. Baseline comparison   — learned vs. rule-based, or why there is none
-  6. Tracking error        — per-channel error vs. the comfort-band midpoint
-  7. Hyperparameters       — the knobs that produced this run
+  5. Actuation             — per-control effort and saturation fraction
+  6. Band-jump response    — did the loop react when the reference moved
+  7. Baseline comparison   — learned vs. rule-based, or why there is none
+  8. Tracking error        — per-channel error vs. the comfort-band midpoint
+  9. Hyperparameters       — the knobs that produced this run
 """
 
 from __future__ import annotations
@@ -23,7 +25,12 @@ from typing import Optional
 
 from neurotemplate.common.metrics import metrics_to_markdown
 from neurotemplate.common.reportcard import _fmt_float, _section
-from neurotemplate.control.metrics import comfort_to_markdown
+from neurotemplate.control.metrics import (
+    SATURATION_WARN,
+    actuation_to_markdown,
+    comfort_to_markdown,
+    response_to_markdown,
+)
 from neurotemplate.control.scenarios import horizons
 
 from neurotemplate._typing import beartype
@@ -136,6 +143,75 @@ def _performance_section(results) -> str:
     ]
     body += _energy_lines(results.energy)
     return _section("Closed-loop performance", "\n".join(body))
+
+
+def _actuation_section(results) -> str:
+    """Per-control effort and saturation — the cheapest silent-failure check.
+
+    A pooled mean |Δu| hides an actuator that never moves, and a comfort score
+    hides one that sits on a bound. Both are one column each here.
+    """
+    pinned = [m for m in results.actuation
+              if m.frac_saturated > SATURATION_WARN]
+    body = [
+        "What each control input actually did, in its own physical units. "
+        "\"At bound\" counts commands within 1% of the actuation range of a "
+        "limit, because a smooth bound method never reaches one exactly.\n",
+        actuation_to_markdown(results.actuation),
+    ]
+    if pinned:
+        body += [
+            "",
+            "**⚠️ Pinned at a bound:** "
+            + ", ".join(
+                f"`{m.name}` ({m.frac_saturated * 100:.0f}% of the evaluation)"
+                for m in pinned
+            )
+            + ". A control held against its limit is not being modulated — the "
+            "closed loop is running on whatever is left. This is usually an "
+            "objective term whose gradient points one way across the whole "
+            "feasible set, not a policy that chose to saturate.",
+        ]
+    return _section("Actuation", "\n".join(body))
+
+
+def _response_section(results, u_names: list[str]) -> str:
+    """Did the loop answer when the reference band moved?
+
+    The comparison that motivates this section: two controllers, 16.6% vs
+    17.9% pooled violation, and the *better*-scoring one reacted to 0% of the
+    band jumps that demanded cooling while the worse one reacted to 75%. The
+    pooled metric ranked them backwards.
+    """
+    if not results.response:
+        return _section(
+            "Band-jump response",
+            "*(no band jumps left a controlled channel outside its band, so "
+            "there was nothing to audit — raise `test_band_sub_samples` or "
+            "widen the band range to exercise the controller.)*",
+        )
+    body = [
+        "Every step change in the reference band that left a controlled "
+        "channel outside the new band, scored over the segment until the next "
+        "jump. **Actuated** is whether any control moved on the same step; "
+        "**moved right way** and **back in band** are whether the channel "
+        "then followed. The per-control Δ columns name the actuator that did "
+        "(or did not) do the work.\n",
+        response_to_markdown(results.response, u_names),
+    ]
+    ignored = [r for r in results.response if r.frac_actuated < 0.5]
+    if ignored:
+        body += [
+            "",
+            "**⚠️ Requests largely ignored:** "
+            + ", ".join(f"`{r.name}` / {r.direction} "
+                        f"({r.frac_actuated * 100:.0f}% actuated)"
+                        for r in ignored)
+            + ". The band asked the loop to move the channel and the controls "
+            "mostly stayed put. Check the Δ columns for which actuator is "
+            "inert, then the Actuation section for whether it is pinned.",
+        ]
+    return _section("Band-jump response", "\n".join(body))
 
 
 def _comparison_values(results) -> list[Optional[float]]:
@@ -254,6 +330,8 @@ def render_control_reportcard(
         _scenario_section(cfg, sysid_cfg, nm_mapping, controlled,
                           eval_band_seed),
         _performance_section(results),
+        _actuation_section(results),
+        _response_section(results, nm_mapping["U"]),
         _baseline_section(results, baseline),
         _tracking_section(results),
         _hyperparameters_section(cfg),

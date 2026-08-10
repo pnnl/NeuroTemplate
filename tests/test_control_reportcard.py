@@ -13,7 +13,12 @@ from pathlib import Path
 import torch
 
 from neurotemplate.common.metrics import per_channel_metrics
-from neurotemplate.control.metrics import comfort_metrics, energy_metrics
+from neurotemplate.control.metrics import (
+    actuation_metrics,
+    comfort_metrics,
+    energy_metrics,
+    response_audit,
+)
 from neurotemplate.control.pipeline import ControlResults
 from neurotemplate.control.reportcard import render_control_reportcard
 from control_fixtures import make_control_cfg, make_sysid_cfg
@@ -46,16 +51,31 @@ def _make_arch():
     }
 
 
+_U_LO, _U_HI = torch.tensor([22.0]), torch.tensor([28.0])
+
+
 def _make_results(offset: float = 1.0, power_level: float = 1500.0):
-    """ControlResults for a trajectory held `offset` above a fixed band."""
+    """ControlResults for a trajectory held `offset` above the band.
+
+    Shaped to exercise every section: the band jumps at the midpoint (so the
+    response audit has something to score), the channel is out of band from
+    then on, and the setpoint mostly sits on its lower bound — one window
+    answers the jump, the other ignores it.
+    """
     n = 8
     y = torch.full((2, n, 1), 22.0)
     y[:, n // 2:, :] = 25.0 + offset
+    # ymin steps 19 -> 20 halfway, which is a band jump that leaves the
+    # channel above the band without changing any excursion.
     ymin = torch.full((2, n, 1), 20.0)
+    ymin[:, :n // 2, :] = 19.0
     ymax = torch.full((2, n, 1), 25.0)
     mid = 0.5 * (ymin + ymax)
     power = torch.full((2, n), power_level)
     comfort = comfort_metrics(y, ymin, ymax, _CONTROLLED, step_hours=0.25)
+
+    u = torch.full((2, n, 1), 22.0)      # pinned at the lower bound
+    u[1, n // 2:, :] = 23.0              # ...except one window, late
 
     return ControlResults(
         comfort_violation_rate=0.5,
@@ -64,7 +84,10 @@ def _make_results(offset: float = 1.0, power_level: float = 1500.0):
         # `offset` above -> mean excursion = offset / 2.
         comfort_mean_exceedance=comfort[0].mean_exceedance,
         comfort=comfort,
-        mean_abs_du=0.375,
+        mean_abs_du=float((u[:, 1:, :] - u[:, :-1, :]).abs().mean()),
+        actuation=actuation_metrics(u, _NM["U"], _U_LO, _U_HI),
+        response=response_audit(y, ymin, ymax, u, _CONTROLLED, _NM["U"],
+                                _U_LO, _U_HI),
         tracking=per_channel_metrics(y, mid, _CONTROLLED),
         energy=energy_metrics(power, step_hours=0.25),
         eval_time_s=0.5,
@@ -98,6 +121,8 @@ def test_all_sections_present():
         "## Policy architecture",
         "## Scenario",
         "## Closed-loop performance",
+        "## Actuation",
+        "## Band-jump response",
         "## Baseline comparison",
         "## Tracking error vs. comfort-band midpoint",
         "## Hyperparameters",

@@ -24,12 +24,18 @@ from neurotemplate.common.metrics import (
 )
 from neurotemplate.common.reportcard import write_reportcard as _write_reportcard
 from neurotemplate.control.metrics import (
+    ActuationMetrics,
     ComfortMetrics,
     EnergyMetrics,
+    JumpResponse,
+    actuation_metrics,
+    actuation_to_dict,
     comfort_metrics,
     comfort_to_dict,
     energy_metrics,
     hours_per_step,
+    response_audit,
+    response_to_dict,
 )
 from neurotemplate.control.closed_loop import build_closed_loop
 from neurotemplate.control.scenarios import horizons, build_window_dict_multi
@@ -49,6 +55,8 @@ class ControlResults:
     comfort_mean_exceedance: float     # pooled mean excursion over ALL steps
     comfort: list[ComfortMetrics]      # per-zone comfort detail
     mean_abs_du: float                 # mean |Δsetpoint| (physical units)
+    actuation: list[ActuationMetrics]  # per-control effort + saturation
+    response: list[JumpResponse]       # reaction to reference-band jumps
     tracking: list[ChannelMetrics]     # per-zone error vs band midpoint
     energy: Optional[EnergyMetrics]    # None if power_metric not implemented
     eval_time_s: float
@@ -188,6 +196,17 @@ def evaluate_closed_loop(
     U = out["U"][:, hmax:, :] * u_stretch + u_shift
     mean_abs_du = (U[:, 1:, :] - U[:, :-1, :]).abs().mean().item()
 
+    # Per-control behaviour, in the same physical units as the commands. The
+    # bounds come from the hook the policy is actually squashed into, so
+    # "at bound" means the limit the policy was given, not the data's spread.
+    umin_n, umax_n = hooks.actuation_bounds(nm_mapping, norm_stats)
+    u_lo = umin_n.to(device) * u_stretch + u_shift
+    u_hi = umax_n.to(device) * u_stretch + u_shift
+    actuation = actuation_metrics(U, u_cols, u_lo, u_hi)
+    response = response_audit(
+        y_ctrl, ymin, ymax, U, controlled, u_cols, u_lo, u_hi,
+    )
+
     energy = None
     if getattr(hooks, "POWER_METRIC_IMPLEMENTED", False):
         power = hooks.power_metric(
@@ -201,6 +220,8 @@ def evaluate_closed_loop(
         comfort_mean_exceedance=mean_exceedance,
         comfort=comfort,
         mean_abs_du=mean_abs_du,
+        actuation=actuation,
+        response=response,
         tracking=tracking,
         energy=energy,
         eval_time_s=eval_time_s,
@@ -249,6 +270,14 @@ def _flat_control_metrics(results: ControlResults, prefix: str) -> dict:
         flat[f"{prefix}_{safe}_mean_violation"] = m.mean_violation
         flat[f"{prefix}_{safe}_max_violation"] = m.max_violation
         flat[f"{prefix}_{safe}_degree_hours"] = m.degree_hours
+    for a in results.actuation:
+        safe = _safe_metric_key(a.name)
+        flat[f"{prefix}_{safe}_mean_abs_du"] = a.mean_abs_du
+        flat[f"{prefix}_{safe}_frac_saturated"] = a.frac_saturated
+    for r in results.response:
+        safe = f"{_safe_metric_key(r.name)}_{r.direction}"
+        flat[f"{prefix}_{safe}_actuated"] = r.frac_actuated
+        flat[f"{prefix}_{safe}_resolved"] = r.frac_resolved
     if results.energy is not None:
         flat[f"{prefix}_mean_power"] = results.energy.mean_power
         flat[f"{prefix}_total_energy"] = results.energy.total_energy
@@ -263,6 +292,8 @@ def _control_metrics_dict(results: ControlResults) -> dict:
         "mean_exceedance": results.comfort_mean_exceedance,
         "mean_abs_du": results.mean_abs_du,
         "comfort": comfort_to_dict(results.comfort),
+        "actuation": actuation_to_dict(results.actuation),
+        "response": response_to_dict(results.response),
         "energy": None if results.energy is None else asdict(results.energy),
         "tracking": metrics_to_dict(results.tracking),
     }

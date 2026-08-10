@@ -1,13 +1,24 @@
 """
 Closed-loop control metrics in physical units.
 
-Two groups, kept separate because they answer different questions and have
+Four groups, kept separate because they answer different questions and have
 different units:
 
   - ComfortMetrics — per controlled channel: how often, how badly, and in
     which direction the comfort band was violated.
   - EnergyMetrics  — how much power the closed loop drew, and what the peaks
     looked like.
+  - ActuationMetrics — per control input: how hard it worked and how much of
+    the evaluation it spent pinned at a bound.
+  - JumpResponse   — whether the loop actually reacted when the reference band
+    moved, which the pooled comfort numbers cannot see.
+
+The last two exist because pooled comfort scores are silent about behaviour.
+A controller that pinned one of its two actuators at a bound for 92% of the
+evaluation scored *better* on violation rate than the fixed version of itself,
+and only a hand-written trajectory audit found it. Saturation fraction and
+band-jump reaction rate are the two numbers that would have said so on the
+first run.
 
 Everything here is a pure function over already-denormalized tensors. The
 pipeline does the denormalization and the hook calls; this module only does
@@ -63,6 +74,62 @@ class EnergyMetrics:
     total_energy: float      # mean over windows of ∫power dt, in power·h
     peak_power: float        # worst instantaneous draw anywhere
     mean_window_peak: float  # mean of per-window maxima — demand-charge proxy
+
+
+# A command within this share of the actuation range of a bound counts as
+# sitting on that bound, and a step of at least this share counts as the
+# controller having moved. Bound methods like `sigmoid_scale` never reach a
+# limit exactly, so an exact comparison would report no saturation ever.
+SATURATION_TOL = 0.01
+
+
+@dataclass
+class ActuationMetrics:
+    """What one control input did over the evaluation, in physical units.
+
+    `frac_at_min` / `frac_at_max` are the cheapest diagnostic in this module
+    and the one most worth reading first: an actuator pinned at a bound for
+    most of the evaluation is not being controlled, and no comfort statistic
+    will say so.
+    """
+    name: str
+    mean_value: float     # mean commanded value
+    mean_abs_du: float    # mean |Δ| between consecutive commands
+    frac_at_min: float    # share of steps sitting on the lower bound
+    frac_at_max: float    # share of steps sitting on the upper bound
+    u_min: float          # the actuation bounds themselves, for context
+    u_max: float
+
+    @property
+    def frac_saturated(self) -> float:
+        return self.frac_at_min + self.frac_at_max
+
+
+@dataclass
+class JumpResponse:
+    """The loop's answer to reference-band step changes, one demand direction.
+
+    A band jump that leaves the controlled channel outside the new band is a
+    request the controller either answers or ignores. Pooled violation rates
+    cannot tell those apart — a policy can score well by sitting still
+    somewhere lucky — so each jump is scored on three separate things:
+
+      actuated — some control moved on the same step as the jump
+      closed   — the channel then moved in the demanded direction
+      resolved — the channel was inside the band by the end of the segment
+
+    `mean_du` breaks the reaction down per control input, which is what names
+    the actuator that is not pulling its weight.
+    """
+    name: str                   # controlled channel
+    direction: str              # "rise" (channel below band) or "fall" (above)
+    n_jumps: int
+    frac_actuated: float
+    frac_closed: float
+    frac_resolved: float
+    mean_move: float            # mean signed channel movement over the segment
+    mean_span: float            # mean steps scored per jump, i.e. the horizon
+    mean_du: dict[str, float]   # mean signed Δcommand per control input
 
 
 @beartype
@@ -173,6 +240,167 @@ def energy_metrics(power: torch.Tensor, step_hours: float) -> EnergyMetrics:
 
 
 @beartype
+def actuation_metrics(
+    u: torch.Tensor,
+    u_names: list[str],
+    u_min: torch.Tensor,
+    u_max: torch.Tensor,
+) -> list[ActuationMetrics]:
+    """
+    Args:
+        u:      [batch, time, nu] commanded controls in physical units.
+        u_names: names for the nu axis.
+        u_min/u_max: actuation bounds in physical units, one per control.
+
+    Returns:
+        One ActuationMetrics per control, in the order of u_names.
+    """
+    if u.ndim != 3:
+        raise ValueError(f"Expected 3D [batch, time, nu] controls; got {u.ndim}D")
+    if len(u_names) != u.shape[-1]:
+        raise ValueError(
+            f"u_names has {len(u_names)} entries but the control tensor has "
+            f"nu={u.shape[-1]}"
+        )
+    if u_min.shape != (len(u_names),) or u_max.shape != (len(u_names),):
+        raise ValueError(
+            f"u_min/u_max must have one entry per control ({len(u_names)}); "
+            f"got {tuple(u_min.shape)} and {tuple(u_max.shape)}"
+        )
+
+    u = u.detach().cpu()
+    u_min, u_max = u_min.detach().cpu(), u_max.detach().cpu()
+    tol = SATURATION_TOL * (u_max - u_min)
+    du = (u[:, 1:, :] - u[:, :-1, :]).abs()
+
+    return [
+        ActuationMetrics(
+            name=name,
+            mean_value=float(u[:, :, j].mean()),
+            mean_abs_du=float(du[:, :, j].mean()),
+            frac_at_min=float((u[:, :, j] <= u_min[j] + tol[j]).float().mean()),
+            frac_at_max=float((u[:, :, j] >= u_max[j] - tol[j]).float().mean()),
+            u_min=float(u_min[j]),
+            u_max=float(u_max[j]),
+        )
+        for j, name in enumerate(u_names)
+    ]
+
+
+def _band_jumps(lo: torch.Tensor, hi: torch.Tensor) -> list[int]:
+    """Steps at which the band moved, for one (window, channel) pair.
+
+    Read off the band signal itself rather than reconstructed from
+    `BandSpec.sub_samples`, so a use case that overrides `comfort_band_signal`
+    with an occupancy schedule or a recorded column is audited just the same.
+    """
+    changed = (lo[1:] != lo[:-1]) | (hi[1:] != hi[:-1])
+    return (changed.nonzero().flatten() + 1).tolist()
+
+
+@beartype
+def response_audit(
+    y: torch.Tensor,
+    ymin: torch.Tensor,
+    ymax: torch.Tensor,
+    u: torch.Tensor,
+    channel_names: list[str],
+    u_names: list[str],
+    u_min: torch.Tensor,
+    u_max: torch.Tensor,
+) -> list[JumpResponse]:
+    """Score every reference-band step change that left the channel out of band.
+
+    Args:
+        y/ymin/ymax: [batch, time, n_ctrl] controlled channel and its band, in
+            physical units.
+        u:      [batch, time, nu] commanded controls in physical units.
+        u_min/u_max: actuation bounds in physical units, used to size the step
+            that counts as the controller having reacted.
+
+    Each jump is scored over the segment that follows it — up to the next jump,
+    or the end of the window. That keeps the horizon parameter-free: the
+    question is whether the loop answered the request before the request
+    changed again.
+
+    Returns one JumpResponse per (channel, direction) that had at least one
+    such jump, so an empty list means the band never moved the channel out of
+    its own band and there was nothing to audit.
+    """
+    if not (y.shape == ymin.shape == ymax.shape):
+        raise ValueError(
+            f"Shape mismatch: y {tuple(y.shape)}, ymin {tuple(ymin.shape)}, "
+            f"ymax {tuple(ymax.shape)}"
+        )
+    if y.ndim != 3 or u.ndim != 3:
+        raise ValueError("Expected 3D [batch, time, n] tensors")
+    if y.shape[:2] != u.shape[:2]:
+        raise ValueError(
+            f"y and u must share batch/time; got {tuple(y.shape[:2])} vs "
+            f"{tuple(u.shape[:2])}"
+        )
+    if len(channel_names) != y.shape[-1] or len(u_names) != u.shape[-1]:
+        raise ValueError(
+            f"Name lists must match tensor widths: {len(channel_names)} vs "
+            f"n_ctrl={y.shape[-1]}, {len(u_names)} vs nu={u.shape[-1]}"
+        )
+
+    y, ymin, ymax, u = (t.detach().cpu() for t in (y, ymin, ymax, u))
+    du_tol = SATURATION_TOL * (u_max.detach().cpu() - u_min.detach().cpu())
+    n_windows, n_steps, _ = y.shape
+
+    # (channel, direction) -> list of per-jump records.
+    hits: dict[tuple[str, str], list[dict]] = {}
+    for w in range(n_windows):
+        for c, name in enumerate(channel_names):
+            lo, hi = ymin[w, :, c], ymax[w, :, c]
+            jumps = _band_jumps(lo, hi)
+            for n, i in enumerate(jumps):
+                end = jumps[n + 1] - 1 if n + 1 < len(jumps) else n_steps - 1
+                if end <= i:
+                    continue
+                y_at, y_end = float(y[w, i, c]), float(y[w, end, c])
+                lo_i, hi_i = float(lo[i]), float(hi[i])
+                if lo_i <= y_at <= hi_i:
+                    continue  # the jump asked for nothing
+                direction = "rise" if y_at < lo_i else "fall"
+                sign = 1.0 if direction == "rise" else -1.0
+                du = u[w, i, :] - u[w, i - 1, :]
+                hits.setdefault((name, direction), []).append({
+                    "actuated": bool((du.abs() > du_tol).any()),
+                    "closed": sign * (y_end - y_at) > SATURATION_TOL * (hi_i - lo_i),
+                    "resolved": (float(ymin[w, end, c]) <= y_end
+                                 <= float(ymax[w, end, c])),
+                    "move": y_end - y_at,
+                    "span": float(end - i),
+                    "du": du,
+                })
+
+    def mean_of(rows: list[dict], key: str) -> float:
+        return sum(float(r[key]) for r in rows) / len(rows)
+
+    results = []
+    for name in channel_names:                 # stable, name-then-direction order
+        for direction in ("rise", "fall"):
+            rows = hits.get((name, direction))
+            if not rows:
+                continue
+            mean_du = torch.stack([r["du"] for r in rows]).mean(dim=0)
+            results.append(JumpResponse(
+                name=name,
+                direction=direction,
+                n_jumps=len(rows),
+                frac_actuated=mean_of(rows, "actuated"),
+                frac_closed=mean_of(rows, "closed"),
+                frac_resolved=mean_of(rows, "resolved"),
+                mean_move=mean_of(rows, "move"),
+                mean_span=mean_of(rows, "span"),
+                mean_du={n: float(mean_du[j]) for j, n in enumerate(u_names)},
+            ))
+    return results
+
+
+@beartype
 def comfort_to_markdown(metrics: list[ComfortMetrics]) -> str:
     """Render comfort metrics as a markdown table for the reportcard."""
     header = (
@@ -198,3 +426,62 @@ def comfort_to_dict(metrics: list[ComfortMetrics]) -> dict:
     """JSON-serializable comfort metrics (for MLflow / disk)."""
     return {m.name: {k: v for k, v in asdict(m).items() if k != "name"}
             for m in metrics}
+
+
+# A control sitting on a bound for more than this share of the evaluation is
+# not being modulated; the reportcard says so out loud.
+SATURATION_WARN = 0.5
+
+
+@beartype
+def actuation_to_markdown(metrics: list[ActuationMetrics]) -> str:
+    """Render per-control actuation as a markdown table, flagging pinning."""
+    rows = [
+        "| Control | Bounds | Mean | Mean \\|Δu\\| | At lower bound | "
+        "At upper bound | |",
+        "|---|---|---:|---:|---:|---:|---|",
+    ]
+    for m in metrics:
+        flag = "⚠️ pinned" if m.frac_saturated > SATURATION_WARN else ""
+        rows.append(
+            f"| {m.name} | [{m.u_min:.4g}, {m.u_max:.4g}] | "
+            f"{m.mean_value:.4g} | {m.mean_abs_du:.4g} | "
+            f"{m.frac_at_min * 100:.1f}% | {m.frac_at_max * 100:.1f}% | {flag} |"
+        )
+    return "\n".join(rows)
+
+
+@beartype
+def response_to_markdown(responses: list[JumpResponse],
+                         u_names: list[str]) -> str:
+    """Render the band-jump audit: one row per (channel, demand direction)."""
+    du_cols = "".join(f" Δ`{n}` |" for n in u_names)
+    rows = [
+        "| Channel | Demand | Jumps | Steps scored | Actuated | Moved right "
+        f"way | Back in band | Mean move |{du_cols}",
+        "|---|---|---:|---:|---:|---:|---:|---:|" + "---:|" * len(u_names),
+    ]
+    for r in responses:
+        du = "".join(f" {r.mean_du[n]:+.3g} |" for n in u_names)
+        rows.append(
+            f"| {r.name} | {r.direction} | {r.n_jumps} | {r.mean_span:.0f} | "
+            f"{r.frac_actuated * 100:.0f}% | {r.frac_closed * 100:.0f}% | "
+            f"{r.frac_resolved * 100:.0f}% | {r.mean_move:+.3g} |{du}"
+        )
+    return "\n".join(rows)
+
+
+@beartype
+def actuation_to_dict(metrics: list[ActuationMetrics]) -> dict:
+    """JSON-serializable actuation metrics (for MLflow / disk)."""
+    return {m.name: {**{k: v for k, v in asdict(m).items() if k != "name"},
+                     "frac_saturated": m.frac_saturated}
+            for m in metrics}
+
+
+@beartype
+def response_to_dict(responses: list[JumpResponse]) -> dict:
+    """JSON-serializable band-jump audit (for MLflow / disk)."""
+    return {f"{r.name} | {r.direction}": {k: v for k, v in asdict(r).items()
+                                          if k not in ("name", "direction")}
+            for r in responses}
