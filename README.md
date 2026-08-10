@@ -127,7 +127,7 @@ The library imports each hook by attribute (no defaulting), so every row above e
 | `build_baseline_policy(cfg, sysid_cfg, nm_mapping, norm_stats) -> Node \| None` | optional | rule-based controller scored alongside the learned policy |
 | `preview_config(nm_mapping) -> {signal: n_steps}` | optional | per-column disturbance + comfort-band preview widths |
 
-`power_metric` returns whatever units the use case meters; the library never converts, so the reportcard labels energy as `power·h`.
+`power_metric` returns whatever units the use case meters; the library never converts, so the reportcard labels energy as `power·h`. When the surrogate meters no power, leave the hook unimplemented and keep `effort_weight: 0.0` — do **not** substitute an actuation proxy such as `(setpoint - ambient)²`. That is a different objective in different units, and it has broken three separate campaigns in this library's record. If you write one anyway, the effort-term shape sweep will tell you on the first run whether it has an interior optimum at all.
 
 If `build_baseline_policy` is defined, `nt control train` rolls that controller out on the same test windows against the same fixed-seed comfort band and adds a learned-vs-baseline table to the reportcard. Without it the comparison section just says so. The returned `Node` must write `["U"]` and have no trainable parameters — it is only ever evaluated, never trained.
 
@@ -173,6 +173,50 @@ nt model train --config model_configs/modeling.yaml \
     --set epochs=10 --print-config
 ```
 
+## Diagnostics that run whether you ask or not
+
+Fit metrics and pooled comfort rates cannot see the failures that cost the
+most, because those failures are silent: nothing crashes and the headline
+number looks reasonable. Every run therefore also produces these, in the
+reportcard and in MLflow.
+
+**After `nt model train`:**
+
+- **Actuator authority** — each control input is held at each end of its range
+  for a whole rollout with the disturbances left at their recorded values, and
+  the sweep reports how far it moved each predicted channel. An input that
+  moves nothing is flagged. Fit cannot see this: a *better*-fitting surrogate
+  with no cooling response produced 2.7× the closed-loop violation of a
+  worse-fitting one that had it.
+- **Achievable envelope** — the span of settled values each channel can be
+  driven to, from the same sweep.
+- **Rollout stability** — rise fraction and drift against the ground truth's
+  own, which catches a model that has stopped responding to its inputs and is
+  emitting a ramp. RMSE on a short window will not.
+
+**Before `nt control train` trains anything:**
+
+- **Envelope vs. band** — is the comfort band inside what the surrogate says
+  the plant can hold? A band outside it cannot be satisfied by any policy, and
+  the violation rate reported against it measures the weather.
+- **Objective balance** — every term's value and share of the objective on one
+  real batch, warning when one term outweighs all the others combined.
+- **Effort term shape** — the effort term swept across each actuation box. A
+  minimum on a bound means the term is monotone over the feasible set, so it
+  is an instruction to saturate that actuator and *no value of `effort_weight`
+  fixes it*.
+
+**After the closed-loop evaluation:**
+
+- **Actuation** — per-control mean |Δu| and the fraction of the evaluation
+  spent pinned at each bound. Cheapest of the lot and the one most worth
+  reading: an actuator held at its limit is not being controlled.
+- **Band-jump response** — every step change in the reference band that left a
+  controlled channel out of band, scored on whether any control moved, whether
+  the channel followed, and whether it got back in band. Two controllers
+  measured at 16.6% and 17.9% pooled violation reacted to 0% and 75% of their
+  cooling-demand jumps respectively; the pooled metric ranked them backwards.
+
 ## Programmatic use
 
 If you'd rather drive things from your own Python instead of the CLIs:
@@ -209,6 +253,7 @@ src/neurotemplate/
 │   ├── loss.py          # build_loss
 │   ├── gradient_sampling.py  # SampledGradientPenalty
 │   ├── scenarios.py     # synthetic-physics penalties (equilibrium / step / free-decay)
+│   ├── probe.py         # counterfactual actuator sweep: authority + envelope
 │   ├── experiment.py    # train_with_curriculum, build_trainer
 │   ├── pipeline.py      # train_and_evaluate, evaluate_and_plot
 │   ├── plotting.py
@@ -217,9 +262,10 @@ src/neurotemplate/
 └── control/
     ├── config.py        # ControlConfig
     ├── policy.py        # policy_catalog (MLP/linear), build_policy, describe_policy, STEQuantize
-    ├── closed_loop.py   # build_closed_loop, build_control_loss
+    ├── closed_loop.py   # build_closed_loop, build_control_loss, power_term
+    ├── objective.py     # term balance + effort-term shape sweep
     ├── scenarios.py     # BandSpec, build_window_dict, build_loaders
-    ├── metrics.py       # ComfortMetrics, EnergyMetrics
+    ├── metrics.py       # ComfortMetrics, EnergyMetrics, ActuationMetrics, JumpResponse
     ├── pipeline.py      # train_policy, evaluate_closed_loop, evaluate_baseline
     ├── reportcard.py    # render_control_reportcard
     ├── load.py          # load_frozen_dynamics
