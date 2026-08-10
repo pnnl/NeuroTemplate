@@ -19,6 +19,11 @@ from neurotemplate.control.metrics import (
     energy_metrics,
     response_audit,
 )
+from neurotemplate.control.objective import (
+    ObjectiveBalance,
+    TermBalance,
+    TermShape,
+)
 from neurotemplate.control.pipeline import ControlResults
 from neurotemplate.control.reportcard import render_control_reportcard
 from control_fixtures import make_control_cfg, make_sysid_cfg
@@ -94,6 +99,29 @@ def _make_results(offset: float = 1.0, power_level: float = 1500.0):
     )
 
 
+def _make_balance():
+    """An effort term worth 3x the comfort term — the mis-scaled failure."""
+    return ObjectiveBalance(
+        terms=[
+            TermBalance("comfort_lower_loss", 1.0, 0.1, 1.0 / 9.0),
+            TermBalance("comfort_upper_loss", 1.5, 0.15, 1.5 / 8.5),
+            TermBalance("du_loss", 0.5, 0.05, 0.5 / 9.5),
+            TermBalance("effort_loss", 7.0, 0.7, 7.0 / 3.0),
+        ],
+        total=10.0,
+    )
+
+
+def _make_shapes():
+    """...and mis-shaped too: monotone decreasing across the whole box."""
+    return [TermShape(
+        u_name="setpoint [°C]",
+        grid=[22.0, 23.5, 25.0, 26.5, 28.0],
+        values=[4.0, 3.0, 2.0, 1.0, 0.5],
+        argmin=4,
+    )]
+
+
 def _render(**kwargs):
     cfg = make_control_cfg()
     cfg.run = "snapshot-control"
@@ -104,6 +132,8 @@ def _render(**kwargs):
         nm_mapping=_NM,
         controlled=_CONTROLLED,
         results=_make_results(),
+        balance=_make_balance(),
+        shapes=_make_shapes(),
         eval_band_seed=12345,
         run_name="snapshot-control",
         timestamp="2026-05-08T12:00:00",
@@ -120,6 +150,7 @@ def test_all_sections_present():
         "## Summary",
         "## Policy architecture",
         "## Scenario",
+        "## Objective balance",
         "## Closed-loop performance",
         "## Actuation",
         "## Band-jump response",
@@ -128,6 +159,19 @@ def test_all_sections_present():
         "## Hyperparameters",
     ):
         assert title in md, f"missing section: {title}"
+
+
+def test_objective_section_flags_both_failure_modes():
+    md = _render()
+    assert "One term is running the objective" in md
+    assert "`effort_loss` at 2.3×" in md
+    assert "Effort term minimised on a bound" in md
+    assert "No value of `effort_weight` fixes this" in md
+
+
+def test_objective_section_skipped_without_a_diagnostic_pass():
+    md = _render(balance=None, shapes=None)
+    assert "## Objective balance" not in md
 
 
 def test_actuation_bounds_reported_in_physical_units():

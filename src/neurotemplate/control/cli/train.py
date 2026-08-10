@@ -25,7 +25,16 @@ from neurotemplate.control.config import ControlConfig, load_config_from_cli, CO
 from neurotemplate.control.load import load_frozen_dynamics
 from neurotemplate.control.scenarios import build_loaders, horizons
 from neurotemplate.control.policy import build_policy, describe_policy
-from neurotemplate.control.closed_loop import build_closed_loop, build_control_loss, build_problem
+from neurotemplate.control.closed_loop import (
+    build_closed_loop, build_control_loss, build_problem, power_term,
+)
+from neurotemplate.control.objective import (
+    format_objective_report,
+    objective_balance,
+    objective_to_dict,
+    run_objective_pass,
+    term_shapes,
+)
 from neurotemplate.control.reportcard import render_control_reportcard
 from neurotemplate.control.pipeline import (
     EVAL_BAND_SEED,
@@ -91,6 +100,18 @@ def main() -> None:
     loss = build_control_loss(cfg, sysid_cfg, nm_mapping, norm_stats)
     problem = build_problem(cl_system, loss).to(cfg.device)
 
+    # One forward pass before training: which term is actually being
+    # optimised, and does the effort term have an interior minimum at all.
+    # Both answers cost seconds here and an iteration each if skipped.
+    hooks = load_control_hooks(cfg)
+    balance_out = run_objective_pass(problem, next(iter(train_loader)))
+    balance = objective_balance(loss, balance_out)
+    effort_term = power_term(cfg, nm_mapping, norm_stats)
+    shapes = [] if (effort_term is None or cfg.effort_weight == 0) else term_shapes(
+        effort_term, balance_out, hmax, nm_mapping["U"],
+        *hooks.actuation_bounds(nm_mapping, norm_stats), norm_stats,
+    )
+    print(format_objective_report(balance, shapes))
 
     cfg.run = "DPC " + cfg.run
     logger = MLFlowLogger(
@@ -138,15 +159,19 @@ def main() -> None:
             Path(cfg.savedir) / "plots",
         )
 
-    controlled, _ = load_control_hooks(cfg).controlled_channels(nm_mapping)
+    controlled, _ = hooks.controlled_channels(nm_mapping)
     arch = describe_policy(policy_node, cfg, sysid_cfg, nm_mapping, norm_stats)
     md = render_control_reportcard(
         cfg, sysid_cfg, arch, nm_mapping, controlled, results,
         eval_band_seed=EVAL_BAND_SEED, baseline=baseline,
         best_dev_loss=best_dev, train_time_s=train_time_s,
+        balance=balance, shapes=shapes,
     )
     write_reportcard(md, Path(cfg.savedir), logger=logger)
     log_control_results(logger, results, baseline=baseline)
+    if hasattr(logger, "log_dict"):
+        logger.log_dict(objective_to_dict(balance, shapes),
+                        name="objective_diagnostics.json")
 
     print(f"Comfort violation rate: "
           f"{results.comfort_violation_rate * 100:.2f}%")

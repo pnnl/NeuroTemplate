@@ -176,6 +176,11 @@ def plot_context_channels(nm_mapping: dict[str, list[str]]) -> list[str]:
 # Set to True once `power_metric` below is implemented. The library checks
 # this flag at problem-build time and fails fast if effort_weight > 0 while
 # it is False, so `effort_weight` must stay 0.0 in your YAML until then.
+#
+# Failing fast is the point. The tempting alternative — quietly falling back
+# to an actuation proxy when the surrogate meters no power — substitutes a
+# different objective in different units, and it is where three of this
+# library's four recorded campaigns lost iterations. See `power_metric`.
 POWER_METRIC_IMPLEMENTED = False
 
 
@@ -188,31 +193,37 @@ def power_metric(
     norm_stats: dict[str, dict[str, float]],
 ) -> torch.Tensor:
     """
-    Instantaneous power (or any effort proxy) per timestep, shape
-    [batch, time]. The training objective drives its closed-loop mean toward
-    zero and the reportcard integrates it over time.
+    Instantaneous power per timestep, shape [batch, time]. The training
+    objective drives its closed-loop mean toward zero and the reportcard
+    integrates it over time.
 
     Inputs are the normalized trajectories: yn [batch, time, ny],
     U [batch, time, nu], D [batch, time, nd]. Denormalize whatever you use
     (`x * stretch + shift`) — the library never converts units, and labels
     the integrated result `power·h`, so returning Watts gives Wh.
 
-    Two shapes this usually takes:
+    The shape this should take: sum the power channels the surrogate already
+    predicts.
 
-      1. Metered — sum the power channels the surrogate already predicts:
-             total = sum(_denorm(yn, c, nm_mapping, norm_stats)
-                         for c in power_channels(nm_mapping))
-             return total.clamp_min(0.0)
+        total = sum(_denorm(yn, c, nm_mapping, norm_stats)
+                    for c in power_channels(nm_mapping))
+        return total.clamp_min(0.0)
 
-      2. Proxy — nothing is metered, so score the actuation instead, e.g.
-         squared distance between the commanded setpoint and ambient:
-             sp = _denorm(U, nm_mapping["U"][0], nm_mapping, norm_stats, "U")
-             amb = _denorm(D, "Ambient Temperature [degC]", nm_mapping,
-                           norm_stats, "D")
-             return (sp - amb) ** 2
+    **If your surrogate meters no power, leave this unimplemented and keep
+    `effort_weight: 0.0`.** Do not substitute an actuation proxy such as
+    `(setpoint - ambient) ** 2`. It is a different objective in different
+    units, and it has broken three separate campaigns in this library's
+    record: on a plant whose ambient range (9-18 °C) did not overlap its
+    setpoint range (20-26 °C), the proxy was monotone across the entire
+    feasible set, so it paid the controller to demand maximum cooling on a
+    cold day. It also outweighed the whole comfort objective by 1.7x, and
+    every pooled metric looked fine for ten consecutive runs.
 
-    A proxy is fine — it only has to be monotone in the real cost, since it
-    is weighted against comfort by `effort_weight` anyway.
+    If you do write a proxy anyway, the library sweeps it across the
+    actuation box before training and prints where its minimum lies. A
+    minimum on a bound means no value of `effort_weight` will save it — the
+    term needs re-deriving. Add the power channels to the surrogate instead
+    if you can; that is the fix, and it is usually available.
     """
     raise NotImplementedError(
         "power_metric is not implemented. Keep effort_weight: 0.0 in the "

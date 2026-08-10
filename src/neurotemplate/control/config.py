@@ -75,7 +75,12 @@ class ControlConfig:
 
     # ── Objective weights ────────────────────────────────────────
     comfort_weight: float = 50.0
-    du_weight: float = 10
+    # Setpoint-smoothness weight. A scalar applies to every actuator; a list
+    # (one entry per U column, in nm_mapping order) or a dict keyed by column
+    # name weights them separately — worth doing as soon as two actuators
+    # differ in authority, since one pooled penalty is then necessarily
+    # mis-weighted for one of them.
+    du_weight: Union[float, list[float], dict[str, float]] = 10
     # Effort/energy term weight. > 0 requires control_user_defined.power_metric
     # to be implemented (fail-fast at problem build).
     effort_weight: float = 0.1
@@ -153,10 +158,19 @@ class ControlConfig:
 
         for name in [
             "d_preview", "warmup", "patience",
-            "comfort_weight", "du_weight", "effort_weight",
+            "comfort_weight", "effort_weight",
             "band_width_min", "setpoint_step",
         ]:
             check_non_negative(self, name)
+
+        # du_weight is per-channel-capable, so it is checked by value rather
+        # than by field. Column names can only be resolved against the
+        # surrogate's U, which happens in closed_loop.resolve_du_weights.
+        weights = (self.du_weight.values() if isinstance(self.du_weight, dict)
+                   else self.du_weight if isinstance(self.du_weight, list)
+                   else [self.du_weight])
+        if any(w < 0 for w in weights):
+            raise ValueError(f"du_weight must be >= 0, got {self.du_weight}")
 
         if self.band_width_min > self.band_width_max:
             raise ValueError(

@@ -7,15 +7,17 @@ that returns markdown. The caller writes it to disk and logs it.
 
 Sections (in order):
 
-  1. Summary               — run, timestamp, surrogate, dev loss, timings
-  2. Policy architecture   — from control.policy.describe_policy
-  3. Scenario              — horizons, controlled channels, bands, weights
-  4. Closed-loop performance — comfort table, actuation, energy
-  5. Actuation             — per-control effort and saturation fraction
-  6. Band-jump response    — did the loop react when the reference moved
-  7. Baseline comparison   — learned vs. rule-based, or why there is none
-  8. Tracking error        — per-channel error vs. the comfort-band midpoint
-  9. Hyperparameters       — the knobs that produced this run
+   1. Summary              — run, timestamp, surrogate, dev loss, timings
+   2. Policy architecture  — from control.policy.describe_policy
+   3. Scenario             — horizons, controlled channels, bands, weights
+   4. Objective balance    — which term was actually being optimised, and
+                             whether the effort term has an interior minimum
+   5. Closed-loop performance — comfort table, actuation, energy
+   6. Actuation            — per-control effort and saturation fraction
+   7. Band-jump response   — did the loop react when the reference moved
+   8. Baseline comparison  — learned vs. rule-based, or why there is none
+   9. Tracking error       — per-channel error vs. the comfort-band midpoint
+  10. Hyperparameters      — the knobs that produced this run
 """
 
 from __future__ import annotations
@@ -30,6 +32,12 @@ from neurotemplate.control.metrics import (
     actuation_to_markdown,
     comfort_to_markdown,
     response_to_markdown,
+)
+from neurotemplate.control.objective import (
+    ObjectiveBalance,
+    TermShape,
+    balance_to_markdown,
+    shapes_to_markdown,
 )
 from neurotemplate.control.scenarios import horizons
 
@@ -113,6 +121,57 @@ def _scenario_section(cfg, sysid_cfg, nm_mapping: dict, controlled: list[str],
         "*(fixed, so runs are scored against the same band realization)*",
     ]
     return _section("Scenario", "\n".join(rows))
+
+
+def _objective_section(balance: ObjectiveBalance,
+                       shapes: list[TermShape]) -> str:
+    """What the weights actually bought, measured on one batch before training.
+
+    Objective weights do not port across datasets, and the library's job is
+    not a better default — it is making a bad one visible on iteration 1.
+    """
+    body = [
+        "Each objective term on a single training batch, taken before the "
+        "first optimizer step. The share column is what the policy is really "
+        "being asked to minimise, whatever the weights suggest.\n",
+        balance_to_markdown(balance),
+    ]
+    dominant = balance.dominant()
+    if dominant:
+        body += [
+            "",
+            "**⚠️ One term is running the objective:** "
+            + ", ".join(
+                f"`{t.name}` at {t.ratio_to_rest:.1f}× everything else combined"
+                for t in dominant
+            )
+            + ". Re-derive its weight against the magnitude of the quantity "
+            "it multiplies. A weight that was right on the last dataset is "
+            "not evidence about this one.",
+        ]
+    if shapes:
+        body += [
+            "",
+            "Effort term swept across each actuation box, with the rest of "
+            "the rollout held at its recorded values. A minimum on a bound "
+            "means the term is monotone over the whole feasible set — it is "
+            "not a cost being traded off, it is an instruction to saturate "
+            "that actuator.\n",
+            shapes_to_markdown(shapes),
+        ]
+        boundary = [s for s in shapes if s.minimum_on_boundary]
+        if boundary:
+            body += [
+                "",
+                "**⚠️ Effort term minimised on a bound:** "
+                + ", ".join(f"`{s.u_name}` at {s.pinned_at:.4g}"
+                            for s in boundary)
+                + ". **No value of `effort_weight` fixes this** — lowering it "
+                "only weakens the instruction. The term needs re-deriving so "
+                "it has an interior optimum over the actuation range this "
+                "plant actually operates in.",
+            ]
+    return _section("Objective balance", "\n".join(body))
 
 
 def _energy_lines(energy) -> list[str]:
@@ -299,6 +358,8 @@ def render_control_reportcard(
     *,
     eval_band_seed: int,
     baseline: Optional[object] = None,
+    balance: Optional[ObjectiveBalance] = None,
+    shapes: Optional[list[TermShape]] = None,
     run_name: Optional[str] = None,
     timestamp: Optional[str] = None,
     best_dev_loss: Optional[float] = None,
@@ -313,6 +374,9 @@ def render_control_reportcard(
         results:     ControlResults for the learned policy.
         eval_band_seed: The fixed seed the evaluation band was drawn with.
         baseline:    Optional ControlResults for the rule-based controller.
+        balance:     Optional objective.ObjectiveBalance from the pre-training
+                     forward pass; the section is skipped without it.
+        shapes:      Optional objective.term_shapes(...) for the effort term.
 
     Returns:
         Markdown string. The caller writes it to disk and logs it.
@@ -329,6 +393,10 @@ def render_control_reportcard(
         _policy_section(arch),
         _scenario_section(cfg, sysid_cfg, nm_mapping, controlled,
                           eval_band_seed),
+    ]
+    if balance is not None:
+        parts.append(_objective_section(balance, shapes or []))
+    parts += [
         _performance_section(results),
         _actuation_section(results),
         _response_section(results, nm_mapping["U"]),
