@@ -332,17 +332,21 @@ class EquilibriumScenario(_Scenario):
         s = self._states_physical(y_pred)
         return (s[:, 1:, :] - s[:, 0:1, :]).abs().mean(dim=1)
 
+    @staticmethod
+    def _penalty(s):
+        return (s[:, 1:, :] - s[:, 0:1, :]).pow(2).mean()
+
     def compute(self):
         y_pred = self.system(self._data(self.n_scenarios))["yn"]
-        s = self._states_physical(y_pred)
-        return (s[:, 1:, :] - s[:, 0:1, :]).pow(2).mean()
+        return self._penalty(self._states_physical(y_pred))
 
     def check(self, n: Optional[int] = None) -> list[ScenarioResult]:
         n = n or self.n_scenarios
         with torch.no_grad():
             y_pred = self.system(self._data(n))["yn"]
             drift = self._drift(y_pred).mean(dim=0)      # [n_states]
-            penalty = float(self.compute())
+            # Same rollout as the verdict, so the two numbers agree.
+            penalty = float(self._penalty(self._states_physical(y_pred)))
 
         tol = self._tolerance(EQUILIBRIUM_DRIFT_FRAC)
         worst = max(range(len(tol)), key=lambda i: float(drift[i]) / tol[i])
@@ -494,19 +498,23 @@ class FreeDecayScenario(_Scenario):
         gap = t_out.unsqueeze(1) - start
         return (s[:, -1, :] - start) / gap
 
-    def compute(self):
-        data, _, t_out = self._data(self.n_scenarios)
-        y_pred = self.system(data)["yn"]
-        s = self._states_physical(y_pred)
+    @staticmethod
+    def _penalty(s, t_out):
+        """Movement away from ambient, plus anything outside [start, ambient]."""
         toward = torch.sign(t_out.unsqueeze(1) - s[:, 0, :]).unsqueeze(1)
         deltas = s[:, 1:, :] - s[:, :-1, :]
         wrong_way = torch.relu(-deltas * toward).mean()
-        # Overshoot: past ambient, or back behind where it started.
-        lo = torch.min(s[:, 0:1, :], t_out[:, None, None].expand_as(s[:, 0:1, :]))
-        hi = torch.max(s[:, 0:1, :], t_out[:, None, None].expand_as(s[:, 0:1, :]))
+        target = t_out[:, None, None].expand_as(s[:, 0:1, :])
+        lo = torch.min(s[:, 0:1, :], target)
+        hi = torch.max(s[:, 0:1, :], target)
         overshoot = (torch.relu(s[:, 1:, :] - hi).pow(2)
                      + torch.relu(lo - s[:, 1:, :]).pow(2)).mean()
         return wrong_way + overshoot
+
+    def compute(self):
+        data, _, t_out = self._data(self.n_scenarios)
+        y_pred = self.system(data)["yn"]
+        return self._penalty(self._states_physical(y_pred), t_out)
 
     def check(self, n: Optional[int] = None) -> list[ScenarioResult]:
         n = n or self.n_scenarios
@@ -515,7 +523,8 @@ class FreeDecayScenario(_Scenario):
             y_pred = self.system(data)["yn"]
             closed = self._closed_fraction(y_pred, t_out).mean(dim=0)
             mean_gap = float((t_out - t_in).abs().mean())
-            penalty = float(self.compute())
+            # Same rollout as the verdict, so the two numbers agree.
+            penalty = float(self._penalty(self._states_physical(y_pred), t_out))
 
         worst = min(range(len(closed)), key=lambda i: float(closed[i]))
         value = float(closed[worst])
