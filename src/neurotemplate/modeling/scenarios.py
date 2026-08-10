@@ -89,6 +89,13 @@ class SynthSpec:
                   out is held at its recorded minimum, which is what "no
                   forcing" means for solar, occupancy, power and flow — list it
                   in `off` if your plant idles somewhere else.
+
+                  For a *setpoint* actuator, "off" has to be off across the
+                  whole `states` range, since equilibria are sampled from all
+                  of it. A cooling setpoint of 26 °C is a call for cooling on
+                  a zone that reaches 28, and the equilibrium check will
+                  rightly report the resulting drift. Put such a setpoint
+                  outside the states' range.
       actuations  optional; without any, the step-response check is skipped.
 
     Everything is in physical units; the library normalizes.
@@ -357,7 +364,9 @@ class EquilibriumScenario(_Scenario):
             f"held to {value:.3g} over {self.n_steps} steps"
             if passed else
             f"drifted {value:.3g} over {self.n_steps} steps with nothing "
-            "running — the model is integrating something it should not"
+            "running — either the model is integrating something it should "
+            "not, or a control's `off` value is not off across the whole "
+            "range equilibria are sampled from"
         )
         return [ScenarioResult(
             name=self.label, passed=passed,

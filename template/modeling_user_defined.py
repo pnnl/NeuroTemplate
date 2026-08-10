@@ -235,6 +235,11 @@ def synth_cfg(
                minimum, which is what "no forcing" means for solar,
                occupancy, power and flow.
 
+               For a setpoint actuator, pick a value that is off across the
+               *whole* `states` range — equilibria are sampled from all of
+               it, and a 26 °C cooling setpoint is a call for cooling on a
+               zone that reaches 28.
+
     `actuations` is optional; each one names the control values to apply and
     the direction (+1 up, -1 down) the states should then move.
 
