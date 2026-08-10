@@ -5,11 +5,17 @@ from typing import Optional, Union
 
 from neurotemplate.common.config import (
     _check_paths_field,
+    check_max,
     check_non_negative,
     check_one_of,
     check_positive,
     default_savedir,
 )
+
+# History-window ceiling, enforced on both ModelingConfig and ControlConfig
+# (the two places `in_steps` appears). Keeps the lookback window bounded
+# across the library rather than per-project.
+MAX_IN_STEPS = 12
 
 
 @dataclass
@@ -120,6 +126,7 @@ class ModelingConfig:
 
         check_one_of(self, "model", ["mlp", "nssm", "lssm", "gru", "dummy"])
         check_one_of(self, "save_config", ["last_step", "all", "None", None])
+        check_max(self, "in_steps", MAX_IN_STEPS)
 
         if (self.grad_gain > 0) and (self.grad_path is None):
             raise ValueError("grad_gain set but not grad_path")

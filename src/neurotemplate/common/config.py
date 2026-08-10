@@ -170,6 +170,12 @@ def check_one_of(obj: Any, name: str, options: list) -> None:
         raise ValueError(f"{name} must be one of {options}, got {x}")
 
 
+def check_max(obj: Any, name: str, max_value: float) -> None:
+    x = getattr(obj, name)
+    if x > max_value:
+        raise ValueError(f"{name} must be <= {max_value}, got {x}")
+
+
 def _parse_value(raw: str) -> Any:
     """Parse a `--set key=value` CLI value into a Python object.
 

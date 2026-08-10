@@ -7,6 +7,7 @@ from typing import Optional, Union
 
 from neurotemplate.common.config import (  # noqa: F401  re-exported
     _check_paths_field,
+    check_max,
     check_non_negative,
     check_one_of,
     check_positive,
@@ -15,6 +16,7 @@ from neurotemplate.common.config import (  # noqa: F401  re-exported
     paths_as_list,
     CONTROL_CONFIG_DIR,
 )
+from neurotemplate.modeling.config import MAX_IN_STEPS
 
 from neurotemplate._typing import beartype
 
@@ -135,6 +137,7 @@ class ControlConfig:
         check_one_of(self, "policy", list(policy_catalog))
         check_one_of(self, "policy_nonlin", list(POLICY_NONLIN))
         check_one_of(self, "policy_bound_method", POLICY_BOUND_METHODS)
+        check_max(self, "in_steps", MAX_IN_STEPS)
 
         for name in ("train_data_path", "dev_data_path", "test_data_path"):
             _check_paths_field(name, getattr(self, name))
