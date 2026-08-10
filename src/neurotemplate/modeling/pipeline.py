@@ -98,6 +98,7 @@ def evaluate_and_plot(
     freq_s: float,
     plot_run_dir: Path,
     logger=None,
+    grad_masks: Optional[dict] = None,
 ) -> TestResults:
     """
     Roll the model out on the test split, compute per-channel metrics,
@@ -167,7 +168,7 @@ def evaluate_and_plot(
     # The verdicts are the point; the figures are for when one surprises you.
     outcome = _run_physics_checks(
         cfg, dyn_sys, nm_mapping, norm_stats, synth_cfg, freq_s,
-        plot_run_dir, logger,
+        plot_run_dir, logger, grad_masks,
     )
 
     if cfg.plot:
@@ -220,7 +221,7 @@ def _plot_predictions(
 
 def _run_physics_checks(
     cfg, dyn_sys, nm_mapping, norm_stats, synth_cfg, freq_s,
-    plot_run_dir, logger,
+    plot_run_dir, logger, grad_masks=None,
 ) -> Optional[ScenarioOutcome]:
     """Assert the three physics scenarios; plot their traces if plotting is on.
 
@@ -236,6 +237,7 @@ def _run_physics_checks(
         n_scenarios=cfg.synth_n_scenarios,
         n_steps=cfg.synth_n_steps,
         device=cfg.device,
+        grad_masks=grad_masks,
     )
     if scenarios is None:
         if cfg.verbose:
@@ -463,6 +465,7 @@ def train_and_evaluate(
         nm_mapping=nm_mapping, norm_stats=norm_stats,
         synth_cfg=synth_cfg, freq_s=freq_s,
         plot_run_dir=plot_run_dir, logger=logger,
+        grad_masks=grad_masks,
     )
     log_test_results(logger, test_results, nm_mapping)
 

@@ -1,9 +1,8 @@
 """
 End-to-end wiring test for the sys-id diagnostics.
 
-`nt model train` now runs an actuator sweep and three physics assertions on
-top of the fit metrics, and threads all of them into one reportcard and one
-set of MLflow keys. The pieces have unit tests; this runs `evaluate_and_plot`
+`nt model train` runs four physics assertions on top of the fit metrics, and
+threads all of them into one reportcard and one set of MLflow keys. The pieces have unit tests; this runs `evaluate_and_plot`
 against the real fixture hooks so a signature drifting between them fails here
 instead of at the end of a real training run.
 
@@ -112,8 +111,8 @@ def test_everything_logged_is_json_serializable(tmp_path):
         "test_metrics.json", "rollout_stability.json",
         "actuator_authority.json", "physics_checks.json",
     }
-    assert logger.metrics["physics_checks_total"] == 3.0
-    assert 0.0 <= logger.metrics["physics_checks_passed"] <= 3.0
+    assert logger.metrics["physics_checks_total"] == 4.0
+    assert 0.0 <= logger.metrics["physics_checks_passed"] <= 4.0
     assert all(isinstance(v, float) for v in logger.metrics.values())
 
 
@@ -165,5 +164,5 @@ def test_the_plot_path_writes_figures_and_their_data(tmp_path):
     synth_dir = Path(tmp_path) / "synthetic"
     pdfs = sorted(synth_dir.glob("*.pdf"))
     csvs = sorted((synth_dir / "synth_data").glob("*.csv"))
-    assert len(pdfs) == 3 * cfg.synth_n_plot      # three scenarios
+    assert len(pdfs) == 4 * cfg.synth_n_plot      # four scenarios
     assert [p.stem for p in pdfs] == [c.stem for c in csvs]

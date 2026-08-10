@@ -415,11 +415,14 @@ class _Scenario:
     """Shared plumbing: sample equilibria, roll out, read the state channels."""
 
     def __init__(self, system, nm_mapping, norm_stats, spec: SynthSpec,
-                 in_steps, n_scenarios, n_steps, device):
+                 in_steps, n_scenarios, n_steps, device, grad_masks=None):
         self.system = system
         self.nm_mapping = nm_mapping
         self.norm_stats = norm_stats
         self.spec = spec
+        # Only the reachability scenario reads these, for the direction to push
+        # each disturbance. Empty/None means disturbances stay at rest.
+        self.grad_masks = grad_masks or {}
         self.in_steps = in_steps
         self.n_scenarios = n_scenarios
         self.n_steps = n_steps
@@ -643,6 +646,145 @@ class StepResponseScenario(_Scenario):
                       self.in_steps)
 
 
+class ReachabilityScenario(_Scenario):
+    """From equilibrium, everything pushed the same way. How far can it get?
+
+    For each state and each direction, every control that moves that state is
+    driven to whichever end of its range pushes it further, and every exogenous
+    input with a declared gradient sign is driven the same way. The span
+    between the two directions is the state's reachable envelope under this
+    surrogate — the number a comfort band has to fit inside.
+
+    Step response and reachability are deliberately different questions. The
+    step response *isolates* one actuator, holding ambient equal to indoors so
+    there is no envelope gradient to confound it. Reachability deliberately
+    *conflates* actuators and weather, because it is asking for a bound rather
+    than an attribution.
+
+    Exogenous directions come from the gradient mapping (`cfg.grad_path`),
+    whose D half is a genuine universal partial: more outdoor heat warms the
+    zone anywhere in the state space. Without a mapping the disturbances stay
+    at their equilibrium values and the span reported is actuator-only, which
+    the headline says.
+    """
+
+    label = "Reachability"
+
+    #: A state whose two directions land closer together than this share of its
+    #: recorded range is not controllable on this surrogate. Same threshold the
+    #: actuator probe used to call an actuator dead, applied per state.
+    MIN_SPAN_FRAC = 0.02
+
+    def _push_targets(self, channel: str, direction: int):
+        """(control targets, disturbance targets) that drive `channel` further.
+
+        `direction` is +1 to push the state up and -1 to push it down. A sign
+        of +1 means the state rises with the input, so the input goes to its
+        maximum when pushing up and its minimum when pushing down.
+        """
+        def target(col: str, sign: int) -> float:
+            s = self.norm_stats[col]
+            return s["max"] if sign * direction > 0 else s["min"]
+
+        controls = {
+            col: target(col, sign)
+            for col, sign in self.spec.responds.get(channel, {}).items()
+        }
+        disturbances = {
+            col: target(col, sign)
+            for col, sign in self._ambient_signs(channel).items()
+        }
+        return controls, disturbances
+
+    def _ambient_signs(self, channel: str) -> dict[str, int]:
+        """Declared d(state)/d(disturbance) signs, from the gradient mapping."""
+        mask = self.grad_masks.get("D") if self.grad_masks else None
+        if mask is None:
+            return {}
+        i = self.nm_mapping["Y"].index(channel)
+        return {
+            col: int(mask[0, 0, i, j])
+            for j, col in enumerate(self.nm_mapping["D"])
+            if int(mask[0, 0, i, j]) != 0
+        }
+
+    def _data(self, channel: str, direction: int, n, t=None):
+        # Both directions must start from the *same* equilibrium sample, or the
+        # span between them picks up the sampling spread — an inert surrogate
+        # would report a reachable range it does not have.
+        t = self._sample_equilibrium(n) if t is None else t
+        y, u_off, d_rest = _equilibrium_inputs(
+            t, self.nm_mapping, self.norm_stats, self.spec, self.device,
+        )
+        controls, disturbances = self._push_targets(channel, direction)
+
+        def driven(row, key, targets):
+            out = row.clone()
+            for col, value in targets.items():
+                j = self.nm_mapping[key].index(col)
+                out[:, j] = _normalize(
+                    torch.full((n,), float(value), device=self.device),
+                    col, self.norm_stats,
+                )
+            return out
+
+        return _rollout_data(
+            y,
+            (u_off, driven(u_off, "U", controls)),
+            (d_rest, driven(d_rest, "D", disturbances)),
+            self.in_steps, self.n_steps, self.ny, self.device,
+        )
+
+    def _settled(self, channel: str, direction: int, n, t) -> tuple[float, object]:
+        """Mean final value of `channel` when pushed, plus the raw rollout."""
+        i = self.spec.states.index(channel)
+        y_pred = self.system(self._data(channel, direction, n, t))["yn"]
+        return float(self._states_physical(y_pred)[:, -1, i].mean()), y_pred
+
+    def evaluate(self, n: Optional[int] = None) -> ScenarioOutcome:
+        n = n or self.n_scenarios
+        results, readouts = [], []
+        for channel in self.spec.states:
+            with torch.no_grad():
+                t = self._sample_equilibrium(n)
+                hi, y_up = self._settled(channel, +1, n, t)
+                lo, _ = self._settled(channel, -1, n, t)
+            readouts += self._readouts(y_up, f"{self.label} (up)")
+
+            span = hi - lo
+            limit = max(self.MIN_SPAN_FRAC * self._range(channel), 1e-9)
+            weather = "" if self._ambient_signs(channel) else (
+                " Disturbances held at rest — no gradient mapping, so this is "
+                "the actuators alone"
+            )
+            if span >= limit:
+                passed, verdict = True, (
+                    f"Driven between {lo:.4g} and {hi:.4g} in {self.n_steps} "
+                    f"steps, a span of {span:.4g}"
+                )
+            else:
+                passed, verdict = False, (
+                    f"Reaches only {lo:.4g} to {hi:.4g} — a span of "
+                    f"{span:.4g} with everything pushed both ways. No policy "
+                    "can hold a band this surrogate cannot reach"
+                )
+            results.append(ScenarioResult(
+                name=self.label, passed=passed,
+                headline=f"{verdict}.{weather}",
+                channel=channel, value=span, tolerance=limit,
+            ))
+        return ScenarioOutcome(results, readouts)
+
+    def trace(self, n: int) -> dict:
+        channel = self.spec.states[0]
+        with torch.no_grad():
+            data = self._data(channel, +1, n)
+            y_pred = self.system(data)["yn"]
+        return _trace(f"{self.label}: {channel} (up)", data, y_pred,
+                      self.nm_mapping, self.norm_stats, self.spec,
+                      self.in_steps)
+
+
 class FreeDecayScenario(_Scenario):
     """From equilibrium, a new climate with the HVAC off. The states must relax."""
 
@@ -757,6 +899,7 @@ def build_scenarios(
     n_scenarios: int,
     n_steps: int,
     device,
+    grad_masks: Optional[dict] = None,
 ) -> Optional[list]:
     """The scenario objects for this run, or None when the subsystem is off.
 
@@ -772,11 +915,12 @@ def build_scenarios(
     common = dict(
         system=system, nm_mapping=nm_mapping, norm_stats=norm_stats,
         spec=synth_cfg, in_steps=in_steps, n_scenarios=n_scenarios,
-        n_steps=n_steps, device=device,
+        n_steps=n_steps, device=device, grad_masks=grad_masks,
     )
     return [
         EquilibriumScenario(**common),
         StepResponseScenario(**common),
+        ReachabilityScenario(**common),
         FreeDecayScenario(**common),
     ]
 

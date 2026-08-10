@@ -194,14 +194,14 @@ def test_a_state_with_no_declared_sign_is_not_asserted_on():
 
 
 def test_a_plant_that_relaxes_toward_ambient_passes():
-    (r,) = _scenarios(_perfect)[2].check()
+    (r,) = _scenarios(_perfect)[3].check()
     assert r.passed
     assert 0.0 < r.value <= 1.0
     assert "Closed" in r.headline and "gap to ambient" in r.headline
 
 
 def test_a_plant_with_no_envelope_coupling_fails():
-    (r,) = _scenarios(_inert)[2].check()
+    (r,) = _scenarios(_inert)[3].check()
     assert not r.passed
     assert r.value == pytest.approx(0.0, abs=1e-6)
     assert "no envelope coupling" in r.headline
@@ -213,10 +213,100 @@ def test_overshooting_ambient_fails():
         return torch.stack([zone + 1.5 * (d[:, 0] - zone),
                             torch.zeros_like(zone)], dim=1)
 
-    (r,) = _scenarios(overshoot, n_steps=1)[2].check()
+    (r,) = _scenarios(overshoot, n_steps=1)[3].check()
     assert not r.passed
     assert r.value > 1.0
     assert "Overshot ambient" in r.headline
+
+
+# ── Reachability ─────────────────────────────────────────────────
+#
+# The honest version of what the actuator probe was reaching for: instead of
+# holding co-actuators at an arbitrary range midpoint over whatever weather
+# happened to be in one test file, everything starts at a declared equilibrium
+# and is pushed the same way on purpose.
+
+
+def _grad_d(sign: int):
+    """A gradient mask declaring d(zone)/d(outdoor) = `sign`."""
+    mask = torch.zeros((1, 1, len(NM["Y"]), len(NM["D"])), dtype=torch.int8)
+    mask[0, 0, NM["Y"].index(ZONE), NM["D"].index(AMBIENT)] = sign
+    return {"D": mask}
+
+
+def _reach(step, grad_masks=None, n_steps=N_STEPS):
+    return build_scenarios(
+        system=_system(step), nm_mapping=NM, norm_stats=NORM_STATS,
+        synth_cfg=_spec(), in_steps=IN_STEPS, n_scenarios=8,
+        n_steps=n_steps, device="cpu", grad_masks=grad_masks,
+    )[2]
+
+
+def test_reachability_reports_the_span_the_actuators_can_drive():
+    (r,) = _reach(_perfect).check()
+
+    assert r.name == "Reachability"
+    assert r.channel == ZONE
+    assert r.passed
+    assert r.value > 0                       # pushed apart in both directions
+    assert "Driven between" in r.headline
+    # No gradient mapping, so the weather was left alone and the report says so.
+    assert "Disturbances held at rest" in r.headline
+
+
+def test_reachability_fails_a_surrogate_nothing_can_move():
+    """Both directions share one equilibrium sample, so an inert plant reports
+    exactly zero span rather than the spread of the sampling."""
+    (r,) = _reach(_inert).check()
+
+    assert not r.passed
+    assert r.value == pytest.approx(0.0, abs=1e-6)
+    assert "No policy can hold a band this surrogate cannot reach" in r.headline
+
+
+def test_reachability_pushes_disturbances_by_their_declared_gradient_sign():
+    """d(zone)/d(outdoor) = +1, so driving the zone up wants outdoor at max."""
+    seen = []
+
+    def record(y, u, d):
+        seen.append(d[:, 0].clone())
+        return torch.stack([y[:, 0] + 0.25 * (d[:, 0] - y[:, 0]),
+                            torch.zeros_like(y[:, 0])], dim=1)
+
+    scenario = _reach(record, grad_masks=_grad_d(+1))
+    (r,) = scenario.check()
+
+    # Pushing up drives outdoor to its recorded max, down to its min.
+    assert max(float(t.max()) for t in seen) == pytest.approx(35.0)
+    assert min(float(t.min()) for t in seen) == pytest.approx(-5.0)
+    assert "Disturbances held at rest" not in r.headline
+    assert r.passed
+
+
+def test_a_negative_gradient_sign_flips_which_end_is_pushed():
+    seen = []
+
+    def record(y, u, d):
+        seen.append(d[:, 0].clone())
+        return torch.stack([y[:, 0], torch.zeros_like(y[:, 0])], dim=1)
+
+    scenario = _reach(record, grad_masks=_grad_d(-1))
+    targets = scenario._push_targets(ZONE, direction=+1)[1]
+
+    # Zone falls as outdoor rises, so pushing the zone UP wants outdoor at min.
+    assert targets[AMBIENT] == pytest.approx(-5.0)
+    assert scenario._push_targets(ZONE, direction=-1)[1][AMBIENT] == 35.0
+
+
+def test_reachability_drives_the_controls_that_move_the_state():
+    """responds[zone][setpoint] = +1, so the zone goes up with the setpoint."""
+    scenario = _reach(_perfect)
+
+    up, _ = scenario._push_targets(ZONE, direction=+1)
+    down, _ = scenario._push_targets(ZONE, direction=-1)
+
+    assert up[SETPT] == pytest.approx(26.0)      # max setpoint = least cooling
+    assert down[SETPT] == pytest.approx(20.0)    # min setpoint = most cooling
 
 
 # ── The bug this subsystem used to have ──────────────────────────
@@ -369,8 +459,8 @@ def test_states_with_no_shared_temperature_fail_loudly():
 
 def test_the_free_decay_gap_scales_with_the_intersection():
     """MIN_GAP_FRAC is 10% of the seeding window, so it narrows with it."""
-    wide = _scenarios(_perfect)[2]                      # zone alone: 18-30
-    narrow = _two_state_scenarios(_two_state_stats())[2]  # intersection: 18.9-27.3
+    wide = _scenarios(_perfect)[3]                      # zone alone: 18-30
+    narrow = _two_state_scenarios(_two_state_stats())[3]  # intersection: 18.9-27.3
 
     assert wide.MIN_GAP_FRAC * (wide.t_max - wide.t_min) == pytest.approx(1.2)
     assert (narrow.MIN_GAP_FRAC * (narrow.t_max - narrow.t_min)
@@ -387,7 +477,7 @@ def test_a_constant_state_channel_does_not_divide_by_zero():
         device="cpu",
     )
     results = run_checks(scenarios)
-    assert len(results) == 3
+    assert len(results) == 4
     assert all(r.tolerance > 0 for r in results[:2])
 
 
@@ -467,10 +557,12 @@ def test_run_scenarios_merges_verdicts_and_readouts():
     outcome = run_scenarios(_scenarios(_perfect))
 
     assert [r.name for r in outcome.verdicts] == [
-        "Equilibrium", f"Step response: {SETPT} to 20", "Free decay",
+        "Equilibrium", f"Step response: {SETPT} to 20", "Reachability",
+        "Free decay",
     ]
     assert [r.scenario for r in outcome.readouts] == [
-        "Equilibrium", f"Step response: {SETPT} to 20", "Free decay",
+        "Equilibrium", f"Step response: {SETPT} to 20", "Reachability (up)",
+        "Free decay",
     ]
     payload = readouts_to_dict(outcome.readouts)
     assert set(payload) == {r.key for r in outcome.readouts}
@@ -487,7 +579,8 @@ def test_run_scenarios_merges_verdicts_and_readouts():
 def test_run_checks_flattens_every_scenario():
     results = run_checks(_scenarios(_perfect))
     assert [r.name for r in results] == [
-        "Equilibrium", f"Step response: {SETPT} to 20", "Free decay",
+        "Equilibrium", f"Step response: {SETPT} to 20", "Reachability",
+        "Free decay",
     ]
 
 
