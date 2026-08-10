@@ -25,7 +25,7 @@ from typing import Optional
 
 from neurotemplate.modeling.gradient_sampling import SampledGradientPenalty
 from neurotemplate.modeling.heads import HeadStack
-from neurotemplate.modeling.scenarios import build_scenarios
+from neurotemplate.modeling.scenarios import SynthSpec, build_scenarios
 
 from neurotemplate._typing import beartype
 
@@ -38,7 +38,7 @@ def build_loss(
     grad_masks: dict[str, torch.Tensor],
     nm_mapping: dict[str, list[str]],
     norm_stats: dict[str, dict[str, float]],
-    synth_cfg: Optional[dict[str, dict]],
+    synth_cfg: Optional[SynthSpec],
     head_stack: Optional[HeadStack] = None,
 ) -> PenaltyLoss:
     """
@@ -51,8 +51,8 @@ def build_loss(
         grad_masks:   {key: Tensor[1,1,ny,nx]} with sign constraints, or empty dict
         nm_mapping:   {"Y": [...], "U": [...], "D": [...]}
         norm_stats:   {col: {"shift", "stretch", "min", "max", ...}} per-column stats
-        synth_cfg:    Per-column physical values for synth scenarios, or None
-                      to indicate the synth subsystem is disabled for this run.
+        synth_cfg:    scenarios.SynthSpec describing the plant's resting
+                      state, or None when the synth subsystem is disabled.
 
     Returns:
         PenaltyLoss combining all active loss terms
@@ -168,18 +168,23 @@ def build_loss(
 
     # ── Synthetic scenario penalties ────────────────────────────────
     #
-    # Built by synthetic_scenarios.build_scenarios from the user-provided
-    # synth_cfg. Each scenario contributes a differentiable scalar penalty
-    # summed into one `synth_penalty` term. All share synth_gain /
-    # synth_n_scenarios / synth_n_steps. See synthetic_scenarios.py for
-    # the scenario catalog.
+    # Built by scenarios.build_scenarios from the user-provided synth_cfg.
+    # Each scenario contributes a differentiable scalar penalty summed into one
+    # `synth_penalty` term, all sharing synth_gain / synth_n_scenarios /
+    # synth_n_steps.
+    #
+    # This is the optional half of the subsystem. The same scenarios run as
+    # pass-fail assertions after training whatever `synth_gain` is, and that is
+    # the intended way to use them — a verdict in physical units beats a
+    # penalty whose weight has to be guessed.
 
     if cfg.synth_gain > 0:
         # synth_gain > 0 with no synth_cfg is a configuration mistake; fail fast.
         if synth_cfg is None:
             raise ValueError(
                 "cfg.synth_gain > 0 but synth_cfg is None. Either set "
-                "synth_gain=0 or have user_defined.synth_cfg return a populated dict."
+                "synth_gain=0 or have modeling_user_defined.synth_cfg return "
+                "a SynthSpec."
             )
         scenarios = build_scenarios(
             system=system,

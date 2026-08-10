@@ -25,6 +25,7 @@ from neurotemplate.modeling.heads import (
     RegressionHead,
     project_physical_to_norm,
 )
+from neurotemplate.modeling.scenarios import Actuation, SynthSpec
 
 if os.environ.get("RUNTIME_TYPING", 0):
     from beartype import beartype
@@ -226,55 +227,36 @@ def column_norm_config(
 
 
 # ---------------------------------------------------------------------
-# Required: synthetic scenario configuration
+# Required: the plant's resting state, for the physics checks
 # ---------------------------------------------------------------------
 @beartype
 def synth_cfg(
     nm_mapping: dict,
     norm_stats: dict,
-) -> Optional[dict[str, dict]]:
+) -> Optional[SynthSpec]:
+    """The RTU strip-mall plant at rest, and the one way it can be driven.
+
+    Only the zone air temperature behaves like a temperature — supply air,
+    flow, stage and the two power channels are readouts, and naming them as
+    states would have the equilibrium scenario sampling "temperatures" out of
+    a 0-6000 W range. That distinction is the whole point of `states`.
+
+    The single control is a cooling setpoint, so its "off" is its *maximum*
+    (never calls for cooling) and full actuation is its minimum, which should
+    drive the zone down.
     """
-    Per-column physical values for synthetic training scenarios.
-
-    Return None to opt out of the synthetic-scenario subsystem entirely.
-    Otherwise the dict must cover every U and D column with the keys
-    expected by `synthetic_scenarios.build_scenarios`.
-    """
-    cfg = None
-
-    # for col in nm_mapping["U"]:
-    #     if "Cooling Setpoint" in col:
-    #         cfg[col] = {
-    #             "off": norm_stats[col]["max"],             # setback / no cooling demand
-    #             "active_cooling": norm_stats[col]["min"],  # occupied setpoint / max cooling demand
-    #         }
-    #     elif "Supply Air Temperature" in col:
-    #         cfg[col] = {
-    #             "off": norm_stats[col]["max"],             # irrelevant when flow=0
-    #             "active_cooling": norm_stats[col]["min"],  # coldest supply air
-    #         }
-    #     elif "Supply Air Flow" in col:
-    #         cfg[col] = {
-    #             "off": norm_stats[col]["min"],             # no airflow (HVAC off)
-    #             "active_cooling": norm_stats[col]["max"],  # max airflow
-    #         }
-
-    # for col in nm_mapping["D"]:
-    #     if "Outdoor Dry-Bulb Temperature" in col:
-    #         cfg[col] = {
-    #             # "off": None,  # not physically meaningful, should never be used
-    #             "outdoor_temp": True,
-    #         }
-    #     elif "Global Horizontal Irradiance" in col:
-    #         cfg[col] = {
-    #             "off": 0.0,  # no irradiance
-    #         }
-    #     elif "Occupancy" in col:
-    #         cfg[col] = {
-    #             "off": 0.0,  # unoccupied
-    #         }
-            
-    return cfg
+    (setpoint,) = nm_mapping["U"]
+    ambient = next(c for c in nm_mapping["D"] if "Outdoor Dry-Bulb" in c)
+    return SynthSpec(
+        states=[c for c in nm_mapping["Y"] if "Zone Air Temperature" in c],
+        ambient=ambient,
+        off={setpoint: norm_stats[setpoint]["max"]},
+        actuations=[Actuation(
+            name="cooling",
+            values={setpoint: norm_stats[setpoint]["min"]},
+            direction=-1,
+        )],
+    )
 
 
 # ---------------------------------------------------------------------

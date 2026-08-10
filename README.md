@@ -107,7 +107,7 @@ The library finds the hook files automatically: by default it looks for `modelin
 | `data_mapping(df, cfg) -> {Y, U, D, t: [col]}` | yes | pipeline at data-prep time |
 | `data_head_config(nm_mapping, norm_stats) -> HeadStack` | must be defined; return `HeadStack([RegressionHead() for _ in Y], Y)` for plain regression | output-head construction |
 | `column_norm_config(nm_mapping) -> {col: norm_type \| None}` | must be defined; return `{}` for no overrides | per-column norm override |
-| `synth_cfg(nm_mapping, norm_stats) -> dict \| None` | must be defined; return `None` to disable | synthetic-scenario penalties |
+| `synth_cfg(nm_mapping, norm_stats) -> SynthSpec \| None` | must be defined; return `None` to disable | physics checks (and the optional `synth_gain` penalty) |
 | `sub_plot(df_true, col_name) -> tuple \| None` | must be defined; return `None` for default | per-column subplot guidance |
 | `hyper_args(trial, base_cfg) -> Config` | required only for `nt model optuna` | Optuna trial setup |
 | `tie_norm_stats(nm_mapping, norm_stats, cfg) -> norm_stats` | optional | post-process norm stats before they are frozen (e.g. force two columns onto a shared `shift`/`stretch`) |
@@ -193,6 +193,14 @@ reportcard and in MLflow.
 - **Rollout stability** — rise fraction and drift against the ground truth's
   own, which catches a model that has stopped responding to its inputs and is
   emitting a ramp. RMSE on a short window will not.
+- **Physics checks** — three assertions on synthetic states the recorded data
+  never contains, each answered in physical units: the states must hold at
+  equilibrium, move the declared way under an actuation, and relax toward
+  ambient with the HVAC off. *"`Zone Air Temperature` closed 0.4% of an 8.3 °C
+  gap to ambient in 24 steps"* is a reason to reject a surrogate; a test-split
+  RMSE cannot produce one. Needs `modeling_user_defined.synth_cfg` to return a
+  `SynthSpec` — two required fields and one per-control value — and is skipped
+  when it returns `None`.
 
 **Before `nt control train` trains anything:**
 
@@ -252,7 +260,7 @@ src/neurotemplate/
 │   ├── heads.py         # HeadStack (regression / binary / bounded / ordinal)
 │   ├── loss.py          # build_loss
 │   ├── gradient_sampling.py  # SampledGradientPenalty
-│   ├── scenarios.py     # synthetic-physics penalties (equilibrium / step / free-decay)
+│   ├── scenarios.py     # SynthSpec + physics checks (equilibrium / step / free-decay)
 │   ├── probe.py         # counterfactual actuator sweep: authority + envelope
 │   ├── experiment.py    # train_with_curriculum, build_trainer
 │   ├── pipeline.py      # train_and_evaluate, evaluate_and_plot

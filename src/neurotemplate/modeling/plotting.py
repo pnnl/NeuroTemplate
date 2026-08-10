@@ -149,10 +149,8 @@ def plot_predictions(
         plt.close(fig)
 
 
-# Plot synthetic scenario results — one figure per scenario, all zones together.
-@beartype
 def plot_synthetic(
-    results: list[dict],
+    traces: list[dict],
     run_dir: str,
     freq_s: float = 300.0,
     n_plot: int = 4,
@@ -160,152 +158,77 @@ def plot_synthetic(
     temp_range: Optional[Tuple[float, float]] = None,
 ) -> None:
     """
+    One figure per synthetic-scenario instance: the state channels against the
+    ambient signal they were driven with, with the seed/rollout boundary
+    marked. The verdicts live in the reportcard; these are for looking at the
+    shape when a verdict is surprising.
+
     Args:
-        results: List of dicts from scenario.evaluate(), one per scenario type.
-        run_dir: Directory to save plots.
-        freq_s: Seconds per timestep, used for x-axis labeling.
-        n_plot: Max number of scenario instances to plot per figure.
-        temp_range: (T_min, T_max) baseline for y-axis. Expanded if data exceeds it.
+        traces: dicts from `scenario.trace(n)`; empty ones are skipped.
+        run_dir: directory for the figures (CSVs go in `synth_data/` beside).
+        freq_s: seconds per timestep, for the x axis.
+        n_plot: max instances drawn per scenario.
+        temp_range: (lo, hi) baseline for the y axis; expanded to fit the data.
     """
     plot_dir = Path(run_dir)
     plot_dir.mkdir(parents=True, exist_ok=True)
 
-    for result in results:
-        zone_names = result["zone_names"]
-        name = result["name"]
+    for trace in traces:
+        if not trace:
+            continue
+        name = trace["name"]
+        preds = trace["predictions"]
+        ambient = trace["ambient_traj"]
+        channels = trace["channel_names"]
+        states = trace["state_names"]
+        seed_steps = trace["seed_steps"]
 
-        # Step response has modes (cooling/heating); others are a single entry.
-        if "modes" in result:
-            entries = [
-                (mode_name, mode_data)
-                for mode_name, mode_data in result["modes"].items()
-            ]
-        else:
-            entries = [(None, result)]
+        total_steps = preds.shape[1]
+        t_minutes = np.arange(total_steps) * freq_s / 60.0
+        # The input tensors are one step shorter than the prediction sequence
+        # (no input drives the final state).
+        t_input = t_minutes[:len(ambient[0])]
 
-        for mode_name, entry in entries:
-            losses = entry["losses"]
-            preds = entry["predictions"]
-            u_traj = entry.get("u_traj")
-            outdoor_temp_traj = entry.get("outdoor_temp_traj")
+        for row in range(min(n_plot, preds.shape[0])):
+            fig, ax = plt.subplots(1, 1)
+            fig.suptitle(name, fontsize=14)
 
-            # has_u = u_traj is not None
-            has_u = False
-            has_outdoor = outdoor_temp_traj is not None
-            n_scenarios = preds.shape[0]
-            total_steps = preds.shape[1]
-            n_show = min(n_plot, n_scenarios)
+            for label in states:
+                z = channels.index(label)
+                ax.plot(t_minutes, preds[row, :, z].numpy(), "-", label=label)
+            ax.axvline(t_minutes[seed_steps - 1], color="gray",
+                       linestyle="--", linewidth=1, label="Rollout start")
+            ax.step(t_input, ambient[row].numpy(), where="post", color="blue",
+                    linestyle=":", alpha=0.6, label="Ambient")
 
-            if len(losses) != n_scenarios:
-                raise ValueError(
-                    f"losses length ({len(losses)}) != batch dim ({n_scenarios}) "
-                    f"for {name}" + (f" mode {mode_name}" if mode_name else "")
-                )
+            ax.set_ylabel("Physical units")
+            ax.set_xlabel("Time (minutes)")
+            ax.grid(True, alpha=0.3)
+            ax.legend(loc="best", fontsize=8)
 
-            t_minutes = np.arange(total_steps) * freq_s / 60.0
-            # D/U tensors have total_steps-1 entries; align with the first
-            # total_steps-1 prediction steps (no input for the final step).
-            t_input = t_minutes[:-1]
+            if temp_range is not None:
+                margin = 0.5
+                data_min = min(preds[row].min().item(), ambient[row].min().item())
+                data_max = max(preds[row].max().item(), ambient[row].max().item())
+                ax.set_ylim(min(temp_range[0], data_min) - margin,
+                            max(temp_range[1], data_max) + margin)
 
-            seed_steps = result.get("seed_steps")
+            fig.tight_layout()
+            fname = safe_name(name)
+            fig.savefig(plot_dir / f"{fname}_{row}.pdf")
+            if verbose:
+                print(f"Saved synthetic plot: {plot_dir / f'{fname}_{row}.pdf'}")
+            plt.close(fig)
 
-            # One figure per scenario instance
-            for row in range(n_show):
-                fig, ax = plt.subplots(1, 1)
-
-                title = name
-                if mode_name:
-                    title += f" — {mode_name.replace('_', ' ').title()}"
-                title += f" — Loss: {losses[row]:.4f}"
-                fig.suptitle(title, fontsize=14)
-
-                # Zone temp trajectories (solid)
-                for z in range(len(zone_names)):
-                    ax.plot(t_minutes, preds[row, :, z].numpy(), "-")
-
-                # Vertical line at seed/prediction boundary
-                if seed_steps is not None:
-                    ax.axvline(
-                        t_minutes[seed_steps - 1], color="gray",
-                        linestyle="--", linewidth=1, label="Prediction start",
-                    )
-
-                # Outdoor temp: plot the actual tensor fed to the model
-                if has_outdoor:
-                    ax.step(t_input, outdoor_temp_traj[row].numpy(),
-                            where="post", color="blue", linestyle=":", alpha=0.6)
-
-                ax.set_ylabel("Temp [°C]")
-                ax.set_xlabel("Time (minutes)")
-                ax.grid(True, alpha=0.3)
-
-                # Control inputs on twin axis (dashed, no labels)
-                if has_u:
-                    ax2 = ax.twinx()
-                    for u_idx in range(u_traj.shape[2]):
-                        ax2.step(t_input, u_traj[row, :, u_idx].numpy(),
-                                 where="post", alpha=0.4, linestyle="--",
-                                 color="green")
-                    ax2.tick_params(right=False, labelright=False)
-
-                # Legend
-                legend_handles = [
-                    plt.Line2D([], [], color="black", linestyle="-", label="Zone temps"),
-                ]
-                if seed_steps is not None:
-                    legend_handles.append(
-                        plt.Line2D([], [], color="gray", linestyle="--", linewidth=1,
-                                   label="Prediction start"),
-                    )
-                if has_outdoor:
-                    legend_handles.append(
-                        plt.Line2D([], [], color="blue", linestyle=":", alpha=0.6,
-                                   label="Outdoor temp"),
-                    )
-                if has_u:
-                    legend_handles.append(
-                        plt.Line2D([], [], color="green", linestyle="--", alpha=0.4,
-                                   label="Control inputs"),
-                    )
-                ax.legend(handles=legend_handles, loc="best", fontsize=10)
-
-                # Standardize y-axis: temp_range as baseline, expand for data
-                if temp_range is not None:
-                    data_min = preds[row].min().item()
-                    data_max = preds[row].max().item()
-                    if has_outdoor:
-                        data_min = min(data_min, outdoor_temp_traj[row].min().item())
-                        data_max = max(data_max, outdoor_temp_traj[row].max().item())
-                    margin = 0.5
-                    y_low = min(temp_range[0], data_min) - margin
-                    y_high = max(temp_range[1], data_max) + margin
-                    ax.set_ylim(y_low, y_high)
-
-                fig.tight_layout()
-                fname = safe_name(f"{name}_{mode_name}" if mode_name else name)
-                save_path = plot_dir / f"{fname}_{row}.pdf"
-                fig.savefig(save_path)
-                if verbose:
-                    print(f"Saved synthetic plot: {save_path}")
-                plt.close(fig)
-
-                # Save actual values to CSV alongside the plot
-                csv_data = {"time_min": t_minutes}
-                for z, zn in enumerate(zone_names):
-                    csv_data[zn] = preds[row, :, z].numpy()
-                if has_outdoor:
-                    # Pad to match total_steps (inputs are 1 shorter)
-                    outdoor_vals = outdoor_temp_traj[row].numpy()
-                    csv_data["outdoor_temp"] = np.append(outdoor_vals, np.nan)
-                if has_u:
-                    u_names = result.get("u_names") or entry.get("u_names")
-                    for u_idx in range(u_traj.shape[2]):
-                        u_label = u_names[u_idx] if u_names else f"u_{u_idx}"
-                        csv_data[u_label] = np.append(
-                            u_traj[row, :, u_idx].numpy(), np.nan
-                        )
-                data_dir = plot_dir / "synth_data"
-                data_dir.mkdir(parents=True, exist_ok=True)
-                pd.DataFrame(csv_data).to_csv(
-                    data_dir / f"{fname}_{row}.csv", index=False
-                )
+            csv_data = {"time_min": t_minutes}
+            for z, label in enumerate(channels):
+                csv_data[label] = preds[row, :, z].numpy()
+            pad = total_steps - len(ambient[row])
+            csv_data["ambient"] = np.append(
+                ambient[row].numpy(), [np.nan] * pad
+            )
+            data_dir = plot_dir / "synth_data"
+            data_dir.mkdir(parents=True, exist_ok=True)
+            pd.DataFrame(csv_data).to_csv(
+                data_dir / f"{fname}_{row}.csv", index=False
+            )

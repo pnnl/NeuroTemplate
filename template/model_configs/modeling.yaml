@@ -103,10 +103,15 @@ run: ""
 # grad_gain: 0.0
 # Random off-trajectory points sampled per step for the gradient penalty.
 # grad_n_samples: 128
-# Synthetic-scenario penalty weight; > 0 requires
-# modeling_user_defined.synth_cfg to return a dict. 0 disables.
+# Synthetic-scenario TRAINING PENALTY weight. This knob is optional and off by
+# default. The scenarios themselves are not: whenever
+# modeling_user_defined.synth_cfg returns a SynthSpec, the run asserts them
+# after training and reports pass/fail per scenario in physical units. Turn
+# this up only if you want the penalty in the loss as well.
 # synth_gain: 0.0
+# Scenario instances per check, and how far each one is rolled out. More steps
+# is a harder test: a model can hold for 6 steps and diverge by 24.
 # synth_n_scenarios: 32
 # synth_n_steps: 24
-# Scenario instances drawn on the diagnostic figure.
+# Scenario instances drawn on the diagnostic figures.
 # synth_n_plot: 4

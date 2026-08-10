@@ -22,6 +22,7 @@ from optuna.pruners import MedianPruner
 from pandas import DataFrame
 
 from neurotemplate._typing import beartype
+from neurotemplate.modeling.scenarios import SynthSpec
 
 from neurotemplate.modeling.config import ModelingConfig
 from neurotemplate.common.config import load_config_from_cli, MODEL_CONFIG_DIR
@@ -47,7 +48,7 @@ def objective(
     dev_dfs: list[DataFrame],
     nm_mapping: dict[str, list[str]],
     norm_stats: dict[str, dict[str, float]],
-    synth_cfg: Optional[dict],
+    synth_cfg: Optional[SynthSpec],
     head_stack: Optional[HeadStack],
 ) -> float:
     """Train under suggested hyperparameters across multiple seeds; return mean dev loss."""

@@ -48,7 +48,15 @@ from neurotemplate.modeling.probe import (
     u_bounds_from_norm_stats,
 )
 from neurotemplate.modeling.reportcard import render_reportcard as _render_reportcard
-from neurotemplate.modeling.scenarios import _unnormalize_y, build_scenarios
+from neurotemplate.modeling.scenarios import (
+    ScenarioResult,
+    SynthSpec,
+    _unnormalize_y,
+    build_scenarios,
+    checks_to_dict,
+    format_checks,
+    run_checks,
+)
 
 
 # ── Result type ──────────────────────────────────────────────────
@@ -64,6 +72,8 @@ class TestResults:
     # Counterfactual actuator sweep. None only when the surrogate has no U
     # columns, i.e. nothing to probe.
     authority: Optional[AuthorityReport] = None
+    # Physics assertions. None when the use case opted out of synth_cfg.
+    physics: Optional[list[ScenarioResult]] = None
 
 
 # ── Test eval + plotting (one operation) ────────────────────────
@@ -76,7 +86,7 @@ def evaluate_and_plot(
     test_dfs: list[DataFrame],
     nm_mapping: dict[str, list[str]],
     norm_stats: dict,
-    synth_cfg: Optional[dict],
+    synth_cfg: Optional[SynthSpec],
     freq_s: float,
     plot_run_dir: Path,
     logger=None,
@@ -145,18 +155,19 @@ def evaluate_and_plot(
                 print("WARNING: no authority over any predicted channel: "
                       + ", ".join(dead))
 
+    # Physics assertions on synthetic states the recorded data never visits.
+    # These run on their own, with no `synth_gain` and no plotting — the
+    # verdicts are the point, the figures are for when one surprises you.
+    physics = _run_physics_checks(
+        cfg, dyn_sys, nm_mapping, norm_stats, synth_cfg, freq_s,
+        plot_run_dir, logger,
+    )
+
     if cfg.plot:
         _plot_predictions(
             cfg, test_out, test_dfs, source_idx, nm_mapping, norm_stats,
             plot_run_dir, logger,
         )
-        if synth_cfg is not None:
-            _plot_synth(
-                cfg, dyn_sys, nm_mapping, norm_stats, synth_cfg,
-                freq_s, plot_run_dir, logger,
-            )
-        elif cfg.verbose:
-            print("Synthetic scenarios disabled (synth_cfg=None); skipping.")
 
     return TestResults(
         metrics=metrics,
@@ -164,6 +175,7 @@ def evaluate_and_plot(
         aggregate_rmse=aggregate_rmse,
         test_time_s=test_time_s,
         authority=authority,
+        physics=physics,
     )
 
 
@@ -198,11 +210,14 @@ def _plot_predictions(
         )
 
 
-def _plot_synth(
+def _run_physics_checks(
     cfg, dyn_sys, nm_mapping, norm_stats, synth_cfg, freq_s,
     plot_run_dir, logger,
-):
-    """Synthetic-scenario figures."""
+) -> Optional[list[ScenarioResult]]:
+    """Assert the three physics scenarios; plot their traces if plotting is on.
+
+    Returns None when the use case opted out (`synth_cfg` hook returns None).
+    """
     dyn_sys.eval()
     scenarios = build_scenarios(
         system=dyn_sys,
@@ -210,43 +225,33 @@ def _plot_synth(
         norm_stats=norm_stats,
         synth_cfg=synth_cfg,
         in_steps=cfg.in_steps,
-        n_scenarios=cfg.synth_n_plot,
+        n_scenarios=cfg.synth_n_scenarios,
         n_steps=cfg.synth_n_steps,
         device=cfg.device,
     )
     if scenarios is None:
-        return  # already handled at caller via verbose print
+        if cfg.verbose:
+            print("Physics checks disabled (synth_cfg=None); skipping.")
+        return None
 
+    results = run_checks(scenarios)
     if cfg.verbose:
-        print("Running synthetic scenario evaluation...")
-    with torch.no_grad():
-        results = [s.evaluate() for s in scenarios]
+        print(format_checks(results))
 
-    if cfg.verbose:
-        for r in results:
-            if "modes" in r:
-                for mode_name, mode_data in r["modes"].items():
-                    losses = mode_data["losses"]
-                    mean_loss = sum(losses) / len(losses) if losses else 0.0
-                    print(f"  {r['name']} ({mode_name}): mean loss = {mean_loss:.4f}")
-            else:
-                losses = r["losses"]
-                mean_loss = sum(losses) / len(losses) if losses else 0.0
-                print(f"  {r['name']}: mean loss = {mean_loss:.4f}")
+    if cfg.plot:
+        synth_dir = plot_run_dir / "synthetic"
+        states = synth_cfg.states
+        plot_synthetic(
+            [s.trace(cfg.synth_n_plot) for s in scenarios],
+            run_dir=str(synth_dir),
+            freq_s=freq_s, n_plot=cfg.synth_n_plot, verbose=cfg.verbose,
+            temp_range=(min(norm_stats[c]["min"] for c in states),
+                        max(norm_stats[c]["max"] for c in states)),
+        )
+        if logger is not None and hasattr(logger, "_mlflow"):
+            logger._mlflow.log_artifact(str(synth_dir), artifact_path="plots")
 
-    synth_dir = plot_run_dir / "synthetic"
-    y_cols = nm_mapping["Y"]
-    temp_range = (
-        min(norm_stats[c]["min"] for c in y_cols),
-        max(norm_stats[c]["max"] for c in y_cols),
-    )
-    plot_synthetic(
-        results, run_dir=str(synth_dir),
-        freq_s=freq_s, n_plot=cfg.synth_n_plot,
-        verbose=cfg.verbose, temp_range=temp_range,
-    )
-    if logger is not None and hasattr(logger, "_mlflow"):
-        logger._mlflow.log_artifact(str(synth_dir), artifact_path="plots")
+    return results
 
 
 # ── Reportcard ──────────────────────────────────────────────────
@@ -290,6 +295,7 @@ def render_reportcard(
         test_metrics=test_results.metrics,
         stability=test_results.stability,
         authority=test_results.authority,
+        physics=test_results.physics,
         nm_mapping=nm_mapping,
         head_stack=head_stack,
         norm_stats=norm_stats,
@@ -340,6 +346,14 @@ def log_test_results(
             key = f"{_safe_metric_key(a.y_name)}_per_{_safe_metric_key(a.u_name)}"
             flat[f"authority_{key}"] = a.delta
             flat[f"authority_rel_{key}"] = a.relative
+    if test_results.physics is not None:
+        # One gate number to sort a leaderboard by, plus the detail.
+        flat["physics_checks_passed"] = float(
+            sum(r.passed for r in test_results.physics)
+        )
+        flat["physics_checks_total"] = float(len(test_results.physics))
+        for r in test_results.physics:
+            flat[f"physics_{_safe_metric_key(r.name)}"] = r.value
 
     logger.log_metrics(flat)
     if hasattr(logger, "log_dict"):
@@ -354,6 +368,11 @@ def log_test_results(
             logger.log_dict(
                 authority_to_dict(test_results.authority),
                 name="actuator_authority.json",
+            )
+        if test_results.physics is not None:
+            logger.log_dict(
+                checks_to_dict(test_results.physics),
+                name="physics_checks.json",
             )
 
 
@@ -370,7 +389,7 @@ def train_and_evaluate(
     nm_mapping: dict[str, list[str]],
     norm_stats: dict,
     grad_masks: dict,
-    synth_cfg: Optional[dict],
+    synth_cfg: Optional[SynthSpec],
     freq_s: float,
     logger,
     head_stack: Optional[HeadStack] = None,

@@ -15,9 +15,12 @@ logged to MLflow. Sections (in order):
                               responding to their inputs and are ramping
   6. Actuator authority     — counterfactual sweep of each control input, and
                               the achievable envelope of each channel
-  7. Bounded channel coverage — for each bounded head, whether any test
+  7. Physics checks         — equilibrium / step response / free decay, each a
+                              pass-fail assertion on synthetic states the
+                              recorded data never contains
+  8. Bounded channel coverage — for each bounded head, whether any test
                               samples fall outside the head's [lo, hi]
-  8. Hyperparameters        — lr, batch_size, train_pred_steps, curriculum, gains
+  9. Hyperparameters        — lr, batch_size, train_pred_steps, curriculum, gains
 
 The "auto-detected anomalies" section listed in updates.md is left for
 a future, more creative pass and intentionally not implemented here.
@@ -48,6 +51,7 @@ from neurotemplate.modeling.probe import (
     authority_to_markdown,
     envelope_to_markdown,
 )
+from neurotemplate.modeling.scenarios import ScenarioResult, checks_to_markdown
 from neurotemplate.common.reportcard import _fmt_float, _section
 
 from neurotemplate._typing import beartype
@@ -359,6 +363,36 @@ def _authority_section(report: AuthorityReport) -> str:
     return _section("Actuator authority", "\n".join(body))
 
 
+def _physics_section(results: list[ScenarioResult]) -> str:
+    """Assertions on synthetic states the recorded data never contains.
+
+    The test split cannot ask whether the model has learned any physics,
+    because it never contains the HVAC fully off or the weather stepping to a
+    new value. These do, and each answer is a number in physical units and a
+    verdict rather than a loss.
+    """
+    if not results:
+        return _section("Physics checks", "*(no scenarios ran)*")
+    failed = [r for r in results if not r.passed]
+    body = [
+        f"{len(results) - len(failed)} of {len(results)} passed. Each "
+        "scenario puts the surrogate in a state the training data never "
+        "visits and asserts what has to happen next.\n",
+        checks_to_markdown(results),
+    ]
+    if failed:
+        body += [
+            "",
+            "**⚠️ Failed:** " + ", ".join(f"`{r.name}`" for r in failed)
+            + ". A surrogate that fails these is not physically coherent, "
+            "whatever its NRMSE says, and a policy trained against it will "
+            "be optimising against the incoherence. Fix the model, or widen "
+            "the training excitation so these regimes are covered, before "
+            "spending an hour on a controller.",
+        ]
+    return _section("Physics checks", "\n".join(body))
+
+
 def _hyperparameters_section(cfg: ModelingConfig) -> str:
     rows = [
         f"- **lr:** {cfg.lr}",
@@ -397,6 +431,7 @@ def render_reportcard(
     *,
     stability: Optional[list[RolloutStability]] = None,
     authority: Optional[AuthorityReport] = None,
+    physics: Optional[list[ScenarioResult]] = None,
     head_stack: Optional[HeadStack] = None,
     norm_stats: Optional[dict] = None,
     test_df: Optional[pd.DataFrame] = None,
@@ -450,6 +485,8 @@ def render_reportcard(
         parts.append(_stability_section(stability, cfg.test_window))
     if authority is not None:
         parts.append(_authority_section(authority))
+    if physics is not None:
+        parts.append(_physics_section(physics))
     coverage = _bounded_coverage_section(head_stack, test_df)
     if coverage is not None:
         parts.append(coverage)

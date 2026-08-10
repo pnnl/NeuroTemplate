@@ -189,6 +189,50 @@ def test_authority_section_skipped_without_a_probe():
     assert "## Actuator authority" not in md
 
 
+def _physics(passed: bool):
+    from neurotemplate.modeling.scenarios import ScenarioResult
+    return [
+        ScenarioResult("Equilibrium", True, "`zone_a [°C]` held to 0.01.",
+                       "zone_a [°C]", 0.01, 0.24, 0.0),
+        ScenarioResult("Free decay", passed,
+                       "`zone_a [°C]` closed 0.4% of a 8.3 gap to ambient.",
+                       "zone_a [°C]", 0.004, 0.02, 1.2),
+    ]
+
+
+def test_physics_section_counts_the_verdicts():
+    md = render_reportcard(
+        cfg=_make_cfg(), arch=_make_arch(), test_metrics=_make_metrics(),
+        nm_mapping={"Y": ["zone_a [°C]"], "U": [], "D": ["outdoor"]},
+        physics=_physics(passed=False),
+        run_name="x", timestamp="2026-01-01T00:00:00",
+    )
+    assert "## Physics checks" in md
+    assert "1 of 2 passed" in md
+    assert "**FAIL**" in md
+    assert "**⚠️ Failed:** `Free decay`" in md
+
+
+def test_physics_section_stays_quiet_when_everything_passes():
+    md = render_reportcard(
+        cfg=_make_cfg(), arch=_make_arch(), test_metrics=_make_metrics(),
+        nm_mapping={"Y": ["zone_a [°C]"], "U": [], "D": ["outdoor"]},
+        physics=_physics(passed=True),
+        run_name="x", timestamp="2026-01-01T00:00:00",
+    )
+    assert "2 of 2 passed" in md
+    assert "⚠️ Failed" not in md
+
+
+def test_physics_section_skipped_when_the_use_case_opted_out():
+    md = render_reportcard(
+        cfg=_make_cfg(), arch=_make_arch(), test_metrics=_make_metrics(),
+        nm_mapping={"Y": ["a"], "U": [], "D": []},
+        run_name="x", timestamp="2026-01-01T00:00:00",
+    )
+    assert "## Physics checks" not in md
+
+
 def test_stability_section_states_the_rollout_horizon():
     """The gate's horizon must be visible, not inferred from the config section.
 

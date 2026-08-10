@@ -33,6 +33,10 @@ from neurotemplate.modeling.heads import (  # noqa: F401  — cited in comments
     bounds_from_norm,
     project_physical_to_norm,
 )
+from neurotemplate.modeling.scenarios import (  # noqa: F401  — cited in synth_cfg
+    Actuation,
+    SynthSpec,
+)
 
 
 # ---------------------------------------------------------------------
@@ -200,39 +204,56 @@ def tie_norm_stats(
 
 
 # ---------------------------------------------------------------------
-# Required: synthetic physics-scenario configuration,
-# This is required to exist, but may be un-implemented. 
-# Leave this unless specifically asked to use it, it is significant
-# additional machinery
+# Required: the plant's resting state, for the physics checks
 # ---------------------------------------------------------------------
 @beartype
 def synth_cfg(
     nm_mapping: dict,
     norm_stats: dict,
-) -> Optional[dict[str, dict]]:
+) -> Optional[SynthSpec]:
     """
-    Physical values that define the synthetic scenarios (equilibrium, step
-    response, free decay). Return None to disable the subsystem — then
-    `synth_gain` must stay 0.
+    Three physics assertions run after training whatever else you configure:
+    the states must hold at equilibrium, move the right way under an
+    actuation, and relax toward ambient when the HVAC is off. They put the
+    surrogate in states the recorded data never contains, so they answer a
+    question no test split can — and a surrogate that fails them will not
+    control well however good its NRMSE is.
 
-    When enabled the dict must cover EVERY U and D column:
-      U columns: {"off": <value with no actuation>}
-                 plus optional {"active_cooling": <value at full actuation>}
-                 to enable the step-response scenario.
-      D columns: {"off": <value with no external forcing>}
-      Exactly one D column instead carries {"outdoor_temp": True} — the
-      ambient signal the states relax toward. Required.
+    Filling this in is a few lines and worth doing. Return None to skip the
+    checks entirely; `synth_gain` must then stay 0.
 
-    All values are PHYSICAL units; the library normalizes them.
+    Only two things are per-column work:
 
-        cfg = {}
-        for col in nm_mapping["U"]:
-            cfg[col] = {"off": norm_stats[col]["max"],
-                        "active_cooling": norm_stats[col]["min"]}
-        for col in nm_mapping["D"]:
-            cfg[col] = ({"outdoor_temp": True} if "Ambient" in col
-                        else {"off": 0.0})
-        return cfg
+      states   Y channels that behave like temperatures — they hold when
+               nothing drives them and relax toward ambient. Naming them is
+               required, because writing an equilibrium temperature into a
+               power channel produces silent garbage.
+      off      the physical value of each CONTROL column when nothing is
+               running. Required for controls and only for controls: an
+               actuator's "off" is not guessable (a cooling setpoint is off
+               at its *maximum*). Every other column defaults to its recorded
+               minimum, which is what "no forcing" means for solar,
+               occupancy, power and flow.
+
+    `actuations` is optional; each one names the control values to apply and
+    the direction (+1 up, -1 down) the states should then move.
+
+        from neurotemplate.modeling.scenarios import Actuation, SynthSpec
+
+        cool_sp = "Zone Cooling Setpoint [degC]"
+        return SynthSpec(
+            states=["Zone Air Temperature [degC]"],
+            ambient="Ambient Temperature [degC]",
+            off={cool_sp: norm_stats[cool_sp]["max"]},
+            actuations=[Actuation(
+                name="cooling",
+                values={cool_sp: norm_stats[cool_sp]["min"]},
+                direction=-1,
+            )],
+        )
+
+    All values are PHYSICAL units; the library normalizes them, and validates
+    the whole spec against the column mapping before anything runs.
     """
     return None
 

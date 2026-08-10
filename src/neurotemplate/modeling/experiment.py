@@ -22,6 +22,7 @@ from datetime import datetime
 
 
 from neurotemplate._typing import beartype
+from neurotemplate.modeling.scenarios import SynthSpec
 
 from neurotemplate.common.data_utils import get_loader
 from neurotemplate.modeling.heads import HeadStack
@@ -79,7 +80,7 @@ def build_trainer(
     nm_mapping: dict[str, list[str]],
     grad_masks: dict[str, torch.Tensor],
     norm_stats: dict[str, dict[str, float]],
-    synth_cfg: Optional[dict],
+    synth_cfg: Optional[SynthSpec],
     head_stack: Optional[HeadStack] = None,
     logger: Optional[MLFlowLogger] = None,
 ) -> Trainer:
@@ -217,7 +218,7 @@ def train_with_curriculum(
     nm_mapping: dict[str, list[str]],
     grad_masks: dict[str, torch.Tensor],
     norm_stats: dict[str, dict[str, float]],
-    synth_cfg: Optional[dict],
+    synth_cfg: Optional[SynthSpec],
     head_stack: Optional[HeadStack] = None,
     global_logger: Optional[MLFlowLogger] = None,
 ) -> tuple[System, float]:
