@@ -296,6 +296,10 @@ def _band_jumps(lo: torch.Tensor, hi: torch.Tensor) -> list[int]:
     Read off the band signal itself rather than reconstructed from
     `BandSpec.sub_samples`, so a use case that overrides `comfort_band_signal`
     with an occupancy schedule or a recorded column is audited just the same.
+
+    A band that changes at *every* step — a continuously varying reference
+    rather than a piecewise-constant one — leaves no segment to score, and
+    `response_audit` then reports nothing rather than reporting noise.
     """
     changed = (lo[1:] != lo[:-1]) | (hi[1:] != hi[:-1])
     return (changed.nonzero().flatten() + 1).tolist()
