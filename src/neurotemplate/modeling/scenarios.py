@@ -33,6 +33,12 @@ the plant in a state the data never visited and assert the sign and stability
 of what happens. The probe measures authority you have; this says whether the
 model is physically coherent at all.
 
+These are deliberately extrapolations. Holding ambient equal to a 24 °C indoor
+state puts a surrogate trained on a 9-18 °C spring outside its data, and that
+is the point — a model that only behaves inside its training distribution will
+be asked to leave it the moment a controller starts steering. Read a failure
+as "this is where it stops making sense", not as a scoring error.
+
 The same rollouts also back a differentiable training penalty (`compute()`,
 wired through `cfg.synth_gain`), but the assertions run whether or not the
 penalty is switched on, and that is the intended way to use them.

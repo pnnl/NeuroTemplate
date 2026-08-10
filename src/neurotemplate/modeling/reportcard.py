@@ -386,9 +386,10 @@ def _physics_section(results: list[ScenarioResult]) -> str:
             "**⚠️ Failed:** " + ", ".join(f"`{r.name}`" for r in failed)
             + ". A surrogate that fails these is not physically coherent, "
             "whatever its NRMSE says, and a policy trained against it will "
-            "be optimising against the incoherence. Fix the model, or widen "
-            "the training excitation so these regimes are covered, before "
-            "spending an hour on a controller.",
+            "be optimising against the incoherence. These scenarios are "
+            "deliberately outside the training distribution — which is also "
+            "where a controller will take the model — so widening the "
+            "excitation is as valid a fix as changing the architecture.",
         ]
     return _section("Physics checks", "\n".join(body))
 
