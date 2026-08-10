@@ -209,7 +209,8 @@ def test_physics_section_counts_the_verdicts():
     assert "## Physics checks" in md
     assert "1 of 2 passed" in md
     assert "**FAIL**" in md
-    assert "**⚠️ Failed:** `Free decay`" in md
+    # Named by scenario *and* channel, since each scenario reports on each.
+    assert "**⚠️ Failed:** `Free decay | zone_a [°C]`" in md
 
 
 def test_physics_section_stays_quiet_when_everything_passes():

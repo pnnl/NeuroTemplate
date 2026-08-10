@@ -375,13 +375,14 @@ def _physics_section(results: list[ScenarioResult]) -> str:
     body = [
         f"{len(results) - len(failed)} of {len(results)} passed. Each "
         "scenario puts the surrogate in a state the training data never "
-        "visits and asserts what has to happen next.\n",
+        "visits and asserts what has to happen next, once per state channel — "
+        "so a channel you are not relying on cannot hide one you are.\n",
         checks_to_markdown(results),
     ]
     if failed:
         body += [
             "",
-            "**⚠️ Failed:** " + ", ".join(f"`{r.name}`" for r in failed)
+            "**⚠️ Failed:** " + ", ".join(f"`{r.key}`" for r in failed)
             + ". A surrogate that fails these is not physically coherent, "
             "whatever its NRMSE says, and a policy trained against it will "
             "be optimising against the incoherence. These scenarios are "

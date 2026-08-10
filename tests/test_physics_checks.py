@@ -137,7 +137,7 @@ def test_a_plant_that_holds_passes_equilibrium():
     assert r.passed
     assert r.channel == ZONE
     assert r.value == pytest.approx(0.0, abs=1e-4)
-    assert "held to" in r.headline
+    assert "Held to" in r.headline
 
 
 def test_a_drifting_plant_fails_equilibrium():
@@ -157,14 +157,14 @@ def test_a_responsive_plant_passes_the_step():
     assert r.passed
     assert r.name == "Step response: cooling"
     assert r.value < 0                      # the zone came down
-    assert "moved" in r.headline
+    assert "Moved" in r.headline
 
 
 def test_an_inert_actuator_is_named_as_such():
     (r,) = _scenarios(_inert)[1].check()
     assert not r.passed
     assert r.value == pytest.approx(0.0, abs=1e-6)
-    assert "did not respond" in r.headline
+    assert "Did not respond" in r.headline
     assert "no lever" in r.headline
 
 
@@ -187,7 +187,7 @@ def test_a_plant_that_relaxes_toward_ambient_passes():
     (r,) = _scenarios(_perfect)[2].check()
     assert r.passed
     assert 0.0 < r.value <= 1.0
-    assert "closed" in r.headline and "gap to ambient" in r.headline
+    assert "Closed" in r.headline and "gap to ambient" in r.headline
 
 
 def test_a_plant_with_no_envelope_coupling_fails():
@@ -206,7 +206,7 @@ def test_overshooting_ambient_fails():
     (r,) = _scenarios(overshoot, n_steps=1)[2].check()
     assert not r.passed
     assert r.value > 1.0
-    assert "overshot ambient" in r.headline
+    assert "Overshot ambient" in r.headline
 
 
 # ── The bug this subsystem used to have ──────────────────────────
@@ -385,6 +385,33 @@ def test_run_checks_flattens_every_scenario():
     ]
 
 
+def test_every_scenario_reports_on_every_state_channel():
+    """One verdict per (scenario, channel) — no collapse to a worst case.
+
+    The collapse this replaces made naming a second state destructive: a
+    failure on the wide channel took the channel you cared about out of the
+    report entirely, so the classification was a hard gate rather than a label.
+    """
+    stats = _two_state_stats()
+
+    def zone_drifts_supply_holds(y, u, d):
+        # Zone ramps (fails equilibrium); supply air sits still (passes).
+        return torch.stack([y[:, 0] + 0.5, y[:, 1], y[:, 2]], dim=1)
+
+    results = run_checks(_two_state_scenarios(stats, zone_drifts_supply_holds))
+
+    equilibrium = [r for r in results if r.name == "Equilibrium"]
+    assert [r.channel for r in equilibrium] == [ZONE, SUPPLY]
+
+    by_channel = {r.channel: r for r in equilibrium}
+    assert not by_channel[ZONE].passed          # the one that actually drifted
+    assert by_channel[SUPPLY].passed            # still visible, still its own row
+
+    # And the two are distinguishable everywhere downstream.
+    assert by_channel[ZONE].key == f"Equilibrium | {ZONE}"
+    assert len(checks_to_dict(results)) == len(results)
+
+
 def test_renderers_show_verdicts_not_losses():
     results = run_checks(_scenarios(_inert))
 
@@ -396,8 +423,8 @@ def test_renderers_show_verdicts_not_losses():
     assert "[FAIL]" in text and "[ok  ]" in text
 
     payload = checks_to_dict(results)
-    assert set(payload) == {r.name for r in results}
-    assert payload["Free decay"]["passed"] is False
+    assert set(payload) == {r.key for r in results}
+    assert payload[f"Free decay | {ZONE}"]["passed"] is False
 
 
 def test_the_scenarios_are_assertions_and_carry_no_training_term():

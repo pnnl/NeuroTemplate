@@ -164,18 +164,31 @@ class SynthSpec:
 
 @dataclass
 class ScenarioResult:
-    """One physics assertion, its verdict, and the number behind it."""
-    name: str
+    """One physics assertion on one state channel, and the number behind it.
+
+    Every scenario reports one of these per channel in `SynthSpec.states`. An
+    earlier version collapsed each scenario to its single worst channel, which
+    made naming a second state destructive: one wide-ranging channel failing
+    took the channel you cared about out of the report entirely. Per channel,
+    the classification is a soft label — it decides what a channel is *seeded*
+    with, not whether you get to see it.
+    """
+    name: str          # the scenario, e.g. "Equilibrium"
     passed: bool
     headline: str      # one sentence, physical units, safe to print as-is
-    channel: str       # the state channel the verdict was decided on
+    channel: str       # the state channel this verdict is about
     value: float       # the measured quantity the check turned on
     tolerance: float   # the threshold it was compared against
 
+    @property
+    def key(self) -> str:
+        """Stable identifier for one (scenario, channel) verdict."""
+        return f"{self.name} | {self.channel}"
+
     def to_dict(self) -> dict:
         return {"passed": self.passed, "headline": self.headline,
-                "channel": self.channel, "value": self.value,
-                "tolerance": self.tolerance}
+                "scenario": self.name, "channel": self.channel,
+                "value": self.value, "tolerance": self.tolerance}
 
 
 # ── Input construction ───────────────────────────────────────────
@@ -394,23 +407,24 @@ class EquilibriumScenario(_Scenario):
             drift = self._drift(y_pred).mean(dim=0)      # [n_states]
 
         tol = self._tolerance(EQUILIBRIUM_DRIFT_FRAC)
-        worst = max(range(len(tol)), key=lambda i: float(drift[i]) / tol[i])
-        value, limit = float(drift[worst]), tol[worst]
-        channel = self.spec.states[worst]
-        passed = value <= limit
-        verdict = (
-            f"held to {value:.3g} over {self.n_steps} steps"
-            if passed else
-            f"drifted {value:.3g} over {self.n_steps} steps with nothing "
-            "running — either the model is integrating something it should "
-            "not, or a control's `off` value is not off across the whole "
-            "range equilibria are sampled from"
-        )
-        return [ScenarioResult(
-            name=self.label, passed=passed,
-            headline=f"`{channel}` {verdict} (limit {limit:.3g}).",
-            channel=channel, value=value, tolerance=limit,
-        )]
+        results = []
+        for i, channel in enumerate(self.spec.states):
+            value, limit = float(drift[i]), tol[i]
+            passed = value <= limit
+            verdict = (
+                f"Held to {value:.3g} over {self.n_steps} steps"
+                if passed else
+                f"Drifted {value:.3g} over {self.n_steps} steps with nothing "
+                "running — either the model is integrating something it "
+                "should not, or a control's `off` value is not off across the "
+                "whole range equilibria are sampled from"
+            )
+            results.append(ScenarioResult(
+                name=self.label, passed=passed,
+                headline=f"{verdict} (limit {limit:.3g}).",
+                channel=channel, value=value, tolerance=limit,
+            ))
+        return results
 
     def trace(self, n: int) -> dict:
         with torch.no_grad():
@@ -449,33 +463,30 @@ class StepResponseScenario(_Scenario):
                 move = self._move(y_pred).mean(dim=0)     # [n_states]
 
             tol = self._tolerance(RESPONSE_MOVE_FRAC)
-            # Worst channel = the one furthest from doing what was asked.
-            worst = min(range(len(tol)),
-                        key=lambda i: act.direction * float(move[i]) / tol[i])
-            value, limit = float(move[worst]), tol[worst]
-            channel = self.spec.states[worst]
-            signed = act.direction * value
-            if signed >= limit:
-                passed, verdict = True, (
-                    f"moved {value:+.3g} over {self.n_steps} steps"
-                )
-            elif abs(value) < limit:
-                passed, verdict = False, (
-                    f"did not respond ({value:+.3g} over {self.n_steps} "
-                    "steps) — the policy will have no lever here"
-                )
-            else:
-                passed, verdict = False, (
-                    f"moved {value:+.3g}, the wrong way — the policy will "
-                    "pull this actuator backwards"
-                )
-            results.append(ScenarioResult(
-                name=f"{self.label}: {act.name}", passed=passed,
-                headline=f"`{channel}` {verdict} "
-                         f"(wanted {'+' if act.direction > 0 else '-'}"
-                         f"{limit:.3g} or more).",
-                channel=channel, value=value, tolerance=limit,
-            ))
+            for i, channel in enumerate(self.spec.states):
+                value, limit = float(move[i]), tol[i]
+                signed = act.direction * value
+                if signed >= limit:
+                    passed, verdict = True, (
+                        f"Moved {value:+.3g} over {self.n_steps} steps"
+                    )
+                elif abs(value) < limit:
+                    passed, verdict = False, (
+                        f"Did not respond ({value:+.3g} over {self.n_steps} "
+                        "steps) — the policy will have no lever here"
+                    )
+                else:
+                    passed, verdict = False, (
+                        f"Moved {value:+.3g}, the wrong way — the policy will "
+                        "pull this actuator backwards"
+                    )
+                results.append(ScenarioResult(
+                    name=f"{self.label}: {act.name}", passed=passed,
+                    headline=f"{verdict} "
+                             f"(wanted {'+' if act.direction > 0 else '-'}"
+                             f"{limit:.3g} or more).",
+                    channel=channel, value=value, tolerance=limit,
+                ))
         return results
 
     def trace(self, n: int) -> dict:
@@ -541,30 +552,30 @@ class FreeDecayScenario(_Scenario):
             closed = self._closed_fraction(y_pred, t_out).mean(dim=0)
             mean_gap = float((t_out - t_in).abs().mean())
 
-        worst = min(range(len(closed)), key=lambda i: float(closed[i]))
-        value = float(closed[worst])
-        channel = self.spec.states[worst]
-        if value < DECAY_MIN_CLOSED:
-            passed, verdict = False, (
-                f"closed {value:.1%} of a {mean_gap:.3g} gap to ambient in "
-                f"{self.n_steps} steps — this surrogate has no envelope "
-                "coupling to speak of"
-            )
-        elif value > DECAY_MAX_CLOSED:
-            passed, verdict = False, (
-                f"overshot ambient by {value - 1:.1%} of a {mean_gap:.3g} "
-                f"gap in {self.n_steps} steps"
-            )
-        else:
-            passed, verdict = True, (
-                f"closed {value:.1%} of a {mean_gap:.3g} gap to ambient in "
-                f"{self.n_steps} steps"
-            )
-        return [ScenarioResult(
-            name=self.label, passed=passed,
-            headline=f"`{channel}` {verdict}.",
-            channel=channel, value=value, tolerance=DECAY_MIN_CLOSED,
-        )]
+        results = []
+        for i, channel in enumerate(self.spec.states):
+            value = float(closed[i])
+            if value < DECAY_MIN_CLOSED:
+                passed, verdict = False, (
+                    f"Closed {value:.1%} of a {mean_gap:.3g} gap to ambient in "
+                    f"{self.n_steps} steps — this surrogate has no envelope "
+                    "coupling to speak of"
+                )
+            elif value > DECAY_MAX_CLOSED:
+                passed, verdict = False, (
+                    f"Overshot ambient by {value - 1:.1%} of a {mean_gap:.3g} "
+                    f"gap in {self.n_steps} steps"
+                )
+            else:
+                passed, verdict = True, (
+                    f"Closed {value:.1%} of a {mean_gap:.3g} gap to ambient in "
+                    f"{self.n_steps} steps"
+                )
+            results.append(ScenarioResult(
+                name=self.label, passed=passed, headline=f"{verdict}.",
+                channel=channel, value=value, tolerance=DECAY_MIN_CLOSED,
+            ))
+        return results
 
     def trace(self, n: int) -> dict:
         with torch.no_grad():
@@ -635,16 +646,19 @@ def run_checks(scenarios: list, n: Optional[int] = None) -> list[ScenarioResult]
 
 @beartype
 def checks_to_markdown(results: list[ScenarioResult]) -> str:
-    rows = ["| Scenario | Verdict | What happened |", "|---|---|---|"]
+    rows = ["| Scenario | Channel | Verdict | What happened |",
+            "|---|---|---|---|"]
     for r in results:
-        rows.append(f"| {r.name} | {'pass' if r.passed else '**FAIL**'} | "
-                    f"{r.headline} |")
+        rows.append(f"| {r.name} | `{r.channel}` | "
+                    f"{'pass' if r.passed else '**FAIL**'} | {r.headline} |")
     return "\n".join(rows)
 
 
 @beartype
 def checks_to_dict(results: list[ScenarioResult]) -> dict:
-    return {r.name: r.to_dict() for r in results}
+    """Keyed by scenario *and* channel, since each scenario reports on every
+    state channel."""
+    return {r.key: r.to_dict() for r in results}
 
 
 @beartype
@@ -653,5 +667,5 @@ def format_checks(results: list[ScenarioResult]) -> str:
     lines = ["Physics checks (synthetic scenarios):"]
     for r in results:
         mark = "ok  " if r.passed else "FAIL"
-        lines.append(f"  [{mark}] {r.name}: {r.headline}")
+        lines.append(f"  [{mark}] {r.key}: {r.headline}")
     return "\n".join(lines)

@@ -347,13 +347,17 @@ def log_test_results(
             flat[f"authority_{key}"] = a.delta
             flat[f"authority_rel_{key}"] = a.relative
     if test_results.physics is not None:
-        # One gate number to sort a leaderboard by, plus the detail.
+        # One gate number to sort a leaderboard by, plus per-(scenario, channel)
+        # detail — so a channel someone does not care about can be excluded from
+        # a comparison rather than quietly moving the aggregate.
         flat["physics_checks_passed"] = float(
             sum(r.passed for r in test_results.physics)
         )
         flat["physics_checks_total"] = float(len(test_results.physics))
         for r in test_results.physics:
-            flat[f"physics_{_safe_metric_key(r.name)}"] = r.value
+            key = _safe_metric_key(r.key)
+            flat[f"physics_{key}"] = r.value
+            flat[f"physics_{key}_passed"] = float(r.passed)
 
     logger.log_metrics(flat)
     if hasattr(logger, "log_dict"):
