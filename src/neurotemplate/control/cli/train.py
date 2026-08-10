@@ -18,11 +18,8 @@ from neurotemplate._typing import beartype
 
 from neuromancer.loggers import MLFlowLogger
 
-from neurotemplate.common.data_utils import (
-    get_data_splits, get_sw_dict_multi, normalize_df,
-)
+from neurotemplate.common.data_utils import get_data_splits, normalize_df
 from neurotemplate.modeling.experiment import resolve_device, set_seeds
-from neurotemplate.modeling.probe import authority_to_dict, probe_authority
 
 from neurotemplate.control.config import ControlConfig, load_config_from_cli, CONTROL_CONFIG_DIR
 from neurotemplate.control.load import load_frozen_dynamics
@@ -96,32 +93,12 @@ def main() -> None:
         cfg, sysid_cfg, nm_mapping, norm_stats, train_dfs, dev_dfs,
     )
 
-    # Before anything trains: can this surrogate hold the band it is being
-    # asked to hold, and does every actuator have a lever? Both answers are a
-    # few short rollouts, and a "no" to either makes the run meaningless.
+    # Whether this band is reachable at all is a sys-id question, answered by
+    # the reachability scenario on the surrogate's own reportcard. Read it
+    # there before spending an hour training against a band nothing can hold.
     hooks = load_control_hooks(cfg)
     u_bounds = hooks.actuation_bounds(nm_mapping, norm_stats)
-    probe_data = get_sw_dict_multi(
-        dfs=test_dfs, cfg=sysid_cfg, nm_mapping=nm_mapping,
-        steps=cfg.test_window, stride=cfg.test_stride,
-    )
-    probe_data.pop("source_idx")
-    authority = probe_authority(
-        dyn_sys, probe_data, sysid_cfg.in_steps, nm_mapping, norm_stats,
-        *u_bounds,
-    )
     controlled, _ = hooks.controlled_channels(nm_mapping)
-    band = cfg.test_band()
-    for name in controlled:
-        env = authority.envelope_for(name)
-        print(f"Achievable {name}: {env.lo:.4g} to {env.hi:.4g}  "
-              f"(band drawn from {band.lo:.4g} to {band.hi:.4g})")
-        if not env.covers(band.lo, band.hi):
-            print(f"  WARNING: the band for {name} lies outside what this "
-                  "surrogate can hold. No policy can satisfy it.")
-    if authority.dead_actuators():
-        print("  WARNING: no authority over any predicted channel: "
-              + ", ".join(authority.dead_actuators()))
 
     if cfg.verbose:
         print("Building policy + closed loop + loss...")
@@ -192,15 +169,13 @@ def main() -> None:
         cfg, sysid_cfg, arch, nm_mapping, controlled, results,
         eval_band_seed=EVAL_BAND_SEED, baseline=baseline,
         best_dev_loss=best_dev, train_time_s=train_time_s,
-        authority=authority, balance=balance, shapes=shapes,
+        balance=balance, shapes=shapes,
     )
     write_reportcard(md, Path(cfg.savedir), logger=logger)
     log_control_results(logger, results, baseline=baseline)
     if hasattr(logger, "log_dict"):
         logger.log_dict(objective_to_dict(balance, shapes),
                         name="objective_diagnostics.json")
-        logger.log_dict(authority_to_dict(authority),
-                        name="actuator_authority.json")
 
     print(f"Comfort violation rate: "
           f"{results.comfort_violation_rate * 100:.2f}%")

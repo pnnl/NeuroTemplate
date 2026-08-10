@@ -62,12 +62,12 @@ def test_every_diagnostic_reaches_the_reportcard(tmp_path):
     md = render_reportcard(
         cfg=cfg, arch=describe_dynamics(make_frozen_dynamics(cfg, nm)[0], cfg),
         test_metrics=results.metrics, nm_mapping=nm,
-        stability=results.stability, authority=results.authority,
-        physics=results.physics, run_name="x",
+        stability=results.stability,
+        physics=results.physics, readouts=results.readouts, run_name="x",
         timestamp="2026-01-01T00:00:00",
     )
     for title in ("## Test Metrics (per channel)", "## Rollout stability",
-                  "## Actuator authority", "## Physics checks"):
+                  "## Physics checks", "## Readout channels"):
         assert title in md, f"missing section: {title}"
 
 
@@ -94,7 +94,7 @@ def test_opting_out_leaves_the_other_diagnostics_alone(tmp_path):
     results, _, _, _ = _evaluate(tmp_path, synth=False)
 
     assert results.physics is None
-    assert results.authority is not None
+    assert results.readouts is None
     assert results.metrics and results.stability
 
 
@@ -109,7 +109,7 @@ def test_everything_logged_is_json_serializable(tmp_path):
         json.dumps(payload)
     assert set(logger.dicts) >= {
         "test_metrics.json", "rollout_stability.json",
-        "actuator_authority.json", "physics_checks.json",
+        "physics_checks.json", "readout_channels.json",
     }
     assert logger.metrics["physics_checks_total"] == 4.0
     assert 0.0 <= logger.metrics["physics_checks_passed"] <= 4.0

@@ -4,7 +4,7 @@ A library of generic, time-series, data-driven black-box modeling and control bu
 
 The repo contains two sister subsystems:
 
-- **Modeling** — train a system-identification surrogate `y_{k+1} = f(y_k, u_k, d_k) [+ y_k]` from data, with optional physics-informed losses (gradient sign penalties, equilibrium / step-response / free-decay scenarios), Optuna search, MLflow tracking. Model families: `mlp`, `nssm`, `lssm`, `gru`.
+- **Modeling** — train a system-identification surrogate `y_{k+1} = f(y_k, u_k, d_k) [+ y_k]` from data, with an optional gradient-sign penalty, post-training physics assertions (equilibrium / step response / reachability / free decay), Optuna search, MLflow tracking. Model families: `mlp`, `nssm`, `lssm`, `gru`.
 - **Control** — train a differentiable predictive control (DPC) policy against a frozen surrogate. Closed-loop rollouts, comfort-band penalties, optional energy/effort objectives, setpoint quantization. Policy families: `mlp`, `linear` (a saturated affine feedback law). Optionally scores a rule-based baseline alongside the learned policy.
 
 Both sides share a thin `common/` layer (YAML/CLI loader, CSV + sliding-window data utilities, per-channel metrics).
@@ -182,31 +182,27 @@ reportcard and in MLflow.
 
 **After `nt model train`:**
 
-- **Actuator authority** — each control input is held at each end of its range
-  for a whole rollout with the disturbances left at their recorded values, and
-  the sweep reports how far it moved each predicted channel. An input that
-  moves nothing is flagged. Fit cannot see this: a *better*-fitting surrogate
-  with no cooling response produced 2.7× the closed-loop violation of a
-  worse-fitting one that had it.
-- **Achievable envelope** — the span of settled values each channel can be
-  driven to, from the same sweep.
 - **Rollout stability** — rise fraction and drift against the ground truth's
   own, which catches a model that has stopped responding to its inputs and is
   emitting a ramp. RMSE on a short window will not.
-- **Physics checks** — three assertions on synthetic states the recorded data
-  never contains, each answered in physical units: the states must hold at
-  equilibrium, move the declared way under an actuation, and relax toward
-  ambient with the HVAC off. *"`Zone Air Temperature` closed 0.4% of an 8.3 °C
-  gap to ambient in 24 steps"* is a reason to reject a surrogate; a test-split
-  RMSE cannot produce one. Needs `modeling_user_defined.synth_cfg` to return a
-  `SynthSpec` — two required fields and one per-control value — and is skipped
-  when it returns `None`.
+- **Physics checks** — four assertions per state channel, on synthetic states
+  the recorded data never contains, each answered in physical units. The states
+  must hold at **equilibrium**, move the declared way under a **step response**,
+  be drivable across a usable span (**reachability**), and relax toward ambient
+  in **free decay**. *"`Zone Air Temperature` closed 0.4% of an 8.3 °C gap to
+  ambient in 24 steps"* is a reason to reject a surrogate; a test-split RMSE
+  cannot produce one. Reachability also answers "can any policy hold the band I
+  am about to configure" before a controller is built. Needs
+  `modeling_user_defined.synth_cfg` to return a `SynthSpec`; skipped when it
+  returns `None`.
+- **Readout channels** — order statistics for every Y channel that is *not* a
+  declared thermal state. No verdict: what a readout should do is
+  scenario-dependent. But a readout emitting 4000 W at equilibrium feeds back
+  into the state predictions that *are* asserted on, so the spread is worth
+  seeing.
 
 **Before `nt control train` trains anything:**
 
-- **Envelope vs. band** — is the comfort band inside what the surrogate says
-  the plant can hold? A band outside it cannot be satisfied by any policy, and
-  the violation rate reported against it measures the weather.
 - **Objective balance** — every term's value and share of the objective on one
   real batch, warning when one term outweighs all the others combined. This is
   the one that asserts something: a term carried over from another dataset once
@@ -263,8 +259,7 @@ src/neurotemplate/
 │   ├── heads.py         # HeadStack (regression / binary / bounded / ordinal)
 │   ├── loss.py          # build_loss
 │   ├── gradient_sampling.py  # SampledGradientPenalty
-│   ├── scenarios.py     # SynthSpec + physics checks (equilibrium / step / free-decay)
-│   ├── probe.py         # counterfactual actuator sweep: authority + envelope
+│   ├── scenarios.py     # SynthSpec + physics checks
 │   ├── experiment.py    # train_with_curriculum, build_trainer
 │   ├── pipeline.py      # train_and_evaluate, evaluate_and_plot
 │   ├── plotting.py
@@ -291,7 +286,7 @@ NeuroTemplate is a layer **on top of** Neuromancer, not a replacement. We reuse 
 
 - `SSMGrad` plus a vmap-compatible `GRUBlock` (manual GRU unroll for `jacrev` / `vmap`)
 - `SampledGradientPenalty` — off-trajectory Jacobian sign sampling
-- Synthetic physics-scenario penalties (equilibrium / step response / free decay)
+- Synthetic physics assertions (equilibrium / step response / reachability / free decay)
 - `HeadStack` per-channel output heads (regression / binary / bounded / ordinal)
 - Per-channel metrics + markdown reportcards
 - Control-side: `STEQuantize`, `BandSpec` + comfort-band penalties, closed-loop assembly

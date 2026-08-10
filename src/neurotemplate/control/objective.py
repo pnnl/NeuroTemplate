@@ -172,7 +172,7 @@ def term_shapes(
         u_min/u_max: actuation box in NORMALIZED space, one entry per control.
 
     Every other control keeps its recorded trajectory, so this is the same
-    one-at-a-time reading as the sys-id authority probe: what does this term
+    one-at-a-time reading the step-response scenario uses: what does this term
     ask *this* actuator to do, holding the rest of the rollout fixed.
     """
     yn = out["yn"][:, hmax:, :]

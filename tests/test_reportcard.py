@@ -142,53 +142,8 @@ def test_snapshot_matches_golden():
     )
 
 
-def _authority(delta: float):
-    from neurotemplate.modeling.probe import (
-        ActuatorAuthority, AuthorityReport, ChannelEnvelope,
-    )
-    return AuthorityReport(
-        authority=[ActuatorAuthority("zone_a [°C]", "setpoint", delta,
-                                     y_range=10.0, u_lo=20.0, u_hi=26.0)],
-        envelope=[ChannelEnvelope("zone_a [°C]", 21.0, 25.0, 18.0, 30.0)],
-        settle_steps=24, n_windows=32,
-    )
-
-
-def _render_with_authority(delta: float) -> str:
-    return render_reportcard(
-        cfg=_make_cfg(), arch=_make_arch(), test_metrics=_make_metrics(),
-        nm_mapping={"Y": ["zone_a [°C]"], "U": ["setpoint"], "D": ["outdoor"]},
-        authority=_authority(delta),
-        run_name="x", timestamp="2026-01-01T00:00:00",
-    )
-
-
-def test_authority_section_reports_the_sweep_and_the_envelope():
-    md = _render_with_authority(delta=-3.0)
-    assert "## Actuator authority" in md
-    assert "32 test windows" in md and "24 rollout steps" in md
-    assert "Achievable envelope" in md
-    assert "⚠️ no authority" not in md
-
-
-def test_an_actuator_that_moves_nothing_is_flagged():
-    """0.05 °C on a 10 °C channel is 0.5% — below any usable authority."""
-    md = _render_with_authority(delta=0.05)
-    assert "⚠️ no authority" in md
-    assert "**⚠️ No authority:**" in md
-    assert "`setpoint`" in md
-
-
-def test_authority_section_skipped_without_a_probe():
-    md = render_reportcard(
-        cfg=_make_cfg(), arch=_make_arch(), test_metrics=_make_metrics(),
-        nm_mapping={"Y": ["a"], "U": [], "D": []},
-        run_name="x", timestamp="2026-01-01T00:00:00",
-    )
-    assert "## Actuator authority" not in md
-
-
-def _physics(passed: bool):
+def _physics(passed: bool) -> list:
+    """Two verdicts: one that always passes, one the caller decides."""
     from neurotemplate.modeling.scenarios import ScenarioResult
     return [
         ScenarioResult("Equilibrium", True, "`zone_a [°C]` held to 0.01.",

@@ -2,7 +2,7 @@
 End-to-end wiring test for the control diagnostics.
 
 `nt control train` now runs three checks the pooled metrics cannot make — the
-surrogate probe, the objective balance, and the closed-loop behaviour audit —
+the objective balance and the closed-loop behaviour audit —
 and threads all three into one reportcard. Each piece has unit tests; this
 walks the same sequence the CLI does, so a signature that drifts out of step
 fails here rather than an hour into a real run.
@@ -30,7 +30,6 @@ from neurotemplate.control.pipeline import (
 from neurotemplate.control.policy import build_policy, describe_policy
 from neurotemplate.control.reportcard import render_control_reportcard
 from neurotemplate.control.scenarios import build_loaders, horizons
-from neurotemplate.modeling.probe import authority_to_dict, probe_authority
 from control_fixtures import full_setup
 import control_user_defined as hooks
 
@@ -54,14 +53,6 @@ def _run_diagnostics(**overrides):
     test_dfs = [s["norm_df"]]
 
     u_bounds = hooks.actuation_bounds(nm, ns)
-    probe_data = get_sw_dict_multi(
-        dfs=test_dfs, cfg=sysid_cfg, nm_mapping=nm,
-        steps=cfg.test_window, stride=cfg.test_stride,
-    )
-    probe_data.pop("source_idx")
-    authority = probe_authority(
-        s["dyn_sys"], probe_data, sysid_cfg.in_steps, nm, ns, *u_bounds,
-    )
 
     policy = build_policy(cfg, sysid_cfg, nm, ns)
     cl = build_closed_loop(s["dyn_node"], policy, cfg, sysid_cfg)
@@ -81,16 +72,16 @@ def _run_diagnostics(**overrides):
         cfg, sysid_cfg, describe_policy(policy, cfg, sysid_cfg, nm, ns),
         nm, hooks.controlled_channels(nm)[0], results,
         eval_band_seed=EVAL_BAND_SEED,
-        authority=authority, balance=balance, shapes=shapes,
+        balance=balance, shapes=shapes,
     )
-    return dict(results=results, authority=authority, balance=balance,
+    return dict(results=results, balance=balance,
                 shapes=shapes, md=md, u_cols=nm["U"])
 
 
 def test_every_diagnostic_section_reaches_the_reportcard():
     d = _run_diagnostics(effort_weight=1.0)
 
-    for title in ("## Achievable envelope vs. comfort band",
+    for title in (
                   "## Objective balance",
                   "## Actuation",
                   "## Band-jump response"):
@@ -101,10 +92,6 @@ def test_the_diagnostics_describe_the_run_they_were_measured_on():
     d = _run_diagnostics(effort_weight=1.0)
     (u_col,) = d["u_cols"]
 
-    # The probe and the closed-loop audit must agree on what the controls are.
-    assert [a.u_name for a in d["authority"].authority] == [u_col] * len(
-        d["authority"].authority
-    )
     assert [m.name for m in d["results"].actuation] == [u_col]
     for r in d["results"].response:
         assert set(r.mean_du) == {u_col}
@@ -141,8 +128,6 @@ def test_everything_logged_is_json_serializable():
     log_control_results(logger, d["results"])
     logger.log_dict(objective_to_dict(d["balance"], d["shapes"]),
                     name="objective_diagnostics.json")
-    logger.log_dict(authority_to_dict(d["authority"]),
-                    name="actuator_authority.json")
 
     for payload in logger.dicts.values():
         json.dumps(payload)
@@ -159,21 +144,3 @@ def test_the_stdout_report_is_printable_before_training():
         assert term in text
 
 
-def test_the_probe_does_not_disturb_the_surrogate():
-    """Diagnostics run on a frozen model and must leave no trace on it."""
-    s = full_setup()
-    before = [p.clone() for p in s["dyn_sys"].parameters()]
-    probe_data = get_sw_dict_multi(
-        dfs=[s["norm_df"]], cfg=s["sysid_cfg"], nm_mapping=s["nm"],
-        steps=s["cfg"].test_window, stride=s["cfg"].test_stride,
-    )
-    probe_data.pop("source_idx")
-
-    probe_authority(
-        s["dyn_sys"], probe_data, s["sysid_cfg"].in_steps, s["nm"],
-        s["norm_stats"], *hooks.actuation_bounds(s["nm"], s["norm_stats"]),
-    )
-
-    for p, p0 in zip(s["dyn_sys"].parameters(), before):
-        assert torch.equal(p, p0)
-        assert p.grad is None

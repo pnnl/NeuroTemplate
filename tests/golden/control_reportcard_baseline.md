@@ -32,20 +32,6 @@
 - **Objective weights:** comfort=50.0, du=10, effort=0.1
 - **Eval band seed:** 12345 *(fixed, so runs are scored against the same band realization)*
 
-## Achievable envelope vs. comfort band
-
-Achievable envelope of each controlled channel under this surrogate, from a constant-actuation sweep over 12 test windows, against the range the evaluation band is drawn from.
-
-| Channel | Achievable lo | Achievable hi | Band lo | Band hi | |
-|---|---:|---:|---:|---:|---|
-| zone [°C] | 21 | 26.5 | 23 | 27 | ⚠️ band extends past the envelope |
-
-How far each control moves each channel over its full range. An actuator with no authority here has none in closed loop either, whatever the objective asks of it.
-
-| Channel | Control | Swept range | Δ channel | Δ / channel range | |
-|---|---|---|---:|---:|---|
-| zone [°C] | setpoint [°C] | 22 → 28 | -3 | 30.0% |  |
-
 ## Objective balance
 
 Each objective term on a single training batch, taken before the first optimizer step. The share column is what the policy is really being asked to minimise, whatever the weights suggest.

@@ -42,12 +42,6 @@ from neurotemplate.common.metrics import (
 from neurotemplate.common.reportcard import write_reportcard as _write_reportcard
 from neurotemplate.modeling.dynamics import describe_dynamics
 from neurotemplate.modeling.plotting import plot_predictions, plot_synthetic
-from neurotemplate.modeling.probe import (
-    AuthorityReport,
-    authority_to_dict,
-    probe_authority,
-    u_bounds_from_norm_stats,
-)
 from neurotemplate.modeling.reportcard import render_reportcard as _render_reportcard
 from neurotemplate.modeling.scenarios import (
     ReadoutSummary,
@@ -73,9 +67,6 @@ class TestResults:
     stability: list[RolloutStability]  # rollout shape, to catch ramping models
     aggregate_rmse: float  # legacy single-number RMSE in normalized space
     test_time_s: float
-    # Counterfactual actuator sweep. None only when the surrogate has no U
-    # columns, i.e. nothing to probe.
-    authority: Optional[AuthorityReport] = None
     # Physics assertions on the thermal states. None when the use case opted
     # out of synth_cfg.
     physics: Optional[list[ScenarioResult]] = None
@@ -148,22 +139,6 @@ def evaluate_and_plot(
     )
     aggregate_rmse = err_norm.pow(2).mean().sqrt().item()
 
-    # Fit says the rollout tracks the data; it says nothing about whether the
-    # surrogate believes the actuators do anything. Sweep them and find out —
-    # it is 2*nu + 1 extra rollouts on a capped window count.
-    authority = None
-    if nm_mapping["U"]:
-        umin, umax = u_bounds_from_norm_stats(nm_mapping, norm_stats)
-        authority = probe_authority(
-            dyn_sys, test_data, cfg.in_steps, nm_mapping, norm_stats,
-            umin, umax,
-        )
-        if cfg.verbose:
-            dead = authority.dead_actuators()
-            if dead:
-                print("WARNING: no authority over any predicted channel: "
-                      + ", ".join(dead))
-
     # Physics assertions on synthetic states the recorded data never visits.
     # The verdicts are the point; the figures are for when one surprises you.
     outcome = _run_physics_checks(
@@ -182,7 +157,6 @@ def evaluate_and_plot(
         stability=stability,
         aggregate_rmse=aggregate_rmse,
         test_time_s=test_time_s,
-        authority=authority,
         physics=None if outcome is None else outcome.verdicts,
         readouts=None if outcome is None else outcome.readouts,
     )
@@ -304,7 +278,6 @@ def render_reportcard(
         arch=arch,
         test_metrics=test_results.metrics,
         stability=test_results.stability,
-        authority=test_results.authority,
         physics=test_results.physics,
         readouts=test_results.readouts,
         nm_mapping=nm_mapping,
@@ -352,11 +325,6 @@ def log_test_results(
         safe = _safe_metric_key(st.name)
         flat[f"test_{safe}_rise_excess"] = st.rise_excess
         flat[f"test_{safe}_drift_ratio"] = st.drift_ratio
-    if test_results.authority is not None:
-        for a in test_results.authority.authority:
-            key = f"{_safe_metric_key(a.y_name)}_per_{_safe_metric_key(a.u_name)}"
-            flat[f"authority_{key}"] = a.delta
-            flat[f"authority_rel_{key}"] = a.relative
     if test_results.physics is not None:
         # One gate number to sort a leaderboard by, plus per-(scenario, channel)
         # detail — so a channel someone does not care about can be excluded from
@@ -379,11 +347,6 @@ def log_test_results(
             stability_to_dict(test_results.stability),
             name="rollout_stability.json",
         )
-        if test_results.authority is not None:
-            logger.log_dict(
-                authority_to_dict(test_results.authority),
-                name="actuator_authority.json",
-            )
         if test_results.physics is not None:
             logger.log_dict(
                 checks_to_dict(test_results.physics),

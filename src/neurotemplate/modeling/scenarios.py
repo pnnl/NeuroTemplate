@@ -8,7 +8,7 @@ never contains the situations that would show it: the HVAC fully off, the
 weather stepping to a new value, an actuator held at one end of its range.
 Those are cheap to synthesize and the answers are unambiguous.
 
-Three scenarios, each an assertion rather than a score:
+Four scenarios, each an assertion rather than a score:
 
   Equilibrium  — everything off, ambient equal to the indoor state. The states
                  must stay put. A model that drifts here is integrating
@@ -19,6 +19,10 @@ Three scenarios, each an assertion rather than a score:
                  will have no lever; a wrong-signed response means it will pull
                  it backwards. Coverage is generated from `SynthSpec.responds`,
                  so no actuator goes untested by omission.
+  Reachability — from equilibrium, push every actuator that moves a state, and
+                 every disturbance with a declared sign, the same way. The span
+                 between the two directions is what a comfort band has to fit
+                 inside.
   Free decay   — from equilibrium, teleport the building to a new climate with
                  the HVAC off. The states must drift toward ambient and must
                  not sail past it.
@@ -29,11 +33,11 @@ Every check reports a number in physical units and a pass/fail, not a loss:
 policy against it — a fit metric cannot make this call, and the record has an
 architecture that fit *better* and controlled 2.7x worse.
 
-Relationship to `modeling.probe`: the probe sweeps actuators over *recorded*
-disturbances and reports how far they move each channel. These scenarios put
-the plant in a state the data never visited and assert the sign and stability
-of what happens. The probe measures authority you have; this says whether the
-model is physically coherent at all.
+Reachability answers what an earlier `modeling.probe` module tried to: how far
+the actuators can drive each channel. It does so from a declared equilibrium
+with declared push directions, rather than by holding co-actuators at the
+arithmetic midpoint of their range over whatever weather one test file
+happened to contain.
 
 These are deliberately extrapolations. Holding ambient equal to a 24 °C indoor
 state puts a surrogate trained on a 9-18 °C spring outside its data, and that
@@ -671,8 +675,7 @@ class ReachabilityScenario(_Scenario):
     label = "Reachability"
 
     #: A state whose two directions land closer together than this share of its
-    #: recorded range is not controllable on this surrogate. Same threshold the
-    #: actuator probe used to call an actuator dead, applied per state.
+    #: recorded range is not controllable on this surrogate.
     MIN_SPAN_FRAC = 0.02
 
     def _push_targets(self, channel: str, direction: int):

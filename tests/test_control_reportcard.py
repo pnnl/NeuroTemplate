@@ -26,11 +26,6 @@ from neurotemplate.control.objective import (
 )
 from neurotemplate.control.pipeline import ControlResults
 from neurotemplate.control.reportcard import render_control_reportcard
-from neurotemplate.modeling.probe import (
-    ActuatorAuthority,
-    AuthorityReport,
-    ChannelEnvelope,
-)
 from control_fixtures import make_control_cfg, make_sysid_cfg
 
 GOLDEN_DIR = Path(__file__).parent / "golden"
@@ -104,20 +99,6 @@ def _make_results(offset: float = 1.0, power_level: float = 1500.0):
     )
 
 
-def _make_authority(env_lo: float = 21.0, env_hi: float = 26.5,
-                    delta: float = -3.0):
-    """A surrogate whose envelope stops short of the band's upper reach."""
-    return AuthorityReport(
-        authority=[ActuatorAuthority(
-            y_name="zone [°C]", u_name="setpoint [°C]", delta=delta,
-            y_range=10.0, u_lo=22.0, u_hi=28.0,
-        )],
-        envelope=[ChannelEnvelope("zone [°C]", env_lo, env_hi, 18.0, 30.0)],
-        settle_steps=6,
-        n_windows=12,
-    )
-
-
 def _make_balance():
     """An effort term worth 3x the comfort term — the mis-scaled failure."""
     return ObjectiveBalance(
@@ -151,7 +132,6 @@ def _render(**kwargs):
         nm_mapping=_NM,
         controlled=_CONTROLLED,
         results=_make_results(),
-        authority=_make_authority(),
         balance=_make_balance(),
         shapes=_make_shapes(),
         eval_band_seed=12345,
@@ -170,7 +150,6 @@ def test_all_sections_present():
         "## Summary",
         "## Policy architecture",
         "## Scenario",
-        "## Achievable envelope vs. comfort band",
         "## Objective balance",
         "## Closed-loop performance",
         "## Actuation",
@@ -180,30 +159,6 @@ def test_all_sections_present():
         "## Hyperparameters",
     ):
         assert title in md, f"missing section: {title}"
-
-
-def test_a_band_reaching_past_the_envelope_is_flagged():
-    """cfg's test band is drawn from [23, 27]; the plant tops out at 26.5."""
-    md = _render()
-    assert "band extends past the envelope" in md
-    assert "entirely unreachable" not in md
-
-
-def test_a_band_the_plant_cannot_reach_at_all_is_flagged_harder():
-    md = _render(authority=_make_authority(env_lo=15.0, env_hi=19.0))
-    assert "band is entirely unreachable" in md
-    assert "Band outside the achievable envelope" in md
-
-
-def test_a_dead_actuator_is_named_in_the_envelope_section():
-    md = _render(authority=_make_authority(delta=0.05))
-    assert "**⚠️ No authority:**" in md
-    assert "`setpoint [°C]`" in md
-
-
-def test_envelope_section_skipped_without_a_probe():
-    md = _render(authority=None)
-    assert "## Achievable envelope vs. comfort band" not in md
 
 
 def test_objective_section_flags_a_dominant_term():
