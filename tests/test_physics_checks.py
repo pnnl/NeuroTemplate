@@ -25,7 +25,10 @@ from neurotemplate.modeling.scenarios import (
     checks_to_dict,
     checks_to_markdown,
     format_checks,
+    readouts_to_dict,
+    readouts_to_markdown,
     run_checks,
+    run_scenarios,
 )
 
 ZONE = "zone [°C]"
@@ -373,6 +376,85 @@ def test_off_is_required_for_controls_but_defaulted_elsewhere():
 
     with pytest.raises(ValueError, match="missing:"):
         SynthSpec(states=[ZONE], ambient=AMBIENT, off={}).validate(NM)
+
+
+# ── Readout channels ─────────────────────────────────────────────
+#
+# Not asserted on — what a readout *should* do is scenario-dependent. The
+# spread is reported so a readout going somewhere absurd is visible, since it
+# feeds back into the state predictions that ARE asserted on.
+
+
+def test_readouts_are_summarised_for_every_non_state_channel():
+    outcome = _scenarios(_perfect)[0].evaluate()
+
+    (readout,) = outcome.readouts
+    assert readout.name == POWER           # the only Y channel outside `states`
+    assert readout.scenario == "Equilibrium"
+    assert readout.key == f"Equilibrium | {POWER}"
+    assert readout.seeded_at == 0.0        # its recorded minimum
+    assert len(readout.quantiles) == 5
+    assert readout.quantiles == pytest.approx([0.0] * 5)
+
+
+def test_a_readout_that_wanders_shows_it_in_the_spread():
+    """`0/0/0/0/0` vs a real spread is the whole question a reader has."""
+    def power_ramps(y, u, d):
+        return torch.stack([y[:, 0], y[:, 1] + 500.0], dim=1)
+
+    (readout,) = _scenarios(power_ramps)[0].evaluate().readouts
+
+    assert readout.seeded_at == 0.0
+    assert readout.quantiles[0] == pytest.approx(500.0)    # first free step
+    assert readout.quantiles[-1] == pytest.approx(6000.0)  # 12 steps later
+    assert readout.quantiles[2] > readout.quantiles[0]     # median in between
+
+
+def test_readout_statistics_skip_the_seeded_prefix():
+    """Index 0 is the `off` value by construction; including it is misleading."""
+    scenarios = build_scenarios(
+        system=_system(lambda y, u, d: torch.stack(
+            [y[:, 0], torch.full_like(y[:, 1], 3000.0)], dim=1)),
+        nm_mapping=NM, norm_stats=NORM_STATS, synth_cfg=_spec(),
+        in_steps=IN_STEPS, n_scenarios=4, n_steps=6, device="cpu",
+    )
+    (readout,) = scenarios[0].evaluate().readouts
+
+    # Every free-running step is 3000; the 0 W seed must not reach the min.
+    assert readout.quantiles == pytest.approx([3000.0] * 5)
+    assert readout.seeded_at == 0.0
+
+
+def test_readouts_and_verdicts_come_off_the_same_rollout():
+    """A second sample would let the spread describe different scenarios."""
+    calls = []
+
+    def counted(y, u, d):
+        calls.append(1)
+        return y.clone()
+
+    outcome = _scenarios(counted)[0].evaluate()
+    before = len(calls)
+    assert outcome.verdicts and outcome.readouts
+    assert len(calls) == before          # nothing re-rolled to build either
+
+
+def test_run_scenarios_merges_verdicts_and_readouts():
+    outcome = run_scenarios(_scenarios(_perfect))
+
+    assert [r.name for r in outcome.verdicts] == [
+        "Equilibrium", "Step response: cooling", "Free decay",
+    ]
+    assert [r.scenario for r in outcome.readouts] == [
+        "Equilibrium", "Step response: cooling", "Free decay",
+    ]
+    payload = readouts_to_dict(outcome.readouts)
+    assert set(payload) == {r.key for r in outcome.readouts}
+    assert payload[f"Equilibrium | {POWER}"]["q50"] == pytest.approx(0.0)
+
+    table = readouts_to_markdown(outcome.readouts)
+    assert POWER in table
+    assert "⚠️" not in table            # reported, never judged
 
 
 # ── Reporting ────────────────────────────────────────────────────

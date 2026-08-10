@@ -50,13 +50,16 @@ from neurotemplate.modeling.probe import (
 )
 from neurotemplate.modeling.reportcard import render_reportcard as _render_reportcard
 from neurotemplate.modeling.scenarios import (
+    ReadoutSummary,
+    ScenarioOutcome,
     ScenarioResult,
     SynthSpec,
     _unnormalize_y,
     build_scenarios,
     checks_to_dict,
     format_checks,
-    run_checks,
+    readouts_to_dict,
+    run_scenarios,
 )
 
 
@@ -73,8 +76,12 @@ class TestResults:
     # Counterfactual actuator sweep. None only when the surrogate has no U
     # columns, i.e. nothing to probe.
     authority: Optional[AuthorityReport] = None
-    # Physics assertions. None when the use case opted out of synth_cfg.
+    # Physics assertions on the thermal states. None when the use case opted
+    # out of synth_cfg.
     physics: Optional[list[ScenarioResult]] = None
+    # Order statistics for the Y channels that are not thermal states. These
+    # carry no verdict — see scenarios.ReadoutSummary.
+    readouts: Optional[list[ReadoutSummary]] = None
 
 
 # ── Test eval + plotting (one operation) ────────────────────────
@@ -158,7 +165,7 @@ def evaluate_and_plot(
 
     # Physics assertions on synthetic states the recorded data never visits.
     # The verdicts are the point; the figures are for when one surprises you.
-    physics = _run_physics_checks(
+    outcome = _run_physics_checks(
         cfg, dyn_sys, nm_mapping, norm_stats, synth_cfg, freq_s,
         plot_run_dir, logger,
     )
@@ -175,7 +182,8 @@ def evaluate_and_plot(
         aggregate_rmse=aggregate_rmse,
         test_time_s=test_time_s,
         authority=authority,
-        physics=physics,
+        physics=None if outcome is None else outcome.verdicts,
+        readouts=None if outcome is None else outcome.readouts,
     )
 
 
@@ -213,7 +221,7 @@ def _plot_predictions(
 def _run_physics_checks(
     cfg, dyn_sys, nm_mapping, norm_stats, synth_cfg, freq_s,
     plot_run_dir, logger,
-) -> Optional[list[ScenarioResult]]:
+) -> Optional[ScenarioOutcome]:
     """Assert the three physics scenarios; plot their traces if plotting is on.
 
     Returns None when the use case opted out (`synth_cfg` hook returns None).
@@ -234,9 +242,9 @@ def _run_physics_checks(
             print("Physics checks disabled (synth_cfg=None); skipping.")
         return None
 
-    results = run_checks(scenarios)
+    outcome = run_scenarios(scenarios)
     if cfg.verbose:
-        print(format_checks(results))
+        print(format_checks(outcome.verdicts))
 
     if cfg.plot:
         synth_dir = plot_run_dir / "synthetic"
@@ -251,7 +259,7 @@ def _run_physics_checks(
         if logger is not None and hasattr(logger, "_mlflow"):
             logger._mlflow.log_artifact(str(synth_dir), artifact_path="plots")
 
-    return results
+    return outcome
 
 
 # ── Reportcard ──────────────────────────────────────────────────
@@ -296,6 +304,7 @@ def render_reportcard(
         stability=test_results.stability,
         authority=test_results.authority,
         physics=test_results.physics,
+        readouts=test_results.readouts,
         nm_mapping=nm_mapping,
         head_stack=head_stack,
         norm_stats=norm_stats,
@@ -377,6 +386,11 @@ def log_test_results(
             logger.log_dict(
                 checks_to_dict(test_results.physics),
                 name="physics_checks.json",
+            )
+        if test_results.readouts:
+            logger.log_dict(
+                readouts_to_dict(test_results.readouts),
+                name="readout_channels.json",
             )
 
 

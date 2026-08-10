@@ -16,8 +16,10 @@ logged to MLflow. Sections (in order):
   6. Actuator authority     — counterfactual sweep of each control input, and
                               the achievable envelope of each channel
   7. Physics checks         — equilibrium / step response / free decay, each a
-                              pass-fail assertion on synthetic states the
-                              recorded data never contains
+                              pass-fail assertion per thermal state channel, on
+                              synthetic states the recorded data never contains
+  7b. Readout channels      — order statistics for the Y channels that are not
+                              thermal states; reported without a verdict
   8. Bounded channel coverage — for each bounded head, whether any test
                               samples fall outside the head's [lo, hi]
   9. Hyperparameters        — lr, batch_size, train_pred_steps, curriculum, gains
@@ -51,7 +53,12 @@ from neurotemplate.modeling.probe import (
     authority_to_markdown,
     envelope_to_markdown,
 )
-from neurotemplate.modeling.scenarios import ScenarioResult, checks_to_markdown
+from neurotemplate.modeling.scenarios import (
+    ReadoutSummary,
+    ScenarioResult,
+    checks_to_markdown,
+    readouts_to_markdown,
+)
 from neurotemplate.common.reportcard import _fmt_float, _section
 
 from neurotemplate._typing import beartype
@@ -393,6 +400,29 @@ def _physics_section(results: list[ScenarioResult]) -> str:
     return _section("Physics checks", "\n".join(body))
 
 
+def _readouts_section(readouts: list[ReadoutSummary]) -> Optional[str]:
+    """What the non-state channels did, with no verdict attached.
+
+    Readouts are seeded at their resting value and then run free — the model's
+    own predictions feed back every step. Nothing asserts on them, because what
+    a readout *should* do depends on the scenario (hold at off during
+    equilibrium, move under a step response). The spread is still worth seeing:
+    a readout that goes somewhere absurd is also an input to the next state
+    prediction, which is otherwise an unattributable drift in the table above.
+    """
+    if not readouts:
+        return None
+    body = [
+        "Y channels not named in `states`, so nothing above asserts on them. "
+        "Statistics are over the free-running steps of each scenario — the "
+        "seeded prefix is the channel's own resting value by construction, and "
+        "is shown separately as the reference point.\n",
+        readouts_to_markdown(readouts),
+    ]
+    return _section("Readout channels (reported, not asserted)",
+                    "\n".join(body))
+
+
 def _hyperparameters_section(cfg: ModelingConfig) -> str:
     rows = [
         f"- **lr:** {cfg.lr}",
@@ -430,6 +460,7 @@ def render_reportcard(
     stability: Optional[list[RolloutStability]] = None,
     authority: Optional[AuthorityReport] = None,
     physics: Optional[list[ScenarioResult]] = None,
+    readouts: Optional[list[ReadoutSummary]] = None,
     head_stack: Optional[HeadStack] = None,
     norm_stats: Optional[dict] = None,
     test_df: Optional[pd.DataFrame] = None,
@@ -485,6 +516,10 @@ def render_reportcard(
         parts.append(_authority_section(authority))
     if physics is not None:
         parts.append(_physics_section(physics))
+    if readouts is not None:
+        readout_md = _readouts_section(readouts)
+        if readout_md is not None:
+            parts.append(readout_md)
     coverage = _bounded_coverage_section(head_stack, test_df)
     if coverage is not None:
         parts.append(coverage)

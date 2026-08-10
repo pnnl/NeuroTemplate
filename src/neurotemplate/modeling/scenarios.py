@@ -162,6 +162,45 @@ class SynthSpec:
             )
 
 
+#: Order statistics reported for each readout channel.
+READOUT_QUANTILES = (0.0, 0.25, 0.5, 0.75, 1.0)
+
+
+@dataclass
+class ReadoutSummary:
+    """What a non-state Y channel did during one scenario. No verdict.
+
+    Readouts are seeded at their resting value and then left alone: the model's
+    own predictions feed back at every step, so a readout is free to go
+    anywhere and nothing asserts otherwise. That freedom is not harmless —
+    those predictions are inputs to the next state prediction, so a readout
+    emitting 4000 W at equilibrium with the compressor off can drag the zone
+    with it, and the drift would look unattributable.
+
+    Reporting the spread costs a slice and a quantile on a rollout that already
+    ran, and it separates `0/0/0/0/0` from `0/1200/3000/4200/5800` — which is
+    the whole question a reader has. What a readout *should* do is
+    scenario-dependent (hold at off during equilibrium, move under a step
+    response), so the library takes no position and prints the numbers.
+    """
+    scenario: str
+    name: str
+    seeded_at: float        # the resting value it started from
+    quantiles: list[float]  # at READOUT_QUANTILES, in physical units
+
+    @property
+    def key(self) -> str:
+        return f"{self.scenario} | {self.name}"
+
+    def to_dict(self) -> dict:
+        return {
+            "scenario": self.scenario, "channel": self.name,
+            "seeded_at": self.seeded_at,
+            **{f"q{int(q * 100)}": v
+               for q, v in zip(READOUT_QUANTILES, self.quantiles)},
+        }
+
+
 @dataclass
 class ScenarioResult:
     """One physics assertion on one state channel, and the number behind it.
@@ -338,6 +377,22 @@ def _unnormalize_y(predictions, nm_mapping, norm_stats):
 # ── Scenarios ────────────────────────────────────────────────────
 
 
+@dataclass
+class ScenarioOutcome:
+    """Everything one scenario measured: verdicts on states, stats on readouts.
+
+    Both come off the same rollouts. Drawing a second sample for the readouts
+    would let the printed spread describe a different set of scenarios than the
+    verdict beside it — the shape of a bug this module has already had once.
+    """
+    verdicts: list[ScenarioResult]
+    readouts: list[ReadoutSummary]
+
+    def __add__(self, other: "ScenarioOutcome") -> "ScenarioOutcome":
+        return ScenarioOutcome(self.verdicts + other.verdicts,
+                               self.readouts + other.readouts)
+
+
 class _Scenario:
     """Shared plumbing: sample equilibria, roll out, read the state channels."""
 
@@ -368,6 +423,34 @@ class _Scenario:
         """
         phys = _to_physical(y_pred, self.nm_mapping["Y"], self.norm_stats)
         return phys[:, self.in_steps - 1:, self.state_idx]
+
+    def check(self, n: Optional[int] = None) -> list[ScenarioResult]:
+        """Just the verdicts. `evaluate` also returns the readout statistics."""
+        return self.evaluate(n).verdicts
+
+    def _readouts(self, y_pred, scenario: str) -> list[ReadoutSummary]:
+        """Order statistics per non-state Y channel, from an existing rollout.
+
+        Measured over the free-running steps only: the seeded prefix is the
+        channel's own `off` value by construction, and including it would plant
+        a known constant in the min or max. It is reported separately as
+        `seeded_at` so the spread has a reference point.
+        """
+        phys = _to_physical(y_pred, self.nm_mapping["Y"], self.norm_stats)
+        free = phys[:, self.in_steps:, :]
+        qs = torch.tensor(READOUT_QUANTILES, device=free.device)
+        return [
+            ReadoutSummary(
+                scenario=scenario,
+                name=name,
+                seeded_at=_resting_value(name, self.spec, self.norm_stats),
+                quantiles=torch.quantile(
+                    free[:, :, i].reshape(-1), qs
+                ).tolist(),
+            )
+            for i, name in enumerate(self.nm_mapping["Y"])
+            if name not in self.spec.states
+        ]
 
     def _tolerance(self, frac: float) -> list[float]:
         """Per-state-channel threshold, `frac` of that channel's own range.
@@ -400,11 +483,12 @@ class EquilibriumScenario(_Scenario):
         s = self._states_physical(y_pred)
         return (s[:, 1:, :] - s[:, 0:1, :]).abs().mean(dim=1)
 
-    def check(self, n: Optional[int] = None) -> list[ScenarioResult]:
+    def evaluate(self, n: Optional[int] = None) -> ScenarioOutcome:
         n = n or self.n_scenarios
         with torch.no_grad():
             y_pred = self.system(self._data(n))["yn"]
             drift = self._drift(y_pred).mean(dim=0)      # [n_states]
+            readouts = self._readouts(y_pred, self.label)
 
         tol = self._tolerance(EQUILIBRIUM_DRIFT_FRAC)
         results = []
@@ -424,7 +508,7 @@ class EquilibriumScenario(_Scenario):
                 headline=f"{verdict} (limit {limit:.3g}).",
                 channel=channel, value=value, tolerance=limit,
             ))
-        return results
+        return ScenarioOutcome(results, readouts)
 
     def trace(self, n: int) -> dict:
         with torch.no_grad():
@@ -454,13 +538,15 @@ class StepResponseScenario(_Scenario):
         s = self._states_physical(y_pred)
         return s[:, -1, :] - s[:, 0, :]
 
-    def check(self, n: Optional[int] = None) -> list[ScenarioResult]:
+    def evaluate(self, n: Optional[int] = None) -> ScenarioOutcome:
         n = n or self.n_scenarios
-        results = []
+        results, readouts = [], []
         for act in self.spec.actuations:
+            label = f"{self.label}: {act.name}"
             with torch.no_grad():
                 y_pred = self.system(self._data(act, n))["yn"]
                 move = self._move(y_pred).mean(dim=0)     # [n_states]
+                readouts += self._readouts(y_pred, label)
 
             tol = self._tolerance(RESPONSE_MOVE_FRAC)
             for i, channel in enumerate(self.spec.states):
@@ -481,13 +567,13 @@ class StepResponseScenario(_Scenario):
                         "pull this actuator backwards"
                     )
                 results.append(ScenarioResult(
-                    name=f"{self.label}: {act.name}", passed=passed,
+                    name=label, passed=passed,
                     headline=f"{verdict} "
                              f"(wanted {'+' if act.direction > 0 else '-'}"
                              f"{limit:.3g} or more).",
                     channel=channel, value=value, tolerance=limit,
                 ))
-        return results
+        return ScenarioOutcome(results, readouts)
 
     def trace(self, n: int) -> dict:
         if not self.spec.actuations:
@@ -544,13 +630,14 @@ class FreeDecayScenario(_Scenario):
         gap = t_out.unsqueeze(1) - start
         return (s[:, -1, :] - start) / gap
 
-    def check(self, n: Optional[int] = None) -> list[ScenarioResult]:
+    def evaluate(self, n: Optional[int] = None) -> ScenarioOutcome:
         n = n or self.n_scenarios
         with torch.no_grad():
             data, t_in, t_out = self._data(n)
             y_pred = self.system(data)["yn"]
             closed = self._closed_fraction(y_pred, t_out).mean(dim=0)
             mean_gap = float((t_out - t_in).abs().mean())
+            readouts = self._readouts(y_pred, self.label)
 
         results = []
         for i, channel in enumerate(self.spec.states):
@@ -575,7 +662,7 @@ class FreeDecayScenario(_Scenario):
                 name=self.label, passed=passed, headline=f"{verdict}.",
                 channel=channel, value=value, tolerance=DECAY_MIN_CLOSED,
             ))
-        return results
+        return ScenarioOutcome(results, readouts)
 
     def trace(self, n: int) -> dict:
         with torch.no_grad():
@@ -639,9 +726,18 @@ def build_scenarios(
 
 
 @beartype
+def run_scenarios(scenarios: list, n: Optional[int] = None) -> ScenarioOutcome:
+    """Every scenario's verdicts and readout statistics, flattened."""
+    total = ScenarioOutcome([], [])
+    for s in scenarios:
+        total = total + s.evaluate(n)
+    return total
+
+
+@beartype
 def run_checks(scenarios: list, n: Optional[int] = None) -> list[ScenarioResult]:
     """Every scenario's verdict, flattened."""
-    return [r for s in scenarios for r in s.check(n)]
+    return run_scenarios(scenarios, n).verdicts
 
 
 @beartype
@@ -659,6 +755,23 @@ def checks_to_dict(results: list[ScenarioResult]) -> dict:
     """Keyed by scenario *and* channel, since each scenario reports on every
     state channel."""
     return {r.key: r.to_dict() for r in results}
+
+
+@beartype
+def readouts_to_markdown(readouts: list[ReadoutSummary]) -> str:
+    """Order statistics per readout channel, per scenario. No verdicts."""
+    rows = ["| Scenario | Channel | Seeded at | Min | 25% | Median | 75% | Max |",
+            "|---|---|---:|---:|---:|---:|---:|---:|"]
+    for r in readouts:
+        cells = " | ".join(f"{v:.4g}" for v in r.quantiles)
+        rows.append(f"| {r.scenario} | `{r.name}` | {r.seeded_at:.4g} | "
+                    f"{cells} |")
+    return "\n".join(rows)
+
+
+@beartype
+def readouts_to_dict(readouts: list[ReadoutSummary]) -> dict:
+    return {r.key: r.to_dict() for r in readouts}
 
 
 @beartype
