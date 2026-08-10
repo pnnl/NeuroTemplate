@@ -37,7 +37,7 @@ from typing import Optional
 
 import pandas as pd
 
-from neurotemplate.common.data_utils import degenerate_columns
+from neurotemplate.common.data_utils import degenerate_mapped_columns
 from neurotemplate.modeling.config import ModelingConfig
 from neurotemplate.modeling.heads import BoundedHead, HeadStack
 from neurotemplate.common.metrics import (
@@ -179,9 +179,7 @@ def _data_section(
     parts.append(f"- **U ({len(nm_mapping.get('U', []))} controls):**" + cols("U"))
     parts.append(f"- **D ({len(nm_mapping.get('D', []))} disturbances):**" + cols("D"))
     if norm_stats is not None:
-        frozen = degenerate_columns(norm_stats)
-        mapped = {c for key in ("Y", "U", "D") for c in nm_mapping.get(key, [])}
-        frozen = [c for c in frozen if c in mapped]
+        frozen = degenerate_mapped_columns(norm_stats, nm_mapping)
         if frozen:
             parts.append(
                 "\n**⚠️ Constant in this data:** "

@@ -20,7 +20,12 @@ These tests pin the detector and the warning that surfaces it.
 import pandas as pd
 import pytest
 
-from neurotemplate.common.data_utils import compute_norm_stats, degenerate_columns
+from neurotemplate.common.data_utils import (
+    compute_norm_stats,
+    degenerate_columns,
+    degenerate_mapped_columns,
+    warn_degenerate_columns,
+)
 from neurotemplate.modeling.reportcard import _data_section
 
 MAPPING = {"Y": ["zone [°C]", "gas [J]"], "U": ["cool_sp [°C]"], "D": ["oat [°C]"]}
@@ -100,3 +105,42 @@ def test_unmapped_columns_are_not_warned_about():
 def test_data_section_without_norm_stats_does_not_warn():
     """The section is rendered for callers that pass no stats; it must not raise."""
     assert "Constant in this data" not in _data_section(MAPPING, None, None, None)
+
+
+# ── The startup warning ──────────────────────────────────────────
+#
+# The reportcard only exists once the run has finished. The condition is
+# knowable when norm_stats is frozen, so it is also printed there — someone
+# watching a loss curve should not have to open a file to learn about it.
+
+
+def test_warn_prints_and_names_the_columns(capsys):
+    stats = compute_norm_stats(_frame([1e9] * 6))
+
+    found = warn_degenerate_columns(stats, MAPPING)
+
+    assert set(found) == {"gas [J]", "cool_sp [°C]"}
+    out = capsys.readouterr().out
+    assert "WARNING" in out
+    assert "gas [J]" in out and "cool_sp [°C]" in out
+
+
+def test_warn_is_silent_when_nothing_is_constant(capsys):
+    df = _frame([1e9, 2e9, 3e9, 4e9, 5e9, 6e9])
+    df["cool_sp [°C]"] = [23.0, 24.0, 25.0, 24.0, 23.0, 25.0]
+
+    assert warn_degenerate_columns(compute_norm_stats(df), MAPPING) == []
+    assert capsys.readouterr().out == ""
+
+
+def test_warn_ignores_columns_the_mapping_never_references(capsys):
+    """Same filtering as the reportcard — both read `degenerate_mapped_columns`."""
+    df = _frame([1e9, 2e9, 3e9, 4e9, 5e9, 6e9])
+    df["cool_sp [°C]"] = [23.0, 24.0, 25.0, 24.0, 23.0, 25.0]
+    df["ignored [-]"] = [7.0] * 6
+    stats = compute_norm_stats(df)
+
+    assert "ignored [-]" in degenerate_columns(stats)
+    assert degenerate_mapped_columns(stats, MAPPING) == []
+    assert warn_degenerate_columns(stats, MAPPING) == []
+    assert capsys.readouterr().out == ""

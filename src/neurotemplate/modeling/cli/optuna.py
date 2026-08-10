@@ -31,6 +31,7 @@ from neuromancer.loggers import MLFlowLogger
 from neurotemplate.common.data_utils import (
     normalize_df,
     compute_norm_stats,
+    warn_degenerate_columns,
     get_data_splits,
     get_grad_masks,
 )
@@ -129,6 +130,7 @@ def main() -> None:
     # shared shift/stretch). No-op unless the hooks module defines it.
     if hasattr(hooks, "tie_norm_stats"):
         norm_stats = hooks.tie_norm_stats(nm_mapping, norm_stats, cfg)
+    warn_degenerate_columns(norm_stats, nm_mapping)
     train_dfs = [normalize_df(r, norm_stats) for r in train_raws]
     dev_dfs = [normalize_df(r, norm_stats) for r in dev_raws]
     test_dfs = [normalize_df(r, norm_stats) for r in test_raws]

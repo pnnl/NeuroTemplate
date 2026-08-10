@@ -615,6 +615,47 @@ def degenerate_columns(norm_stats: dict[str, dict[str, float]]) -> list[str]:
     return [col for col, s in norm_stats.items() if s["min"] == s["max"]]
 
 
+@beartype
+def degenerate_mapped_columns(
+    norm_stats: dict[str, dict[str, float]],
+    nm_mapping: dict[str, list[str]],
+) -> list[str]:
+    """`degenerate_columns` restricted to columns the model actually consumes.
+
+    A constant column the mapping never references is harmless — it is dropped
+    before the model ever sees it.
+    """
+    mapped = {c for key in ("Y", "U", "D") for c in nm_mapping.get(key, [])}
+    return [c for c in degenerate_columns(norm_stats) if c in mapped]
+
+
+@beartype
+def warn_degenerate_columns(
+    norm_stats: dict[str, dict[str, float]],
+    nm_mapping: dict[str, list[str]],
+) -> list[str]:
+    """Print a startup warning for constant columns; return the ones found.
+
+    The reportcard says this too, but only once the run has finished. The
+    condition is knowable the moment `norm_stats` is frozen — before a single
+    epoch — and someone watching a loss curve scroll past should not have to
+    open a markdown file to learn that a channel is carrying raw physical units.
+    """
+    frozen = degenerate_mapped_columns(norm_stats, nm_mapping)
+    if frozen:
+        print(
+            "WARNING: constant in the training data, so normalization is the "
+            "identity and these columns reach the model in raw physical "
+            "units: " + ", ".join(frozen)
+        )
+        print(
+            "  If any of them varies at evaluation time, its value arrives "
+            "orders of magnitude out of range and the rollout diverges. "
+            "Exclude the column from the mapping or widen the excitation."
+        )
+    return frozen
+
+
 # Apply precomputed normalization stats to a dataframe.
 @beartype
 def normalize_df(
