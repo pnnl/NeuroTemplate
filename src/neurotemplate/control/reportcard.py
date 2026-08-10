@@ -10,14 +10,21 @@ Sections (in order):
    1. Summary              — run, timestamp, surrogate, dev loss, timings
    2. Policy architecture  — from control.policy.describe_policy
    3. Scenario             — horizons, controlled channels, bands, weights
-   4. Objective balance    — which term was actually being optimised, and
+   4. Achievable envelope  — can this surrogate hold the configured band at
+                             all, and does every actuator have authority
+   5. Objective balance    — which term was actually being optimised, and
                              whether the effort term has an interior minimum
-   5. Closed-loop performance — comfort table, actuation, energy
-   6. Actuation            — per-control effort and saturation fraction
-   7. Band-jump response   — did the loop react when the reference moved
-   8. Baseline comparison  — learned vs. rule-based, or why there is none
-   9. Tracking error       — per-channel error vs. the comfort-band midpoint
-  10. Hyperparameters      — the knobs that produced this run
+   6. Closed-loop performance — comfort table, actuation, energy
+   7. Actuation            — per-control effort and saturation fraction
+   8. Band-jump response   — did the loop react when the reference moved
+   9. Baseline comparison  — learned vs. rule-based, or why there is none
+  10. Tracking error       — per-channel error vs. the comfort-band midpoint
+  11. Hyperparameters      — the knobs that produced this run
+
+Sections 4, 5, 7 and 8 are the behavioural ones. They exist because the
+comfort table above them is silent about infeasible bands, dominated
+objectives, pinned actuators and ignored setpoint changes — every one of
+which has been shipped in a run whose pooled numbers looked fine.
 """
 
 from __future__ import annotations
@@ -40,6 +47,11 @@ from neurotemplate.control.objective import (
     shapes_to_markdown,
 )
 from neurotemplate.control.scenarios import horizons
+from neurotemplate.modeling.probe import (
+    AuthorityReport,
+    authority_to_markdown,
+    envelope_vs_band_to_markdown,
+)
 
 from neurotemplate._typing import beartype
 
@@ -121,6 +133,49 @@ def _scenario_section(cfg, sysid_cfg, nm_mapping: dict, controlled: list[str],
         "*(fixed, so runs are scored against the same band realization)*",
     ]
     return _section("Scenario", "\n".join(rows))
+
+
+def _envelope_section(report: AuthorityReport, controlled: list[str],
+                      band) -> str:
+    """Is the comfort band inside what this surrogate says the plant can hold?
+
+    Measured on the frozen surrogate before the policy trains, so an
+    infeasible band is a five-second finding rather than an hour of training
+    followed by a violation rate that scores the weather.
+    """
+    body = [
+        "Achievable envelope of each controlled channel under this "
+        f"surrogate, from a constant-actuation sweep over {report.n_windows} "
+        "test windows, against the range the evaluation band is drawn from.\n",
+        envelope_vs_band_to_markdown(report, controlled, band.lo, band.hi),
+        "",
+        "How far each control moves each channel over its full range. An "
+        "actuator with no authority here has none in closed loop either, "
+        "whatever the objective asks of it.\n",
+        authority_to_markdown(report),
+    ]
+    unreachable = [
+        c for c in controlled
+        if not report.envelope_for(c).covers(band.lo, band.hi)
+    ]
+    dead = report.dead_actuators()
+    if unreachable:
+        body += [
+            "",
+            "**⚠️ Band outside the achievable envelope:** "
+            + ", ".join(f"`{c}`" for c in unreachable)
+            + ". No policy can hold this band on this surrogate. Move the "
+            "band, or fix the surrogate — the violation rate this run "
+            "reports is a property of the plant, not of the controller.",
+        ]
+    if dead:
+        body += [
+            "",
+            "**⚠️ No authority:** " + ", ".join(f"`{u}`" for u in dead)
+            + ". The policy will train against these actuators as if they "
+            "did nothing, because on this surrogate they do.",
+        ]
+    return _section("Achievable envelope vs. comfort band", "\n".join(body))
 
 
 def _objective_section(balance: ObjectiveBalance,
@@ -358,6 +413,7 @@ def render_control_reportcard(
     *,
     eval_band_seed: int,
     baseline: Optional[object] = None,
+    authority: Optional[AuthorityReport] = None,
     balance: Optional[ObjectiveBalance] = None,
     shapes: Optional[list[TermShape]] = None,
     run_name: Optional[str] = None,
@@ -374,6 +430,8 @@ def render_control_reportcard(
         results:     ControlResults for the learned policy.
         eval_band_seed: The fixed seed the evaluation band was drawn with.
         baseline:    Optional ControlResults for the rule-based controller.
+        authority:   Optional probe.AuthorityReport for the frozen surrogate;
+                     the envelope-vs-band section is skipped without it.
         balance:     Optional objective.ObjectiveBalance from the pre-training
                      forward pass; the section is skipped without it.
         shapes:      Optional objective.term_shapes(...) for the effort term.
@@ -394,6 +452,8 @@ def render_control_reportcard(
         _scenario_section(cfg, sysid_cfg, nm_mapping, controlled,
                           eval_band_seed),
     ]
+    if authority is not None:
+        parts.append(_envelope_section(authority, controlled, cfg.test_band()))
     if balance is not None:
         parts.append(_objective_section(balance, shapes or []))
     parts += [

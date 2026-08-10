@@ -272,6 +272,39 @@ def envelope_to_markdown(report: AuthorityReport) -> str:
 
 
 @beartype
+def envelope_vs_band_to_markdown(
+    report: AuthorityReport,
+    controlled: list[str],
+    band_lo: float,
+    band_hi: float,
+) -> str:
+    """Per controlled channel: what the plant can hold vs. what is being asked.
+
+    "Match the band to the envelope before tuning anything" is finding #1 of
+    every campaign in the record, and the library will otherwise happily
+    accept a band whose ceiling the plant cannot reach and report a violation
+    rate that is really a measurement of the weather.
+    """
+    rows = [
+        "| Channel | Achievable lo | Achievable hi | Band lo | Band hi | |",
+        "|---|---:|---:|---:|---:|---|",
+    ]
+    for name in controlled:
+        e = report.envelope_for(name)
+        if not e.covers(band_lo, band_hi):
+            flag = "⚠️ band is entirely unreachable"
+        elif band_lo < e.lo or band_hi > e.hi:
+            flag = "⚠️ band extends past the envelope"
+        else:
+            flag = ""
+        rows.append(
+            f"| {name} | {e.lo:.4g} | {e.hi:.4g} | "
+            f"{band_lo:.4g} | {band_hi:.4g} | {flag} |"
+        )
+    return "\n".join(rows)
+
+
+@beartype
 def authority_to_dict(report: AuthorityReport) -> dict:
     """JSON-serializable probe result (for MLflow / disk)."""
     return {

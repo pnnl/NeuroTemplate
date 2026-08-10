@@ -18,8 +18,11 @@ from neurotemplate._typing import beartype
 
 from neuromancer.loggers import MLFlowLogger
 
-from neurotemplate.common.data_utils import get_data_splits, normalize_df
+from neurotemplate.common.data_utils import (
+    get_data_splits, get_sw_dict_multi, normalize_df,
+)
 from neurotemplate.modeling.experiment import resolve_device, set_seeds
+from neurotemplate.modeling.probe import authority_to_dict, probe_authority
 
 from neurotemplate.control.config import ControlConfig, load_config_from_cli, CONTROL_CONFIG_DIR
 from neurotemplate.control.load import load_frozen_dynamics
@@ -93,6 +96,33 @@ def main() -> None:
         cfg, sysid_cfg, nm_mapping, norm_stats, train_dfs, dev_dfs,
     )
 
+    # Before anything trains: can this surrogate hold the band it is being
+    # asked to hold, and does every actuator have a lever? Both answers are a
+    # few short rollouts, and a "no" to either makes the run meaningless.
+    hooks = load_control_hooks(cfg)
+    u_bounds = hooks.actuation_bounds(nm_mapping, norm_stats)
+    probe_data = get_sw_dict_multi(
+        dfs=test_dfs, cfg=sysid_cfg, nm_mapping=nm_mapping,
+        steps=cfg.test_window, stride=cfg.test_stride,
+    )
+    probe_data.pop("source_idx")
+    authority = probe_authority(
+        dyn_sys, probe_data, sysid_cfg.in_steps, nm_mapping, norm_stats,
+        *u_bounds,
+    )
+    controlled, _ = hooks.controlled_channels(nm_mapping)
+    band = cfg.test_band()
+    for name in controlled:
+        env = authority.envelope_for(name)
+        print(f"Achievable {name}: {env.lo:.4g} to {env.hi:.4g}  "
+              f"(band drawn from {band.lo:.4g} to {band.hi:.4g})")
+        if not env.covers(band.lo, band.hi):
+            print(f"  WARNING: the band for {name} lies outside what this "
+                  "surrogate can hold. No policy can satisfy it.")
+    if authority.dead_actuators():
+        print("  WARNING: no authority over any predicted channel: "
+              + ", ".join(authority.dead_actuators()))
+
     if cfg.verbose:
         print("Building policy + closed loop + loss...")
     policy_node = build_policy(cfg, sysid_cfg, nm_mapping, norm_stats)
@@ -103,13 +133,11 @@ def main() -> None:
     # One forward pass before training: which term is actually being
     # optimised, and does the effort term have an interior minimum at all.
     # Both answers cost seconds here and an iteration each if skipped.
-    hooks = load_control_hooks(cfg)
     balance_out = run_objective_pass(problem, next(iter(train_loader)))
     balance = objective_balance(loss, balance_out)
     effort_term = power_term(cfg, nm_mapping, norm_stats)
     shapes = [] if (effort_term is None or cfg.effort_weight == 0) else term_shapes(
-        effort_term, balance_out, hmax, nm_mapping["U"],
-        *hooks.actuation_bounds(nm_mapping, norm_stats), norm_stats,
+        effort_term, balance_out, hmax, nm_mapping["U"], *u_bounds, norm_stats,
     )
     print(format_objective_report(balance, shapes))
 
@@ -159,19 +187,20 @@ def main() -> None:
             Path(cfg.savedir) / "plots",
         )
 
-    controlled, _ = hooks.controlled_channels(nm_mapping)
     arch = describe_policy(policy_node, cfg, sysid_cfg, nm_mapping, norm_stats)
     md = render_control_reportcard(
         cfg, sysid_cfg, arch, nm_mapping, controlled, results,
         eval_band_seed=EVAL_BAND_SEED, baseline=baseline,
         best_dev_loss=best_dev, train_time_s=train_time_s,
-        balance=balance, shapes=shapes,
+        authority=authority, balance=balance, shapes=shapes,
     )
     write_reportcard(md, Path(cfg.savedir), logger=logger)
     log_control_results(logger, results, baseline=baseline)
     if hasattr(logger, "log_dict"):
         logger.log_dict(objective_to_dict(balance, shapes),
                         name="objective_diagnostics.json")
+        logger.log_dict(authority_to_dict(authority),
+                        name="actuator_authority.json")
 
     print(f"Comfort violation rate: "
           f"{results.comfort_violation_rate * 100:.2f}%")
