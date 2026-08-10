@@ -76,10 +76,19 @@ def test_the_fixture_hooks_produce_a_usable_spec(tmp_path):
     results, _, _, _ = _evaluate(tmp_path)
 
     names = [r.name for r in results.physics]
-    assert names == ["Equilibrium", "Step response: cooling", "Free decay"]
+    # The step-response case is generated from `responds` + the setpoint's
+    # recorded range, not hand-written, so its name carries the swept target.
+    assert names[0] == "Equilibrium"
+    assert names[-1] == "Free decay"
+    assert any(n.startswith("Step response: Zone Cooling Setpoint")
+               for n in names)
     for r in results.physics:
         assert isinstance(r.passed, bool)
         assert r.headline and r.channel == "Zone Air Temperature [°C]"
+
+    # Readouts are summarised but never asserted on.
+    assert results.readouts
+    assert all(r.name != "Zone Air Temperature [°C]" for r in results.readouts)
 
 
 def test_opting_out_leaves_the_other_diagnostics_alone(tmp_path):

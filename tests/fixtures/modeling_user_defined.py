@@ -25,7 +25,7 @@ from neurotemplate.modeling.heads import (
     RegressionHead,
     project_physical_to_norm,
 )
-from neurotemplate.modeling.scenarios import Actuation, SynthSpec
+from neurotemplate.modeling.scenarios import SynthSpec
 
 if os.environ.get("RUNTIME_TYPING", 0):
     from beartype import beartype
@@ -247,15 +247,15 @@ def synth_cfg(
     """
     (setpoint,) = nm_mapping["U"]
     ambient = next(c for c in nm_mapping["D"] if "Outdoor Dry-Bulb" in c)
+    states = [c for c in nm_mapping["Y"] if "Zone Air Temperature" in c]
     return SynthSpec(
-        states=[c for c in nm_mapping["Y"] if "Zone Air Temperature" in c],
+        states=states,
         ambient=ambient,
         off={setpoint: norm_stats[setpoint]["max"]},
-        actuations=[Actuation(
-            name="cooling",
-            values={setpoint: norm_stats[setpoint]["min"]},
-            direction=-1,
-        )],
+        # Raising a cooling setpoint asks for less cooling, so the zone warms:
+        # +1. The library sweeps the setpoint from its off value (the maximum)
+        # down to its minimum and expects the zone to fall.
+        responds={c: {setpoint: +1} for c in states},
     )
 
 

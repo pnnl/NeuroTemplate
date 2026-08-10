@@ -15,7 +15,6 @@ from torch import nn
 from neuromancer.system import Node, SystemPreview
 
 from neurotemplate.modeling.scenarios import (
-    Actuation,
     EquilibriumScenario,
     FreeDecayScenario,
     ScenarioResult,
@@ -48,11 +47,14 @@ IN_STEPS, N_STEPS = 1, 12
 
 
 def _spec(**overrides) -> SynthSpec:
+    # The setpoint's `off` is its recorded maximum (26 °C), so the generated
+    # sweep drives it down to 20 °C. `responds` is signed against the control
+    # *increasing*: a higher cooling setpoint means less cooling, so +1.
     base = dict(
         states=[ZONE],
         ambient=AMBIENT,
         off={SETPT: 26.0},
-        actuations=[Actuation("cooling", {SETPT: 20.0}, direction=-1)],
+        responds={ZONE: {SETPT: +1}},
     )
     base.update(overrides)
     return SynthSpec(**base)
@@ -158,7 +160,7 @@ def test_a_drifting_plant_fails_equilibrium():
 def test_a_responsive_plant_passes_the_step():
     (r,) = _scenarios(_perfect)[1].check()
     assert r.passed
-    assert r.name == "Step response: cooling"
+    assert r.name == f"Step response: {SETPT} to 20"
     assert r.value < 0                      # the zone came down
     assert "Moved" in r.headline
 
@@ -178,9 +180,14 @@ def test_a_backwards_response_is_distinguished_from_no_response():
     assert "the wrong way" in r.headline
 
 
-def test_no_actuations_means_no_step_checks():
-    results = _scenarios(_perfect, spec=_spec(actuations=[]))[1].check()
-    assert results == []
+def test_a_state_with_no_declared_sign_is_not_asserted_on():
+    """No declared relationship means no claim to check — not a silent pass."""
+    spec = SynthSpec(states=[ZONE], ambient=AMBIENT, off={SETPT: 26.0},
+                     responds={ZONE: {SETPT: +1}})
+    scenario = _scenarios(_perfect, spec=spec)[1]
+    scenario.spec = SynthSpec(states=[ZONE], ambient=AMBIENT,
+                              off={SETPT: 26.0}, responds={ZONE: {}})
+    assert scenario.check() == []
 
 
 # ── Free decay ───────────────────────────────────────────────────
@@ -242,14 +249,27 @@ def test_the_equilibrium_state_never_lands_in_a_readout_channel():
 
 def test_validate_names_every_problem_at_once():
     bad = SynthSpec(states=["nope"], ambient="also nope", off={},
-                    actuations=[Actuation("x", {"nope": 1.0}, direction=0)])
+                    responds={"nope": {"also not a control": 0}})
     with pytest.raises(ValueError) as exc:
         bad.validate(NM)
     message = str(exc.value)
     assert "`states` names columns that are not in Y" in message
     assert "`ambient`" in message
     assert "missing: ['cooling setpoint [°C]']" in message
-    assert "direction 0" in message
+    assert "which is not a control" in message
+    assert "expected -1 or +1" in message
+
+
+def test_validate_demands_a_declared_sign_for_every_control():
+    """The coverage gap `responds` exists to close: an untested actuator."""
+    spec = SynthSpec(states=[ZONE], ambient=AMBIENT, off={SETPT: 26.0},
+                     responds={})
+
+    with pytest.raises(ValueError) as exc:
+        spec.validate(NM)
+
+    assert "declares no state that these controls move" in str(exc.value)
+    assert SETPT in str(exc.value)
 
 
 def test_validate_rejects_an_empty_state_list():
@@ -309,7 +329,9 @@ def _two_state_scenarios(stats, step=None):
 
     return build_scenarios(
         system=_system(step or passthrough), nm_mapping=nm, norm_stats=stats,
-        synth_cfg=_spec(states=[ZONE, SUPPLY]), in_steps=IN_STEPS,
+        synth_cfg=_spec(states=[ZONE, SUPPLY],
+                        responds={ZONE: {SETPT: +1}, SUPPLY: {SETPT: +1}}),
+        in_steps=IN_STEPS,
         n_scenarios=8, n_steps=4, device="cpu",
     )
 
@@ -371,11 +393,13 @@ def test_a_constant_state_channel_does_not_divide_by_zero():
 
 def test_off_is_required_for_controls_but_defaulted_elsewhere():
     """Controls must be declared; a disturbance may rest at its minimum."""
-    spec = SynthSpec(states=[ZONE], ambient=AMBIENT, off={SETPT: 26.0})
+    spec = SynthSpec(states=[ZONE], ambient=AMBIENT, off={SETPT: 26.0},
+                     responds={ZONE: {SETPT: +1}})
     spec.validate(NM)   # no entry for the power readout, and that is fine
 
     with pytest.raises(ValueError, match="missing:"):
-        SynthSpec(states=[ZONE], ambient=AMBIENT, off={}).validate(NM)
+        SynthSpec(states=[ZONE], ambient=AMBIENT, off={},
+                  responds={ZONE: {SETPT: +1}}).validate(NM)
 
 
 # ── Readout channels ─────────────────────────────────────────────
@@ -443,10 +467,10 @@ def test_run_scenarios_merges_verdicts_and_readouts():
     outcome = run_scenarios(_scenarios(_perfect))
 
     assert [r.name for r in outcome.verdicts] == [
-        "Equilibrium", "Step response: cooling", "Free decay",
+        "Equilibrium", f"Step response: {SETPT} to 20", "Free decay",
     ]
     assert [r.scenario for r in outcome.readouts] == [
-        "Equilibrium", "Step response: cooling", "Free decay",
+        "Equilibrium", f"Step response: {SETPT} to 20", "Free decay",
     ]
     payload = readouts_to_dict(outcome.readouts)
     assert set(payload) == {r.key for r in outcome.readouts}
@@ -463,7 +487,7 @@ def test_run_scenarios_merges_verdicts_and_readouts():
 def test_run_checks_flattens_every_scenario():
     results = run_checks(_scenarios(_perfect))
     assert [r.name for r in results] == [
-        "Equilibrium", "Step response: cooling", "Free decay",
+        "Equilibrium", f"Step response: {SETPT} to 20", "Free decay",
     ]
 
 

@@ -13,10 +13,12 @@ Three scenarios, each an assertion rather than a score:
   Equilibrium  — everything off, ambient equal to the indoor state. The states
                  must stay put. A model that drifts here is integrating
                  something it should not.
-  Step response — from equilibrium, apply one named actuation. The states must
-                 move, and in the declared direction. Zero response means the
-                 policy will have no lever; a wrong-signed response means it
-                 will pull it backwards.
+  Step response — from equilibrium, drive one actuator off its rest value, to
+                 each end of its range in turn. Every state with a declared
+                 sign must move the declared way. Zero response means the policy
+                 will have no lever; a wrong-signed response means it will pull
+                 it backwards. Coverage is generated from `SynthSpec.responds`,
+                 so no actuator goes untested by omission.
   Free decay   — from equilibrium, teleport the building to a new climate with
                  the HVAC off. The states must drift toward ambient and must
                  not sail past it.
@@ -49,7 +51,7 @@ sign penalty in `gradient_sampling`, which is the mechanism suited to it.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Optional, Sequence
+from typing import Optional
 
 import torch
 
@@ -64,18 +66,9 @@ DECAY_MIN_CLOSED = 0.02         # share of the ambient gap that must be closed
 DECAY_MAX_CLOSED = 1.10         # more than this is overshoot, not relaxation
 
 
-@dataclass(frozen=True)
-class Actuation:
-    """One named way of driving the plant, and where it should push the states.
-
-    `values` maps control columns to physical values; controls left out stay at
-    their `off` value, so a heating action does not have to restate the cooling
-    setpoint. `direction` is +1 when the states should rise and -1 when they
-    should fall — that sign is the whole assertion.
-    """
-    name: str
-    values: dict[str, float]
-    direction: int
+#: A control whose `off` value sits this close to a range end (as a share of
+#: its range) has nothing to sweep on that side.
+_SAME_VALUE_FRAC = 1e-6
 
 
 @dataclass(frozen=True)
@@ -111,14 +104,31 @@ class SynthSpec:
                   a zone that reaches 28, and the equilibrium check will
                   rightly report the resulting drift. Put such a setpoint
                   outside the states' range.
-      actuations  optional; without any, the step-response check is skipped.
+      responds    `{state: {control: +1 or -1}}` — the sign of that state's
+                  movement as that control *increases*. Required for every
+                  control, and the step response and reachability checks are
+                  generated from it, so an actuator cannot be silently left
+                  untested and one that pushes two zones opposite ways can be
+                  said so.
+
+                  This is the same shape as the gradient-mapping JSON but a
+                  different claim, and the two are deliberately not shared.
+                  `grad_path` declares partials that hold at *every* point in
+                  state space, which is why its U half is usually empty: a
+                  cooling setpoint above the current zone temperature commands
+                  nothing, so ∂zone/∂setpoint is 0 there and positive only
+                  where cooling is active — piecewise, not a universal sign.
+                  What is declared here is a *transition*: start at rest, move
+                  this control off its `off` value, and the scenario has built
+                  the state where the actuator is live. That has a definite
+                  answer where the universal partial does not.
 
     Everything is in physical units; the library normalizes.
     """
     states: list[str]
     ambient: str
     off: dict[str, float]
-    actuations: Sequence[Actuation] = field(default_factory=tuple)
+    responds: dict[str, dict[str, int]] = field(default_factory=dict)
 
     def validate(self, nm_mapping: dict[str, list[str]]) -> None:
         """Fail with a list of exactly what to fix, before anything runs."""
@@ -146,14 +156,34 @@ class SynthSpec:
             problems.append(f"`off` names columns that are not in the "
                             f"mapping: {stray}")
 
-        for act in self.actuations:
-            bad = [c for c in act.values if c not in u]
-            if bad:
-                problems.append(f"actuation {act.name!r} names non-control "
-                                f"columns: {bad}. U = {u}")
-            if act.direction not in (-1, 1):
-                problems.append(f"actuation {act.name!r} has direction "
-                                f"{act.direction}; expected -1 or +1.")
+        covered = set()
+        for state, edges in self.responds.items():
+            if state not in self.states:
+                problems.append(f"`responds` keys must be state channels; "
+                                f"{state!r} is not in states={self.states}")
+            for col, sign in edges.items():
+                if col not in u:
+                    problems.append(f"`responds[{state!r}]` names {col!r}, "
+                                    f"which is not a control. U = {u}")
+                else:
+                    covered.add(col)
+                if sign not in (-1, 1):
+                    problems.append(
+                        f"`responds[{state!r}][{col!r}]` is {sign}; expected "
+                        "-1 or +1 — the sign of the state's movement as the "
+                        "control increases."
+                    )
+
+        untested = [c for c in u if c not in covered]
+        if untested and not problems:
+            problems.append(
+                f"`responds` declares no state that these controls move: "
+                f"{untested}. Every control needs at least one entry, or its "
+                "step response and reachability go untested — which is the "
+                "gap this field exists to close. Give the sign of each state's "
+                "movement as the control increases (a cooling setpoint that "
+                "warms the zone as it rises is +1)."
+            )
 
         if problems:
             raise ValueError(
@@ -321,18 +351,6 @@ def _equilibrium_inputs(t_phys, nm_mapping, norm_stats, spec, device):
     return y, u, d
 
 
-def _actuated_u(u_off, nm_mapping, norm_stats, act: Actuation, device):
-    """`u_off` with the actuation's columns overridden."""
-    u = u_off.clone()
-    n = u.shape[0]
-    for col, value in act.values.items():
-        j = nm_mapping["U"].index(col)
-        u[:, j] = _normalize(
-            torch.full((n,), float(value), device=device), col, norm_stats,
-        )
-    return u
-
-
 def _rollout_data(yn_row, u_rows, d_rows, in_steps, n_steps, ny, device):
     """A SystemPreview input dict from per-phase rows.
 
@@ -464,6 +482,27 @@ class _Scenario:
     def _range(self, col: str) -> float:
         return self.norm_stats[col]["max"] - self.norm_stats[col]["min"]
 
+    def _sweeps(self) -> list[tuple[str, float, int]]:
+        """Every (control, target, direction) worth driving from rest.
+
+        A control is swept to each end of its recorded range that differs from
+        its `off` value, so a cooling setpoint whose off *is* its maximum gets
+        one sweep downward rather than a no-op upward one. `direction` is +1
+        when the target is above `off` and -1 when below, which is what turns
+        `responds` (a sign against increasing the control) into the movement
+        this particular sweep should produce.
+        """
+        sweeps = []
+        for col in self.nm_mapping["U"]:
+            stats = self.norm_stats[col]
+            off = _resting_value(col, self.spec, self.norm_stats)
+            span = max(stats["max"] - stats["min"], 1e-12)
+            for target in (stats["min"], stats["max"]):
+                if abs(target - off) / span <= _SAME_VALUE_FRAC:
+                    continue
+                sweeps.append((col, float(target), 1 if target > off else -1))
+        return sweeps
+
 
 class EquilibriumScenario(_Scenario):
     """Nothing on, ambient equal to indoors. The states must hold."""
@@ -519,17 +558,28 @@ class EquilibriumScenario(_Scenario):
 
 
 class StepResponseScenario(_Scenario):
-    """From equilibrium, one named actuation. The states must move, correctly."""
+    """From equilibrium, one actuator off its rest value. States must respond.
+
+    Every control is swept to each end of its range that differs from `off`,
+    so coverage is generated rather than hand-written: an actuator cannot be
+    left untested by omission, and both directions of a mid-range control are
+    exercised. Each state with a declared sign in `responds` gets its own
+    verdict, so an actuator that warms one zone while cooling another is
+    expressible — a single per-actuation direction could not say that.
+    """
 
     label = "Step response"
 
-    def _data(self, act: Actuation, n):
+    def _data(self, col: str, target: float, n):
         t = self._sample_equilibrium(n)
         y, u_off, d = _equilibrium_inputs(
             t, self.nm_mapping, self.norm_stats, self.spec, self.device,
         )
-        u_on = _actuated_u(u_off, self.nm_mapping, self.norm_stats, act,
-                           self.device)
+        u_on = u_off.clone()
+        j = self.nm_mapping["U"].index(col)
+        u_on[:, j] = _normalize(
+            torch.full((n,), target, device=self.device), col, self.norm_stats,
+        )
         return _rollout_data(y, (u_off, u_on), (d, d), self.in_steps,
                              self.n_steps, self.ny, self.device)
 
@@ -541,18 +591,23 @@ class StepResponseScenario(_Scenario):
     def evaluate(self, n: Optional[int] = None) -> ScenarioOutcome:
         n = n or self.n_scenarios
         results, readouts = [], []
-        for act in self.spec.actuations:
-            label = f"{self.label}: {act.name}"
+        for col, target, moved in self._sweeps():
+            label = f"{self.label}: {col} to {target:.4g}"
             with torch.no_grad():
-                y_pred = self.system(self._data(act, n))["yn"]
+                y_pred = self.system(self._data(col, target, n))["yn"]
                 move = self._move(y_pred).mean(dim=0)     # [n_states]
                 readouts += self._readouts(y_pred, label)
 
             tol = self._tolerance(RESPONSE_MOVE_FRAC)
             for i, channel in enumerate(self.spec.states):
+                # `responds` is signed against the control *increasing*; this
+                # sweep may be driving it the other way.
+                sign = self.spec.responds.get(channel, {}).get(col)
+                if sign is None:
+                    continue      # no declared relationship, nothing to assert
+                want = sign * moved
                 value, limit = float(move[i]), tol[i]
-                signed = act.direction * value
-                if signed >= limit:
+                if want * value >= limit:
                     passed, verdict = True, (
                         f"Moved {value:+.3g} over {self.n_steps} steps"
                     )
@@ -569,20 +624,21 @@ class StepResponseScenario(_Scenario):
                 results.append(ScenarioResult(
                     name=label, passed=passed,
                     headline=f"{verdict} "
-                             f"(wanted {'+' if act.direction > 0 else '-'}"
+                             f"(wanted {'+' if want > 0 else '-'}"
                              f"{limit:.3g} or more).",
                     channel=channel, value=value, tolerance=limit,
                 ))
         return ScenarioOutcome(results, readouts)
 
     def trace(self, n: int) -> dict:
-        if not self.spec.actuations:
+        sweeps = self._sweeps()
+        if not sweeps:
             return {}
-        act = self.spec.actuations[0]
+        col, target, _ = sweeps[0]
         with torch.no_grad():
-            data = self._data(act, n)
+            data = self._data(col, target, n)
             y_pred = self.system(data)["yn"]
-        return _trace(f"{self.label}: {act.name}", data, y_pred,
+        return _trace(f"{self.label}: {col} to {target:.4g}", data, y_pred,
                       self.nm_mapping, self.norm_stats, self.spec,
                       self.in_steps)
 

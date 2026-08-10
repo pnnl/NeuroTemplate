@@ -34,7 +34,6 @@ from neurotemplate.modeling.heads import (  # noqa: F401  — cited in comments
     project_physical_to_norm,
 )
 from neurotemplate.modeling.scenarios import (  # noqa: F401  — cited in synth_cfg
-    Actuation,
     SynthSpec,
 )
 
@@ -213,8 +212,8 @@ def synth_cfg(
 ) -> Optional[SynthSpec]:
     """
     Three physics assertions run after training whatever else you configure:
-    the states must hold at equilibrium, move the right way under an
-    actuation, and relax toward ambient when the HVAC is off. They put the
+    the states must hold at equilibrium, move the right way when an actuator is
+    driven off its rest value, and relax toward ambient when the HVAC is off. They put the
     surrogate in states the recorded data never contains, so they answer a
     question no test split can — and a surrogate that fails them will not
     control well however good its NRMSE is.
@@ -240,21 +239,33 @@ def synth_cfg(
                it, and a 26 °C cooling setpoint is a call for cooling on a
                zone that reaches 28.
 
-    `actuations` is optional; each one names the control values to apply and
-    the direction (+1 up, -1 down) the states should then move.
+      responds `{state: {control: +1 or -1}}` — the sign of each state's
+               movement as that control INCREASES. Required for every control.
+               The library sweeps each control from its `off` value to each end
+               of its range and asserts every declared state moved the right
+               way, so an actuator cannot go untested because nobody wrote a
+               case for it, and one that warms one zone while cooling another
+               is expressible.
 
-        from neurotemplate.modeling.scenarios import Actuation, SynthSpec
+               This looks like the `grad_path` mapping and is deliberately not
+               the same thing. That file declares partials valid at *every*
+               point in state space, which is why its U half is usually empty:
+               a cooling setpoint above the current zone temperature commands
+               nothing, so the partial is 0 there and positive only where
+               cooling runs. Here the scenario has *built* the state where the
+               actuator is live, so the sign is well defined.
+
+        from neurotemplate.modeling.scenarios import SynthSpec
 
         cool_sp = "Zone Cooling Setpoint [degC]"
+        zone = "Zone Air Temperature [degC]"
         return SynthSpec(
-            states=["Zone Air Temperature [degC]"],
+            states=[zone],
             ambient="Ambient Temperature [degC]",
             off={cool_sp: norm_stats[cool_sp]["max"]},
-            actuations=[Actuation(
-                name="cooling",
-                values={cool_sp: norm_stats[cool_sp]["min"]},
-                direction=-1,
-            )],
+            # Raising the cooling setpoint asks for less cooling, so the zone
+            # warms. The sweep drives it down from `off` and expects a fall.
+            responds={zone: {cool_sp: +1}},
         )
 
     All values are PHYSICAL units; the library normalizes them, and validates
