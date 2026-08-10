@@ -316,9 +316,16 @@ class _Scenario:
         return phys[:, self.in_steps - 1:, self.state_idx]
 
     def _tolerance(self, frac: float) -> list[float]:
-        """Per-state-channel threshold, `frac` of that channel's own range."""
-        return [frac * (self.norm_stats[c]["max"] - self.norm_stats[c]["min"])
-                for c in self.spec.states]
+        """Per-state-channel threshold, `frac` of that channel's own range.
+
+        Floored above zero so a channel that was constant in training — which
+        the reportcard already warns about separately — gives a strict check
+        rather than a division by zero.
+        """
+        return [max(frac * self._range(c), 1e-9) for c in self.spec.states]
+
+    def _range(self, col: str) -> float:
+        return self.norm_stats[col]["max"] - self.norm_stats[col]["min"]
 
 
 class EquilibriumScenario(_Scenario):
@@ -471,19 +478,21 @@ class FreeDecayScenario(_Scenario):
 
     label = "Free decay"
 
-    #: Smallest indoor-to-ambient gap worth asserting anything about.
-    MIN_GAP = 2.0
+    #: Smallest indoor-to-ambient gap worth asserting anything about, as a
+    #: share of the states' range — the same scale-free convention as the
+    #: pass thresholds, so it carries to a plant measured in anything.
+    MIN_GAP_FRAC = 0.1
 
     def _data(self, n):
         t_in = self._sample_equilibrium(n)
         a = self.norm_stats[self.spec.ambient]
         t_out = torch.rand(n, device=self.device) * (a["max"] - a["min"]) + a["min"]
-        # Push tiny gaps out to MIN_GAP so the assertion has something to bite
-        # on; the direction of the (possibly zero) gap is preserved.
+        # Push tiny gaps out so the assertion has something to bite on; the
+        # direction of the (possibly zero) gap is preserved.
+        min_gap = self.MIN_GAP_FRAC * (self.t_max - self.t_min)
         gap = t_out - t_in
         sign = torch.where(gap >= 0, 1.0, -1.0)
-        t_out = torch.where(gap.abs() < self.MIN_GAP,
-                            t_in + self.MIN_GAP * sign, t_out)
+        t_out = torch.where(gap.abs() < min_gap, t_in + min_gap * sign, t_out)
 
         y, u, d_before = _equilibrium_inputs(
             t_in, self.nm_mapping, self.norm_stats, self.spec, self.device,

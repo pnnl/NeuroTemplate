@@ -269,6 +269,33 @@ def test_build_scenarios_validates_before_constructing():
         )
 
 
+def test_thresholds_scale_with_the_channel_rather_than_assuming_degrees():
+    """A plant measured in a 0-1 range must get a 0-1-sized tolerance."""
+    stats = dict(NORM_STATS, **{ZONE: {"shift": 0.0, "stretch": 1.0,
+                                       "min": 0.0, "max": 1.0}})
+    scenarios = build_scenarios(
+        system=_system(_perfect), nm_mapping=NM, norm_stats=stats,
+        synth_cfg=_spec(), in_steps=IN_STEPS, n_scenarios=4, n_steps=N_STEPS,
+        device="cpu",
+    )
+    (r,) = scenarios[0].check()
+    assert r.tolerance == pytest.approx(0.02 * 1.0)
+
+
+def test_a_constant_state_channel_does_not_divide_by_zero():
+    """The reportcard warns about constant columns; this must not crash on one."""
+    stats = dict(NORM_STATS, **{ZONE: {"shift": 0.0, "stretch": 1.0,
+                                       "min": 22.0, "max": 22.0}})
+    scenarios = build_scenarios(
+        system=_system(_inert), nm_mapping=NM, norm_stats=stats,
+        synth_cfg=_spec(), in_steps=IN_STEPS, n_scenarios=2, n_steps=4,
+        device="cpu",
+    )
+    results = run_checks(scenarios)
+    assert len(results) == 3
+    assert all(r.tolerance > 0 for r in results[:2])
+
+
 def test_off_is_required_for_controls_but_defaulted_elsewhere():
     """Controls must be declared; a disturbance may rest at its minimum."""
     spec = SynthSpec(states=[ZONE], ambient=AMBIENT, off={SETPT: 26.0})
