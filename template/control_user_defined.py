@@ -209,21 +209,26 @@ def power_metric(
                     for c in power_channels(nm_mapping))
         return total.clamp_min(0.0)
 
-    **If your surrogate meters no power, leave this unimplemented and keep
-    `effort_weight: 0.0`.** Do not substitute an actuation proxy such as
-    `(setpoint - ambient) ** 2`. It is a different objective in different
-    units, and it has broken three separate campaigns in this library's
-    record: on a plant whose ambient range (9-18 °C) did not overlap its
-    setpoint range (20-26 °C), the proxy was monotone across the entire
-    feasible set, so it paid the controller to demand maximum cooling on a
-    cold day. It also outweighed the whole comfort objective by 1.7x, and
-    every pooled metric looked fine for ten consecutive runs.
+    Metered power channels are the best thing to return when the surrogate
+    predicts them, because the units are real and the reportcard's energy
+    numbers then mean something outside this run.
 
-    If you do write a proxy anyway, the library sweeps it across the
-    actuation box before training and prints where its minimum lies. A
-    minimum on a bound means no value of `effort_weight` will save it — the
-    term needs re-deriving. Add the power channels to the surrogate instead
-    if you can; that is the fix, and it is usually available.
+    An actuation proxy such as `(setpoint - ambient) ** 2` is a legitimate
+    alternative when nothing meters power. It is a different quantity in
+    different units, so read the energy section as relative rather than
+    physical — but a term that drives good closed-loop behaviour is a good
+    term, whatever its analytic minimum looks like.
+
+    The one thing that has actually cost campaigns here is **scale**, not
+    shape: a proxy weighted to a previous dataset came out at 1.7x the entire
+    comfort objective and every pooled metric looked fine for ten consecutive
+    runs. Before training, the library prints each term's value and share of
+    the objective, and sweeps this term across each actuation box so its
+    magnitude and shape are both on screen. Compare them and set
+    `effort_weight` from what you see.
+
+    If you would rather not weight an effort term at all, leave this
+    unimplemented and keep `effort_weight: 0.0`.
     """
     raise NotImplementedError(
         "power_metric is not implemented. Keep effort_weight: 0.0 in the "

@@ -132,27 +132,32 @@ def _shapes(term_fn, n_grid=9):
     return term_shapes(term_fn, out, hmax, nm["U"], lo, hi, ns, n_grid=n_grid)
 
 
-def test_a_monotone_term_puts_its_minimum_on_a_bound():
-    """v4's pathology: a proxy with no interior optimum over the actuation box.
+def test_a_monotone_term_is_reported_without_a_verdict():
+    """A term minimised on an endpoint is normal, not a defect.
 
-    Here the term is the setpoint itself, so it is minimised by driving the
-    setpoint to its floor and no weight can change that.
+    Here the term is the setpoint itself, so it is minimised at the floor. An
+    honest power metric behaves the same way — it costs more as the actuator
+    works harder — so the sweep reports where the minimum is and says nothing
+    about whether that is wrong.
     """
     (shape,) = _shapes(lambda yn, u, d: u[:, :, 0])
 
     assert shape.u_name == SETPT
     assert shape.argmin == 0
-    assert shape.minimum_on_boundary
     assert not shape.is_flat
-    assert shape.pinned_at == pytest.approx(shape.grid[0])
-    assert "⚠️ minimum on the bound" in shapes_to_markdown([shape])
-    assert "monotone" in format_objective_report(
-        ObjectiveBalance([], 0.0), [shape]
-    )
+    assert shape.minimised_at == pytest.approx(shape.grid[0])
+
+    table = shapes_to_markdown([shape])
+    assert f"{shape.minimised_at:.4g}" in table
+    assert "⚠️" not in table
+
+    report = format_objective_report(ObjectiveBalance([], 0.0), [shape])
+    assert "WARNING" not in report
+    assert "no verdict attached" in report
 
 
-def test_an_interior_optimum_is_not_flagged():
-    """A term that costs distance from a target is a real trade-off."""
+def test_an_interior_optimum_is_reported_too():
+    """A term that costs distance from a target reports its interior minimum."""
     target = 24.0
     ns_shift, ns_stretch = None, None
 
@@ -169,8 +174,7 @@ def test_an_interior_optimum_is_not_flagged():
     (shape,) = _shapes(term)
 
     assert 0 < shape.argmin < len(shape.values) - 1
-    assert not shape.minimum_on_boundary
-    assert shape.pinned_at == pytest.approx(target, abs=1.0)
+    assert shape.minimised_at == pytest.approx(target, abs=1.0)
 
 
 def test_a_term_that_ignores_the_control_reads_as_flat():
@@ -178,7 +182,6 @@ def test_a_term_that_ignores_the_control_reads_as_flat():
     (shape,) = _shapes(lambda yn, u, d: yn[:, :, 0])
 
     assert shape.is_flat
-    assert not shape.minimum_on_boundary
     assert "flat (no direct effect)" in shapes_to_markdown([shape])
 
 
@@ -203,7 +206,8 @@ def test_objective_to_dict_is_serializable():
 
     payload = objective_to_dict(balance, [shape])
 
-    assert payload["effort_shape"][SETPT]["minimum_on_boundary"] is True
+    assert payload["effort_shape"][SETPT]["minimised_at"] == 26.0
+    assert payload["effort_shape"][SETPT]["values"] == [3.0, 2.0, 1.0]
     json.dumps(payload)  # must not raise
 
 

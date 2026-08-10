@@ -93,7 +93,11 @@ def test_actuation_renderers():
     metrics = actuation_metrics(u, U_NAMES, U_LO, U_HI)
 
     table = actuation_to_markdown(metrics)
-    assert "⚠️ pinned" in table            # cool sits on its floor throughout
+    # Bound-sitting is reported, not judged: a setpoint parked at its
+    # least-aggressive limit while nothing is demanded of it produces the same
+    # number as a stuck one, so no flag is attached either way.
+    assert "⚠️" not in table
+    assert "100.0%" in table               # cool sits on its floor throughout
     assert table.count("\n") == 3          # header + separator + 2 rows
 
     payload = actuation_to_dict(metrics)

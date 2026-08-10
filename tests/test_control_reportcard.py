@@ -132,7 +132,7 @@ def _make_balance():
 
 
 def _make_shapes():
-    """...and mis-shaped too: monotone decreasing across the whole box."""
+    """A monotone effort term — reported, and deliberately not flagged."""
     return [TermShape(
         u_name="setpoint [°C]",
         grid=[22.0, 23.5, 25.0, 26.5, 28.0],
@@ -206,12 +206,20 @@ def test_envelope_section_skipped_without_a_probe():
     assert "## Achievable envelope vs. comfort band" not in md
 
 
-def test_objective_section_flags_both_failure_modes():
+def test_objective_section_flags_a_dominant_term():
+    """Scale is the failure worth asserting on, and the only one asserted."""
     md = _render()
     assert "One term is running the objective" in md
     assert "`effort_loss` at 2.3×" in md
-    assert "Effort term minimised on a bound" in md
-    assert "No value of `effort_weight` fixes this" in md
+
+
+def test_objective_section_reports_term_shape_without_judging_it():
+    """The sweep is information. A monotone effort term is normal."""
+    md = _render()
+    assert "Effort term swept across each actuation box" in md
+    assert "28" in md                      # where the minimum landed
+    assert "minimised on a bound" not in md
+    assert "No value of `effort_weight`" not in md
 
 
 def test_objective_section_skipped_without_a_diagnostic_pass():

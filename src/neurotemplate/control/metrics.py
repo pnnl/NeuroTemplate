@@ -16,9 +16,13 @@ different units:
 The last two exist because pooled comfort scores are silent about behaviour.
 A controller that pinned one of its two actuators at a bound for 92% of the
 evaluation scored *better* on violation rate than the fixed version of itself,
-and only a hand-written trajectory audit found it. Saturation fraction and
-band-jump reaction rate are the two numbers that would have said so on the
-first run.
+and only a hand-written trajectory audit found it.
+
+Neither carries a verdict on its own. Time on a bound is not evidence of a
+fault — a setpoint held at its least-aggressive limit while nothing is demanded
+of it produces exactly the same number as one that is stuck. What separates
+those two is whether the loop moved when the reference band asked it to, which
+is what JumpResponse measures. Read them together.
 
 Everything here is a pure function over already-denormalized tensors. The
 pipeline does the denormalization and the hook calls; this module only does
@@ -87,10 +91,10 @@ SATURATION_TOL = 0.01
 class ActuationMetrics:
     """What one control input did over the evaluation, in physical units.
 
-    `frac_at_min` / `frac_at_max` are the cheapest diagnostic in this module
-    and the one most worth reading first: an actuator pinned at a bound for
-    most of the evaluation is not being controlled, and no comfort statistic
-    will say so.
+    `frac_at_min` / `frac_at_max` are the cheapest diagnostic in this module.
+    They say how much of the evaluation each control spent against a limit,
+    which no comfort statistic reports — but they do not say whether that was
+    wrong. Pair them with `JumpResponse` before concluding anything.
     """
     name: str
     mean_value: float      # mean commanded value
@@ -435,25 +439,24 @@ def comfort_to_dict(metrics: list[ComfortMetrics]) -> dict:
             for m in metrics}
 
 
-# A control sitting on a bound for more than this share of the evaluation is
-# not being modulated; the reportcard says so out loud.
-SATURATION_WARN = 0.5
-
-
 @beartype
 def actuation_to_markdown(metrics: list[ActuationMetrics]) -> str:
-    """Render per-control actuation as a markdown table, flagging pinning."""
+    """Render per-control actuation as a markdown table.
+
+    No flag column: time spent on a bound is reported, not judged. A setpoint
+    parked at its least-aggressive limit through a period that demands nothing
+    of it is correct control and produces the same number as a stuck one.
+    """
     rows = [
         "| Control | Bounds | Mean | Mean \\|Δu\\| | At lower bound | "
-        "At upper bound | |",
-        "|---|---|---:|---:|---:|---:|---|",
+        "At upper bound |",
+        "|---|---|---:|---:|---:|---:|",
     ]
     for m in metrics:
-        flag = "⚠️ pinned" if m.frac_saturated > SATURATION_WARN else ""
         rows.append(
             f"| {m.name} | [{m.u_min:.4g}, {m.u_max:.4g}] | "
             f"{m.mean_value:.4g} | {m.mean_abs_du:.4g} | "
-            f"{m.frac_at_min * 100:.1f}% | {m.frac_at_max * 100:.1f}% | {flag} |"
+            f"{m.frac_at_min * 100:.1f}% | {m.frac_at_max * 100:.1f}% |"
         )
     return "\n".join(rows)
 

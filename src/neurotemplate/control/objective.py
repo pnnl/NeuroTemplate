@@ -1,32 +1,26 @@
 """
-Objective diagnostics: is each term the right size, and does it point the
-right way?
+Objective diagnostics: how big is each term, and what does it look like?
 
 `build_control_loss` sums comfort, du and effort with user-supplied weights,
-and until now nothing checked that a weight suited the magnitude of what it
-multiplies. That is the highest-frequency failure in this library's record —
-four campaigns out of four — and it comes in two flavours that need different
-answers:
+and nothing checks that a weight suits the magnitude of what it multiplies.
+That is the highest-frequency failure in this library's record — four campaigns
+out of four — and it is a *scale* problem: the term has the right shape but the
+wrong magnitude, so it dominates the objective or vanishes from it.
+`objective_balance` answers it in one forward pass by printing every term's
+contribution and share.
 
-  mis-scaled  the term has the right shape but the wrong magnitude, so it
-              dominates or vanishes. Re-derive the weight. `objective_balance`
-              finds this: one forward pass, print every term's contribution.
+The worked example: an effort proxy of `(cooling_setpoint - outdoor)^2` that
+came out at 1.7x the entire comfort objective. The numbers were on screen from
+epoch 1; nobody was comparing them.
 
-  mis-shaped  the term's gradient points the same way across the entire
-              feasible set, so its minimum sits on an actuation bound. **No
-              value of the weight fixes this** — the objective is instructing
-              the policy to saturate an actuator. `term_shapes` finds this by
-              sweeping each control across its box and asking where the
-              minimum lies.
-
-The worked example both were written for: an effort proxy of
-`(cooling_setpoint - outdoor)^2` on a spring plant whose outdoor range
-(9-18 °C) does not overlap its setpoint range (20-26 °C). The term is monotone
-decreasing over the whole box, it was 1.7x the entire comfort objective, and
-the policy did the rational thing — it pinned the cooling setpoint at its
-floor for 87% of the evaluation and ran the zone on heating alone. Ten runs
-scored a respectable violation rate before anyone noticed. Both numbers here
-were on screen from epoch 1; nobody was comparing them.
+`term_shapes` sweeps the effort term across each actuation box and reports what
+it looks like there — the value at each grid point and where the minimum lands.
+This is **reported, not judged**. A monotone effort term is normal and usually
+correct: a real power meter costs more as an actuator works harder, so it has
+no interior optimum of its own. The trade-off that produces an interior optimum
+belongs to the *summed* objective, where effort meets comfort — not to the
+effort term in isolation. The sweep is here so a reader can see the shape and
+the scale of the term they are weighting, and decide for themselves.
 """
 
 from __future__ import annotations
@@ -87,22 +81,22 @@ class TermShape:
 
     @property
     def is_flat(self) -> bool:
+        """The term does not read this control directly.
+
+        Normal for metered power, which the control reaches only through the
+        dynamics. Reported so a flat row is not misread as a missing sweep.
+        """
         scale = max(abs(sum(self.values) / len(self.values)), 1.0)
         return self.spread <= FLAT_TOL * scale
 
     @property
-    def minimum_on_boundary(self) -> bool:
-        """True when the term is minimised by pinning this control at a limit.
+    def minimised_at(self) -> float:
+        """Where over the swept box this term is smallest, in physical units.
 
-        A boundary minimum means the term is monotone across the feasible set,
-        i.e. it is an instruction to saturate the actuator rather than a cost
-        to trade off. Flat sweeps are excluded — they carry no instruction.
+        Carries no verdict. A minimum on an endpoint means the term is monotone
+        over the actuation range, which is what an honest power metric looks
+        like — the interior optimum belongs to the summed objective.
         """
-        return (not self.is_flat
-                and self.argmin in (0, len(self.values) - 1))
-
-    @property
-    def pinned_at(self) -> float:
         return self.grid[self.argmin]
 
 
@@ -225,18 +219,15 @@ def balance_to_markdown(balance: ObjectiveBalance) -> str:
 
 @beartype
 def shapes_to_markdown(shapes: list[TermShape]) -> str:
-    rows = ["| Control | Term at lo | at mid | at hi | Minimised at | |",
-            "|---|---:|---:|---:|---:|---|"]
+    rows = ["| Control | Term at lo | at mid | at hi | Minimised at |",
+            "|---|---:|---:|---:|---:|"]
     for s in shapes:
         mid = len(s.values) // 2
-        if s.is_flat:
-            where, flag = "flat (no direct effect)", ""
-        else:
-            where = f"{s.pinned_at:.4g}"
-            flag = "⚠️ minimum on the bound" if s.minimum_on_boundary else ""
+        where = ("flat (no direct effect)" if s.is_flat
+                 else f"{s.minimised_at:.4g}")
         rows.append(
             f"| {s.u_name} | {s.values[0]:.4g} | {s.values[mid]:.4g} | "
-            f"{s.values[-1]:.4g} | {where} | {flag} |"
+            f"{s.values[-1]:.4g} | {where} |"
         )
     return "\n".join(rows)
 
@@ -256,8 +247,7 @@ def objective_to_dict(balance: ObjectiveBalance,
         "effort_shape": {
             s.u_name: {"grid": s.grid, "values": s.values,
                        "flat": s.is_flat,
-                       "minimum_on_boundary": s.minimum_on_boundary,
-                       "pinned_at": s.pinned_at}
+                       "minimised_at": s.minimised_at}
             for s in shapes
         },
     }
@@ -279,13 +269,12 @@ def format_objective_report(balance: ObjectiveBalance,
             "combined. Whatever the other weights say, this is the objective "
             "being optimised."
         )
-    for s in shapes:
-        if s.minimum_on_boundary:
-            lines.append(
-                f"  WARNING: the effort term is minimised by holding "
-                f"{s.u_name} at {s.pinned_at:.4g}, the edge of its actuation "
-                "range — it is monotone across the whole feasible set, so no "
-                "weight fixes it. Re-derive the term, do not re-tune "
-                "effort_weight."
-            )
+    if shapes:
+        lines.append("Effort term across each actuation box (no verdict "
+                     "attached — read it against the weights above):")
+        for s in shapes:
+            where = ("flat, no direct effect" if s.is_flat
+                     else f"minimised at {s.minimised_at:.4g}")
+            lines.append(f"  {s.u_name:<22s} {s.values[0]:>12.4g} .. "
+                         f"{s.values[-1]:<12.4g} {where}")
     return "\n".join(lines)

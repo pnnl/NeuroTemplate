@@ -127,7 +127,7 @@ The library imports each hook by attribute (no defaulting), so every row above e
 | `build_baseline_policy(cfg, sysid_cfg, nm_mapping, norm_stats) -> Node \| None` | optional | rule-based controller scored alongside the learned policy |
 | `preview_config(nm_mapping) -> {signal: n_steps}` | optional | per-column disturbance + comfort-band preview widths |
 
-`power_metric` returns whatever units the use case meters; the library never converts, so the reportcard labels energy as `power·h`. When the surrogate meters no power, leave the hook unimplemented and keep `effort_weight: 0.0` — do **not** substitute an actuation proxy such as `(setpoint - ambient)²`. That is a different objective in different units, and it has broken three separate campaigns in this library's record. If you write one anyway, the effort-term shape sweep will tell you on the first run whether it has an interior optimum at all.
+`power_metric` returns whatever units the use case meters; the library never converts, so the reportcard labels energy as `power·h`. Metered channels the surrogate already predicts are the best thing to return, because the energy numbers then mean something outside the run. An actuation proxy such as `(setpoint - ambient)²` is a fine alternative when nothing meters power — just read the energy section as relative rather than physical. What has actually cost campaigns here is the term's *scale*, not its shape: a proxy carried over from another dataset came out at 1.7× the entire comfort objective while every pooled metric looked fine. The objective-balance report and the shape sweep both print before training so that magnitude is on screen from the start.
 
 If `build_baseline_policy` is defined, `nt control train` rolls that controller out on the same test windows against the same fixed-seed comfort band and adds a learned-vs-baseline table to the reportcard. Without it the comparison section just says so. The returned `Node` must write `["U"]` and have no trainable parameters — it is only ever evaluated, never trained.
 
@@ -208,17 +208,20 @@ reportcard and in MLflow.
   the plant can hold? A band outside it cannot be satisfied by any policy, and
   the violation rate reported against it measures the weather.
 - **Objective balance** — every term's value and share of the objective on one
-  real batch, warning when one term outweighs all the others combined.
-- **Effort term shape** — the effort term swept across each actuation box. A
-  minimum on a bound means the term is monotone over the feasible set, so it
-  is an instruction to saturate that actuator and *no value of `effort_weight`
-  fixes it*.
+  real batch, warning when one term outweighs all the others combined. This is
+  the one that asserts something: a term carried over from another dataset once
+  came out at 1.7× the whole comfort objective.
+- **Effort term shape** — the effort term swept across each actuation box, so
+  its magnitude and shape sit next to the weights you are choosing. Reported
+  without a verdict: an honest power metric is monotone in actuator effort, and
+  the interior optimum belongs to the summed objective, not to this term alone.
 
 **After the closed-loop evaluation:**
 
 - **Actuation** — per-control mean |Δu| and the fraction of the evaluation
-  spent pinned at each bound. Cheapest of the lot and the one most worth
-  reading: an actuator held at its limit is not being controlled.
+  spent against each bound. Reported, not judged: a setpoint parked at its
+  least-aggressive limit while nothing is demanded of it looks identical to one
+  that is stuck. The band-jump audit below is what tells them apart.
 - **Band-jump response** — every step change in the reference band that left a
   controlled channel out of band, scored on whether any control moved, whether
   the channel followed, and whether it got back in band. Two controllers

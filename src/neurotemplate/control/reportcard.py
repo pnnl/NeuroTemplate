@@ -12,8 +12,8 @@ Sections (in order):
    3. Scenario             — horizons, controlled channels, bands, weights
    4. Achievable envelope  — can this surrogate hold the configured band at
                              all, and does every actuator have authority
-   5. Objective balance    — which term was actually being optimised, and
-                             whether the effort term has an interior minimum
+   5. Objective balance    — which term was actually being optimised, and the
+                             magnitude and shape of the effort term
    6. Closed-loop performance — comfort table, actuation, energy
    7. Actuation            — per-control effort and saturation fraction
    8. Band-jump response   — did the loop react when the reference moved
@@ -21,10 +21,15 @@ Sections (in order):
   10. Tracking error       — per-channel error vs. the comfort-band midpoint
   11. Hyperparameters      — the knobs that produced this run
 
-Sections 4, 5, 7 and 8 are the behavioural ones. They exist because the
-comfort table above them is silent about infeasible bands, dominated
-objectives, pinned actuators and ignored setpoint changes — every one of
-which has been shipped in a run whose pooled numbers looked fine.
+Sections 4, 5, 7 and 8 are the behavioural ones. They exist because the comfort
+table above them is silent about infeasible bands, dominated objectives, what
+the actuators did, and ignored setpoint changes — every one of which has been
+shipped in a run whose pooled numbers looked fine.
+
+Only two of them assert anything: a dominated objective term and an ignored
+band jump. Actuation and effort-term shape are reported without a verdict,
+because bound-sitting and monotone effort terms are both normal in a correct
+controller.
 """
 
 from __future__ import annotations
@@ -35,7 +40,6 @@ from typing import Optional
 from neurotemplate.common.metrics import metrics_to_markdown
 from neurotemplate.common.reportcard import _fmt_float, _section
 from neurotemplate.control.metrics import (
-    SATURATION_WARN,
     actuation_to_markdown,
     comfort_to_markdown,
     response_to_markdown,
@@ -208,24 +212,14 @@ def _objective_section(balance: ObjectiveBalance,
         body += [
             "",
             "Effort term swept across each actuation box, with the rest of "
-            "the rollout held at its recorded values. A minimum on a bound "
-            "means the term is monotone over the whole feasible set — it is "
-            "not a cost being traded off, it is an instruction to saturate "
-            "that actuator.\n",
+            "the rollout held at its recorded values. This is the magnitude "
+            "and shape of what `effort_weight` multiplies, reported so it can "
+            "be weighed against the terms above. A minimum on an endpoint is "
+            "not a defect — an honest power metric is monotone in actuator "
+            "effort, and the trade-off that produces an interior optimum "
+            "belongs to the summed objective, not to this term alone.\n",
             shapes_to_markdown(shapes),
         ]
-        boundary = [s for s in shapes if s.minimum_on_boundary]
-        if boundary:
-            body += [
-                "",
-                "**⚠️ Effort term minimised on a bound:** "
-                + ", ".join(f"`{s.u_name}` at {s.pinned_at:.4g}"
-                            for s in boundary)
-                + ". **No value of `effort_weight` fixes this** — lowering it "
-                "only weakens the instruction. The term needs re-deriving so "
-                "it has an interior optimum over the actuation range this "
-                "plant actually operates in.",
-            ]
     return _section("Objective balance", "\n".join(body))
 
 
@@ -260,32 +254,24 @@ def _performance_section(results) -> str:
 
 
 def _actuation_section(results) -> str:
-    """Per-control effort and saturation — the cheapest silent-failure check.
+    """Per-control effort and time-at-bound, as measured.
 
-    A pooled mean |Δu| hides an actuator that never moves, and a comfort score
-    hides one that sits on a bound. Both are one column each here.
+    A pooled mean |Δu| hides an actuator that never moves, so these are broken
+    out per control. No verdict is attached to a high bound fraction: sitting a
+    cooling setpoint at its least-aggressive limit through a period that needs
+    no cooling is correct, conservative control, not a stuck actuator. Read it
+    together with the band-jump response below, which is what distinguishes
+    "parked because nothing was asked of it" from "did not answer".
     """
-    pinned = [m for m in results.actuation
-              if m.frac_saturated > SATURATION_WARN]
     body = [
         "What each control input actually did, in its own physical units. "
         "\"At bound\" counts commands within 1% of the actuation range of a "
-        "limit, because a smooth bound method never reaches one exactly.\n",
+        "limit, because a smooth bound method never reaches one exactly. A "
+        "high fraction is a fact about the run, not a fault — a setpoint held "
+        "at its least-aggressive limit while nothing is demanded of it reads "
+        "the same way here as one that is stuck.\n",
         actuation_to_markdown(results.actuation),
     ]
-    if pinned:
-        body += [
-            "",
-            "**⚠️ Pinned at a bound:** "
-            + ", ".join(
-                f"`{m.name}` ({m.frac_saturated * 100:.0f}% of the evaluation)"
-                for m in pinned
-            )
-            + ". A control held against its limit is not being modulated — the "
-            "closed loop is running on whatever is left. This is usually an "
-            "objective term whose gradient points one way across the whole "
-            "feasible set, not a policy that chose to saturate.",
-        ]
     return _section("Actuation", "\n".join(body))
 
 
