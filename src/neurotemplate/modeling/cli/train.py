@@ -8,7 +8,7 @@ eval, plotting, reportcard) is in pipeline.train_and_evaluate.
 Usage:
     nt model train --config model_configs/modeling.yaml
     nt model train --config model_configs/modeling.yaml \
-        --set grad_gain=1.0 --set synth_gain=0.5
+        --set grad_gain=1.0
 """
 
 import sys
@@ -57,10 +57,6 @@ def main() -> None:
         if cfg.grad_gain > 0:
             print(f"Gradient penalty: gain={cfg.grad_gain}, "
                   f"samples={cfg.grad_n_samples}")
-        if cfg.synth_gain > 0:
-            print(f"Scenario penalty: gain={cfg.synth_gain}, "
-                  f"scenarios={cfg.synth_n_scenarios}, "
-                  f"steps={cfg.synth_n_steps}")
 
     # ── Data, normalization, masks, synth_cfg (computed once) ────
     if cfg.verbose:
@@ -107,12 +103,12 @@ def main() -> None:
         args=cfg,
         savedir=cfg.savedir,
         stdout=["train_loss", "train_ref_loss", "train_grad_penalty",
-                "train_synth_penalty", "dev_loss"],
+                "dev_loss"],
         verbosity=cfg.epoch_verbose if cfg.verbose else 0,
         logout=[
             "train_loss", "dev_loss",
             "ref_loss", "sgn_loss", "vel_loss",
-            "grad_penalty", "synth_penalty",
+            "grad_penalty",
             "time", "rmse",
         ],
         nested=False,

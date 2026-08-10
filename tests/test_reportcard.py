@@ -59,7 +59,6 @@ def _make_cfg():
         "norm_type": "min_max",
         "seed": 42,
         "ref_gain": 1.0,
-        "synth_gain": 0.0,
         "grad_gain": 0.0,
     }, Config)
     return cfg
@@ -193,10 +192,10 @@ def _physics(passed: bool):
     from neurotemplate.modeling.scenarios import ScenarioResult
     return [
         ScenarioResult("Equilibrium", True, "`zone_a [°C]` held to 0.01.",
-                       "zone_a [°C]", 0.01, 0.24, 0.0),
+                       "zone_a [°C]", 0.01, 0.24),
         ScenarioResult("Free decay", passed,
                        "`zone_a [°C]` closed 0.4% of a 8.3 gap to ambient.",
-                       "zone_a [°C]", 0.004, 0.02, 1.2),
+                       "zone_a [°C]", 0.004, 0.02),
     ]
 
 

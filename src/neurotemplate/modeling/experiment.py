@@ -4,7 +4,7 @@ Training loop and utilities.
 Uses a standard Neuromancer Problem (no subclass needed). Physics losses
 are proper Neuromancer Loss objects inside PenaltyLoss, so they flow
 through Problem.forward() and appear in the Trainer's output dict with
-the correct labels (e.g., 'train_grad_penalty', 'train_synth_penalty').
+the correct labels (e.g., 'train_grad_penalty').
 
 Physics losses are active in both train and eval. During training they
 use the tunable gain; during eval they use a fixed weight of 1.0 so
@@ -22,7 +22,6 @@ from datetime import datetime
 
 
 from neurotemplate._typing import beartype
-from neurotemplate.modeling.scenarios import SynthSpec
 
 from neurotemplate.common.data_utils import get_loader
 from neurotemplate.modeling.heads import HeadStack
@@ -80,7 +79,6 @@ def build_trainer(
     nm_mapping: dict[str, list[str]],
     grad_masks: dict[str, torch.Tensor],
     norm_stats: dict[str, dict[str, float]],
-    synth_cfg: Optional[SynthSpec],
     head_stack: Optional[HeadStack] = None,
     logger: Optional[MLFlowLogger] = None,
 ) -> Trainer:
@@ -110,7 +108,7 @@ def build_trainer(
 
     # Single PenaltyLoss with all objectives:
     #   - Tracking: ref_loss, vel_loss, sgn_loss (Variable expressions)
-    #   - Physics:  grad_penalty, synth_penalty (Loss objects, train-only)
+    #   - Physics:  grad_penalty (Loss object, train-only)
     loss = build_loss(
         cfg=cfg,
         raw_model=raw_model,
@@ -118,7 +116,6 @@ def build_trainer(
         grad_masks=grad_masks,
         nm_mapping=nm_mapping,
         norm_stats=norm_stats,
-        synth_cfg=synth_cfg,
         head_stack=head_stack,
     )
 
@@ -218,7 +215,6 @@ def train_with_curriculum(
     nm_mapping: dict[str, list[str]],
     grad_masks: dict[str, torch.Tensor],
     norm_stats: dict[str, dict[str, float]],
-    synth_cfg: Optional[SynthSpec],
     head_stack: Optional[HeadStack] = None,
     global_logger: Optional[MLFlowLogger] = None,
 ) -> tuple[System, float]:
@@ -234,7 +230,6 @@ def train_with_curriculum(
         nm_mapping=nm_mapping,
         grad_masks=grad_masks,
         norm_stats=norm_stats,
-        synth_cfg=synth_cfg,
         head_stack=head_stack,
         logger=global_logger,
     )

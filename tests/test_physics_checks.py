@@ -330,15 +330,15 @@ def test_renderers_show_verdicts_not_losses():
     assert payload["Free decay"]["passed"] is False
 
 
-def test_the_training_penalty_still_works_and_is_differentiable():
-    """`synth_gain` is optional, but it must not have rotted."""
-    scenarios = _scenarios(_rampng)
-    for s in scenarios:
-        penalty = s.compute()
-        assert penalty.requires_grad
-        assert torch.isfinite(penalty)
-    # A drifting plant is penalized, and the penalty carries a gradient.
-    assert float(scenarios[0].compute().detach()) > 0.0
+def test_the_scenarios_are_assertions_and_carry_no_training_term():
+    """The differentiable penalty is gone; nothing here feeds the loss.
+
+    Physicality during training is the gradient sign penalty's job
+    (`modeling/gradient_sampling.py`), which is still wired to `grad_gain`.
+    """
+    for s in _scenarios(_rampng):
+        assert not hasattr(s, "compute")
+    assert not any(hasattr(r, "penalty") for r in run_checks(_scenarios(_perfect)))
 
 
 def test_traces_carry_physical_trajectories_for_the_plots():

@@ -107,7 +107,7 @@ The library finds the hook files automatically: by default it looks for `modelin
 | `data_mapping(df, cfg) -> {Y, U, D, t: [col]}` | yes | pipeline at data-prep time |
 | `data_head_config(nm_mapping, norm_stats) -> HeadStack` | must be defined; return `HeadStack([RegressionHead() for _ in Y], Y)` for plain regression | output-head construction |
 | `column_norm_config(nm_mapping) -> {col: norm_type \| None}` | must be defined; return `{}` for no overrides | per-column norm override |
-| `synth_cfg(nm_mapping, norm_stats) -> SynthSpec \| None` | must be defined; return `None` to disable | physics checks (and the optional `synth_gain` penalty) |
+| `synth_cfg(nm_mapping, norm_stats) -> SynthSpec \| None` | must be defined; return `None` to disable | physics checks |
 | `sub_plot(df_true, col_name) -> tuple \| None` | must be defined; return `None` for default | per-column subplot guidance |
 | `hyper_args(trial, base_cfg) -> Config` | required only for `nt model optuna` | Optuna trial setup |
 | `tie_norm_stats(nm_mapping, norm_stats, cfg) -> norm_stats` | optional | post-process norm stats before they are frozen (e.g. force two columns onto a shared `shift`/`stretch`) |

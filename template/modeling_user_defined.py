@@ -220,7 +220,7 @@ def synth_cfg(
     control well however good its NRMSE is.
 
     Filling this in is a few lines and worth doing. Return None to skip the
-    checks entirely; `synth_gain` must then stay 0.
+    checks entirely.
 
     Only two things are per-column work:
 

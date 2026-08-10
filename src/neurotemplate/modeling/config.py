@@ -95,10 +95,11 @@ class ModelingConfig:
     optuna_dir: str = "optuna_dbs"
     trial_seeds: int = 3
 
-    # ---- PHYSICS PENALTIES ---------------------------------------------------
+    # ---- PHYSICS -------------------------------------------------------------
+    # grad_* weights a training penalty; synth_* only sizes the post-training
+    # physics assertions, which always run when synth_cfg returns a spec.
     grad_gain: float = 0.0
     grad_n_samples: int = 128
-    synth_gain: float = 0.0
     synth_n_scenarios: int = 32
     synth_n_steps: int = 24
     synth_n_plot: int = 4
@@ -118,9 +119,9 @@ class ModelingConfig:
             "lr",
             "warmup", "patience", "curriculum_steps",
             "ref_gain", "vel_gain", "sgn_gain", "sgn_steepness",
-            "n_trials", "grad_gain", "synth_gain", "trial_epochs",
+            "n_trials", "grad_gain", "trial_epochs",
             "trial_seeds", "grad_n_samples", "synth_n_scenarios",
-            "synth_n_scenarios", "synth_n_steps", "synth_n_plot",
+            "synth_n_steps", "synth_n_plot",
         ]:
             check_non_negative(self, name)
 

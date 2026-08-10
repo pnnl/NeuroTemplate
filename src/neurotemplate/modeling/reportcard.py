@@ -415,8 +415,6 @@ def _hyperparameters_section(cfg: ModelingConfig) -> str:
         gains.append(f"sgn={cfg.sgn_gain}")
     if cfg.grad_gain != 0:
         gains.append(f"grad={cfg.grad_gain}")
-    if cfg.synth_gain != 0:
-        gains.append(f"synth={cfg.synth_gain}")
     rows.append(f"- **Loss gains:** {', '.join(gains) if gains else 'ref-only'}")
     return _section("Hyperparameters", "\n".join(rows))
 

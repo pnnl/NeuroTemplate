@@ -11,8 +11,9 @@ non-trivial steps):
   - train_and_evaluate(...) — one full training run (used by main + optuna Phase 2)
 
 `synth_cfg` is computed once at the entry point (via user_defined.synth_cfg)
-and passed through everywhere. None means "synth subsystem disabled for
-this run" — the single fact, not a re-check at every callsite.
+and passed to the evaluation path. None means "physics checks disabled for
+this run" — the single fact, not a re-check at every callsite. Training never
+sees it: the scenarios are assertions on the trained surrogate, not a loss.
 """
 
 from dataclasses import dataclass
@@ -156,8 +157,7 @@ def evaluate_and_plot(
                       + ", ".join(dead))
 
     # Physics assertions on synthetic states the recorded data never visits.
-    # These run on their own, with no `synth_gain` and no plotting — the
-    # verdicts are the point, the figures are for when one surprises you.
+    # The verdicts are the point; the figures are for when one surprises you.
     physics = _run_physics_checks(
         cfg, dyn_sys, nm_mapping, norm_stats, synth_cfg, freq_s,
         plot_run_dir, logger,
@@ -417,7 +417,6 @@ def train_and_evaluate(
         nm_mapping=nm_mapping,
         grad_masks=grad_masks,
         norm_stats=norm_stats,
-        synth_cfg=synth_cfg,
         head_stack=head_stack,
         global_logger=logger,
     )

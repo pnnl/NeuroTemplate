@@ -28,7 +28,6 @@ def make_cfg(in_steps: int) -> Config:
     cfg.vel_gain = 0.0
     cfg.sgn_gain = 0.0
     cfg.grad_gain = 0.0
-    cfg.synth_gain = 0.0
     cfg.device = torch.device("cpu")
     cfg.verbose = False
     return cfg
@@ -43,7 +42,7 @@ def build(in_steps: int):
     system = get_dynamics(cfg, nm_mapping())
     loss = build_loss(
         cfg=cfg, raw_model=system.nodes[0].callable, system=system,
-        grad_masks={}, nm_mapping=nm_mapping(), norm_stats={}, synth_cfg=None,
+        grad_masks={}, nm_mapping=nm_mapping(), norm_stats={},
     )
     return cfg, loss
 

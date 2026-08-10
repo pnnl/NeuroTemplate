@@ -4,7 +4,6 @@ Loss construction for the physics-informed training pipeline.
 Builds a single Neuromancer PenaltyLoss containing:
   1. Tracking objectives (ref, velocity, sign) — standard Variable expressions
   2. Sampled gradient sign penalty — Neuromancer Loss
-  3. Synthetic scenario penalty — Neuromancer Loss
 
 All loss terms are proper Neuromancer objectives so they flow through
 Problem.forward() and show up with correct labels in the Trainer's
@@ -25,7 +24,6 @@ from typing import Optional
 
 from neurotemplate.modeling.gradient_sampling import SampledGradientPenalty
 from neurotemplate.modeling.heads import HeadStack
-from neurotemplate.modeling.scenarios import SynthSpec, build_scenarios
 
 from neurotemplate._typing import beartype
 
@@ -38,7 +36,6 @@ def build_loss(
     grad_masks: dict[str, torch.Tensor],
     nm_mapping: dict[str, list[str]],
     norm_stats: dict[str, dict[str, float]],
-    synth_cfg: Optional[SynthSpec],
     head_stack: Optional[HeadStack] = None,
 ) -> PenaltyLoss:
     """
@@ -51,8 +48,6 @@ def build_loss(
         grad_masks:   {key: Tensor[1,1,ny,nx]} with sign constraints, or empty dict
         nm_mapping:   {"Y": [...], "U": [...], "D": [...]}
         norm_stats:   {col: {"shift", "stretch", "min", "max", ...}} per-column stats
-        synth_cfg:    scenarios.SynthSpec describing the plant's resting
-                      state, or None when the synth subsystem is disabled.
 
     Returns:
         PenaltyLoss combining all active loss terms
@@ -166,51 +161,9 @@ def build_loss(
         )
         objectives.append(grad_loss)
 
-    # ── Synthetic scenario penalties ────────────────────────────────
-    #
-    # Built by scenarios.build_scenarios from the user-provided synth_cfg.
-    # Each scenario contributes a differentiable scalar penalty summed into one
-    # `synth_penalty` term, all sharing synth_gain / synth_n_scenarios /
-    # synth_n_steps.
-    #
-    # This is the optional half of the subsystem. The same scenarios run as
-    # pass-fail assertions after training whatever `synth_gain` is, and that is
-    # the intended way to use them — a verdict in physical units beats a
-    # penalty whose weight has to be guessed.
-
-    if cfg.synth_gain > 0:
-        # synth_gain > 0 with no synth_cfg is a configuration mistake; fail fast.
-        if synth_cfg is None:
-            raise ValueError(
-                "cfg.synth_gain > 0 but synth_cfg is None. Either set "
-                "synth_gain=0 or have modeling_user_defined.synth_cfg return "
-                "a SynthSpec."
-            )
-        scenarios = build_scenarios(
-            system=system,
-            nm_mapping=nm_mapping,
-            norm_stats=norm_stats,
-            synth_cfg=synth_cfg,
-            in_steps=cfg.in_steps,
-            n_scenarios=cfg.synth_n_scenarios,
-            n_steps=cfg.synth_n_steps,
-            device=cfg.device,
-        )
-
-        def synth_compute():
-            if not system.training:
-                return torch.tensor(0.0, device=cfg.device)
-            total = torch.tensor(0.0, device=cfg.device)
-            for s in scenarios:
-                total = total + s.compute()
-            return total
-
-        synth_loss = Loss(
-            input_keys=[],
-            loss=synth_compute,
-            weight=cfg.synth_gain,
-            name="synth_penalty",
-        )
-        objectives.append(synth_loss)
+    # The physics scenarios (modeling/scenarios.py) deliberately contribute
+    # nothing here. They are assertions run against the trained surrogate, not
+    # a training signal — see that module's header. Physicality *is* enforced
+    # during training, by the gradient sign penalty above.
 
     return PenaltyLoss(objectives, constraints=[])

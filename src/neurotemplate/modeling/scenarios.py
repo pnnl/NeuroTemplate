@@ -39,9 +39,11 @@ is the point — a model that only behaves inside its training distribution will
 be asked to leave it the moment a controller starts steering. Read a failure
 as "this is where it stops making sense", not as a scoring error.
 
-The same rollouts also back a differentiable training penalty (`compute()`,
-wired through `cfg.synth_gain`), but the assertions run whether or not the
-penalty is switched on, and that is the intended way to use them.
+These are assertions only. An earlier version also exposed each scenario as a
+differentiable training penalty behind a `synth_gain` weight; no campaign ever
+switched it on, and it forced every scenario to stay differentiable for a path
+nobody used. Physicality is still enforced during training — by the gradient
+sign penalty in `gradient_sampling`, which is the mechanism suited to it.
 """
 
 from __future__ import annotations
@@ -162,12 +164,11 @@ class ScenarioResult:
     channel: str       # the state channel the verdict was decided on
     value: float       # the measured quantity the check turned on
     tolerance: float   # the threshold it was compared against
-    penalty: float     # the differentiable term's value, for the training path
 
     def to_dict(self) -> dict:
         return {"passed": self.passed, "headline": self.headline,
                 "channel": self.channel, "value": self.value,
-                "tolerance": self.tolerance, "penalty": self.penalty}
+                "tolerance": self.tolerance}
 
 
 # ── Input construction ───────────────────────────────────────────
@@ -352,21 +353,11 @@ class EquilibriumScenario(_Scenario):
         s = self._states_physical(y_pred)
         return (s[:, 1:, :] - s[:, 0:1, :]).abs().mean(dim=1)
 
-    @staticmethod
-    def _penalty(s):
-        return (s[:, 1:, :] - s[:, 0:1, :]).pow(2).mean()
-
-    def compute(self):
-        y_pred = self.system(self._data(self.n_scenarios))["yn"]
-        return self._penalty(self._states_physical(y_pred))
-
     def check(self, n: Optional[int] = None) -> list[ScenarioResult]:
         n = n or self.n_scenarios
         with torch.no_grad():
             y_pred = self.system(self._data(n))["yn"]
             drift = self._drift(y_pred).mean(dim=0)      # [n_states]
-            # Same rollout as the verdict, so the two numbers agree.
-            penalty = float(self._penalty(self._states_physical(y_pred)))
 
         tol = self._tolerance(EQUILIBRIUM_DRIFT_FRAC)
         worst = max(range(len(tol)), key=lambda i: float(drift[i]) / tol[i])
@@ -384,7 +375,7 @@ class EquilibriumScenario(_Scenario):
         return [ScenarioResult(
             name=self.label, passed=passed,
             headline=f"`{channel}` {verdict} (limit {limit:.3g}).",
-            channel=channel, value=value, tolerance=limit, penalty=penalty,
+            channel=channel, value=value, tolerance=limit,
         )]
 
     def trace(self, n: int) -> dict:
@@ -415,16 +406,6 @@ class StepResponseScenario(_Scenario):
         s = self._states_physical(y_pred)
         return s[:, -1, :] - s[:, 0, :]
 
-    def compute(self):
-        total = torch.zeros((), device=self.device)
-        for act in self.spec.actuations:
-            y_pred = self.system(self._data(act, self.n_scenarios))["yn"]
-            s = self._states_physical(y_pred)
-            deltas = s[:, 1:, :] - s[:, :-1, :]
-            # Penalize only steps that move against the declared direction.
-            total = total + torch.relu(-act.direction * deltas).mean()
-        return total
-
     def check(self, n: Optional[int] = None) -> list[ScenarioResult]:
         n = n or self.n_scenarios
         results = []
@@ -432,9 +413,6 @@ class StepResponseScenario(_Scenario):
             with torch.no_grad():
                 y_pred = self.system(self._data(act, n))["yn"]
                 move = self._move(y_pred).mean(dim=0)     # [n_states]
-                s = self._states_physical(y_pred)
-                deltas = s[:, 1:, :] - s[:, :-1, :]
-                penalty = float(torch.relu(-act.direction * deltas).mean())
 
             tol = self._tolerance(RESPONSE_MOVE_FRAC)
             # Worst channel = the one furthest from doing what was asked.
@@ -463,7 +441,6 @@ class StepResponseScenario(_Scenario):
                          f"(wanted {'+' if act.direction > 0 else '-'}"
                          f"{limit:.3g} or more).",
                 channel=channel, value=value, tolerance=limit,
-                penalty=penalty,
             ))
         return results
 
@@ -522,24 +499,6 @@ class FreeDecayScenario(_Scenario):
         gap = t_out.unsqueeze(1) - start
         return (s[:, -1, :] - start) / gap
 
-    @staticmethod
-    def _penalty(s, t_out):
-        """Movement away from ambient, plus anything outside [start, ambient]."""
-        toward = torch.sign(t_out.unsqueeze(1) - s[:, 0, :]).unsqueeze(1)
-        deltas = s[:, 1:, :] - s[:, :-1, :]
-        wrong_way = torch.relu(-deltas * toward).mean()
-        target = t_out[:, None, None].expand_as(s[:, 0:1, :])
-        lo = torch.min(s[:, 0:1, :], target)
-        hi = torch.max(s[:, 0:1, :], target)
-        overshoot = (torch.relu(s[:, 1:, :] - hi).pow(2)
-                     + torch.relu(lo - s[:, 1:, :]).pow(2)).mean()
-        return wrong_way + overshoot
-
-    def compute(self):
-        data, _, t_out = self._data(self.n_scenarios)
-        y_pred = self.system(data)["yn"]
-        return self._penalty(self._states_physical(y_pred), t_out)
-
     def check(self, n: Optional[int] = None) -> list[ScenarioResult]:
         n = n or self.n_scenarios
         with torch.no_grad():
@@ -547,8 +506,6 @@ class FreeDecayScenario(_Scenario):
             y_pred = self.system(data)["yn"]
             closed = self._closed_fraction(y_pred, t_out).mean(dim=0)
             mean_gap = float((t_out - t_in).abs().mean())
-            # Same rollout as the verdict, so the two numbers agree.
-            penalty = float(self._penalty(self._states_physical(y_pred), t_out))
 
         worst = min(range(len(closed)), key=lambda i: float(closed[i]))
         value = float(closed[worst])
@@ -573,7 +530,6 @@ class FreeDecayScenario(_Scenario):
             name=self.label, passed=passed,
             headline=f"`{channel}` {verdict}.",
             channel=channel, value=value, tolerance=DECAY_MIN_CLOSED,
-            penalty=penalty,
         )]
 
     def trace(self, n: int) -> dict:
@@ -639,7 +595,7 @@ def build_scenarios(
 
 @beartype
 def run_checks(scenarios: list, n: Optional[int] = None) -> list[ScenarioResult]:
-    """Every scenario's verdict, flattened. Needs no `synth_gain`."""
+    """Every scenario's verdict, flattened."""
     return [r for s in scenarios for r in s.check(n)]
 
 
