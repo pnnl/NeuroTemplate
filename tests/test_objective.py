@@ -89,6 +89,22 @@ def test_a_balanced_objective_is_not_flagged():
     assert ObjectiveBalance(terms, total=2.0).dominant() == []
 
 
+def test_an_all_zero_objective_is_not_reported_as_dominated():
+    """A policy that starts perfectly in band must not trip the warning."""
+    problem, loss, batch, _ = _problem(
+        comfort_weight=1.0, du_weight=0.0, effort_weight=0.0,
+    )
+    out = run_objective_pass(problem, batch)
+    zeroed = {**out, "comfort_lower_loss": torch.tensor(0.0),
+              "comfort_upper_loss": torch.tensor(0.0)}
+
+    balance = objective_balance(loss, zeroed)
+
+    assert balance.total == 0.0
+    assert all(t.ratio_to_rest == 0.0 for t in balance.terms)
+    assert balance.dominant() == []
+
+
 def test_a_lone_term_reports_an_infinite_ratio():
     problem, loss, batch, _ = _problem(
         comfort_weight=0.0, du_weight=1.0, effort_weight=0.0,

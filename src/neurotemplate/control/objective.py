@@ -142,11 +142,17 @@ def objective_balance(loss, out: dict) -> ObjectiveBalance:
     terms = []
     for name, value in values.items():
         rest = total - value
+        if rest > 0:
+            ratio = value / rest
+        elif value > 0:
+            ratio = float("inf")   # the only live term, or the only positive one
+        else:
+            ratio = 0.0            # nothing to dominate: this term is zero too
         terms.append(TermBalance(
             name=name,
             value=value,
             share=value / total if total != 0 else 0.0,
-            ratio_to_rest=value / rest if rest > 0 else float("inf"),
+            ratio_to_rest=ratio,
         ))
     return ObjectiveBalance(terms=terms, total=total)
 

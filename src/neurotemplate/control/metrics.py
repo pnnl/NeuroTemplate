@@ -93,16 +93,13 @@ class ActuationMetrics:
     will say so.
     """
     name: str
-    mean_value: float     # mean commanded value
-    mean_abs_du: float    # mean |Δ| between consecutive commands
-    frac_at_min: float    # share of steps sitting on the lower bound
-    frac_at_max: float    # share of steps sitting on the upper bound
-    u_min: float          # the actuation bounds themselves, for context
+    mean_value: float      # mean commanded value
+    mean_abs_du: float     # mean |Δ| between consecutive commands
+    frac_at_min: float     # share of steps sitting on the lower bound
+    frac_at_max: float     # share of steps sitting on the upper bound
+    frac_saturated: float  # share sitting on *either* bound
+    u_min: float           # the actuation bounds themselves, for context
     u_max: float
-
-    @property
-    def frac_saturated(self) -> float:
-        return self.frac_at_min + self.frac_at_max
 
 
 @dataclass
@@ -273,18 +270,24 @@ def actuation_metrics(
     tol = SATURATION_TOL * (u_max - u_min)
     du = (u[:, 1:, :] - u[:, :-1, :]).abs()
 
-    return [
-        ActuationMetrics(
+    results = []
+    for j, name in enumerate(u_names):
+        at_min = u[:, :, j] <= u_min[j] + tol[j]
+        at_max = u[:, :, j] >= u_max[j] - tol[j]
+        results.append(ActuationMetrics(
             name=name,
             mean_value=float(u[:, :, j].mean()),
             mean_abs_du=float(du[:, :, j].mean()),
-            frac_at_min=float((u[:, :, j] <= u_min[j] + tol[j]).float().mean()),
-            frac_at_max=float((u[:, :, j] >= u_max[j] - tol[j]).float().mean()),
+            frac_at_min=float(at_min.float().mean()),
+            frac_at_max=float(at_max.float().mean()),
+            # Counted as an OR, not a sum: a degenerate box (u_min == u_max)
+            # puts every command on both bounds at once, and a "200% pinned"
+            # line reads as a bug rather than as the config error it is.
+            frac_saturated=float((at_min | at_max).float().mean()),
             u_min=float(u_min[j]),
             u_max=float(u_max[j]),
-        )
-        for j, name in enumerate(u_names)
-    ]
+        ))
+    return results
 
 
 def _band_jumps(lo: torch.Tensor, hi: torch.Tensor) -> list[int]:
@@ -474,8 +477,7 @@ def response_to_markdown(responses: list[JumpResponse],
 @beartype
 def actuation_to_dict(metrics: list[ActuationMetrics]) -> dict:
     """JSON-serializable actuation metrics (for MLflow / disk)."""
-    return {m.name: {**{k: v for k, v in asdict(m).items() if k != "name"},
-                     "frac_saturated": m.frac_saturated}
+    return {m.name: {k: v for k, v in asdict(m).items() if k != "name"}
             for m in metrics}
 
 

@@ -68,6 +68,16 @@ def test_mean_abs_du_is_per_channel():
     assert heat.mean_abs_du == pytest.approx(0.0)
 
 
+def test_a_degenerate_box_saturates_once_not_twice():
+    """u_min == u_max puts every command on both bounds; don't report 200%."""
+    u = torch.full((1, 4, 2), 20.0)
+    (cool, _) = actuation_metrics(u, U_NAMES, torch.tensor([20.0, 15.0]),
+                                  torch.tensor([20.0, 22.0]))
+
+    assert cool.frac_at_min == cool.frac_at_max == pytest.approx(1.0)
+    assert cool.frac_saturated == pytest.approx(1.0)
+
+
 def test_actuation_rejects_mismatched_names_and_bounds():
     u = torch.zeros(1, 3, 2)
     with pytest.raises(ValueError, match="u_names has 1 entries"):
