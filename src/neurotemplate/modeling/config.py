@@ -101,7 +101,10 @@ class ModelingConfig:
     grad_gain: float = 0.0
     grad_n_samples: int = 128
     synth_n_scenarios: int = 32
-    synth_n_steps: int = 24
+    # Scenario horizon in HOURS, converted to steps against the data's own
+    # sampling frequency. A step count means nothing without knowing the
+    # timestep, and for a reachability bound the horizon is load-bearing.
+    synth_hours: float = 4.0
     synth_n_plot: int = 4
 
     def validate(self) -> None:
@@ -121,7 +124,7 @@ class ModelingConfig:
             "ref_gain", "vel_gain", "sgn_gain", "sgn_steepness",
             "n_trials", "grad_gain", "trial_epochs",
             "trial_seeds", "grad_n_samples", "synth_n_scenarios",
-            "synth_n_steps", "synth_n_plot",
+            "synth_hours", "synth_n_plot",
         ]:
             check_non_negative(self, name)
 

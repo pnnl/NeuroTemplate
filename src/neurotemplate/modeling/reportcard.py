@@ -323,7 +323,9 @@ def _stability_section(
     return _section("Rollout stability", body)
 
 
-def _physics_section(results: list[ScenarioResult]) -> str:
+def _physics_section(results: list[ScenarioResult],
+                     hours: Optional[float] = None,
+                     n_steps: Optional[int] = None) -> str:
     """Assertions on synthetic states the recorded data never contains.
 
     The test split cannot ask whether the model has learned any physics,
@@ -334,8 +336,12 @@ def _physics_section(results: list[ScenarioResult]) -> str:
     if not results:
         return _section("Physics checks", "*(no scenarios ran)*")
     failed = [r for r in results if not r.passed]
+    horizon = (
+        f" Each rollout runs **{hours:g} h** ({n_steps} steps)."
+        if hours is not None and n_steps is not None else ""
+    )
     body = [
-        f"{len(results) - len(failed)} of {len(results)} passed. Each "
+        f"{len(results) - len(failed)} of {len(results)} passed.{horizon} Each "
         "scenario puts the surrogate in a state the training data never "
         "visits and asserts what has to happen next, once per state channel — "
         "so a channel you are not relying on cannot hide one you are.\n",
@@ -414,6 +420,7 @@ def render_reportcard(
     *,
     stability: Optional[list[RolloutStability]] = None,
     physics: Optional[list[ScenarioResult]] = None,
+    physics_steps: Optional[int] = None,
     readouts: Optional[list[ReadoutSummary]] = None,
     head_stack: Optional[HeadStack] = None,
     norm_stats: Optional[dict] = None,
@@ -464,7 +471,7 @@ def render_reportcard(
     if stability is not None:
         parts.append(_stability_section(stability, cfg.test_window))
     if physics is not None:
-        parts.append(_physics_section(physics))
+        parts.append(_physics_section(physics, cfg.synth_hours, physics_steps))
     if readouts is not None:
         readout_md = _readouts_section(readouts)
         if readout_md is not None:

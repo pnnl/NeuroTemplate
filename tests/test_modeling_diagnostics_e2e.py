@@ -1,10 +1,11 @@
 """
 End-to-end wiring test for the sys-id diagnostics.
 
-`nt model train` runs four physics assertions on top of the fit metrics, and
-threads all of them into one reportcard and one set of MLflow keys. The pieces have unit tests; this runs `evaluate_and_plot`
-against the real fixture hooks so a signature drifting between them fails here
-instead of at the end of a real training run.
+`nt model train` runs four physics assertions on top of the fit metrics and
+threads all of them into one reportcard and one set of MLflow keys. The pieces
+have unit tests; this runs `evaluate_and_plot` against the real fixture hooks
+so a signature drifting between them fails here instead of at the end of a real
+training run.
 
 The fixture's `synth_cfg` returns a populated `SynthSpec`, which is also the
 point: the subsystem used to be disabled in the library's own fixture, which
@@ -44,7 +45,7 @@ def _evaluate(tmp_path, synth: bool = True):
     norm_stats = make_norm_stats(raw)
     cfg = make_sysid_cfg()
     cfg.test_window, cfg.test_stride = 24, 24
-    cfg.synth_n_scenarios, cfg.synth_n_steps = 4, 6
+    cfg.synth_n_scenarios, cfg.synth_hours = 4, 0.5
     cfg.plot, cfg.verbose = False, False
     dyn_sys, _ = make_frozen_dynamics(cfg, nm)
 
@@ -122,7 +123,7 @@ def test_the_checks_do_not_disturb_the_surrogate(tmp_path):
     norm_stats = make_norm_stats(raw)
     cfg = make_sysid_cfg()
     cfg.test_window, cfg.test_stride = 24, 24
-    cfg.synth_n_scenarios, cfg.synth_n_steps = 4, 6
+    cfg.synth_n_scenarios, cfg.synth_hours = 4, 0.5
     cfg.plot, cfg.verbose = False, False
     dyn_sys, _ = make_frozen_dynamics(cfg, nm)
     before = [p.clone() for p in dyn_sys.parameters()]
@@ -150,7 +151,7 @@ def test_the_plot_path_writes_figures_and_their_data(tmp_path):
     norm_stats = make_norm_stats(raw)
     cfg = make_sysid_cfg()
     cfg.test_window, cfg.test_stride = 24, 24
-    cfg.synth_n_scenarios, cfg.synth_n_steps, cfg.synth_n_plot = 4, 6, 2
+    cfg.synth_n_scenarios, cfg.synth_hours, cfg.synth_n_plot = 4, 0.5, 2
     cfg.plot, cfg.verbose = True, False
     dyn_sys, _ = make_frozen_dynamics(cfg, nm)
 

@@ -70,6 +70,8 @@ class TestResults:
     # Physics assertions on the thermal states. None when the use case opted
     # out of synth_cfg.
     physics: Optional[list[ScenarioResult]] = None
+    # Rollout length the scenarios ran for, so the reportcard can state it.
+    physics_steps: Optional[int] = None
     # Order statistics for the Y channels that are not thermal states. These
     # carry no verdict — see scenarios.ReadoutSummary.
     readouts: Optional[list[ReadoutSummary]] = None
@@ -158,6 +160,7 @@ def evaluate_and_plot(
         aggregate_rmse=aggregate_rmse,
         test_time_s=test_time_s,
         physics=None if outcome is None else outcome.verdicts,
+        physics_steps=None if outcome is None else synth_steps(cfg, freq_s),
         readouts=None if outcome is None else outcome.readouts,
     )
 
@@ -193,6 +196,19 @@ def _plot_predictions(
         )
 
 
+@beartype
+def synth_steps(cfg: ModelingConfig, freq_s: float) -> int:
+    """Scenario horizon in steps, from `cfg.synth_hours` and the data's own dt.
+
+    The sampling frequency is already on hand wherever the scenarios run, so
+    the horizon can be specified in hours instead of an unlabelled step count.
+    Floored at 2 steps, which is the least a rollout can measure anything over.
+    """
+    if freq_s <= 0:
+        raise ValueError(f"Sampling frequency must be positive, got {freq_s}")
+    return max(2, round(cfg.synth_hours * 3600.0 / freq_s))
+
+
 def _run_physics_checks(
     cfg, dyn_sys, nm_mapping, norm_stats, synth_cfg, freq_s,
     plot_run_dir, logger, grad_masks=None,
@@ -209,7 +225,7 @@ def _run_physics_checks(
         synth_cfg=synth_cfg,
         in_steps=cfg.in_steps,
         n_scenarios=cfg.synth_n_scenarios,
-        n_steps=cfg.synth_n_steps,
+        n_steps=synth_steps(cfg, freq_s),
         device=cfg.device,
         grad_masks=grad_masks,
     )
@@ -279,6 +295,7 @@ def render_reportcard(
         test_metrics=test_results.metrics,
         stability=test_results.stability,
         physics=test_results.physics,
+        physics_steps=test_results.physics_steps,
         readouts=test_results.readouts,
         nm_mapping=nm_mapping,
         head_stack=head_stack,

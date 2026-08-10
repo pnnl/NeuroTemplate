@@ -107,9 +107,11 @@ run: ""
 # modeling_user_defined.synth_cfg returns a SynthSpec, the run asserts them
 # after training and reports pass/fail per scenario in physical units. There is
 # no weight to tune. Physicality during training is grad_gain's job.
-# Scenario instances per check, and how far each one is rolled out. More steps
-# is a harder test: a model can hold for 6 steps and diverge by 24.
+# Scenario instances per check, and how long each one is rolled out, in HOURS
+# (converted against the data's own sampling frequency). A longer horizon is a
+# harder test — a model can hold for 30 minutes and diverge over 4 hours — and
+# the reachability bound is only as meaningful as the time it was given.
 # synth_n_scenarios: 32
-# synth_n_steps: 24
+# synth_hours: 4.0
 # Scenario instances drawn on the diagnostic figures.
 # synth_n_plot: 4

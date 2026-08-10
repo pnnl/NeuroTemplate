@@ -1,5 +1,5 @@
 """
-Behavioural tests for the three physics scenarios.
+Behavioural tests for the four physics scenarios.
 
 The subsystem used to have no test of scenario behaviour at all, and a latent
 bug that only showed up on a plant whose Y was not all temperatures. Both are
@@ -644,3 +644,26 @@ def test_traces_carry_physical_trajectories_for_the_plots():
         assert trace["ambient_traj"].shape[0] == 3
         assert trace["state_names"] == [ZONE]
         assert trace["seed_steps"] == IN_STEPS
+
+
+# ── Horizon ──────────────────────────────────────────────────────
+
+
+def test_the_horizon_is_specified_in_hours_against_the_data_frequency():
+    """A step count means nothing without the timestep; hours do."""
+    from neurotemplate.modeling.pipeline import synth_steps
+    from control_fixtures import make_sysid_cfg
+
+    cfg = make_sysid_cfg()
+    cfg.synth_hours = 4.0
+
+    assert synth_steps(cfg, freq_s=300.0) == 48     # 5-minute data
+    assert synth_steps(cfg, freq_s=900.0) == 16     # 15-minute data
+    assert synth_steps(cfg, freq_s=60.0) == 240     # 1-minute data
+
+    # Floored so a coarse-enough grid still leaves something to measure over.
+    cfg.synth_hours = 0.01
+    assert synth_steps(cfg, freq_s=3600.0) == 2
+
+    with pytest.raises(ValueError, match="must be positive"):
+        synth_steps(cfg, freq_s=0.0)
