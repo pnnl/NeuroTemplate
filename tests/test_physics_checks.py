@@ -282,6 +282,76 @@ def test_thresholds_scale_with_the_channel_rather_than_assuming_degrees():
     assert r.tolerance == pytest.approx(0.02 * 1.0)
 
 
+# ── Equilibrium seeding range ────────────────────────────────────
+
+
+SUPPLY = "supply air [°C]"
+
+
+def _two_state_stats(supply_lo=8.6, supply_hi=54.5):
+    """Zone plus a supply-air channel with a far wider span, as measured."""
+    return dict(
+        NORM_STATS,
+        **{ZONE: {"shift": 0.0, "stretch": 1.0, "min": 18.9, "max": 27.3},
+           SUPPLY: {"shift": 0.0, "stretch": 1.0,
+                    "min": supply_lo, "max": supply_hi}},
+    )
+
+
+def _two_state_scenarios(stats, step=None):
+    nm = {**NM, "Y": [ZONE, POWER, SUPPLY]}
+
+    def passthrough(y, u, d):
+        return y.clone()
+
+    return build_scenarios(
+        system=_system(step or passthrough), nm_mapping=nm, norm_stats=stats,
+        synth_cfg=_spec(states=[ZONE, SUPPLY]), in_steps=IN_STEPS,
+        n_scenarios=8, n_steps=4, device="cpu",
+    )
+
+
+def test_equilibrium_is_seeded_from_the_intersection_not_the_union():
+    """The union would seed a 51 °C building; every state has seen 18.9-27.3."""
+    scenario = _two_state_scenarios(_two_state_stats())[0]
+
+    assert (scenario.t_min, scenario.t_max) == pytest.approx((18.9, 27.3))
+
+    sampled = scenario._sample_equilibrium(256)
+    assert float(sampled.min()) >= 18.9
+    assert float(sampled.max()) <= 27.3
+
+
+def test_a_single_state_is_unaffected_by_the_intersection_rule():
+    """Backward compatibility: with one state, intersection == union."""
+    scenario = _scenarios(_perfect)[0]
+    assert (scenario.t_min, scenario.t_max) == pytest.approx((18.0, 30.0))
+
+
+def test_states_with_no_shared_temperature_fail_loudly():
+    """A chiller loop and a zone never overlap in the data — say why."""
+    stats = _two_state_stats(supply_lo=2.0, supply_hi=12.0)
+
+    with pytest.raises(ValueError) as exc:
+        _two_state_scenarios(stats)
+
+    message = str(exc.value)
+    assert "No temperature is shared by every channel named in `states`" in message
+    assert "18.9..27.3" in message and "2..12" in message
+    # The data is what is missing, not the physics.
+    assert "not that they physically cannot reach one" in message
+
+
+def test_the_free_decay_gap_scales_with_the_intersection():
+    """MIN_GAP_FRAC is 10% of the seeding window, so it narrows with it."""
+    wide = _scenarios(_perfect)[2]                      # zone alone: 18-30
+    narrow = _two_state_scenarios(_two_state_stats())[2]  # intersection: 18.9-27.3
+
+    assert wide.MIN_GAP_FRAC * (wide.t_max - wide.t_min) == pytest.approx(1.2)
+    assert (narrow.MIN_GAP_FRAC * (narrow.t_max - narrow.t_min)
+            == pytest.approx(0.84))
+
+
 def test_a_constant_state_channel_does_not_divide_by_zero():
     """The reportcard warns about constant columns; this must not crash on one."""
     stats = dict(NORM_STATS, **{ZONE: {"shift": 0.0, "stretch": 1.0,

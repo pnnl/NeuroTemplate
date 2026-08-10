@@ -89,6 +89,13 @@ class SynthSpec:
                   is required: a power channel is not a temperature, and
                   treating one as though it were is how this subsystem used to
                   sample "equilibrium temperatures" out of a 0-61728 W range.
+
+                  Only these channels are asserted on. Equilibria are sampled
+                  from the window every one of them has been observed at (the
+                  intersection of their ranges), so naming a channel with a far
+                  wider span — supply air against a zone, say — narrows nothing
+                  but does subject that channel to the assertions. Leave it out
+                  to have it seeded at rest and reported without a verdict.
       ambient     the D column the states relax toward.
       off         physical value of each column when nothing is running.
                   **Required for every control column** and only for those:
@@ -198,9 +205,36 @@ def _resting_value(col: str, spec: SynthSpec, norm_stats: dict) -> float:
 
 
 def _state_range(spec: SynthSpec, norm_stats: dict) -> tuple[float, float]:
-    """Physical range spanned by the state channels — never by all of Y."""
-    return (min(norm_stats[c]["min"] for c in spec.states),
-            max(norm_stats[c]["max"] for c in spec.states))
+    """Temperatures every state channel has been observed at — never all of Y.
+
+    The *intersection* of the state channels' recorded ranges, not their union.
+    At equilibrium every state holds the same temperature and ambient holds it
+    too, so the only place to sample one honestly is where all of them have
+    data. The union is actively wrong once a second state is named: on a real
+    RTU whose zone spans 18.9-27.3 °C and whose supply air spans 8.6-54.5 °C,
+    it would assert the building holds steady at 51 °C indoors *and* out — 28 °C
+    past anything the ambient channel ever recorded.
+
+    With a single state channel the two rules agree, so this is a no-op for the
+    common case.
+    """
+    lo = max(norm_stats[c]["min"] for c in spec.states)
+    hi = min(norm_stats[c]["max"] for c in spec.states)
+    if lo > hi:
+        spans = ", ".join(
+            f"{c} {norm_stats[c]['min']:.4g}..{norm_stats[c]['max']:.4g}"
+            for c in spec.states
+        )
+        raise ValueError(
+            "No temperature is shared by every channel named in `states`, so "
+            "there is no equilibrium the data supports seeding. Recorded "
+            f"ranges: {spans}. This says the data never shows these channels "
+            "at a common temperature — not that they physically cannot reach "
+            "one. Either drop the outlying channel from `states` (a readout "
+            "seeded at its `off` value is not asserted on), or run the checks "
+            "on data that covers a period when the plant was closer to rest."
+        )
+    return lo, hi
 
 
 def _equilibrium_inputs(t_phys, nm_mapping, norm_stats, spec, device):
