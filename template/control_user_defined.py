@@ -246,6 +246,46 @@ def _denorm(x: torch.Tensor, col: str, nm_mapping: dict[str, list[str]],
 
 
 # ---------------------------------------------------------------------
+# Optional: the energy tariff, for the cost objective
+# ---------------------------------------------------------------------
+# LEAVE THIS COMMENTED OUT unless you want price-driven control. Defining
+# `price_signal` is the switch: it adds a `price` signal to every rollout, and
+# `cost_weight > 0` then weights mean_t(price · power) in the objective. With
+# it commented out, `cost_weight` must stay 0.0.
+#
+# PRICE_SCALE is required alongside it and must be > 0. Everything in the
+# rollout dict is normalized, so the tariff is too: return `price /
+# PRICE_SCALE` (O(1), non-negative, shift = 0 so a zero price stays a zero
+# cost). The library multiplies PRICE_SCALE back in to report dollars.
+#
+# Derive the price from `t`, not from a per-window sample. `t` is the same
+# `sec_elapsed` column the plots use, sliced per window and correct across
+# multi-file pooling, so a t-derived tariff is aligned to `yn` by construction
+# and is byte-identical between the learned and the baseline evaluation.
+#
+# CAVEAT ON `t`: `sec_elapsed` counts seconds from the FIRST ROW OF THE FILE,
+# not from midnight (see data_utils._engineer_features). `(t / 3600) % 24` is
+# therefore hour-of-day only if your file starts at midnight. Add the offset
+# of your own data, or read a `price` column out of the dataframe instead —
+# both are honest, and an unnoticed 6-hour shift is a whole failed campaign.
+#
+# PRICE_SCALE = 0.30   # $/kWh; the rollout dict carries price / PRICE_SCALE
+#
+# # Time-of-use table: off-peak / mid-peak / on-peak, in $/kWh.
+# _TOU = torch.tensor([
+#     0.14, 0.14, 0.14, 0.14, 0.14, 0.14, 0.14, 0.22,   # 00-07
+#     0.22, 0.22, 0.22, 0.22, 0.22, 0.22, 0.22, 0.22,   # 08-15
+#     0.48, 0.48, 0.48, 0.48, 0.22, 0.22, 0.14, 0.14,   # 16-23
+# ])
+#
+# @beartype
+# def price_signal(t: torch.Tensor) -> torch.Tensor:
+#     """[n, W, 1] tariff / PRICE_SCALE, aligned to the timestamps in t."""
+#     hour = ((t / 3600.0) % 24.0).long().clamp(0, 23)
+#     return _TOU.to(t.device)[hour] / PRICE_SCALE
+
+
+# ---------------------------------------------------------------------
 # Optional: a rule-based controller to score the learned policy against
 # ---------------------------------------------------------------------
 def build_baseline_policy(cfg, sysid_cfg, nm_mapping, norm_stats):

@@ -38,7 +38,11 @@ from neurotemplate.control.metrics import (
     response_to_dict,
 )
 from neurotemplate.control.closed_loop import build_closed_loop
-from neurotemplate.control.scenarios import horizons, build_window_dict_multi
+from neurotemplate.control.scenarios import (
+    build_window_dict_multi,
+    horizons,
+    price_scale,
+)
 from neurotemplate.hooks import load_control_hooks
 
 from neurotemplate._typing import beartype
@@ -394,6 +398,13 @@ def plot_closed_loop(
             out["yn"][:, hmax:, idx] * s["stretch"] + s["shift"]
         ).clamp_min(0.0).cpu()
 
+    # The tariff, in dollars, on its own axis. A price trace next to the power
+    # trace is how load shifting reads at a glance — and how a precool that
+    # never happened becomes obvious.
+    scale = price_scale(cfg)
+    price = (None if "price" not in out else
+             (out["price"][:, hmax:, 0] * scale).cpu())
+
     # Per-step real timestamps (sec_elapsed is POSIX seconds; see
     # data_utils._engineer_features).
     t_unix = out["t"][:, hmax:, 0].cpu().numpy()
@@ -427,6 +438,8 @@ def plot_closed_loop(
             csv_data[name] = series[w].numpy()
         for name, series in power.items():
             csv_data[name] = series[w].numpy()
+        if price is not None:
+            csv_data["price"] = price[w].numpy()
         pd.DataFrame(csv_data, index=ts).rename_axis("timestamp").to_csv(
             day_dir / f"closed_loop_{date_str}.csv"
         )
@@ -459,6 +472,12 @@ def plot_closed_loop(
             bottom_ax = ax2
         else:
             bottom_ax = ax1
+        if price is not None:
+            ax_price = bottom_ax.twinx()
+            ax_price.plot(steps, price[w], color="grey", lw=0.9,
+                          linestyle=":", label="price")
+            ax_price.set_ylabel("Price [$/kWh]")
+            ax_price.legend(fontsize=6, loc="upper right")
         bottom_ax.set_xlabel("Time [h]")
         bottom_ax.set_xticks(tick_steps)
         bottom_ax.set_xticklabels(tick_labels)

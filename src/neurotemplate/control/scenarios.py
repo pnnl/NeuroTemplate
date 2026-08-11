@@ -15,6 +15,8 @@ A lean control-specific windower. Per window:
     t    : full sec_elapsed (for plots)     [n, W,   1]
     ymin : comfort lower-band signal        [n, W,   n_ctrl]  (normalized)
     ymax : comfort upper-band signal        [n, W,   n_ctrl]
+    price: energy tariff, scaled            [n, W,   1]   (only when the
+           `price_signal` hook exists; see `build_price`)
 
 The closed-loop System rolls out with start_iter = Hmax - 1 and an explicit
 nsteps = P, so predicted yn occupies indices [Hmax : Hmax+P].
@@ -51,6 +53,62 @@ def horizons(cfg, sysid_cfg) -> tuple[int, int, int]:
     h_sys = sysid_cfg.in_steps
     h_ctrl = cfg.in_steps
     return h_sys, h_ctrl, max(h_sys, h_ctrl)
+
+
+@beartype
+def price_scale(cfg) -> Optional[float]:
+    """The $/kWh the `price` signal is divided by, or None with no tariff hook.
+
+    Price is exogenous data the policy and the objective read and the dynamics
+    never sees, so it travels in the window dict rather than as a D column.
+    Everything else in that dict is normalized, so the tariff is too: the dict
+    carries `price / PRICE_SCALE` and the cost term multiplies the scale back
+    in when it wants dollars. Deliberately a pure scaling with no shift — a
+    zero price must stay a zero cost, and a non-negative price is what keeps
+    the cost gradient's sign equal to the energy gradient's.
+    """
+    hooks = load_control_hooks(cfg)
+    if getattr(hooks, "price_signal", None) is None:
+        return None
+    scale = getattr(hooks, "PRICE_SCALE", None)
+    if not isinstance(scale, (int, float)) or isinstance(scale, bool) or scale <= 0:
+        raise ValueError(
+            "control_user_defined.price_signal is defined but PRICE_SCALE is "
+            f"missing or not a positive number (got {scale!r}). The window "
+            "dict carries price / PRICE_SCALE; the cost term multiplies it "
+            "back in to report dollars."
+        )
+    return float(scale)
+
+
+@beartype
+def build_price(cfg, t: torch.Tensor) -> Optional[torch.Tensor]:
+    """The scaled tariff aligned to `t`, or None when no `price_signal` hook.
+
+    Deriving the price from the window's own timestamps rather than sampling
+    it per window is what makes alignment un-gettable-wrong: the price at
+    index i is by construction the price at the timestamp of `yn[i]`, across
+    multi-file pooling and across the learned/baseline evaluations alike.
+    """
+    hooks = load_control_hooks(cfg)
+    fn = getattr(hooks, "price_signal", None)
+    if fn is None:
+        return None
+    price_scale(cfg)  # validate PRICE_SCALE while we are here
+
+    price = fn(t)
+    if price.shape != t.shape:
+        raise ValueError(
+            f"price_signal must return the shape of t {tuple(t.shape)}, got "
+            f"{tuple(price.shape)}. One price per timestep, per window."
+        )
+    if bool((price < 0).any()):
+        raise ValueError(
+            "price_signal returned a negative price. A negative tariff flips "
+            "the sign of the cost gradient, so the cost term would pay the "
+            "policy to burn energy. Clamp or rescale in the hook."
+        )
+    return price
 
 
 def _sliding(df: DataFrame, cols: list[str], steps: int, stride: int,
@@ -103,7 +161,7 @@ def build_window_dict(
         generator=generator,
     )
 
-    return {
+    out = {
         "yn": Y[:, :hmax, :].contiguous(),
         "U": U[:, :hmax, :].contiguous(),
         "D": D,
@@ -111,6 +169,14 @@ def build_window_dict(
         "ymin": ymin.to(device),
         "ymax": ymax.to(device),
     }
+
+    # An extra key the rollout does not write passes straight through
+    # SystemPreview.forward, so the tariff is readable in the loss as
+    # variable("price") and in `out["price"]` at evaluation time.
+    price = build_price(cfg, t)
+    if price is not None:
+        out["price"] = price.to(device)
+    return out
 
 
 @beartype

@@ -103,6 +103,33 @@ def make_frozen_dynamics(sysid_cfg: Config, nm_mapping: dict):
     return dyn_sys, dyn_sys.nodes[0]
 
 
+# Tariff used by the price/cost/peak tests. Cheap for the first half of each
+# day, expensive for the second — coarse on purpose, so a hand-computed cost
+# is easy to check and a one-step shift is visible.
+PRICE_SCALE = 0.30
+CHEAP, EXPENSIVE = 0.12, 0.48
+
+
+def tou_price(t):
+    """[n, W, 1] scaled tariff, from the same `t` the window dict carries."""
+    hour = (t / 3600.0) % 24.0
+    dollars = torch.where(hour < 12.0, torch.full_like(t, CHEAP),
+                          torch.full_like(t, EXPENSIVE))
+    return dollars / PRICE_SCALE
+
+
+def install_price_hook(monkeypatch, signal=tou_price, scale=PRICE_SCALE):
+    """Give the fixture hooks module a tariff for the duration of one test.
+
+    Price plumbing is off by default (no `price_signal` attribute), which is
+    what keeps every other test a regression guard on "a run without a tariff
+    is unchanged".
+    """
+    import control_user_defined as cud
+    monkeypatch.setattr(cud, "PRICE_SCALE", scale, raising=False)
+    monkeypatch.setattr(cud, "price_signal", signal, raising=False)
+
+
 def full_setup(**control_overrides):
     """One-call bundle used by most tests."""
     nm = make_nm_mapping()
