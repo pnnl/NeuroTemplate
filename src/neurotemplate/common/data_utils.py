@@ -242,8 +242,9 @@ def get_grad_masks(
 
     for key_i, deps in key_mapping.items():
         if key_i not in Y_names:
-            raise ValueError(f"Trying to constrain {key_i}, \
-                which is not a predicted value (not in Y).")
+            continue
+            # raise ValueError(f"Trying to constrain {key_i}, \
+            #     which is not a predicted value (not in Y).")
 
         i = Y_names.index(key_i)
 
