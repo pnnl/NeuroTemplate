@@ -4,6 +4,34 @@ A running log of issues found while walking through the `autonomous_upgrades` an
 `synthetic_scenarios` branches commit by commit. Each entry names the file, states
 the problem, and records a verdict/recommendation.
 
+## Status: implemented on `curated_improvements`
+
+Every finding below has been acted on. Commits, oldest first:
+
+| Commit | Finding |
+|---|---|
+| `d5e0a4d` | constant-column warning at startup |
+| `1d72d43` | objective-shape and saturation verdicts removed; magnitudes kept |
+| `45ebaae` | synthetic-scenario training penalty dropped (`grad_gain` kept) |
+| `5455419` | equilibrium seeded from the intersection, not the union |
+| `173a06e` | one physics verdict per state channel |
+| `a2b537d` | readout order statistics |
+| `7cdb2e7` | step-response coverage generated from `SynthSpec.responds` |
+| `5b68a43` | reachability scenario added |
+| `05f5d49` | `modeling/probe.py` and the envelope-vs-band check removed |
+| `cc567bc` | scenario horizon specified in hours |
+| `54f02c7` | backwards vs. narrow reachability distinguished |
+
+**One decision changed during implementation.** The plan was to require the
+gradient file and derive step-response directions from it. On inspection the
+gradient file's U half is deliberately empty — `u.json` is a 0-byte file and
+`yud.json`'s zone edges are irradiance/occupancy/outdoor/supply-air/self, no
+setpoint — because a universal `∂zone/∂setpoint` does not exist (it is 0 where
+the actuator is idle). Deriving directions from it would have produced no step
+checks at all on the measured plant. Transition signs therefore live in
+`SynthSpec.responds`; the gradient file is unchanged and still feeds the
+training penalty, and supplies the D→Y signs reachability needs.
+
 ---
 
 ## `modeling/probe.py` — actuator authority probe holds co-actuators at a physically ungrounded midpoint
