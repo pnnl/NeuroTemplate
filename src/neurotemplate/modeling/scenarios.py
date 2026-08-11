@@ -758,12 +758,22 @@ class ReachabilityScenario(_Scenario):
             limit = max(self.MIN_SPAN_FRAC * self._range(channel), 1e-9)
             weather = "" if self._ambient_signs(channel) else (
                 " Disturbances held at rest — no gradient mapping, so this is "
-                "the actuators alone"
+                "the actuators alone."
             )
+            ends = (f"pushed down it settles at {lo:.4g}, pushed up "
+                    f"{hi:.4g}, over {self.n_steps} steps")
             if span >= limit:
                 passed, verdict = True, (
-                    f"Driven between {lo:.4g} and {hi:.4g} in {self.n_steps} "
-                    f"steps, a span of {span:.4g}"
+                    f"Reaches {lo:.4g} to {hi:.4g} — a span of {span:.4g} "
+                    f"over {self.n_steps} steps"
+                )
+            elif span < 0:
+                # Not a narrow envelope: the two directions came out crossed,
+                # so the surrogate moves against every declared sign at once.
+                passed, verdict = False, (
+                    f"Responds backwards — {ends}, so driving everything "
+                    f"toward a higher value lands {-span:.4g} lower. The "
+                    "declared signs in `responds` and this surrogate disagree"
                 )
             else:
                 passed, verdict = False, (

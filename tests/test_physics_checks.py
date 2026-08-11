@@ -249,9 +249,32 @@ def test_reachability_reports_the_span_the_actuators_can_drive():
     assert r.channel == ZONE
     assert r.passed
     assert r.value > 0                       # pushed apart in both directions
-    assert "Driven between" in r.headline
+    assert "Reaches" in r.headline and "a span of" in r.headline
     # No gradient mapping, so the weather was left alone and the report says so.
     assert "Disturbances held at rest" in r.headline
+
+
+def test_reachability_distinguishes_a_backwards_surrogate_from_a_narrow_one():
+    """Crossed endpoints are a different finding from a small envelope.
+
+    Caught on a real run: an undertrained surrogate came back with "Reaches
+    only 19.22 to 12.47 — a span of -6.75", which reads as a range and is not
+    one. Pushing everything toward a higher value landed *lower*, meaning the
+    model contradicts every declared sign at once.
+    """
+    def backwards(y, u, d):
+        # Cooling harder (lower setpoint) warms the zone.
+        zone = y[:, 0]
+        return torch.stack([zone + 0.5 * _cooling(u), torch.zeros_like(zone)],
+                           dim=1)
+
+    (r,) = _reach(backwards).check()
+
+    assert not r.passed
+    assert r.value < 0
+    assert "Responds backwards" in r.headline
+    assert "pushed down it settles at" in r.headline
+    assert "cannot reach" not in r.headline
 
 
 def test_reachability_fails_a_surrogate_nothing_can_move():
