@@ -141,17 +141,34 @@ def alternating_price(length: int = PRICE_SERIES.shape[0]) -> torch.Tensor:
     return steps[:, None]
 
 
-def _write_price_csv(path, series: torch.Tensor, freq: str = "5min") -> None:
+MIDNIGHT = "2026-01-01"
+PRICE_STEPS_PER_DAY = 24 * PRICE_STEPS_PER_HOUR
+
+
+def _write_price_csv(path, series: torch.Tensor, freq: str = "5min",
+                     start: str = MIDNIGHT) -> None:
     """Write a [T, 1] price series to a CSV `get_data` can parse: a timestamp
-    column plus one price column."""
-    idx = pd.date_range("2026-01-01", periods=series.shape[0], freq=freq)
+    column plus one price column. `start` defaults to a midnight boundary."""
+    idx = pd.date_range(start, periods=series.shape[0], freq=freq)
     pd.DataFrame({"timestamp": idx, "price": series[:, 0].numpy()}).to_csv(
         path, index=False,
     )
 
 
+def time_of_day_price(days: int = 10, start_step: int = 0) -> torch.Tensor:
+    """A [days * steps_per_day, 1] series whose value *is* the step of day.
+
+    So a window drawn on a day boundary starts at 0, and one drawn anywhere
+    else does not — which is what `price_align` has to get right.
+    `start_step` is where the file's first row sits within its own day.
+    """
+    n = days * PRICE_STEPS_PER_DAY
+    steps = (torch.arange(n, dtype=torch.float32) + start_step)
+    return (steps % PRICE_STEPS_PER_DAY)[:, None]
+
+
 def install_price(cfg, tmp_path, series=PRICE_SERIES, scale=PRICE_SCALE,
-                  repeat=1):
+                  repeat=1, start=MIDNIGHT):
     """Point `cfg` at a real price CSV — the fixture stand-in for a plant's
     historical tariff record. The same file is used for all three splits,
     which is a valid config (nothing requires them to differ).
@@ -161,7 +178,7 @@ def install_price(cfg, tmp_path, series=PRICE_SERIES, scale=PRICE_SCALE,
     tariff is unchanged".
     """
     path = str(tmp_path / "price.csv")
-    _write_price_csv(path, series)
+    _write_price_csv(path, series, start=start)
     cfg.train_price_path = path
     cfg.dev_price_path = path
     cfg.test_price_path = path

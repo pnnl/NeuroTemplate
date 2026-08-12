@@ -43,6 +43,18 @@ test_data_path: data/test.csv
 # anticipate — 48 steps = 4 h on 5-minute data. A cost_weight > 0 with this
 # at 0 is flagged on the reportcard.
 # price_preview: 0
+# How each window's slice of the price record is drawn.
+#   random — a uniformly random offset (default). The tariff's peak lands at
+#     a random hour of the plant's day, which is what stops the policy from
+#     reading the price channel as a clock.
+#   day — snapped to a whole-day boundary in the price file: the day is still
+#     random, the hours are the tariff's real hours. Set this when the point
+#     is to SEE pre-cooling — an 8 pm peak is drawn at 8 pm in every window
+#     and every plot. The trade is that a series peaking at the same hour
+#     most days becomes learnable as that hour, so confirm a price response
+#     by re-scoring the trained policy against a tariff whose peak has been
+#     moved, rather than from the trajectory.
+# price_align: random
 
 # ── HORIZON ──────────────────────────────────────────────────────
 # Closed-loop rollout length during training.

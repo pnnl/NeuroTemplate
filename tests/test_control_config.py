@@ -210,6 +210,13 @@ def test_validate_rejects_a_price_preview_with_no_tariff():
         cfg.validate()
 
 
+def test_validate_rejects_an_unknown_price_alignment():
+    cfg = _runnable_cfg()
+    cfg.price_align = "hourly"
+    with pytest.raises(ValueError, match="price_align must be one of"):
+        cfg.validate()
+
+
 def test_validate_rejects_a_negative_price_preview():
     cfg = _runnable_cfg()
     cfg.price_preview = -1

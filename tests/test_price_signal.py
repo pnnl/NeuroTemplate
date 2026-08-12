@@ -29,12 +29,15 @@ from neurotemplate.control.scenarios import (
     price_scale,
 )
 from control_fixtures import (
+    MIDNIGHT,
     PRICE_SCALE,
     PRICE_SERIES,
+    PRICE_STEPS_PER_DAY,
     _write_price_csv,
     flat_price,
     full_setup,
     install_price,
+    time_of_day_price,
 )
 
 
@@ -139,7 +142,7 @@ def test_price_repeat_upsamples_a_coarser_file(tmp_path):
     hourly price over 5-minute data) onto the plant's per-step grid."""
     path = str(tmp_path / "hourly.csv")
     _write_price_csv(path, torch.tensor([[0.1], [0.2], [0.3]]))
-    series = _load_price_series(path, None, 12)
+    series, _ = _load_price_series(path, None, 12)
     assert series.shape == (36, 1)
     assert torch.allclose(series[:12], torch.full((12, 1), 0.1))
     assert torch.allclose(series[12:24], torch.full((12, 1), 0.2))
@@ -162,7 +165,7 @@ def test_price_column_picks_the_named_column(tmp_path):
     pd.DataFrame({"timestamp": idx, "a": [0.1] * 5, "b": [0.2] * 5}).to_csv(
         path, index=False,
     )
-    series = _load_price_series(path, "b", 1)
+    series, _ = _load_price_series(path, "b", 1)
     assert torch.allclose(series, torch.full((5, 1), 0.2))
 
 
@@ -236,3 +239,92 @@ def test_the_fixture_tariff_varies_within_and_across_days():
     day = 24 * 12
     assert PRICE_SERIES[:day].min() < PRICE_SERIES[:day].max()
     assert not torch.equal(PRICE_SERIES[:day], PRICE_SERIES[day:2 * day])
+
+
+# ── price_align ──────────────────────────────────────────────────
+#
+# The tariff is sampled independently of the weather, which by default puts
+# its evening peak at a random hour of the plant's day. That is the right
+# default — it is what stops "read the price" collapsing into "read the
+# clock" — but it also means a real 8 pm peak is never drawn at 8 pm, so
+# pre-cooling cannot be seen in a plot or scored by hour. `price_align: day`
+# snaps the offset to a whole day, keeping the day random and the hours real.
+
+
+def _price_starts(s, tmp_path, align, start=MIDNIGHT, start_step=0, days=10,
+                  seed=0):
+    """The first price value of every window, in physical units.
+
+    The fixture series encodes step-of-day (`start_step` says where the file's
+    first row sits within its own day), so these values *are* the time of day
+    each window's tariff begins at.
+    """
+    s["cfg"].price_align = align
+    install_price(s["cfg"], tmp_path,
+                  series=time_of_day_price(days, start_step=start_step),
+                  scale=1.0, start=start)
+    data = _window(s, generator=_gen(seed))
+    return data["price"][:, 0, 0]
+
+
+def test_day_alignment_starts_every_window_at_the_same_hour(tmp_path):
+    """The property the whole option exists for."""
+    s = full_setup()
+    starts = _price_starts(s, tmp_path, "day")
+
+    assert starts.numel() > 1, "need several windows for this to mean anything"
+    assert torch.all(starts == 0.0), f"windows began at steps {set(starts.tolist())}"
+
+
+def test_random_alignment_does_not(tmp_path):
+    s = full_setup()
+    starts = _price_starts(s, tmp_path, "random")
+
+    assert len(set(starts.tolist())) > 1, "offsets should not all coincide"
+
+
+def test_day_alignment_finds_midnight_in_a_file_that_starts_elsewhere(tmp_path):
+    """A price export need not begin at midnight, so the day boundary is
+    found from the file's own first timestamp rather than assumed at row 0."""
+    s = full_setup()
+    # 06:00 start => the file's first row sits 72 five-minute steps into its
+    # day, and the encoded series says so. Alignment must therefore land on
+    # series index 216, not on index 0.
+    starts = _price_starts(s, tmp_path, "day", start="2026-01-01 06:00",
+                           start_step=72)
+
+    assert torch.all(starts == 0.0)
+
+
+def test_day_alignment_still_varies_the_day(tmp_path):
+    """Only the within-day phase is pinned; the day must stay random, or the
+    policy sees one tariff profile over and over."""
+    s = full_setup()
+    s["cfg"].price_align = "day"
+    # A series whose value is the day index, so a window's value is its day.
+    days = 12
+    per_day = torch.arange(days, dtype=torch.float32).repeat_interleave(
+        PRICE_STEPS_PER_DAY,
+    )[:, None]
+    install_price(s["cfg"], tmp_path, series=per_day, scale=1.0)
+    drawn = _window(s, generator=_gen(0))["price"][:, 0, 0]
+
+    assert len(set(drawn.tolist())) > 1, "every window drew the same day"
+
+
+def test_day_alignment_is_reproducible_under_a_seeded_generator(tmp_path):
+    s = full_setup()
+    first = _price_starts(s, tmp_path, "day", seed=7)
+    second = _price_starts(s, tmp_path, "day", seed=7)
+    assert torch.equal(first, second)
+
+
+def test_day_alignment_needs_a_whole_day_of_record(tmp_path):
+    """A price file shorter than a day has no boundary to snap to."""
+    s = full_setup()
+    s["cfg"].price_align = "day"
+    short = torch.full((PRICE_STEPS_PER_DAY // 2, 1), 0.2)
+    install_price(s["cfg"], tmp_path, series=short, scale=1.0,
+                  start="2026-01-01 06:00")
+    with pytest.raises(ValueError, match="at least one whole day boundary"):
+        _window(s, generator=_gen(0))

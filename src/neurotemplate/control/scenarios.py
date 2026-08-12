@@ -87,14 +87,18 @@ def price_scale(cfg) -> Optional[float]:
 
 @lru_cache(maxsize=None)
 def _load_price_series(path: str, column: Optional[str],
-                       repeat: int) -> torch.Tensor:
-    """[T, 1] physical price series at the plant's timestep. Cached by path.
+                       repeat: int) -> tuple[torch.Tensor, float]:
+    """([T, 1] physical price series, seconds past midnight at row 0).
 
-    Reuses `get_data`'s CSV/timestamp convention, so a price file follows the
-    same rules as the plant data. `repeat` upsamples a file coarser than the
-    plant's timestep (e.g. hourly price over 5-minute plant data, repeat=12)
-    onto the plant's per-step grid; the file must already be at the plant's
-    resolution or a whole-number multiple coarser than it.
+    Cached by path. Reuses `get_data`'s CSV/timestamp convention, so a price
+    file follows the same rules as the plant data. `repeat` upsamples a file
+    coarser than the plant's timestep (e.g. hourly price over 5-minute plant
+    data, repeat=12) onto the plant's per-step grid; the file must already be
+    at the plant's resolution or a whole-number multiple coarser than it.
+
+    The second return value is what `price_align: day` needs: a file need not
+    begin at midnight, so the offset from the preceding one is what says where
+    the day boundaries sit in the series.
     """
     df, _ = get_data(path)
     cols = [c for c in df.columns if c != "sec_elapsed"]
@@ -118,12 +122,40 @@ def _load_price_series(path: str, column: Optional[str],
             "the source series — a NaN here propagates silently into the "
             "cost term."
         )
-    return series.repeat_interleave(repeat).unsqueeze(-1)
+    first = df.index[0]
+    midnight_offset = float((first - first.normalize()).total_seconds())
+    return series.repeat_interleave(repeat).unsqueeze(-1), midnight_offset
+
+
+@beartype
+def _day_aligned_starts(n_samples: int, series_len: int, nsteps: int,
+                        steps_per_day: int, phase: int,
+                        generator=None) -> torch.Tensor:
+    """Window starts drawn from whole-day boundaries in the price series.
+
+    `phase` is where row 0 sits within its own day, in steps, so the first
+    day boundary is `-phase mod steps_per_day` and legal starts step by a
+    whole day from there. The day is still drawn at random; only the
+    within-day position is pinned.
+    """
+    first = (-phase) % steps_per_day
+    n_days = (series_len - nsteps - first) // steps_per_day + 1
+    if n_days < 1:
+        raise ValueError(
+            f"price_align: day needs a price record with at least one whole "
+            f"day boundary at least {nsteps} steps from its end; this one has "
+            f"{series_len} steps with the first boundary at step {first}. Use "
+            "a longer price record, shorten the window, or set "
+            "price_align: random."
+        )
+    days = torch.randint(0, int(n_days), (n_samples,), generator=generator)
+    return first + days * steps_per_day
 
 
 @beartype
 def build_price(cfg, n_samples: int, nsteps: int, price_path: Optional[str],
-                generator=None) -> Optional[torch.Tensor]:
+                generator=None,
+                steps_per_day: Optional[int] = None) -> Optional[torch.Tensor]:
     """A sampled tariff of shape [n_samples, nsteps, 1], scaled, or None.
 
     Price is exogenous data the policy and the objective read and the dynamics
@@ -152,6 +184,21 @@ def build_price(cfg, n_samples: int, nsteps: int, price_path: Optional[str],
     same shortcut, and it decouples the amount of price data needed from the
     length of the plant record.
 
+    `cfg.price_align` chooses how those offsets are drawn:
+
+      random  (default) — a uniformly random step offset. The tariff's evening
+        peak lands at a random hour of the plant's day, so nothing about the
+        window's position can be read as a clock.
+      day — the offset is snapped to a whole-day boundary in the price file,
+        so the day is still random but the tariff's hours are its real hours.
+        This is what makes pre-cooling legible: an 8 pm peak is drawn at 8 pm
+        in every window and in every plot. It also partially re-opens the
+        shortcut above — a series that peaks at hour 19 on most days is that
+        much more learnable as "hour 19" — so a price response measured under
+        `day` should be confirmed by re-scoring the trained policy against a
+        rewritten tariff (hold the weather, move the peak, watch the load) and
+        not by the trajectory alone.
+
     Reproducibility comes from the same `generator` discipline the band uses:
     `evaluate_closed_loop` reseeds from EVAL_BAND_SEED, so the learned policy
     and the baseline are scored against a byte-identical tariff. Price is drawn
@@ -161,19 +208,49 @@ def build_price(cfg, n_samples: int, nsteps: int, price_path: Optional[str],
         return None
     scale = price_scale(cfg)
     assert scale is not None  # price_path set => cfg.train_price_path set => scale checked above
-    series = _load_price_series(price_path, cfg.price_column, cfg.price_repeat)
+    series, midnight_offset = _load_price_series(
+        price_path, cfg.price_column, cfg.price_repeat,
+    )
     if series.shape[0] < nsteps:
         raise ValueError(
             f"{price_path} has {series.shape[0]} steps but a window needs "
             f"{nsteps}. Use a longer price record or shorten train_pred_steps."
         )
-    starts = torch.randint(0, series.shape[0] - nsteps + 1, (n_samples,),
-                           generator=generator)
+    if cfg.price_align == "day":
+        if steps_per_day is None:
+            raise ValueError(
+                "price_align: day needs a plant timestep that divides 24 h "
+                "evenly, so a window can start on a day boundary. This run's "
+                "timestep does not (or the window is too short to show one). "
+                "Set price_align: random."
+            )
+        phase = round(midnight_offset * steps_per_day / 86400.0)
+        starts = _day_aligned_starts(n_samples, series.shape[0], nsteps,
+                                     steps_per_day, phase, generator)
+    else:
+        starts = torch.randint(0, series.shape[0] - nsteps + 1, (n_samples,),
+                               generator=generator)
     idx = starts[:, None] + torch.arange(nsteps)[None, :]
     # Negative prices are allowed and mean what they say: a market paying to
     # absorb load. The cost term then correctly wants more of it, which is why
     # a non-zero energy or comfort weight alongside it is not optional.
     return series[idx] / scale
+
+
+@beartype
+def _steps_per_day(t: torch.Tensor) -> Optional[int]:
+    """Plant timesteps in 24 h, read off the window's own `sec_elapsed`.
+
+    None when a window is too short to show a timestep, or when the timestep
+    does not divide a day — `price_align: day` is the only caller and it says
+    so itself rather than silently rounding.
+    """
+    if t.shape[1] < 2:
+        return None
+    dt = float(t[0, 1, 0] - t[0, 0, 0])
+    if dt <= 0 or 86400.0 % dt != 0:
+        return None
+    return int(86400.0 / dt)
 
 
 def _sliding(df: DataFrame, cols: list[str], steps: int, stride: int,
@@ -245,7 +322,8 @@ def build_window_dict(
     # SystemPreview.forward, so the tariff is readable in the loss as
     # variable("price") and in `out["price"]` at evaluation time. Drawn after
     # the band, so turning price on does not shift the band realization.
-    price = build_price(cfg, n, W, price_path, generator)
+    price = build_price(cfg, n, W, price_path, generator,
+                        steps_per_day=_steps_per_day(t))
     if price is not None:
         out["price"] = price.to(device)
     return out

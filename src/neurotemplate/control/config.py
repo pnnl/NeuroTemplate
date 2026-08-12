@@ -20,6 +20,9 @@ from neurotemplate.modeling.config import MAX_IN_STEPS
 
 from neurotemplate._typing import beartype
 
+# How a window's slice of the price record is drawn. See `price_align`.
+PRICE_ALIGNMENTS = {"random", "day"}
+
 
 @dataclass
 class ControlConfig:
@@ -73,6 +76,18 @@ class ControlConfig:
     # it is a per-run tuning knob, while the disturbance previews are a
     # structural property of the plant that every run shares.
     price_preview: int = 0
+    # How each window's slice of the price record is drawn.
+    #   "random" — a uniformly random offset. The tariff's peak lands at a
+    #     random hour of the plant's day, which is what stops the policy
+    #     reading the price channel as a clock.
+    #   "day" — the offset is snapped to a whole-day boundary in the price
+    #     file, so the day is random but the hours are the tariff's real
+    #     hours. Use this when the point is to SEE pre-cooling: an 8 pm peak
+    #     is drawn at 8 pm in every window and every plot. The cost is that a
+    #     series peaking at the same hour most days becomes learnable as that
+    #     hour, so confirm a price response by re-scoring the trained policy
+    #     against a tariff whose peak has been moved, not from the trace.
+    price_align: str = "random"
 
     # Optional path or dotted module name for the control hooks file.
     # If unset, the library looks for `control_user_defined.py` in CWD.
@@ -226,6 +241,11 @@ class ControlConfig:
         if self.price_preview < 0:
             raise ValueError(
                 f"price_preview must be >= 0, got {self.price_preview}"
+            )
+        if self.price_align not in PRICE_ALIGNMENTS:
+            raise ValueError(
+                f"price_align must be one of {sorted(PRICE_ALIGNMENTS)}, got "
+                f"{self.price_align!r}"
             )
         if self.price_preview > 0 and n_set == 0:
             raise ValueError(

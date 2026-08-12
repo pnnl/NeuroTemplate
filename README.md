@@ -142,6 +142,16 @@ The same hook is what `residual_delta` anchors to. Set it and the policy command
 
 The library draws its own window offsets out of each split's file, so price windows are deliberately independent of the weather windows they are scored beside — that removes the residual price↔weather correlation as a second route to the same shortcut, and it means the price record need not span the plant record. Reproducibility rides on the `generator` `build_price` is handed: `evaluate_closed_loop` reseeds it from `EVAL_BAND_SEED`, so the learned policy and the baseline are scored against a byte-identical tariff. Price is drawn after the band, so enabling it leaves band realizations unchanged.
 
+`price_align` chooses how those offsets are drawn, and the choice is a real trade-off:
+
+| | `random` (default) | `day` |
+|---|---|---|
+| offset | any step | snapped to a whole day in the price file |
+| the tariff's 8 pm peak | lands at a random hour of the plant's day | lands at 8 pm, in every window and every plot |
+| clock shortcut | closed | partly re-opened |
+
+**Use `day` when the point is to see pre-cooling.** Under `random` a real evening peak is drawn at a different hour in every window, so the pre-cool it should provoke averages away and no plot shows it — v6 had to work around this by cutting the eval price file down to exactly one window long, leaving `randint` a single legal offset. `day` keeps the day random (so day-to-day price variation still forces the policy to read the channel) and pins only the within-day phase. The cost is that a series peaking at hour 19 on most days becomes that much more learnable *as* hour 19, so under `day` a load-shifting trace is not by itself evidence of price response: re-score the trained policy with the peak moved to a different hour and check the load moves with it.
+
 `cost_weight` then weights `mean_t(price · power)`, and `peak_weight` weights the per-window power mean `M_q(power)` — all three power terms are reductions of one shared signal. Neither is solvable at the default `train_pred_steps: 48`; expect 144–288 steps, and expect `cost_weight` to need a price preview (`price_preview`) before it can shift load rather than merely react to it.
 
 The tables above are the canonical hook contract. To start writing hooks, copy [template/](template/) — it has all of them stubbed with the right signatures. For worked-through implementations (including an ordinal/bounded `data_head_config`), read [tests/fixtures/modeling_user_defined.py](tests/fixtures/modeling_user_defined.py) and [tests/fixtures/control_user_defined.py](tests/fixtures/control_user_defined.py).
@@ -233,6 +243,37 @@ To turn on price-driven control:
    ```
 
 `train_pred_steps` is the real cost — rollout memory grows roughly linearly.
+
+#### If what you want is pre-cooling
+
+Pre-cooling is load shifting you can point at: drive the zone down through the
+cheap block, then coast up through the expensive one on the building's own
+thermal mass. Four things have to be true at once or it will not appear, and
+three of them are not the weights:
+
+- **`price_preview` covers the run-up to the peak.** Pre-cooling is by
+  definition an action taken before the expensive block. A policy whose only
+  price input is the current one can be cheap, but it cannot pre-cool.
+- **The comfort band is wide enough to store anything.** Load shifting *is*
+  thermal storage, and a 0.5 °C band leaves nowhere to put it — reporting "no
+  price response" out of a narrow band is measuring the band. 1.5–2.5 °C is a
+  reasonable place to start.
+- **The rollout spans the cycle.** 288 steps (24 h at 5-minute data) covers a
+  precool and the coast that pays for it; the default 48 covers neither.
+- **`cost_weight` carries the power side, not `energy_weight`.** They pull
+  different ways: `energy_weight` rewards using less power at *every* hour, so
+  the cheapest way to satisfy it is to stop cooling — load *shedding*, which
+  shows up as a big power cut with comfort going backwards. Only `cost_weight`
+  rewards moving power to the cheap hours. If pre-cooling is the goal, start
+  with `cost_weight` alone and a comfort weight high enough that the savings
+  have to be found rather than bought.
+
+Set `price_align: day` while you are looking for it, or the tariff's evening
+peak lands at a different hour in every window and the precool averages out of
+every plot. Then confirm it is the price and not the clock: re-score the
+trained policy with the peak moved to a different hour (holding the weather,
+the band and the surrogate fixed) and check the load follows. Pre-heating
+against an evening peak is the same recipe with the sign flipped.
 
 ### Residual control: bound the policy to a rule
 
