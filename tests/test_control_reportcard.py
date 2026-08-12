@@ -46,6 +46,8 @@ def _make_arch():
         "h_ctrl": 12,
         "d_preview": 0,
         "band_preview": 0,
+        "price_preview": 0,
+        "reads_price": False,
         "hsizes": [64, 64],
         "param_count": 6017,
         "u_cols": ["setpoint [°C]"],

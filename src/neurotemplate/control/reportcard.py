@@ -98,7 +98,10 @@ def _policy_section(arch: dict) -> str:
         f"- **Trainable params:** {arch['param_count']:,}",
         f"- **Input width:** {arch['insize']} "
         f"(H_ctrl={arch['h_ctrl']}, D preview={arch['d_preview']}, "
-        f"band preview={arch['band_preview']})",
+        f"band preview={arch['band_preview']}"
+        + (f", price preview={arch['price_preview']}" if arch["reads_price"]
+           else "")
+        + ")",
         f"- **Output width:** {arch['outsize']}",
         f"- **Setpoint quantization:** {quant}",
         "- **Actuation bounds (physical units):**",

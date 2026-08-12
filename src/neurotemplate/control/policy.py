@@ -155,35 +155,48 @@ class _QuantizedPolicy(nn.Module):
         return self.quantize(self.base(*args))
 
 
-def _preview_steps(hooks, cfg, nm_mapping: dict[str, list[str]]) -> tuple[int, int]:
-    """Resolve (disturbance_future, band_future) preview widths for the policy.
+def _preview_steps(hooks, cfg,
+                   nm_mapping: dict[str, list[str]]) -> tuple[int, int, int]:
+    """Resolve (disturbance, band, price) future-preview widths for the policy.
 
     If the use case defines `preview_config(nm_mapping) -> {signal: n_steps}`,
-    use it: keys may be D column names (per-column disturbance preview) or the
-    literal "band" (future comfort-band preview). The disturbance window is one
-    block, so it is sized to the largest per-column D value requested (columns
-    asking for less just see harmless extra lookahead). With no hook, fall back
-    to the global `cfg.d_preview` for disturbances and no band preview.
+    use it: keys may be D column names (per-column disturbance preview), the
+    literal "band" (future comfort-band preview), or the literal "price"
+    (tariff forecast). The disturbance window is one block, so it is sized to
+    the largest per-column D value requested (columns asking for less just see
+    harmless extra lookahead). With no hook, fall back to the global
+    `cfg.d_preview` for disturbances and no band or price preview.
+
+    Price preview is what separates load *shifting* from a slightly more
+    expensive thermostat: precooling is an action taken before the expensive
+    block, so a policy whose only price input is the current one can react but
+    not shift.
     """
     preview = getattr(hooks, "preview_config", None)
     if preview is None:
-        return cfg.d_preview, 0
+        return cfg.d_preview, 0, 0
 
     spec = preview(nm_mapping)
-    allowed = set(nm_mapping["D"]) | {"band"}
+    allowed = set(nm_mapping["D"]) | {"band", "price"}
     for key, steps in spec.items():
         if key not in allowed:
             raise ValueError(
-                f"preview_config key '{key}' is not a D column or 'band'. "
-                f"Allowed: {sorted(allowed)}"
+                f"preview_config key '{key}' is not a D column, 'band' or "
+                f"'price'. Allowed: {sorted(allowed)}"
             )
         if not isinstance(steps, int) or steps < 0:
             raise ValueError(
                 f"preview_config['{key}'] must be a non-negative int, got {steps!r}"
             )
+    if spec.get("price", 0) > 0 and getattr(hooks, "price_signal", None) is None:
+        raise ValueError(
+            "preview_config asks for a price preview but "
+            "control_user_defined.price_signal is not defined, so no tariff "
+            "reaches the rollout. Implement the hook or drop the 'price' key."
+        )
 
     d_future = max([spec.get(col, 0) for col in nm_mapping["D"]], default=0)
-    return d_future, spec.get("band", 0)
+    return d_future, spec.get("band", 0), spec.get("price", 0)
 
 
 def _build_mlp_net(cfg, insize: int, nu: int, umin, umax) -> nn.Module:
@@ -253,18 +266,22 @@ def build_policy(
 
     # How many future steps each previewed signal feeds the policy. A use case
     # may define control_user_defined.preview_config for per-column disturbance
-    # preview and comfort-band preview; otherwise fall back to the global
-    # cfg.d_preview (disturbances only, no band preview).
-    d_future, band_future = _preview_steps(hooks, cfg, nm_mapping)
+    # preview, comfort-band preview and price preview; otherwise fall back to
+    # the global cfg.d_preview (disturbances only, nothing else previewed).
+    d_future, band_future, price_future = _preview_steps(hooks, cfg, nm_mapping)
+    # The tariff reaches the policy exactly when the use case defines one.
+    reads_price = getattr(hooks, "price_signal", None) is not None
 
     # Flattened window widths (see SystemPreview.get_mapped_data):
     #   yn : past = H_ctrl-1, future = 0                 -> ny * H_ctrl
     #   D  : past = H_ctrl-1, future = d_future          -> nd * (H_ctrl + d_future)
     #   ymin/ymax: current + band_future preview steps   -> n_ctrl*(1+band_future) each
+    #   price: current + price_future preview steps      -> 1 * (1+price_future)
     insize = (
         ny * h_ctrl
         + 2 * n_ctrl * (1 + band_future)
         + nd * (h_ctrl + d_future)
+        + (1 + price_future if reads_price else 0)
     )
 
     umin, umax = hooks.actuation_bounds(nm_mapping, norm_stats)
@@ -302,9 +319,16 @@ def build_policy(
             input_map[key] = {"past": 0, "future": band_future,
                               "pad_mode": "nearest"}
 
+    input_keys = ["yn", "ymin", "ymax", "D"]
+    if reads_price:
+        input_keys.append("price")
+        if price_future > 0:
+            input_map["price"] = {"past": 0, "future": price_future,
+                                  "pad_mode": "nearest"}
+
     return Node(
         net,
-        ["yn", "ymin", "ymax", "D"],
+        input_keys,
         ["U"],
         name="DPC Policy",
         input_map=input_map,
@@ -330,8 +354,8 @@ def describe_policy(
     between config and reality shows up on the card.
 
     Window widths are reported alongside `insize` so a reader can re-check the
-    ny*H_ctrl + 2*n_ctrl*(1+band) + nd*(H_ctrl+d) sum by eye — a wrong window
-    is otherwise an invisible failure.
+    ny*H_ctrl + 2*n_ctrl*(1+band) + nd*(H_ctrl+d) + (1+price) sum by eye — a
+    wrong window is otherwise an invisible failure.
     """
     # Unwrap: Node -> (_QuantizedPolicy) -> MLP_bounds
     raw = policy_node.callable
@@ -340,7 +364,7 @@ def describe_policy(
 
     hooks = load_control_hooks(cfg)
     _, h_ctrl, _ = horizons(cfg, sysid_cfg)
-    d_future, band_future = _preview_steps(hooks, cfg, nm_mapping)
+    d_future, band_future, price_future = _preview_steps(hooks, cfg, nm_mapping)
 
     # Actuator limits are set in normalized U space by the actuation_bounds
     # hook; report them in physical units, which is what a reader can sanity
@@ -360,6 +384,8 @@ def describe_policy(
         "h_ctrl": h_ctrl,
         "d_preview": d_future,
         "band_preview": band_future,
+        "price_preview": price_future,
+        "reads_price": "price" in policy_node.input_keys,
         "hsizes": [int(lin.out_features) for lin in net.linear[:-1]],
         "param_count": sum(p.numel() for p in net.parameters()),
         "u_cols": list(u_cols),

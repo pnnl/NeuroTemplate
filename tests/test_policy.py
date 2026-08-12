@@ -15,7 +15,7 @@ from neurotemplate.control.policy import (
 )
 from neurotemplate.control.closed_loop import build_closed_loop
 from control_user_defined import actuation_bounds
-from control_fixtures import full_setup
+from control_fixtures import full_setup, install_price_hook
 
 _NM = {"Y": ["z"], "U": ["sp"], "D": ["outdoor", "irr"], "t": ["sec"]}
 
@@ -23,7 +23,7 @@ _NM = {"Y": ["z"], "U": ["sp"], "D": ["outdoor", "irr"], "t": ["sec"]}
 def test_preview_steps_falls_back_to_d_preview_without_hook():
     hooks = SimpleNamespace()  # no preview_config attribute
     cfg = SimpleNamespace(d_preview=2)
-    assert _preview_steps(hooks, cfg, _NM) == (2, 0)
+    assert _preview_steps(hooks, cfg, _NM) == (2, 0, 0)
 
 
 def test_preview_steps_reads_hook_and_takes_max_d():
@@ -31,13 +31,29 @@ def test_preview_steps_reads_hook_and_takes_max_d():
     # largest per-column D request.
     hooks = SimpleNamespace(preview_config=lambda nm: {"band": 3, "outdoor": 1})
     cfg = SimpleNamespace(d_preview=0)
-    assert _preview_steps(hooks, cfg, _NM) == (1, 3)
+    assert _preview_steps(hooks, cfg, _NM) == (1, 3, 0)
+
+
+def test_preview_steps_reads_price_when_a_tariff_exists():
+    hooks = SimpleNamespace(preview_config=lambda nm: {"price": 4},
+                            price_signal=lambda t: t)
+    cfg = SimpleNamespace(d_preview=0)
+    assert _preview_steps(hooks, cfg, _NM) == (0, 0, 4)
+
+
+def test_price_preview_without_a_tariff_hook_fails_fast():
+    """Previewing a signal that never reaches the rollout is a silent dead
+    input width, so say so at build time."""
+    hooks = SimpleNamespace(preview_config=lambda nm: {"price": 4})
+    cfg = SimpleNamespace(d_preview=0)
+    with pytest.raises(ValueError, match="price_signal is not defined"):
+        _preview_steps(hooks, cfg, _NM)
 
 
 def test_preview_steps_rejects_unknown_signal():
     hooks = SimpleNamespace(preview_config=lambda nm: {"bogus": 1})
     cfg = SimpleNamespace(d_preview=0)
-    with pytest.raises(ValueError, match="not a D column or 'band'"):
+    with pytest.raises(ValueError, match="not a D column, 'band' or 'price'"):
         _preview_steps(hooks, cfg, _NM)
 
 
@@ -72,6 +88,45 @@ def test_policy_node_io():
     policy = build_policy(s["cfg"], s["sysid_cfg"], s["nm"], s["norm_stats"])
     assert policy.input_keys == ["yn", "ymin", "ymax", "D"]
     assert policy.output_keys == ["U"]
+
+
+def test_price_hook_adds_one_policy_input_per_previewed_step(monkeypatch):
+    """The tariff is a single column, so the policy's input width grows by
+    exactly 1 + price_preview when a use case defines one."""
+    import control_user_defined as cud
+    s = full_setup(setpoint_step=0.0)
+    cfg, sysid_cfg, nm, ns = s["cfg"], s["sysid_cfg"], s["nm"], s["norm_stats"]
+
+    def insize_of():
+        return build_policy(cfg, sysid_cfg, nm, ns).callable.linear[0].in_features
+
+    base = insize_of()
+    install_price_hook(monkeypatch)
+    assert insize_of() == base + 1
+
+    monkeypatch.setattr(cud, "preview_config", lambda nm: {"price": 3},
+                        raising=False)
+    assert insize_of() == base + 4
+
+
+def test_price_reaches_the_policy_and_changes_what_it_commands(monkeypatch):
+    """An input the policy never reads is a dead window. Doubling the tariff
+    must move the commanded setpoint."""
+    install_price_hook(monkeypatch)
+    s = full_setup(setpoint_step=0.0)
+    cfg, sysid_cfg, nm, ns = s["cfg"], s["sysid_cfg"], s["nm"], s["norm_stats"]
+
+    policy = build_policy(cfg, sysid_cfg, nm, ns)
+    assert policy.input_keys == ["yn", "ymin", "ymax", "D", "price"]
+
+    cl = build_closed_loop(s["dyn_node"], policy, cfg, sysid_cfg)
+    data = build_window_dict(
+        s["norm_df"], cfg, sysid_cfg, nm, ns,
+        P=cfg.train_pred_steps, stride=cfg.in_steps,
+    )
+    cheap = cl(data)["U"].clone()
+    dear = cl({**data, "price": data["price"] * 2.0})["U"]
+    assert not torch.allclose(cheap, dear)
 
 
 def test_policy_output_within_actuator_bounds():
@@ -241,6 +296,7 @@ def test_describe_policy_reports_shape_and_physical_bounds():
 
     # insize must equal the documented window sum.
     n_ctrl = 1  # single controlled zone temp in the fixture
+    assert d["reads_price"] is False
     assert d["insize"] == (
         len(nm["Y"]) * d["h_ctrl"]
         + 2 * n_ctrl * (1 + d["band_preview"])
