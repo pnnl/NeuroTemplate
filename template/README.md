@@ -51,7 +51,7 @@ for the step-by-step:
 | Want | Implement | Then set |
 |---|---|---|
 | an energy objective, and the energy section of the reportcard | `power_metric` + `POWER_METRIC_IMPLEMENTED` | `energy_weight` |
-| price-driven load shifting | `price_signal` + `PRICE_SCALE`, and a `"price"` entry in `preview_config` | `cost_weight` |
+| price-driven load shifting | `train/dev/test_price_path` + `price_scale` in control.yaml, and a `"price"` entry in `preview_config` | `cost_weight` |
 | peak shaving | `power_metric` | `peak_weight`, `peak_q` |
 | a rule-based baseline, and the learned-vs-rule verdict | `reference_control` | *(nothing)* |
 | a policy bounded to that rule | `reference_control` | `residual_delta` |
@@ -68,17 +68,16 @@ nt model train --config model_configs/modeling.yaml --print-config
   `POWER_METRIC_IMPLEMENTED = True`. A positive weight without it fails at
   problem build, by design. Same for `cost_weight` and `peak_weight`, which
   are two more reductions of that same power signal, and `cost_weight`
-  additionally needs `price_signal` + `PRICE_SCALE`.
+  additionally needs `train/dev/test_price_path` + `price_scale` set.
 - **`preview_config` is commented out** in `control_user_defined.py` on
   purpose. If the function merely exists it replaces `cfg.d_preview`
   entirely, so an empty stub would silently disable a preview set in YAML.
   Leave it commented, or define it fully.
-- **`price_signal` is commented out for the same reason** — its mere presence
-  adds a tariff to every rollout and a price input to the policy. When you do
-  enable it, sample windows out of a real historical price series rather than
-  writing a time-of-use table keyed on hour-of-day: a tariff that is a
-  function of the clock is one the policy will learn *as* the clock, since the
-  disturbances already carry that signal.
+- **The price paths are unset by default for the same reason** — setting them
+  adds a tariff to every rollout and a price input to the policy. Point them
+  at a real historical price series rather than a time-of-use table keyed on
+  hour-of-day: a tariff that is a function of the clock is one the policy will
+  learn *as* the clock, since the disturbances already carry that signal.
 - **`residual_delta` must be at least one `setpoint_step`** if quantization is
   on. Below that every residual snaps back to zero and you train for an hour
   to reproduce the rule; the library rejects it rather than let that happen.

@@ -248,77 +248,37 @@ def _denorm(x: torch.Tensor, col: str, nm_mapping: dict[str, list[str]],
 # ---------------------------------------------------------------------
 # Optional: the energy tariff, for the cost objective
 # ---------------------------------------------------------------------
-# LEAVE THIS COMMENTED OUT unless you want price-driven control. Defining
-# `price_signal` is the switch: it adds a `price` signal to every rollout and a
-# price input to the policy, and `cost_weight > 0` then weights
-# mean_t(price · power). With it commented out, `cost_weight` must stay 0.0.
+# No hook here — the tariff is config, not code. Set `train_price_path`,
+# `dev_price_path` and `test_price_path` in control.yaml (one CSV per split,
+# a timestamp column plus one price column in $/kWh) plus `price_scale`, and
+# `cost_weight > 0` weights mean_t(price · power). Leave all three paths
+# unset and `cost_weight` must stay 0.0.
 #
-# PRICE_SCALE is required alongside it and must be > 0. Return the tariff in
-# PHYSICAL units ($/kWh); the library divides by PRICE_SCALE so the policy sees
-# an O(1) input, and multiplies it back in to report dollars. The scaling is
-# deliberately shift-free, so a zero price stays a zero cost. Match the units
-# to `power_metric`: Watts against $/kWh is off by 1000, and the library
-# converts nothing.
+# **Use a real historical price series**, not a time-of-use table keyed on
+# hour-of-day: `t` (`sec_elapsed`) counts from the first row of the file
+# rather than from midnight, and a tariff that is a deterministic function of
+# the clock is one the policy can learn *as* the clock — D is strongly
+# hour-of-day correlated, so "read the price" and "read the time" collapse
+# into the same task, and you get a convincing load-shifting trace with no
+# price responsiveness in it. Real day-to-day variation is what forces the
+# policy to read the channel.
 #
-# **Use a real historical price series, and sample windows out of it.** The
-# tempting alternative — a time-of-use table keyed on hour-of-day — fails for
-# two reasons, and the second is fatal:
+# The library samples its own window offsets out of each split's file,
+# independent of the weather windows — that is deliberate, and it is why the
+# test file is the place to put whatever price swings you want the eval
+# judged on. See control.yaml's ENERGY TARIFF section for the fields, and
+# control.scenarios.build_price for the sampling contract.
 #
-#   - `t` is `sec_elapsed`, which counts from the first row of the file rather
-#     than from midnight, so hour-of-day is an assumption the library cannot
-#     check.
-#   - A tariff that is a deterministic function of the clock is one the policy
-#     can learn *as* the clock. D is strongly hour-of-day correlated, so
-#     "read the price" and "read the time" collapse into the same task, and you
-#     get a convincing load-shifting trace with no price responsiveness in it.
-#     Real day-to-day variation is what forces the policy to read the channel.
-#
-# Sample your own window offsets, independent of the weather windows. That is
-# deliberate: it removes the residual price↔weather correlation as a second
-# route to the same shortcut, and it means the price record does not have to
-# cover the same span as the plant record. Draw with the `generator` you are
-# handed so evaluations stay reproducible.
-#
-# The example below uses PG&E Hourly Flex Pricing. Download it once (see
-# "How Might Hourly Prices Vary?" under the FAQ at
-# https://www.pge.com/en/account/rate-plans/hourly-flex-pricing.html), or fetch
-# the hosted sample:
+# For a real dataset: PG&E Hourly Flex Pricing. Download it once (see "How
+# Might Hourly Prices Vary?" under the FAQ at
+# https://www.pge.com/en/account/rate-plans/hourly-flex-pricing.html), or
+# fetch the hosted sample:
 #
 #   https://raw.githubusercontent.com/EladMichael/small_example_datasets/main/hourly-flex-prices-historical-sample.xlsx
 #
-# PRICE_SCALE = 0.30            # $/kWh; the dict carries price / PRICE_SCALE
-# STEPS_PER_HOUR = 12           # your data's timestep; 12 = 5-minute data
-#
-# def _load_prices() -> torch.Tensor:
-#     """[T, 1] historical $/kWh, upsampled from hourly to the data timestep."""
-#     from pandas import read_excel
-#     hourly = read_excel("data/hourly-prices.xlsx", sheet_name="HFP_Prices",
-#                         usecols=[10], skiprows=3).to_numpy()
-#     prices = torch.tensor(hourly, dtype=torch.float32)
-#     return prices.repeat_interleave(STEPS_PER_HOUR, dim=0)
-#
-# _PRICES = _load_prices()
-#
-# @beartype
-# def price_signal(
-#     n_samples: int,
-#     nsteps: int,
-#     generator: Optional[torch.Generator] = None,
-# ) -> torch.Tensor:
-#     """[n_samples, nsteps, 1] tariff in $/kWh, one window per sample."""
-#     if _PRICES.shape[0] < nsteps:
-#         raise ValueError(
-#             f"Price series has {_PRICES.shape[0]} steps but a window needs "
-#             f"{nsteps}. Fetch a longer record or shorten train_pred_steps."
-#         )
-#     starts = torch.randint(0, _PRICES.shape[0] - nsteps + 1, (n_samples,),
-#                            generator=generator)
-#     idx = starts[:, None] + torch.arange(nsteps)[None, :]
-#     return _PRICES[idx]
-#
-# Negative prices are allowed and mean what they say — a market paying to
-# absorb load — and the cost term will correctly want more of it. That is one
-# more reason not to run `cost_weight` without a comfort weight beside it.
+# It is hourly and in .xlsx; convert it to a two-column
+# (timestamp, price [$/kWh]) CSV and set `price_repeat` to the number of
+# plant timesteps one hour spans (12 for 5-minute data).
 
 
 # ---------------------------------------------------------------------

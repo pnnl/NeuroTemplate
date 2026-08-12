@@ -146,3 +146,55 @@ def test_validate_rejects_a_negative_residual():
     cfg.residual_delta = -0.5
     with pytest.raises(ValueError, match="residual_delta must be >= 0"):
         cfg.validate()
+
+
+# ── Energy tariff (train/dev/test_price_path + price_scale) ──────
+
+
+@pytest.mark.parametrize("field", [
+    "train_price_path", "dev_price_path", "test_price_path",
+])
+def test_validate_rejects_a_partially_set_tariff(field):
+    """A split with no price file would silently see no cost term."""
+    cfg = _runnable_cfg()
+    cfg.train_price_path = "train_price.csv"
+    cfg.dev_price_path = "dev_price.csv"
+    cfg.test_price_path = "test_price.csv"
+    setattr(cfg, field, None)
+    with pytest.raises(ValueError, match="together or not at all"):
+        cfg.validate()
+
+
+def test_validate_rejects_a_tariff_with_no_scale():
+    cfg = _runnable_cfg()
+    cfg.train_price_path = "train_price.csv"
+    cfg.dev_price_path = "dev_price.csv"
+    cfg.test_price_path = "test_price.csv"
+    with pytest.raises(ValueError, match="price_scale"):
+        cfg.validate()
+
+
+def test_validate_rejects_a_scale_with_no_tariff():
+    cfg = _runnable_cfg()
+    cfg.price_scale = 0.30
+    with pytest.raises(ValueError, match="price_scale is set"):
+        cfg.validate()
+
+
+def test_validate_rejects_a_non_positive_price_scale():
+    cfg = _runnable_cfg()
+    cfg.train_price_path = "train_price.csv"
+    cfg.dev_price_path = "dev_price.csv"
+    cfg.test_price_path = "test_price.csv"
+    cfg.price_scale = 0.0
+    with pytest.raises(ValueError, match="price_scale must be positive"):
+        cfg.validate()
+
+
+def test_validate_accepts_a_complete_tariff():
+    cfg = _runnable_cfg()
+    cfg.train_price_path = "train_price.csv"
+    cfg.dev_price_path = "dev_price.csv"
+    cfg.test_price_path = "test_price.csv"
+    cfg.price_scale = 0.30
+    cfg.validate()  # must not raise

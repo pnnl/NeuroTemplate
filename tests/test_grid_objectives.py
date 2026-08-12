@@ -22,7 +22,7 @@ from control_fixtures import (
     alternating_price,
     flat_price,
     full_setup,
-    install_price_hook,
+    install_price,
 )
 
 
@@ -55,10 +55,10 @@ def _power_of(s, out):
 # ── The cost term ────────────────────────────────────────────────
 
 
-def test_cost_is_the_price_weighted_mean_power(monkeypatch):
-    install_price_hook(monkeypatch)
+def test_cost_is_the_price_weighted_mean_power(tmp_path):
     s = full_setup(comfort_weight=0.0, du_weight=0.0, energy_weight=0.0,
                    cost_weight=1.0)
+    install_price(s["cfg"], tmp_path)
     _, _, hmax = horizons(s["cfg"], s["sysid_cfg"])
     _, out, data = _rolled_out(s)
 
@@ -70,23 +70,23 @@ def test_cost_is_the_price_weighted_mean_power(monkeypatch):
     assert got == pytest.approx(float((power * price).mean().detach()), rel=1e-5)
 
 
-def test_a_zero_price_is_a_zero_cost(monkeypatch):
-    install_price_hook(monkeypatch, signal=flat_price(0.0))
+def test_a_zero_price_is_a_zero_cost(tmp_path):
     s = full_setup(comfort_weight=0.0, du_weight=0.0, energy_weight=0.0,
                    cost_weight=1.0)
+    install_price(s["cfg"], tmp_path, series=flat_price(0.0))
     _, out, data = _rolled_out(s)
     loss = build_control_loss(s["cfg"], s["sysid_cfg"], s["nm"], s["norm_stats"])
     assert _term(loss, {**out, "price": data["price"]}, "cost_loss") == 0.0
 
 
-def test_shifting_the_tariff_changes_the_cost(monkeypatch):
+def test_shifting_the_tariff_changes_the_cost(tmp_path):
     """The cheap guard on price/power co-indexing: if the cost were reading a
     mis-aligned slice, rolling the tariff by a step would not move it. The
     tariff has to alternate per step for this to bite — a test window is under
     an hour long, so a realistic series is nearly constant across it."""
-    install_price_hook(monkeypatch, signal=alternating_price)
     s = full_setup(comfort_weight=0.0, du_weight=0.0, energy_weight=0.0,
                    cost_weight=1.0)
+    install_price(s["cfg"], tmp_path, series=alternating_price())
     _, out, data = _rolled_out(s)
     loss = build_control_loss(s["cfg"], s["sysid_cfg"], s["nm"], s["norm_stats"])
 
@@ -98,7 +98,7 @@ def test_shifting_the_tariff_changes_the_cost(monkeypatch):
 
 def test_cost_without_a_tariff_hook_fails_fast():
     s = full_setup(cost_weight=1.0)
-    with pytest.raises(NotImplementedError, match="price_signal"):
+    with pytest.raises(NotImplementedError, match="train_price_path"):
         build_control_loss(s["cfg"], s["sysid_cfg"], s["nm"], s["norm_stats"])
 
 
@@ -171,14 +171,14 @@ def test_peak_objective_builds_and_matches_the_helper():
      ("cost_loss", "cost_weight"),
      ("peak_loss", "peak_weight")],
 )
-def test_every_power_term_reaches_the_policy_parameters(monkeypatch, name,
+def test_every_power_term_reaches_the_policy_parameters(tmp_path, name,
                                                         weight):
     """The chain is theta -> U -> (STE quantize) -> surrogate -> yn ->
     power_metric -> term. A power metric that read only recorded D would have a
     zero gradient and train to nothing while looking fine."""
-    install_price_hook(monkeypatch)
     s = full_setup(**{"comfort_weight": 0.0, "du_weight": 0.0,
                       "energy_weight": 0.0, weight: 1.0})
+    install_price(s["cfg"], tmp_path)
     cfg, sysid_cfg, nm, ns = s["cfg"], s["sysid_cfg"], s["nm"], s["norm_stats"]
 
     policy = build_policy(cfg, sysid_cfg, nm, ns)
@@ -200,7 +200,7 @@ def test_every_power_term_reaches_the_policy_parameters(monkeypatch, name,
 # ── The cost reaches the reportcard ──────────────────────────────
 
 
-def test_energy_cost_is_reported_when_a_tariff_exists(monkeypatch):
+def test_energy_cost_is_reported_when_a_tariff_exists(tmp_path):
     from neurotemplate.control.pipeline import evaluate_closed_loop
 
     s = full_setup()
@@ -211,7 +211,7 @@ def test_energy_cost_is_reported_when_a_tariff_exists(monkeypatch):
     before, _ = evaluate_closed_loop(cfg, sysid_cfg, cl, [s["norm_df"]], nm, ns)
     assert before.energy.energy_cost is None
 
-    install_price_hook(monkeypatch)
+    install_price(cfg, tmp_path)
     cl = build_closed_loop(
         s["dyn_node"], build_policy(cfg, sysid_cfg, nm, ns), cfg, sysid_cfg,
     )
@@ -220,10 +220,10 @@ def test_energy_cost_is_reported_when_a_tariff_exists(monkeypatch):
     assert "price" in out
 
 
-def test_price_stays_free_of_gradient_inside_the_loss(monkeypatch):
-    install_price_hook(monkeypatch)
+def test_price_stays_free_of_gradient_inside_the_loss(tmp_path):
     s = full_setup(comfort_weight=0.0, du_weight=0.0, energy_weight=0.0,
                    cost_weight=1.0)
+    install_price(s["cfg"], tmp_path)
     _, out, data = _rolled_out(s)
     assert data["price"].requires_grad is False
 

@@ -301,11 +301,12 @@ def _preview_steps(hooks, cfg,
             raise ValueError(
                 f"preview_config['{key}'] must be a non-negative int, got {steps!r}"
             )
-    if spec.get("price", 0) > 0 and getattr(hooks, "price_signal", None) is None:
+    if spec.get("price", 0) > 0 and cfg.train_price_path is None:
         raise ValueError(
-            "preview_config asks for a price preview but "
-            "control_user_defined.price_signal is not defined, so no tariff "
-            "reaches the rollout. Implement the hook or drop the 'price' key."
+            "preview_config asks for a price preview but train_price_path is "
+            "not set, so no tariff reaches the rollout. Set "
+            "train_price_path/dev_price_path/test_price_path + price_scale, "
+            "or drop the 'price' key."
         )
 
     d_future = max([spec.get(col, 0) for col in nm_mapping["D"]], default=0)
@@ -483,8 +484,8 @@ def build_policy(
     # preview, comfort-band preview and price preview; otherwise fall back to
     # the global cfg.d_preview (disturbances only, nothing else previewed).
     d_future, band_future, price_future = _preview_steps(hooks, cfg, nm_mapping)
-    # The tariff reaches the policy exactly when the use case defines one.
-    reads_price = getattr(hooks, "price_signal", None) is not None
+    # The tariff reaches the policy exactly when a price path is configured.
+    reads_price = cfg.train_price_path is not None
 
     # Flattened window widths (see SystemPreview.get_mapped_data):
     #   yn : past = H_ctrl-1, future = 0                 -> ny * H_ctrl

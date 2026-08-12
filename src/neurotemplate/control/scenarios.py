@@ -15,8 +15,8 @@ A lean control-specific windower. Per window:
     t    : full sec_elapsed (for plots)     [n, W,   1]
     ymin : comfort lower-band signal        [n, W,   n_ctrl]  (normalized)
     ymax : comfort upper-band signal        [n, W,   n_ctrl]
-    price: sampled energy tariff, scaled    [n, W,   1]   (only when the
-           `price_signal` hook exists; see `build_price`)
+    price: sampled energy tariff, scaled    [n, W,   1]   (only when
+           `cfg.train_price_path` is set; see `build_price`)
 
 Both the band and the price are *sampled* per window rather than sliced out of
 the dataframe: they are exogenous signals the dynamics never sees, and their
@@ -29,6 +29,7 @@ nsteps = P, so predicted yn occupies indices [Hmax : Hmax+P].
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import lru_cache
 from typing import Optional
 
 import torch
@@ -36,6 +37,7 @@ from pandas import DataFrame
 
 from neuromancer.dataset import DictDataset
 
+from neurotemplate.common.data_utils import get_data
 from neurotemplate.hooks import load_control_hooks
 
 from neurotemplate._typing import beartype
@@ -63,29 +65,64 @@ def horizons(cfg, sysid_cfg) -> tuple[int, int, int]:
 def price_scale(cfg) -> Optional[float]:
     """The price unit the `price` signal is divided by, or None with no tariff.
 
-    The hook returns the tariff in physical units ($/kWh); everything else in
-    the window dict is normalized, so the dict carries `price / PRICE_SCALE`
-    and the objective multiplies the scale back in when it wants dollars.
+    The price CSVs carry physical units ($/kWh); everything else in the
+    window dict is normalized, so the dict carries `price / price_scale` and
+    the objective multiplies the scale back in when it wants dollars.
     Deliberately a pure scaling with no shift, so a zero price stays a zero
     cost and the cost term stays a per-timestep reweighting of the energy
     gradient rather than a different quantity.
     """
-    hooks = load_control_hooks(cfg)
-    if getattr(hooks, "price_signal", None) is None:
+    if cfg.train_price_path is None:
         return None
-    scale = getattr(hooks, "PRICE_SCALE", None)
+    scale = cfg.price_scale
     if not isinstance(scale, (int, float)) or isinstance(scale, bool) or scale <= 0:
         raise ValueError(
-            "control_user_defined.price_signal is defined but PRICE_SCALE is "
-            f"missing or not a positive number (got {scale!r}). The hook "
-            "returns physical prices; the dict carries price / PRICE_SCALE so "
-            "the policy sees an O(1) input."
+            "train_price_path is set but price_scale is missing or not a "
+            f"positive number (got {scale!r}). Price CSVs carry physical "
+            "$/kWh; the dict carries price / price_scale so the policy sees "
+            "an O(1) input."
         )
     return float(scale)
 
 
+@lru_cache(maxsize=None)
+def _load_price_series(path: str, column: Optional[str],
+                       repeat: int) -> torch.Tensor:
+    """[T, 1] physical price series at the plant's timestep. Cached by path.
+
+    Reuses `get_data`'s CSV/timestamp convention, so a price file follows the
+    same rules as the plant data. `repeat` upsamples a file coarser than the
+    plant's timestep (e.g. hourly price over 5-minute plant data, repeat=12)
+    onto the plant's per-step grid; the file must already be at the plant's
+    resolution or a whole-number multiple coarser than it.
+    """
+    df, _ = get_data(path)
+    cols = [c for c in df.columns if c != "sec_elapsed"]
+    if column is not None:
+        if column not in cols:
+            raise ValueError(
+                f"price_column {column!r} not found in {path}. Columns: {cols}"
+            )
+        col = column
+    elif len(cols) == 1:
+        col = cols[0]
+    else:
+        raise ValueError(
+            f"{path} has more than one non-timestamp column {cols}; set "
+            "price_column to pick one."
+        )
+    series = torch.tensor(df[col].to_numpy(), dtype=torch.float32)
+    if not bool(torch.isfinite(series).all()):
+        raise ValueError(
+            f"{path} contains a non-finite price value. Check for gaps in "
+            "the source series — a NaN here propagates silently into the "
+            "cost term."
+        )
+    return series.repeat_interleave(repeat).unsqueeze(-1)
+
+
 @beartype
-def build_price(cfg, n_samples: int, nsteps: int,
+def build_price(cfg, n_samples: int, nsteps: int, price_path: Optional[str],
                 generator=None) -> Optional[torch.Tensor]:
     """A sampled tariff of shape [n_samples, nsteps, 1], scaled, or None.
 
@@ -94,9 +131,10 @@ def build_price(cfg, n_samples: int, nsteps: int,
     column would be baked into the frozen surrogate's input width, and would
     tell the dynamics model that electricity price drives zone temperature.
 
-    Sampled per window from a real historical series, exactly like the comfort
-    band — not derived from `t`. Two reasons, and the second is the one that
-    matters:
+    Sampled per window from a real historical series (`price_path` — one CSV
+    per split, so the test split can carry price swings the eval should be
+    judged on), exactly like the comfort band — not derived from `t`. Two
+    reasons, and the second is the one that matters:
 
       - `t` is `sec_elapsed`, which counts from the first row of the file
         rather than from midnight, so a t-derived hour-of-day is an unverifiable
@@ -108,7 +146,7 @@ def build_price(cfg, n_samples: int, nsteps: int,
         responsiveness in it at all. Real day-to-day price variation is what
         breaks that degeneracy.
 
-    The use case draws its own window offsets, so price windows are independent
+    The library draws its own window offsets, so price windows are independent
     of the weather windows they are scored beside. That is deliberate: it
     removes the residual price↔weather correlation as a second route to the
     same shortcut, and it decouples the amount of price data needed from the
@@ -119,27 +157,23 @@ def build_price(cfg, n_samples: int, nsteps: int,
     and the baseline are scored against a byte-identical tariff. Price is drawn
     *after* the band so that enabling it leaves band realizations unchanged.
     """
-    hooks = load_control_hooks(cfg)
-    fn = getattr(hooks, "price_signal", None)
-    if fn is None:
+    if price_path is None:
         return None
     scale = price_scale(cfg)
-
-    price = fn(n_samples, nsteps, generator)
-    if tuple(price.shape) != (n_samples, nsteps, 1):
+    assert scale is not None  # price_path set => cfg.train_price_path set => scale checked above
+    series = _load_price_series(price_path, cfg.price_column, cfg.price_repeat)
+    if series.shape[0] < nsteps:
         raise ValueError(
-            f"price_signal must return [{n_samples}, {nsteps}, 1], got "
-            f"{tuple(price.shape)}. One price per timestep, per window."
+            f"{price_path} has {series.shape[0]} steps but a window needs "
+            f"{nsteps}. Use a longer price record or shorten train_pred_steps."
         )
-    if not bool(torch.isfinite(price).all()):
-        raise ValueError(
-            "price_signal returned a non-finite price. Check for gaps in the "
-            "source series — a NaN here propagates silently into the cost term."
-        )
+    starts = torch.randint(0, series.shape[0] - nsteps + 1, (n_samples,),
+                           generator=generator)
+    idx = starts[:, None] + torch.arange(nsteps)[None, :]
     # Negative prices are allowed and mean what they say: a market paying to
     # absorb load. The cost term then correctly wants more of it, which is why
     # a non-zero energy or comfort weight alongside it is not optional.
-    return price / scale
+    return series[idx] / scale
 
 
 def _sliding(df: DataFrame, cols: list[str], steps: int, stride: int,
@@ -168,11 +202,15 @@ def build_window_dict(
     P: int,
     stride: int,
     band: Optional[BandSpec] = None,
+    price_path: Optional[str] = None,
     generator=None,
 ) -> dict:
     """Lean closed-loop window dict for one normalized split.
 
-    `band` defaults to `cfg.train_band()` if not provided.
+    `band` defaults to `cfg.train_band()` and `price_path` to
+    `cfg.train_price_path` if not provided — a caller building dev/test
+    windows passes its own split's path explicitly (see `build_loaders` and
+    `pipeline.evaluate_closed_loop`).
     """
     _, _, hmax = horizons(cfg, sysid_cfg)
     W = hmax + P
@@ -180,6 +218,8 @@ def build_window_dict(
 
     if band is None:
         band = cfg.train_band()
+    if price_path is None:
+        price_path = cfg.train_price_path
 
     Y = _sliding(df, nm_mapping["Y"], W, stride, device)
     U = _sliding(df, nm_mapping["U"], W, stride, device)
@@ -205,7 +245,7 @@ def build_window_dict(
     # SystemPreview.forward, so the tariff is readable in the loss as
     # variable("price") and in `out["price"]` at evaluation time. Drawn after
     # the band, so turning price on does not shift the band realization.
-    price = build_price(cfg, n, W, generator)
+    price = build_price(cfg, n, W, price_path, generator)
     if price is not None:
         out["price"] = price.to(device)
     return out
@@ -221,6 +261,7 @@ def build_window_dict_multi(
     P: int,
     stride: int,
     band: Optional[BandSpec] = None,
+    price_path: Optional[str] = None,
     generator=None,
 ) -> dict:
     """Per-file windows pooled into one dict, with a `source_idx` lookup.
@@ -236,7 +277,7 @@ def build_window_dict_multi(
     parts = [
         build_window_dict(
             df, cfg, sysid_cfg, nm_mapping, norm_stats, P, stride,
-            band=band, generator=generator,
+            band=band, price_path=price_path, generator=generator,
         )
         for df in dfs
     ]
@@ -266,11 +307,11 @@ def build_loaders(
     gen = torch.Generator(device=sysid_cfg.device)
     gen.manual_seed(cfg.seed)
 
-    def loader(dfs, name, shuffle):
+    def loader(dfs, name, shuffle, price_path):
         data = build_window_dict_multi(
             dfs, cfg, sysid_cfg, nm_mapping, norm_stats,
             P=cfg.train_pred_steps, stride=h_ctrl,
-            band=cfg.train_band(), generator=gen,
+            band=cfg.train_band(), price_path=price_path, generator=gen,
         )
         ds = DictDataset(data, name=name)
         return torch.utils.data.DataLoader(
@@ -278,4 +319,5 @@ def build_loaders(
             shuffle=shuffle, generator=gen, drop_last=False,
         )
 
-    return loader(train_dfs, "train", True), loader(dev_dfs, "dev", False)
+    return (loader(train_dfs, "train", True, cfg.train_price_path),
+            loader(dev_dfs, "dev", False, cfg.dev_price_path))

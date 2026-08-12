@@ -171,7 +171,7 @@ def evaluate_closed_loop(
     data = build_window_dict_multi(
         test_dfs, cfg, sysid_cfg, nm_mapping, norm_stats,
         P=eval_pred_steps, stride=cfg.test_stride,
-        band=cfg.test_band(), generator=eval_gen,
+        band=cfg.test_band(), price_path=cfg.test_price_path, generator=eval_gen,
     )
     # source_idx is bookkeeping for plotting only; the closed-loop System
     # doesn't expect it among its inputs.

@@ -44,6 +44,27 @@ class ControlConfig:
     test_data_path: Union[str, list[str]] = ""
     batch_size: int = 256
 
+    # ── Energy tariff (all four required together, or none) ───────
+    # One CSV per split — a timestamp column plus one price column ($/kWh).
+    # Sampled independently of the weather windows (see control.scenarios),
+    # so a price record does not need to span the plant record, and the test
+    # file is where to put the price swings the eval should be judged on.
+    train_price_path: Optional[str] = None
+    dev_price_path: Optional[str] = None
+    test_price_path: Optional[str] = None
+    # Which CSV column carries price. Unset infers the sole non-timestamp
+    # column; set it when a file has more than one.
+    price_column: Optional[str] = None
+    # How many plant timesteps one price-file row spans (12 = hourly price
+    # over 5-minute plant data). 1 = price file is already at the plant's
+    # resolution.
+    price_repeat: int = 1
+    # The tariff arrives in physical units ($/kWh); the dict carries
+    # price / price_scale so the policy sees an O(1) input, and the cost
+    # term multiplies the scale back in. Deliberately a pure scaling with no
+    # shift, so a zero price stays a zero cost.
+    price_scale: Optional[float] = None
+
     # Optional path or dotted module name for the control hooks file.
     # If unset, the library looks for `control_user_defined.py` in CWD.
     user_hooks_path: Optional[str] = None
@@ -163,12 +184,44 @@ class ControlConfig:
         for name in ("train_data_path", "dev_data_path", "test_data_path"):
             _check_paths_field(name, getattr(self, name))
 
+        price_paths = {
+            "train_price_path": self.train_price_path,
+            "dev_price_path": self.dev_price_path,
+            "test_price_path": self.test_price_path,
+        }
+        n_set = sum(v is not None for v in price_paths.values())
+        if 0 < n_set < 3:
+            missing = [k for k, v in price_paths.items() if v is None]
+            raise ValueError(
+                f"train_price_path/dev_price_path/test_price_path must be set "
+                f"together or not at all (missing: {missing}). A tariff is "
+                "sampled per split, so a split with no price file would "
+                "silently see no cost term."
+            )
+        if n_set == 3 and self.price_scale is None:
+            raise ValueError(
+                "A price_*_path is set but price_scale is not. The tariff "
+                "arrives in physical $/kWh; price_scale is required so the "
+                "dict can carry price / price_scale as an O(1) policy input."
+            )
+        if n_set == 0 and self.price_scale is not None:
+            raise ValueError(
+                "price_scale is set but no train_price_path/dev_price_path/"
+                "test_price_path is. Set all three price paths to enable a "
+                "tariff, or unset price_scale."
+            )
+        if self.price_scale is not None and self.price_scale <= 0:
+            raise ValueError(
+                f"price_scale must be positive, got {self.price_scale}"
+            )
+
         for name in [
             "batch_size", "train_pred_steps", "in_steps",
             "log2_policy_hidden", "policy_layers",
             "epochs", "epoch_verbose", "lr",
             "test_window", "test_stride", "band_width_max",
             "train_band_sub_samples", "test_band_sub_samples",
+            "price_repeat",
         ]:
             check_positive(self, name)
 

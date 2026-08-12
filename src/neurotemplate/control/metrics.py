@@ -81,7 +81,7 @@ class EnergyMetrics:
     mean_window_peak: float  # mean of per-window maxima — demand-charge proxy
     # Mean over windows of ∫price·power dt. None when no tariff is defined.
     # Units are price·power·h, and the library converts nothing: a
-    # `power_metric` in Watts against a PRICE_SCALE in $/kWh is off by 1000.
+    # `power_metric` in Watts against a price_scale in $/kWh is off by 1000.
     energy_cost: Optional[float] = None
 
 

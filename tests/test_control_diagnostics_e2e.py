@@ -31,7 +31,7 @@ from neurotemplate.control.pipeline import (
 from neurotemplate.control.policy import build_policy, describe_policy
 from neurotemplate.control.reportcard import render_control_reportcard
 from neurotemplate.control.scenarios import build_loaders, horizons
-from control_fixtures import full_setup, install_price_hook
+from control_fixtures import full_setup, install_price
 import control_user_defined as hooks
 
 
@@ -46,11 +46,11 @@ class _FakeLogger:
         self.dicts[name] = d
 
 
-def _run_diagnostics(monkeypatch=None, **overrides):
+def _run_diagnostics(tmp_path=None, **overrides):
     """The CLI's diagnostic sequence, minus MLflow and argparse."""
-    if monkeypatch is not None:
-        install_price_hook(monkeypatch)
     s = full_setup(**overrides)
+    if tmp_path is not None:
+        install_price(s["cfg"], tmp_path)
     cfg, sysid_cfg, nm, ns = s["cfg"], s["sysid_cfg"], s["nm"], s["norm_stats"]
     _, _, hmax = horizons(cfg, sysid_cfg)
     test_dfs = [s["norm_df"]]
@@ -164,10 +164,10 @@ def test_the_stdout_report_is_printable_before_training():
 # ── Grid response and residual control, through the same sequence ─
 
 
-def test_the_grid_terms_reach_every_diagnostic(monkeypatch):
+def test_the_grid_terms_reach_every_diagnostic(tmp_path):
     """cost and peak show up on the balance report, in the reportcard and in
     the energy section with nothing told about them by name."""
-    d = _run_diagnostics(monkeypatch, energy_weight=1.0, cost_weight=1.0,
+    d = _run_diagnostics(tmp_path, energy_weight=1.0, cost_weight=1.0,
                          peak_weight=1.0)
 
     assert {t.name for t in d["balance"].terms} == {
@@ -183,14 +183,14 @@ def test_the_grid_terms_reach_every_diagnostic(monkeypatch):
     assert d["frac_zero"] is not None
 
 
-def test_a_cost_term_with_no_price_preview_says_so(monkeypatch):
-    d = _run_diagnostics(monkeypatch, energy_weight=1.0, cost_weight=1.0)
+def test_a_cost_term_with_no_price_preview_says_so(tmp_path):
+    d = _run_diagnostics(tmp_path, energy_weight=1.0, cost_weight=1.0)
     assert any("cannot shift load" in n for n in d["notes"])
     assert "cannot shift load" in d["md"]
 
 
-def test_peak_alone_is_flagged_as_raising_energy(monkeypatch):
-    d = _run_diagnostics(monkeypatch, energy_weight=0.0, peak_weight=1.0)
+def test_peak_alone_is_flagged_as_raising_energy(tmp_path):
+    d = _run_diagnostics(tmp_path, energy_weight=0.0, peak_weight=1.0)
     assert any("only power term" in n for n in d["notes"])
 
 

@@ -15,7 +15,7 @@ from neurotemplate.control.pipeline import (
 )
 from neurotemplate.control.policy import build_policy, reference_over_horizon
 from neurotemplate.control.scenarios import build_loaders, horizons
-from control_fixtures import full_setup, install_price_hook
+from control_fixtures import full_setup, install_price
 
 
 def _train(s):
@@ -30,10 +30,10 @@ def _train(s):
     return policy, trained, best_dev
 
 
-def test_a_grid_response_objective_trains(monkeypatch):
-    install_price_hook(monkeypatch)
+def test_a_grid_response_objective_trains(tmp_path):
     s = full_setup(epochs=3, comfort_weight=10.0, du_weight=1.0,
                    energy_weight=0.1, cost_weight=0.1, peak_weight=0.1)
+    install_price(s["cfg"], tmp_path)
     _, trained, best_dev = _train(s)
 
     assert torch.isfinite(torch.tensor(best_dev))
@@ -45,10 +45,10 @@ def test_a_grid_response_objective_trains(monkeypatch):
     assert torch.isfinite(out["U"]).all()
 
 
-def test_a_residual_policy_trains_and_stays_in_its_box(monkeypatch):
-    install_price_hook(monkeypatch)
+def test_a_residual_policy_trains_and_stays_in_its_box(tmp_path):
     s = full_setup(epochs=3, residual_delta=1.0, setpoint_step=0.5,
                    comfort_weight=10.0, cost_weight=0.1)
+    install_price(s["cfg"], tmp_path)
     cfg, sysid_cfg, nm, ns = s["cfg"], s["sysid_cfg"], s["nm"], s["norm_stats"]
     _, _, hmax = horizons(cfg, sysid_cfg)
     _, trained, best_dev = _train(s)

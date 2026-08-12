@@ -22,6 +22,21 @@ test_data_path: data/test.csv
 # Path or dotted module name of the hooks file. Unset = control_user_defined.py in CWD.
 # user_hooks_path: null
 
+# ── ENERGY TARIFF (optional; required together for cost_weight > 0) ──
+# One CSV per split — a timestamp column plus one price column, in $/kWh.
+# Sampled independently of the weather windows, so the test file is where to
+# put whatever price swings you want the eval judged on.
+# train_price_path: null
+# dev_price_path: null
+# test_price_path: null
+# Only needed if a price CSV has more than one non-timestamp column.
+# price_column: null
+# Plant timesteps per price-file row (12 = hourly price over 5-min data).
+# price_repeat: 1
+# $/kWh unit the tariff is divided by so the policy sees an O(1) input.
+# Required (and must be > 0) whenever the three paths above are set.
+# price_scale: null
+
 # ── HORIZON ──────────────────────────────────────────────────────
 # Closed-loop rollout length during training.
 # train_pred_steps: 48
@@ -70,7 +85,7 @@ energy_weight: 0.0
 # all three need power_metric. Both default to off.
 #
 # Load shifting: weights mean_t(price · power), in $/h. Additionally requires
-# the control_user_defined.price_signal hook (plus PRICE_SCALE), which samples
+# the train/dev/test_price_path + price_scale fields above, which sample
 # windows out of a real historical price series. Only solvable if the policy
 # previews the price — see preview_config.
 # cost_weight: 0.0

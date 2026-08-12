@@ -229,11 +229,11 @@ def _power_objectives(cfg, nm_mapping, norm_stats, hmax, yn, u, d) -> list:
         scale = price_scale(cfg)
         if scale is None:
             raise NotImplementedError(
-                "cost_weight > 0 requires control_user_defined.price_signal "
-                "(plus PRICE_SCALE) so a tariff reaches the rollout. Run with "
-                "--set cost_weight=0 until a tariff exists. Falling back to a "
-                "flat price would silently turn the cost term into a rescaled "
-                "energy term."
+                "cost_weight > 0 requires train_price_path/dev_price_path/"
+                "test_price_path + price_scale so a tariff reaches the "
+                "rollout. Run with --set cost_weight=0 until a tariff exists. "
+                "Falling back to a flat price would silently turn the cost "
+                "term into a rescaled energy term."
             )
         # Price is data: no gradient, non-negative. So the cost term is a
         # per-timestep *reweighting* of the energy gradient — it cannot flip

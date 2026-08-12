@@ -21,7 +21,7 @@ from neurotemplate.control.policy import (
     reference_over_horizon,
 )
 from neurotemplate.control.scenarios import build_window_dict, horizons
-from control_fixtures import full_setup, install_price_hook
+from control_fixtures import full_setup, install_price
 
 
 def _rollout(s):
@@ -70,11 +70,11 @@ def test_residual_without_the_hook_fails_fast(monkeypatch):
         build_policy(s["cfg"], s["sysid_cfg"], s["nm"], s["norm_stats"])
 
 
-def test_a_price_preview_does_not_disturb_the_rule(monkeypatch):
+def test_a_price_preview_does_not_disturb_the_rule(tmp_path):
     """The rule keeps comfort and ignores everything else it is handed —
     which is the division of labour the price case is built on."""
-    install_price_hook(monkeypatch)
     s = full_setup(residual_delta=1.0)
+    install_price(s["cfg"], tmp_path)
     policy, out = _rollout(s)
     assert policy.input_keys[-1] == "price"
     assert torch.isfinite(out["U"]).all()

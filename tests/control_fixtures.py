@@ -129,41 +129,44 @@ def _price_series() -> torch.Tensor:
 PRICE_SERIES = _price_series()
 
 
-def sampled_price(n_samples, nsteps, generator=None):
-    """[n_samples, nsteps, 1] $/kWh — random windows out of PRICE_SERIES.
+def flat_price(value, length: int = PRICE_SERIES.shape[0]) -> torch.Tensor:
+    """A constant [length, 1] tariff, for tests that want a hand-computable cost."""
+    return torch.full((length, 1), float(value))
 
-    Offsets are drawn independently of the weather windows, which is the
-    contract `build_price` documents.
+
+def alternating_price(length: int = PRICE_SERIES.shape[0]) -> torch.Tensor:
+    """A [length, 1] tariff that changes every step, so a one-step shift is
+    detectable."""
+    steps = (torch.arange(length, dtype=torch.float32) % 2) * EXPENSIVE + CHEAP
+    return steps[:, None]
+
+
+def _write_price_csv(path, series: torch.Tensor, freq: str = "5min") -> None:
+    """Write a [T, 1] price series to a CSV `get_data` can parse: a timestamp
+    column plus one price column."""
+    idx = pd.date_range("2026-01-01", periods=series.shape[0], freq=freq)
+    pd.DataFrame({"timestamp": idx, "price": series[:, 0].numpy()}).to_csv(
+        path, index=False,
+    )
+
+
+def install_price(cfg, tmp_path, series=PRICE_SERIES, scale=PRICE_SCALE,
+                  repeat=1):
+    """Point `cfg` at a real price CSV — the fixture stand-in for a plant's
+    historical tariff record. The same file is used for all three splits,
+    which is a valid config (nothing requires them to differ).
+
+    Price plumbing is off by default (`train_price_path` unset), which is
+    what keeps every other test a regression guard on "a run without a
+    tariff is unchanged".
     """
-    starts = torch.randint(0, PRICE_SERIES.shape[0] - nsteps + 1, (n_samples,),
-                           generator=generator)
-    idx = starts[:, None] + torch.arange(nsteps)[None, :]
-    return PRICE_SERIES[idx]
-
-
-def flat_price(value):
-    """A constant tariff, for tests that want a hand-computable cost."""
-    def signal(n_samples, nsteps, generator=None):
-        return torch.full((n_samples, nsteps, 1), float(value))
-    return signal
-
-
-def alternating_price(n_samples, nsteps, generator=None):
-    """A tariff that changes every step, so a one-step shift is detectable."""
-    steps = (torch.arange(nsteps, dtype=torch.float32) % 2) * EXPENSIVE + CHEAP
-    return steps.reshape(1, nsteps, 1).repeat(n_samples, 1, 1)
-
-
-def install_price_hook(monkeypatch, signal=sampled_price, scale=PRICE_SCALE):
-    """Give the fixture hooks module a tariff for the duration of one test.
-
-    Price plumbing is off by default (no `price_signal` attribute), which is
-    what keeps every other test a regression guard on "a run without a tariff
-    is unchanged".
-    """
-    import control_user_defined as cud
-    monkeypatch.setattr(cud, "PRICE_SCALE", scale, raising=False)
-    monkeypatch.setattr(cud, "price_signal", signal, raising=False)
+    path = str(tmp_path / "price.csv")
+    _write_price_csv(path, series)
+    cfg.train_price_path = path
+    cfg.dev_price_path = path
+    cfg.test_price_path = path
+    cfg.price_scale = scale
+    cfg.price_repeat = repeat
 
 
 def full_setup(**control_overrides):

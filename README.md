@@ -126,8 +126,9 @@ The library imports each hook by attribute (no defaulting), so every row above e
 | `power_metric(yn, U, D, nm_mapping, norm_stats) -> Tensor` + `POWER_METRIC_IMPLEMENTED: bool` | required only when `energy_weight > 0` | energy / cost / peak objectives + energy reportcard |
 | `reference_control(yn_now, ymin_now, ymax_now, d_now, nm_mapping, norm_stats) -> Tensor` | optional | rule-based baseline **and** the residual policy's anchor |
 | `build_baseline_policy(cfg, sysid_cfg, nm_mapping, norm_stats) -> Node \| None` | optional; mutually exclusive with `reference_control` | escape hatch for a baseline a memoryless rule cannot express |
-| `price_signal(n_samples, nsteps, generator) -> Tensor` + `PRICE_SCALE: float` | required only when `cost_weight > 0` | the energy tariff in the rollout, the cost objective, `energy_cost` |
 | `preview_config(nm_mapping) -> {signal: n_steps}` | optional | per-column disturbance, comfort-band and price preview widths |
+
+The energy tariff is config, not a hook: `train_price_path` / `dev_price_path` / `test_price_path` (one CSV per split) + `price_scale` in `control.yaml`, required together only when `cost_weight > 0`.
 
 `power_metric` returns whatever units the use case meters; the library never converts, so the reportcard labels energy as `power·h`. Metered channels the surrogate already predicts are the best thing to return, because the energy numbers then mean something outside the run. An actuation proxy such as `(setpoint - ambient)²` is a fine alternative when nothing meters power — just read the energy section as relative rather than physical. What has actually cost campaigns here is the term's *scale*, not its shape: a proxy carried over from another dataset came out at 1.7× the entire comfort objective while every pooled metric looked fine. The objective-balance report and the shape sweep both print before training so that magnitude is on screen from the start.
 
@@ -135,11 +136,11 @@ If `reference_control` is defined, `nt control train` rolls that rule out on the
 
 The same hook is what `residual_delta` anchors to. Set it and the policy commands `reference_control(...) + δ` with `|δ| ≤ residual_delta` instead of commanding a setpoint outright: the rule keeps comfort, δ answers whatever else is being optimised, and the ±Δ box is a trust region on surrogate error rather than a claim about the network. The reportcard reports the box and the fraction of steps δ spent pinned at it — a cap that binds most of the time means either the rule is wrong for this plant or the optimizer is riding a surrogate artifact into the wall. Note Δ bounds the *action*, not the outcome: the commanded setpoint stays within Δ of the rule's, the zone temperature does not, because the plant is in between.
 
-`price_signal` is the switch for price-driven control. It returns one `[n_samples, nsteps, 1]` window of tariff per rollout, in physical units ($/kWh); the library divides by `PRICE_SCALE` so the policy sees an O(1) input and multiplies it back to report dollars. Price rides in the rollout dict rather than as a D column: a D column would need the frozen surrogate retrained, and would tell the dynamics model that electricity price drives zone temperature.
+`train_price_path`/`dev_price_path`/`test_price_path` are the switch for price-driven control — set all three (one CSV per split: a timestamp column plus one price column, in physical $/kWh) plus `price_scale`, and the library divides by `price_scale` so the policy sees an O(1) input and multiplies it back to report dollars. Price rides in the rollout dict rather than as a D column: a D column would need the frozen surrogate retrained, and would tell the dynamics model that electricity price drives zone temperature.
 
-**Sample it from a real historical series, and do not derive it from the clock.** A tariff that is a deterministic function of hour-of-day is one the policy can learn *as* hour-of-day — D is strongly clock-correlated, so "read the price" and "read the time" collapse into the same task and you get a convincing load-shifting trace with no price responsiveness in it. Real day-to-day variation is what forces the policy to read the channel. (`t` would not help anyway: `sec_elapsed` counts from the first row of the file, not from midnight.) The template shows the shape, using PG&E Hourly Flex Pricing.
+**Point it at a real historical series, and do not derive it from the clock.** A tariff that is a deterministic function of hour-of-day is one the policy can learn *as* hour-of-day — D is strongly clock-correlated, so "read the price" and "read the time" collapse into the same task and you get a convincing load-shifting trace with no price responsiveness in it. Real day-to-day variation is what forces the policy to read the channel. (`t` would not help anyway: `sec_elapsed` counts from the first row of the file, not from midnight.) A per-split file also means the test file is where to put whatever price swings you want the eval judged on.
 
-The hook draws its own window offsets, so price windows are deliberately independent of the weather windows they are scored beside — that removes the residual price↔weather correlation as a second route to the same shortcut, and it means the price record need not span the plant record. Reproducibility rides on the `generator` the hook is handed: `evaluate_closed_loop` reseeds it from `EVAL_BAND_SEED`, so the learned policy and the baseline are scored against a byte-identical tariff. Price is drawn after the band, so enabling it leaves band realizations unchanged.
+The library draws its own window offsets out of each split's file, so price windows are deliberately independent of the weather windows they are scored beside — that removes the residual price↔weather correlation as a second route to the same shortcut, and it means the price record need not span the plant record. Reproducibility rides on the `generator` `build_price` is handed: `evaluate_closed_loop` reseeds it from `EVAL_BAND_SEED`, so the learned policy and the baseline are scored against a byte-identical tariff. Price is drawn after the band, so enabling it leaves band realizations unchanged.
 
 `cost_weight` then weights `mean_t(price · power)`, and `peak_weight` weights the per-window power mean `M_q(power)` — all three power terms are reductions of one shared signal. Neither is solvable at the default `train_pred_steps: 48`; expect 144–288 steps, and expect `cost_weight` to need a price preview (`preview_config()["price"]`) before it can shift load rather than merely react to it.
 
@@ -201,13 +202,16 @@ To turn on price-driven control:
 
 1. **Implement `power_metric` and set `POWER_METRIC_IMPLEMENTED = True`.**
    Nothing else here works without it.
-2. **Get a real price series.** Sample: `grid_response.ipynb` in Neuromancer's
+2. **Get a real price series, as a CSV per split** (timestamp + one price
+   column in $/kWh). Sample: `grid_response.ipynb` in Neuromancer's
    `examples/domain_examples/` downloads PG&E Hourly Flex Pricing from
    `https://raw.githubusercontent.com/EladMichael/small_example_datasets/main/hourly-flex-prices-historical-sample.xlsx`.
-   Upsample it to your data's timestep (`repeat_interleave`).
-3. **Implement `price_signal(n_samples, nsteps, generator)`** to slice random
-   windows out of it, returning `[n_samples, nsteps, 1]` in $/kWh, plus
-   `PRICE_SCALE`. The template has the whole function in comments.
+   Convert it to CSV; no need to upsample it yourself.
+3. **Set `train_price_path`/`dev_price_path`/`test_price_path` + `price_scale`
+   in control.yaml**, and `price_repeat` if the file is coarser than your
+   plant data's timestep (12 for hourly price over 5-minute data — the
+   library upsamples it, so it needs a whole-number ratio, not the finer
+   resolution itself).
    *Do not build a time-of-use table keyed on hour-of-day* — see the hook
    contract above for why the policy will learn the clock instead of the price.
 4. **Give the policy a price preview**, or the cost term is not solvable:
