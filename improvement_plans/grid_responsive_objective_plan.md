@@ -12,7 +12,7 @@ All six phases landed. Commits, oldest first:
 | `bdd6ad2` | 4 — `EnergyMetrics.energy_cost`, the MLflow keys, the baseline cost column |
 | `c2dee7a` | 5 — `effort_weight` → `energy_weight` |
 | `bc2ceeb` | integration: a training run with all three power terms weighted |
-| `468b9f1` | price re-sourced: sampled from a real historical series, not derived from `t` |
+| `03530e2` | price re-sourced: sampled from a real historical series, not derived from `t` |
 
 Phases 2 and 3 shipped together: the shared power variable is the same edit
 for both terms, and splitting it would have meant writing `_power_objectives`
