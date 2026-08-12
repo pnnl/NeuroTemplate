@@ -36,7 +36,7 @@ def test_preview_steps_reads_hook_and_takes_max_d():
 
 def test_preview_steps_reads_price_when_a_tariff_exists():
     hooks = SimpleNamespace(preview_config=lambda nm: {"price": 4},
-                            price_signal=lambda t: t)
+                            price_signal=lambda n, w, g=None: None)
     cfg = SimpleNamespace(d_preview=0)
     assert _preview_steps(hooks, cfg, _NM) == (0, 0, 4)
 

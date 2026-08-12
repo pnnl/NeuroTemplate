@@ -103,22 +103,58 @@ def make_frozen_dynamics(sysid_cfg: Config, nm_mapping: dict):
     return dyn_sys, dyn_sys.nodes[0]
 
 
-# Tariff used by the price/cost/peak tests. Cheap for the first half of each
-# day, expensive for the second — coarse on purpose, so a hand-computed cost
-# is easy to check and a one-step shift is visible.
+# Tariff used by the price/cost/peak tests. A stand-in for a real historical
+# record: an evening peak whose height varies day to day, so a window's price
+# is NOT a function of its position in the day alone — which is the property
+# that stops a policy from learning the clock instead of the price.
 PRICE_SCALE = 0.30
 CHEAP, EXPENSIVE = 0.12, 0.48
+PRICE_STEPS_PER_HOUR = 12
+PRICE_DAYS = 30
 
 
-def tou_price(t):
-    """[n, W, 1] scaled tariff, from the same `t` the window dict carries."""
-    hour = (t / 3600.0) % 24.0
-    dollars = torch.where(hour < 12.0, torch.full_like(t, CHEAP),
-                          torch.full_like(t, EXPENSIVE))
-    return dollars / PRICE_SCALE
+def _price_series() -> torch.Tensor:
+    """[T, 1] deterministic $/kWh series, upsampled to a 5-minute grid."""
+    hours = torch.arange(PRICE_DAYS * 24, dtype=torch.float32)
+    on_peak = ((hours % 24) >= 16) & ((hours % 24) < 21)
+    # Peak height cycles across days with an irrational-ish period, so no two
+    # consecutive days share a price profile.
+    height = CHEAP + (EXPENSIVE - CHEAP) * (
+        0.5 + 0.5 * torch.cos(hours // 24 * 1.1)
+    )
+    dollars = torch.where(on_peak, height, torch.full_like(hours, CHEAP))
+    return dollars.repeat_interleave(PRICE_STEPS_PER_HOUR)[:, None]
 
 
-def install_price_hook(monkeypatch, signal=tou_price, scale=PRICE_SCALE):
+PRICE_SERIES = _price_series()
+
+
+def sampled_price(n_samples, nsteps, generator=None):
+    """[n_samples, nsteps, 1] $/kWh — random windows out of PRICE_SERIES.
+
+    Offsets are drawn independently of the weather windows, which is the
+    contract `build_price` documents.
+    """
+    starts = torch.randint(0, PRICE_SERIES.shape[0] - nsteps + 1, (n_samples,),
+                           generator=generator)
+    idx = starts[:, None] + torch.arange(nsteps)[None, :]
+    return PRICE_SERIES[idx]
+
+
+def flat_price(value):
+    """A constant tariff, for tests that want a hand-computable cost."""
+    def signal(n_samples, nsteps, generator=None):
+        return torch.full((n_samples, nsteps, 1), float(value))
+    return signal
+
+
+def alternating_price(n_samples, nsteps, generator=None):
+    """A tariff that changes every step, so a one-step shift is detectable."""
+    steps = (torch.arange(nsteps, dtype=torch.float32) % 2) * EXPENSIVE + CHEAP
+    return steps.reshape(1, nsteps, 1).repeat(n_samples, 1, 1)
+
+
+def install_price_hook(monkeypatch, signal=sampled_price, scale=PRICE_SCALE):
     """Give the fixture hooks module a tariff for the duration of one test.
 
     Price plumbing is off by default (no `price_signal` attribute), which is

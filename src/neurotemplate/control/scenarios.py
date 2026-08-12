@@ -15,8 +15,12 @@ A lean control-specific windower. Per window:
     t    : full sec_elapsed (for plots)     [n, W,   1]
     ymin : comfort lower-band signal        [n, W,   n_ctrl]  (normalized)
     ymax : comfort upper-band signal        [n, W,   n_ctrl]
-    price: energy tariff, scaled            [n, W,   1]   (only when the
+    price: sampled energy tariff, scaled    [n, W,   1]   (only when the
            `price_signal` hook exists; see `build_price`)
+
+Both the band and the price are *sampled* per window rather than sliced out of
+the dataframe: they are exogenous signals the dynamics never sees, and their
+windows are deliberately independent of the weather windows.
 
 The closed-loop System rolls out with start_iter = Hmax - 1 and an explicit
 nsteps = P, so predicted yn occupies indices [Hmax : Hmax+P].
@@ -57,15 +61,14 @@ def horizons(cfg, sysid_cfg) -> tuple[int, int, int]:
 
 @beartype
 def price_scale(cfg) -> Optional[float]:
-    """The $/kWh the `price` signal is divided by, or None with no tariff hook.
+    """The price unit the `price` signal is divided by, or None with no tariff.
 
-    Price is exogenous data the policy and the objective read and the dynamics
-    never sees, so it travels in the window dict rather than as a D column.
-    Everything else in that dict is normalized, so the tariff is too: the dict
-    carries `price / PRICE_SCALE` and the cost term multiplies the scale back
-    in when it wants dollars. Deliberately a pure scaling with no shift — a
-    zero price must stay a zero cost, and a non-negative price is what keeps
-    the cost gradient's sign equal to the energy gradient's.
+    The hook returns the tariff in physical units ($/kWh); everything else in
+    the window dict is normalized, so the dict carries `price / PRICE_SCALE`
+    and the objective multiplies the scale back in when it wants dollars.
+    Deliberately a pure scaling with no shift, so a zero price stays a zero
+    cost and the cost term stays a per-timestep reweighting of the energy
+    gradient rather than a different quantity.
     """
     hooks = load_control_hooks(cfg)
     if getattr(hooks, "price_signal", None) is None:
@@ -74,41 +77,69 @@ def price_scale(cfg) -> Optional[float]:
     if not isinstance(scale, (int, float)) or isinstance(scale, bool) or scale <= 0:
         raise ValueError(
             "control_user_defined.price_signal is defined but PRICE_SCALE is "
-            f"missing or not a positive number (got {scale!r}). The window "
-            "dict carries price / PRICE_SCALE; the cost term multiplies it "
-            "back in to report dollars."
+            f"missing or not a positive number (got {scale!r}). The hook "
+            "returns physical prices; the dict carries price / PRICE_SCALE so "
+            "the policy sees an O(1) input."
         )
     return float(scale)
 
 
 @beartype
-def build_price(cfg, t: torch.Tensor) -> Optional[torch.Tensor]:
-    """The scaled tariff aligned to `t`, or None when no `price_signal` hook.
+def build_price(cfg, n_samples: int, nsteps: int,
+                generator=None) -> Optional[torch.Tensor]:
+    """A sampled tariff of shape [n_samples, nsteps, 1], scaled, or None.
 
-    Deriving the price from the window's own timestamps rather than sampling
-    it per window is what makes alignment un-gettable-wrong: the price at
-    index i is by construction the price at the timestamp of `yn[i]`, across
-    multi-file pooling and across the learned/baseline evaluations alike.
+    Price is exogenous data the policy and the objective read and the dynamics
+    never sees, so it travels in the window dict rather than as a D column: a D
+    column would be baked into the frozen surrogate's input width, and would
+    tell the dynamics model that electricity price drives zone temperature.
+
+    Sampled per window from a real historical series, exactly like the comfort
+    band — not derived from `t`. Two reasons, and the second is the one that
+    matters:
+
+      - `t` is `sec_elapsed`, which counts from the first row of the file
+        rather than from midnight, so a t-derived hour-of-day is an unverifiable
+        per-file assumption.
+      - A tariff that is a deterministic function of the clock is a tariff the
+        policy can learn *as* the clock. D is strongly hour-of-day correlated,
+        so "read the price" and "read the time" become the same task and the
+        policy posts a convincing load-shifting trace with no price
+        responsiveness in it at all. Real day-to-day price variation is what
+        breaks that degeneracy.
+
+    The use case draws its own window offsets, so price windows are independent
+    of the weather windows they are scored beside. That is deliberate: it
+    removes the residual price↔weather correlation as a second route to the
+    same shortcut, and it decouples the amount of price data needed from the
+    length of the plant record.
+
+    Reproducibility comes from the same `generator` discipline the band uses:
+    `evaluate_closed_loop` reseeds from EVAL_BAND_SEED, so the learned policy
+    and the baseline are scored against a byte-identical tariff. Price is drawn
+    *after* the band so that enabling it leaves band realizations unchanged.
     """
     hooks = load_control_hooks(cfg)
     fn = getattr(hooks, "price_signal", None)
     if fn is None:
         return None
-    price_scale(cfg)  # validate PRICE_SCALE while we are here
+    scale = price_scale(cfg)
 
-    price = fn(t)
-    if price.shape != t.shape:
+    price = fn(n_samples, nsteps, generator)
+    if tuple(price.shape) != (n_samples, nsteps, 1):
         raise ValueError(
-            f"price_signal must return the shape of t {tuple(t.shape)}, got "
+            f"price_signal must return [{n_samples}, {nsteps}, 1], got "
             f"{tuple(price.shape)}. One price per timestep, per window."
         )
-    if bool((price < 0).any()):
+    if not bool(torch.isfinite(price).all()):
         raise ValueError(
-            "price_signal returned a negative price. A negative tariff flips "
-            "the sign of the cost gradient, so the cost term would pay the "
-            "policy to burn energy. Clamp or rescale in the hook."
+            "price_signal returned a non-finite price. Check for gaps in the "
+            "source series — a NaN here propagates silently into the cost term."
         )
-    return price
+    # Negative prices are allowed and mean what they say: a market paying to
+    # absorb load. The cost term then correctly wants more of it, which is why
+    # a non-zero energy or comfort weight alongside it is not optional.
+    return price / scale
 
 
 def _sliding(df: DataFrame, cols: list[str], steps: int, stride: int,
@@ -172,8 +203,9 @@ def build_window_dict(
 
     # An extra key the rollout does not write passes straight through
     # SystemPreview.forward, so the tariff is readable in the loss as
-    # variable("price") and in `out["price"]` at evaluation time.
-    price = build_price(cfg, t)
+    # variable("price") and in `out["price"]` at evaluation time. Drawn after
+    # the band, so turning price on does not shift the band realization.
+    price = build_price(cfg, n, W, generator)
     if price is not None:
         out["price"] = price.to(device)
     return out

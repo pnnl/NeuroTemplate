@@ -70,8 +70,9 @@ energy_weight: 0.0
 # all three need power_metric. Both default to off.
 #
 # Load shifting: weights mean_t(price · power), in $/h. Additionally requires
-# the control_user_defined.price_signal hook (plus PRICE_SCALE), and it is
-# only solvable if the policy previews the price — see preview_config.
+# the control_user_defined.price_signal hook (plus PRICE_SCALE), which samples
+# windows out of a real historical price series. Only solvable if the policy
+# previews the price — see preview_config.
 # cost_weight: 0.0
 # Peak shaving: weights the per-window power mean M_q, averaged over the
 # batch. Same units as energy, so the two weights are directly comparable.

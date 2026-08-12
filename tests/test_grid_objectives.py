@@ -17,7 +17,13 @@ from neurotemplate.control.closed_loop import (
 )
 from neurotemplate.control.policy import build_policy
 from neurotemplate.control.scenarios import build_window_dict, horizons
-from control_fixtures import PRICE_SCALE, full_setup, install_price_hook
+from control_fixtures import (
+    PRICE_SCALE,
+    alternating_price,
+    flat_price,
+    full_setup,
+    install_price_hook,
+)
 
 
 def _rolled_out(s, **kw):
@@ -65,7 +71,7 @@ def test_cost_is_the_price_weighted_mean_power(monkeypatch):
 
 
 def test_a_zero_price_is_a_zero_cost(monkeypatch):
-    install_price_hook(monkeypatch, signal=lambda t: torch.zeros_like(t))
+    install_price_hook(monkeypatch, signal=flat_price(0.0))
     s = full_setup(comfort_weight=0.0, du_weight=0.0, energy_weight=0.0,
                    cost_weight=1.0)
     _, out, data = _rolled_out(s)
@@ -76,9 +82,9 @@ def test_a_zero_price_is_a_zero_cost(monkeypatch):
 def test_shifting_the_tariff_changes_the_cost(monkeypatch):
     """The cheap guard on price/power co-indexing: if the cost were reading a
     mis-aligned slice, rolling the tariff by a step would not move it. The
-    tariff has to alternate per step for this to bite — a test window is half
-    an hour long, so a time-of-use table is constant across it."""
-    install_price_hook(monkeypatch, signal=lambda t: (t / 300.0) % 2.0)
+    tariff has to alternate per step for this to bite — a test window is under
+    an hour long, so a realistic series is nearly constant across it."""
+    install_price_hook(monkeypatch, signal=alternating_price)
     s = full_setup(comfort_weight=0.0, du_weight=0.0, energy_weight=0.0,
                    cost_weight=1.0)
     _, out, data = _rolled_out(s)

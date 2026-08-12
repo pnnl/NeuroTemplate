@@ -12,6 +12,7 @@ All six phases landed. Commits, oldest first:
 | `bdd6ad2` | 4 — `EnergyMetrics.energy_cost`, the MLflow keys, the baseline cost column |
 | `c2dee7a` | 5 — `effort_weight` → `energy_weight` |
 | `bc2ceeb` | integration: a training run with all three power terms weighted |
+| `468b9f1` | price re-sourced: sampled from a real historical series, not derived from `t` |
 
 Phases 2 and 3 shipped together: the shared power variable is the same edit
 for both terms, and splitting it would have meant writing `_power_objectives`
@@ -19,15 +20,52 @@ twice. Everything else went as planned.
 
 ### Eight decisions that changed under implementation
 
-**1. `t` is not POSIX seconds, and hour-of-day is not free.** The plan's whole
-alignment argument rests on deriving price from `t`. That argument survives —
-but `sec_elapsed` counts from the *first row of the file*
+**1. The `t`-derived tariff was wrong, and got replaced.** This is the plan's
+one substantive error, and it took two forms.
+
+The visible one: `sec_elapsed` counts from the *first row of the file*
 (`data_utils._engineer_features`), not from midnight, so `(t / 3600) % 24` is
-hour-of-day only if the file starts there. The template hook says so in
-capitals and offers the two honest fixes (add your data's offset, or read a
-`price` column). What the plan claimed does hold: the price at index `i` is by
-construction the price at the timestamp of `yn[i]`, across multi-file pooling
-and byte-identically between the learned and baseline evaluations.
+hour-of-day only if the file starts there. That was survivable — document the
+offset and move on — and it is what shipped first.
+
+The real one, which the plan never considered: **a tariff that is a
+deterministic function of the clock is a tariff the policy can learn *as* the
+clock.** D is strongly hour-of-day correlated, so "read the price" and "read
+the time" become the same task; the policy posts a convincing load-shifting
+trace with no price responsiveness in it, and falls over the moment the tariff
+changes — which is the one thing about a tariff that does change. This is
+exactly the shortcut the [control transform plan](control_transform_plan.md)
+documents for setpoint schedules, reintroduced in a new place by a plan that
+cites it.
+
+The fix reverses the plan's Part 1 recommendation: **price is sampled per
+window from a real historical series, exactly like the comfort band.** The
+hook is now
+`price_signal(n_samples, nsteps, generator) -> [n, W, 1]` returning *physical*
+$/kWh, with the library owning the `/ PRICE_SCALE` normalization — one clear
+contract instead of asking the hook to pre-divide. The template shows it over
+PG&E Hourly Flex Pricing (`grid_response.ipynb` hosts a sample), upsampled
+hourly→5-minute and sliced at drawn offsets.
+
+Three consequences worth recording:
+
+- **Window offsets are drawn independently of the weather windows**, which is
+  deliberate: it removes the residual price↔weather correlation as a second
+  route to the same shortcut, and it decouples how much price data is needed
+  from the length of the plant record. The notebook makes the same choice.
+- **Reproducibility moves from "free" to "seeded".** The plan's argument that a
+  `t`-derived price needs no seed discipline was true and is now moot: price
+  rides the same `generator` the band does, `evaluate_closed_loop` reseeds from
+  `EVAL_BAND_SEED`, and the learned/baseline comparison stays byte-identical.
+  Price is drawn *after* the band so enabling it does not re-roll every band.
+- **Negative prices are allowed.** The first implementation rejected them to
+  protect the cost gradient's sign. With real market data a negative price
+  means what it says — a market paying to absorb load — and a cost term that
+  then wants more load is correct. Only non-finite values are rejected, since a
+  gap in the source series would propagate silently.
+
+The real prices also make `energy_cost` a real bill rather than an index, which
+is what the baseline comparison column was for.
 
 **2. `frac_power_clamped` is not observable; `frac_power_zero` is.** The clamp
 lives *inside* `power_metric`, so the library never sees the pre-clamp value
@@ -201,6 +239,13 @@ price ----------- NEW: tariff, full W ------------------------
 ```
 
 ### Derive it from `t`, not from a per-window sample
+
+> **Superseded — see the status block above.** This section is the plan's one
+> substantive error, kept here because the argument it makes is the one that
+> had to be answered. `t`-derived alignment is real, but it buys that property
+> by making the tariff a function of the clock, which the policy can learn
+> instead of the price. Price is now sampled per window from a real historical
+> series, with drawn offsets and the same seed discipline as the band.
 
 The comfort band is *sampled* — it is a synthetic scenario, so it needs a `torch.Generator`
 and a fixed `EVAL_BAND_SEED` to stay reproducible. A tariff is not synthetic: it is a real
