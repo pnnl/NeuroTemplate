@@ -63,7 +63,7 @@ def _run_diagnostics(**overrides):
     out = run_objective_pass(problem, next(iter(train_loader)))
     balance = objective_balance(loss, out)
     term = power_term(cfg, nm, ns)
-    shapes = [] if (term is None or cfg.effort_weight == 0) else term_shapes(
+    shapes = [] if (term is None or cfg.energy_weight == 0) else term_shapes(
         term, out, hmax, nm["U"], *u_bounds, ns,
     )
 
@@ -79,7 +79,7 @@ def _run_diagnostics(**overrides):
 
 
 def test_every_diagnostic_section_reaches_the_reportcard():
-    d = _run_diagnostics(effort_weight=1.0)
+    d = _run_diagnostics(energy_weight=1.0)
 
     for title in (
                   "## Objective balance",
@@ -89,7 +89,7 @@ def test_every_diagnostic_section_reaches_the_reportcard():
 
 
 def test_the_diagnostics_describe_the_run_they_were_measured_on():
-    d = _run_diagnostics(effort_weight=1.0)
+    d = _run_diagnostics(energy_weight=1.0)
     (u_col,) = d["u_cols"]
 
     assert [m.name for m in d["results"].actuation] == [u_col]
@@ -98,7 +98,7 @@ def test_the_diagnostics_describe_the_run_they_were_measured_on():
 
     # And the balance must cover exactly the terms the loss actually built.
     assert {t.name for t in d["balance"].terms} == {
-        "comfort_lower_loss", "comfort_upper_loss", "du_loss", "effort_loss",
+        "comfort_lower_loss", "comfort_upper_loss", "du_loss", "energy_loss",
     }
     assert [s.u_name for s in d["shapes"]] == [u_col]
 
@@ -123,7 +123,7 @@ def test_a_constant_evaluation_band_says_so_rather_than_failing():
 def test_everything_logged_is_json_serializable():
     import json
 
-    d = _run_diagnostics(effort_weight=1.0)
+    d = _run_diagnostics(energy_weight=1.0)
     logger = _FakeLogger()
     log_control_results(logger, d["results"])
     logger.log_dict(objective_to_dict(d["balance"], d["shapes"]),
@@ -138,9 +138,9 @@ def test_everything_logged_is_json_serializable():
 
 
 def test_the_stdout_report_is_printable_before_training():
-    d = _run_diagnostics(effort_weight=1.0)
+    d = _run_diagnostics(energy_weight=1.0)
     text = format_objective_report(d["balance"], d["shapes"])
-    for term in ("comfort_lower_loss", "du_loss", "effort_loss"):
+    for term in ("comfort_lower_loss", "du_loss", "energy_loss"):
         assert term in text
 
 

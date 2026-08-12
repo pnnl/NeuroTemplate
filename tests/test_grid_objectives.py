@@ -51,7 +51,7 @@ def _power_of(s, out):
 
 def test_cost_is_the_price_weighted_mean_power(monkeypatch):
     install_price_hook(monkeypatch)
-    s = full_setup(comfort_weight=0.0, du_weight=0.0, effort_weight=0.0,
+    s = full_setup(comfort_weight=0.0, du_weight=0.0, energy_weight=0.0,
                    cost_weight=1.0)
     _, _, hmax = horizons(s["cfg"], s["sysid_cfg"])
     _, out, data = _rolled_out(s)
@@ -66,7 +66,7 @@ def test_cost_is_the_price_weighted_mean_power(monkeypatch):
 
 def test_a_zero_price_is_a_zero_cost(monkeypatch):
     install_price_hook(monkeypatch, signal=lambda t: torch.zeros_like(t))
-    s = full_setup(comfort_weight=0.0, du_weight=0.0, effort_weight=0.0,
+    s = full_setup(comfort_weight=0.0, du_weight=0.0, energy_weight=0.0,
                    cost_weight=1.0)
     _, out, data = _rolled_out(s)
     loss = build_control_loss(s["cfg"], s["sysid_cfg"], s["nm"], s["norm_stats"])
@@ -79,7 +79,7 @@ def test_shifting_the_tariff_changes_the_cost(monkeypatch):
     tariff has to alternate per step for this to bite — a test window is half
     an hour long, so a time-of-use table is constant across it."""
     install_price_hook(monkeypatch, signal=lambda t: (t / 300.0) % 2.0)
-    s = full_setup(comfort_weight=0.0, du_weight=0.0, effort_weight=0.0,
+    s = full_setup(comfort_weight=0.0, du_weight=0.0, energy_weight=0.0,
                    cost_weight=1.0)
     _, out, data = _rolled_out(s)
     loss = build_control_loss(s["cfg"], s["sysid_cfg"], s["nm"], s["norm_stats"])
@@ -146,7 +146,7 @@ def test_negative_power_cannot_read_as_a_peak():
 
 
 def test_peak_objective_builds_and_matches_the_helper():
-    s = full_setup(comfort_weight=0.0, du_weight=0.0, effort_weight=0.0,
+    s = full_setup(comfort_weight=0.0, du_weight=0.0, energy_weight=0.0,
                    peak_weight=1.0, peak_q=4.0)
     _, out, _ = _rolled_out(s)
     loss = build_control_loss(s["cfg"], s["sysid_cfg"], s["nm"], s["norm_stats"])
@@ -161,7 +161,7 @@ def test_peak_objective_builds_and_matches_the_helper():
 
 @pytest.mark.parametrize(
     "name, weight",
-    [("effort_loss", "effort_weight"),
+    [("energy_loss", "energy_weight"),
      ("cost_loss", "cost_weight"),
      ("peak_loss", "peak_weight")],
 )
@@ -172,7 +172,7 @@ def test_every_power_term_reaches_the_policy_parameters(monkeypatch, name,
     zero gradient and train to nothing while looking fine."""
     install_price_hook(monkeypatch)
     s = full_setup(**{"comfort_weight": 0.0, "du_weight": 0.0,
-                      "effort_weight": 0.0, weight: 1.0})
+                      "energy_weight": 0.0, weight: 1.0})
     cfg, sysid_cfg, nm, ns = s["cfg"], s["sysid_cfg"], s["nm"], s["norm_stats"]
 
     policy = build_policy(cfg, sysid_cfg, nm, ns)
@@ -216,7 +216,7 @@ def test_energy_cost_is_reported_when_a_tariff_exists(monkeypatch):
 
 def test_price_stays_free_of_gradient_inside_the_loss(monkeypatch):
     install_price_hook(monkeypatch)
-    s = full_setup(comfort_weight=0.0, du_weight=0.0, effort_weight=0.0,
+    s = full_setup(comfort_weight=0.0, du_weight=0.0, energy_weight=0.0,
                    cost_weight=1.0)
     _, out, data = _rolled_out(s)
     assert data["price"].requires_grad is False

@@ -2,7 +2,7 @@
 Control hooks — the glue between the DPC machinery and *your* plant.
 
 These answer: which states are held inside a reference band, what that band
-looks like, what the actuator limits are, and (optionally) what "effort"
+looks like, what the actuator limits are, and (optionally) what energy
 costs. The Y/U/D roles and the normalization come from the frozen sys-id run,
 so nothing here re-derives them.
 
@@ -171,11 +171,11 @@ def plot_context_channels(nm_mapping: dict[str, list[str]]) -> list[str]:
 
 
 # ---------------------------------------------------------------------
-# Required when `effort_weight > 0`: the quantity the effort term minimizes
+# Required when a power term is weighted: the signal they all reduce
 # ---------------------------------------------------------------------
 # Set to True once `power_metric` below is implemented. The library checks
-# this flag at problem-build time and fails fast if effort_weight > 0 while
-# it is False, so `effort_weight` must stay 0.0 in your YAML until then.
+# this flag at problem-build time and fails fast if energy_weight > 0 while
+# it is False, so `energy_weight` must stay 0.0 in your YAML until then.
 #
 # Failing fast is the point. The tempting alternative — quietly falling back
 # to an actuation proxy when the surrogate meters no power — substitutes a
@@ -225,13 +225,13 @@ def power_metric(
     runs. Before training, the library prints each term's value and share of
     the objective, and sweeps this term across each actuation box so its
     magnitude and shape are both on screen. Compare them and set
-    `effort_weight` from what you see.
+    `energy_weight` from what you see.
 
-    If you would rather not weight an effort term at all, leave this
-    unimplemented and keep `effort_weight: 0.0`.
+    If you would rather not weight a power term at all, leave this
+    unimplemented and keep `energy_weight: 0.0`.
     """
     raise NotImplementedError(
-        "power_metric is not implemented. Keep effort_weight: 0.0 in the "
+        "power_metric is not implemented. Keep energy_weight: 0.0 in the "
         "control config, or implement this and set "
         "POWER_METRIC_IMPLEMENTED = True."
     )

@@ -35,7 +35,7 @@ def test_closed_loop_rollout_shapes():
 
 
 def test_gradients_only_reach_policy():
-    s = full_setup(comfort_weight=10.0, du_weight=0.0, effort_weight=0.0)
+    s = full_setup(comfort_weight=10.0, du_weight=0.0, energy_weight=0.0)
     cfg, sysid_cfg, nm = s["cfg"], s["sysid_cfg"], s["nm"]
 
     policy = build_policy(cfg, sysid_cfg, nm, s["norm_stats"])

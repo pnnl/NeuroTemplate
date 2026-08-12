@@ -16,7 +16,7 @@ band_hi: 26.0
 band_width_min: 0.5
 band_width_max: 2.0
 
-effort_weight: 0.0
+energy_weight: 0.0
 
 policy: mlp
 log2_policy_hidden: 3

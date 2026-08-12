@@ -49,7 +49,7 @@ def _problem(**overrides):
 
 def test_balance_covers_every_term_and_sums_to_the_total():
     problem, loss, batch, _ = _problem(
-        comfort_weight=1.0, du_weight=1.0, effort_weight=1.0,
+        comfort_weight=1.0, du_weight=1.0, energy_weight=1.0,
     )
     out = run_objective_pass(problem, batch)
 
@@ -69,16 +69,16 @@ def test_a_pass_leaves_the_module_in_the_mode_it_found_it():
 
 
 def test_a_lopsided_weight_is_flagged_as_dominant():
-    """The measured failure: an effort weight suited to the last dataset."""
+    """The measured failure: an energy weight suited to the last dataset."""
     problem, loss, batch, _ = _problem(
-        comfort_weight=1.0, du_weight=0.0, effort_weight=1e4,
+        comfort_weight=1.0, du_weight=0.0, energy_weight=1e4,
     )
     out = run_objective_pass(problem, batch)
 
     balance = objective_balance(loss, out)
 
     dominant = balance.dominant()
-    assert [t.name for t in dominant] == ["effort_loss"]
+    assert [t.name for t in dominant] == ["energy_loss"]
     assert dominant[0].ratio_to_rest > DOMINANCE_FACTOR
     assert "⚠️ dominates" in balance_to_markdown(balance)
     assert "WARNING" in format_objective_report(balance, [])
@@ -92,7 +92,7 @@ def test_a_balanced_objective_is_not_flagged():
 def test_an_all_zero_objective_is_not_reported_as_dominated():
     """A policy that starts perfectly in band must not trip the warning."""
     problem, loss, batch, _ = _problem(
-        comfort_weight=1.0, du_weight=0.0, effort_weight=0.0,
+        comfort_weight=1.0, du_weight=0.0, energy_weight=0.0,
     )
     out = run_objective_pass(problem, batch)
     zeroed = {**out, "comfort_lower_loss": torch.tensor(0.0),
@@ -107,7 +107,7 @@ def test_an_all_zero_objective_is_not_reported_as_dominated():
 
 def test_a_lone_term_reports_an_infinite_ratio():
     problem, loss, batch, _ = _problem(
-        comfort_weight=0.0, du_weight=1.0, effort_weight=0.0,
+        comfort_weight=0.0, du_weight=1.0, energy_weight=0.0,
     )
     out = run_objective_pass(problem, batch)
 
@@ -121,7 +121,7 @@ def test_a_lone_term_reports_an_infinite_ratio():
 
 
 def _shapes(term_fn, n_grid=9):
-    problem, _, batch, s = _problem(effort_weight=1.0)
+    problem, _, batch, s = _problem(energy_weight=1.0)
     out = run_objective_pass(problem, batch)
     _, _, hmax = horizons(s["cfg"], s["sysid_cfg"])
     nm, ns = s["nm"], s["norm_stats"]
@@ -198,7 +198,7 @@ def test_the_grid_spans_the_actuation_box():
 def test_objective_to_dict_is_serializable():
     import json
 
-    problem, loss, batch, _ = _problem(effort_weight=1.0)
+    problem, loss, batch, _ = _problem(energy_weight=1.0)
     out = run_objective_pass(problem, batch)
     balance = objective_balance(loss, out)
     shape = TermShape(SETPT, grid=[20.0, 23.0, 26.0], values=[3.0, 2.0, 1.0],
@@ -232,7 +232,7 @@ def test_dict_du_weight_defaults_omitted_controls_to_zero():
 
 def test_scalar_du_weight_reproduces_the_pooled_penalty():
     """The per-channel form must be a strict generalization, not a change."""
-    s = full_setup(comfort_weight=0.0, du_weight=3.0, effort_weight=0.0)
+    s = full_setup(comfort_weight=0.0, du_weight=3.0, energy_weight=0.0)
     cfg, sysid_cfg, nm = s["cfg"], s["sysid_cfg"], s["nm"]
     _, _, hmax = horizons(cfg, sysid_cfg)
     loss = build_control_loss(cfg, sysid_cfg, nm, s["norm_stats"])
@@ -251,7 +251,7 @@ def test_scalar_du_weight_reproduces_the_pooled_penalty():
 
 
 def test_a_zero_weight_on_every_control_drops_the_term():
-    s = full_setup(comfort_weight=1.0, du_weight={}, effort_weight=0.0)
+    s = full_setup(comfort_weight=1.0, du_weight={}, energy_weight=0.0)
     loss = build_control_loss(s["cfg"], s["sysid_cfg"], s["nm"],
                               s["norm_stats"])
     assert "du_loss" not in [o.name for o in loss.objectives]

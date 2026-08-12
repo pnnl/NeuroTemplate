@@ -1,7 +1,8 @@
 """
 Objective diagnostics: how big is each term, and what does it look like?
 
-`build_control_loss` sums comfort, du and effort with user-supplied weights,
+`build_control_loss` sums comfort, du and three power-derived terms with
+user-supplied weights,
 and nothing checks that a weight suits the magnitude of what it multiplies.
 That is the highest-frequency failure in this library's record — four campaigns
 out of four — and it is a *scale* problem: the term has the right shape but the
@@ -9,17 +10,17 @@ wrong magnitude, so it dominates the objective or vanishes from it.
 `objective_balance` answers it in one forward pass by printing every term's
 contribution and share.
 
-The worked example: an effort proxy of `(cooling_setpoint - outdoor)^2` that
+The worked example: a power proxy of `(cooling_setpoint - outdoor)^2` that
 came out at 1.7x the entire comfort objective. The numbers were on screen from
 epoch 1; nobody was comparing them.
 
-`term_shapes` sweeps the effort term across each actuation box and reports what
+`term_shapes` sweeps the power signal across each actuation box and reports what
 it looks like there — the value at each grid point and where the minimum lands.
-This is **reported, not judged**. A monotone effort term is normal and usually
+This is **reported, not judged**. A monotone power term is normal and usually
 correct: a real power meter costs more as an actuator works harder, so it has
 no interior optimum of its own. The trade-off that produces an interior optimum
-belongs to the *summed* objective, where effort meets comfort — not to the
-effort term in isolation. The sweep is here so a reader can see the shape and
+belongs to the *summed* objective, where energy meets comfort — not to the
+power term in isolation. The sweep is here so a reader can see the shape and
 the scale of the term they are weighting, and decide for themselves.
 """
 
@@ -188,11 +189,11 @@ def objective_notes(cfg, arch: dict) -> list[str]:
             "a cheaper hour. Add a `price` entry to `preview_config` covering "
             "the price cycle."
         )
-    if cfg.peak_weight > 0 and cfg.effort_weight == 0 and cfg.cost_weight == 0:
+    if cfg.peak_weight > 0 and cfg.energy_weight == 0 and cfg.cost_weight == 0:
         notes.append(
             "`peak_weight` is the only power term. Flattening a profile by "
             "*adding* off-peak load is a valid solution to min M_q(p) and a "
-            "bad outcome — carry a non-zero `effort_weight` or `cost_weight` "
+            "bad outcome — carry a non-zero `energy_weight` or `cost_weight` "
             "alongside it."
         )
     return notes

@@ -83,12 +83,12 @@ class ControlConfig:
     du_weight: Union[float, list[float], dict[str, float]] = 10
     # Effort/energy term weight. > 0 requires control_user_defined.power_metric
     # to be implemented (fail-fast at problem build).
-    effort_weight: float = 0.1
+    energy_weight: float = 0.1
     # Energy-cost weight: multiplies mean_t(price * power), in $/h. > 0
     # additionally requires the control_user_defined.price_signal hook.
     cost_weight: float = 0.0
     # Peak-demand weight: multiplies the per-window power mean M_q(power),
-    # averaged over the batch. Same units as the effort term.
+    # averaged over the batch. Same units as the energy term.
     peak_weight: float = 0.0
     # Exponent of that power mean. 1 = plain mean (no peak preference),
     # 2 = RMS, larger = closer to a hard max. Must be >= 1.
@@ -167,7 +167,7 @@ class ControlConfig:
 
         for name in [
             "d_preview", "warmup", "patience",
-            "comfort_weight", "effort_weight", "cost_weight", "peak_weight",
+            "comfort_weight", "energy_weight", "cost_weight", "peak_weight",
             "band_width_min", "setpoint_step",
         ]:
             check_non_negative(self, name)

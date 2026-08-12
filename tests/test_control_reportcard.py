@@ -102,20 +102,20 @@ def _make_results(offset: float = 1.0, power_level: float = 1500.0):
 
 
 def _make_balance():
-    """An effort term worth 3x the comfort term — the mis-scaled failure."""
+    """An energy term worth 3x the comfort term — the mis-scaled failure."""
     return ObjectiveBalance(
         terms=[
             TermBalance("comfort_lower_loss", 1.0, 0.1, 1.0 / 9.0),
             TermBalance("comfort_upper_loss", 1.5, 0.15, 1.5 / 8.5),
             TermBalance("du_loss", 0.5, 0.05, 0.5 / 9.5),
-            TermBalance("effort_loss", 7.0, 0.7, 7.0 / 3.0),
+            TermBalance("energy_loss", 7.0, 0.7, 7.0 / 3.0),
         ],
         total=10.0,
     )
 
 
 def _make_shapes():
-    """A monotone effort term — reported, and deliberately not flagged."""
+    """A monotone power term — reported, and deliberately not flagged."""
     return [TermShape(
         u_name="setpoint [°C]",
         grid=[22.0, 23.5, 25.0, 26.5, 28.0],
@@ -167,16 +167,16 @@ def test_objective_section_flags_a_dominant_term():
     """Scale is the failure worth asserting on, and the only one asserted."""
     md = _render()
     assert "One term is running the objective" in md
-    assert "`effort_loss` at 2.3×" in md
+    assert "`energy_loss` at 2.3×" in md
 
 
 def test_objective_section_reports_term_shape_without_judging_it():
-    """The sweep is information. A monotone effort term is normal."""
+    """The sweep is information. A monotone power term is normal."""
     md = _render()
     assert "The power signal swept across each actuation box" in md
     assert "28" in md                      # where the minimum landed
     assert "minimised on a bound" not in md
-    assert "No value of `effort_weight`" not in md
+    assert "No value of `energy_weight`" not in md
 
 
 def test_objective_section_skipped_without_a_diagnostic_pass():

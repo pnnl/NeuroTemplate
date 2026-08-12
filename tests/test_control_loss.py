@@ -24,7 +24,7 @@ def _data_dict(s, y_ctrl_value):
 
 
 def test_comfort_penalty_zero_inside_positive_outside():
-    s = full_setup(comfort_weight=1.0, du_weight=0.0, effort_weight=0.0)
+    s = full_setup(comfort_weight=1.0, du_weight=0.0, energy_weight=0.0)
     loss = build_control_loss(
         s["cfg"], s["sysid_cfg"], s["nm"], s["norm_stats"],
     )
@@ -36,19 +36,19 @@ def test_comfort_penalty_zero_inside_positive_outside():
     assert float(outside) > 0.0
 
 
-def test_effort_objective_builds_and_runs():
-    s = full_setup(comfort_weight=1.0, du_weight=0.0, effort_weight=1.0)
+def test_energy_objective_builds_and_runs():
+    s = full_setup(comfort_weight=1.0, du_weight=0.0, energy_weight=1.0)
     loss = build_control_loss(
         s["cfg"], s["sysid_cfg"], s["nm"], s["norm_stats"],
     )
     names = [o.name for o in loss.objectives]
-    assert "effort_loss" in names
+    assert "energy_loss" in names
     out = loss(_data_dict(s, 0.5))
     assert torch.isfinite(out["loss"])
 
 
 def test_no_active_objective_raises():
-    s = full_setup(comfort_weight=0.0, du_weight=0.0, effort_weight=0.0)
+    s = full_setup(comfort_weight=0.0, du_weight=0.0, energy_weight=0.0)
     with pytest.raises(ValueError, match="No active control objective"):
         build_control_loss(
             s["cfg"], s["sysid_cfg"], s["nm"], s["norm_stats"],

@@ -83,7 +83,7 @@ def resolve_du_weights(du_weight, u_cols: list[str]) -> list[float]:
 @beartype
 def power_term(cfg, nm_mapping: dict[str, list[str]],
                norm_stats: dict[str, dict[str, float]]):
-    """The effort term as a plain callable, or None when unimplemented.
+    """The per-step power signal as a plain callable, or None when unimplemented.
 
     Signature is `(yn, U, D) -> [batch, time]` over the *scored horizon*
     slices. Shared with `control.objective` so the shape check sweeps exactly
@@ -181,7 +181,7 @@ def build_control_loss(
     if not objectives:
         raise ValueError(
             "No active control objective. Set at least one of comfort_weight "
-            "/ du_weight / effort_weight / cost_weight / peak_weight > 0."
+            "/ du_weight / energy_weight / cost_weight / peak_weight > 0."
         )
 
     return PenaltyLoss(objectives, constraints=[])
@@ -195,7 +195,7 @@ def _power_objectives(cfg, nm_mapping, norm_stats, hmax, yn, u, d) -> list:
     thing at P=288. A sum would make each term's magnitude proportional to
     `train_pred_steps`; the reportcard does the integration instead.
     """
-    weights = {"effort": cfg.effort_weight, "cost": cfg.cost_weight,
+    weights = {"energy": cfg.energy_weight, "cost": cfg.cost_weight,
                "peak": cfg.peak_weight}
     if not any(w > 0 for w in weights.values()):
         return []
@@ -218,9 +218,9 @@ def _power_objectives(cfg, nm_mapping, norm_stats, hmax, yn, u, d) -> list:
     power = variable([yn, u, d], _power, display_name="power")   # [b, P]
 
     objectives = []
-    if cfg.effort_weight > 0:
+    if cfg.energy_weight > 0:
         objectives.append(
-            _penalty(cfg.effort_weight * torch.mean(power), "effort_loss")
+            _penalty(cfg.energy_weight * torch.mean(power), "energy_loss")
         )
 
     if cfg.cost_weight > 0:
@@ -258,7 +258,7 @@ def _soft_peak(power, q: float):
 
     Homogeneous of degree 1, so it has the same units and the same
     weight-scaling behaviour as the energy term — `peak_weight` and
-    `effort_weight` are comparable on the balance report. A mean-square term
+    `energy_weight` are comparable on the balance report. A mean-square term
     would be homogeneous of degree 2 instead, so switching the power metric
     from kW to W would move its correct weight by 1e6 while every neighbour's
     moved by 1e3. Given that mis-scaled weights are this library's most

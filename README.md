@@ -5,7 +5,7 @@ A library of generic, time-series, data-driven black-box modeling and control bu
 The repo contains two sister subsystems:
 
 - **Modeling** — train a system-identification surrogate `y_{k+1} = f(y_k, u_k, d_k) [+ y_k]` from data, with an optional gradient-sign penalty, post-training physics assertions (equilibrium / step response / reachability / free decay), Optuna search, MLflow tracking. Model families: `mlp`, `nssm`, `lssm`, `gru`.
-- **Control** — train a differentiable predictive control (DPC) policy against a frozen surrogate. Closed-loop rollouts, comfort-band penalties, optional energy/effort objectives, setpoint quantization. Policy families: `mlp`, `linear` (a saturated affine feedback law). Optionally scores a rule-based baseline alongside the learned policy.
+- **Control** — train a differentiable predictive control (DPC) policy against a frozen surrogate. Closed-loop rollouts, comfort-band penalties, optional energy, cost and peak-demand objectives, setpoint quantization. Policy families: `mlp`, `linear` (a saturated affine feedback law). Optionally scores a rule-based baseline alongside the learned policy.
 
 Both sides share a thin `common/` layer (YAML/CLI loader, CSV + sliding-window data utilities, per-channel metrics).
 
@@ -123,7 +123,7 @@ The library imports each hook by attribute (no defaulting), so every row above e
 | `actuation_bounds(nm_mapping, norm_stats) -> (umin, umax)` | yes | policy bounds |
 | `power_channels(nm_mapping) -> [col]` | must be defined; return `[]` when nothing is metered | closed-loop plot power row + energy metrics |
 | `plot_context_channels(nm_mapping) -> [col]` | must be defined; return `[]` for none | D traces overlaid on the closed-loop temperature axis |
-| `power_metric(yn, U, D, nm_mapping, norm_stats) -> Tensor` + `POWER_METRIC_IMPLEMENTED: bool` | required only when `effort_weight > 0` | effort objective + energy reportcard |
+| `power_metric(yn, U, D, nm_mapping, norm_stats) -> Tensor` + `POWER_METRIC_IMPLEMENTED: bool` | required only when `energy_weight > 0` | energy / cost / peak objectives + energy reportcard |
 | `build_baseline_policy(cfg, sysid_cfg, nm_mapping, norm_stats) -> Node \| None` | optional | rule-based controller scored alongside the learned policy |
 | `preview_config(nm_mapping) -> {signal: n_steps}` | optional | per-column disturbance + comfort-band preview widths |
 
@@ -207,7 +207,7 @@ reportcard and in MLflow.
   real batch, warning when one term outweighs all the others combined. This is
   the one that asserts something: a term carried over from another dataset once
   came out at 1.7× the whole comfort objective.
-- **Effort term shape** — the effort term swept across each actuation box, so
+- **Power term shape** — the power signal swept across each actuation box, so
   its magnitude and shape sit next to the weights you are choosing. Reported
   without a verdict: an honest power metric is monotone in actuator effort, and
   the interior optimum belongs to the summed objective, not to this term alone.
@@ -269,7 +269,7 @@ src/neurotemplate/
     ├── config.py        # ControlConfig
     ├── policy.py        # policy_catalog (MLP/linear), build_policy, describe_policy, STEQuantize
     ├── closed_loop.py   # build_closed_loop, build_control_loss, power_term
-    ├── objective.py     # term balance + effort-term shape sweep
+    ├── objective.py     # term balance + power-signal shape sweep
     ├── scenarios.py     # BandSpec, build_window_dict, build_loaders
     ├── metrics.py       # ComfortMetrics, EnergyMetrics, ActuationMetrics, JumpResponse
     ├── pipeline.py      # train_policy, evaluate_closed_loop, evaluate_baseline

@@ -116,7 +116,7 @@ def main() -> None:
     balance_out = run_objective_pass(problem, next(iter(train_loader)))
     balance = objective_balance(loss, balance_out)
     power = power_term(cfg, nm_mapping, norm_stats)
-    power_weighted = (cfg.effort_weight > 0 or cfg.cost_weight > 0
+    power_weighted = (cfg.energy_weight > 0 or cfg.cost_weight > 0
                       or cfg.peak_weight > 0)
     if power is None or not power_weighted:
         shapes, frac_zero = [], None
@@ -136,13 +136,13 @@ def main() -> None:
         savedir=cfg.savedir,
         stdout=[
             "train_loss", "dev_loss", "train_comfort_lower_loss",
-            "train_comfort_upper_loss", "train_du_loss", "train_effort_loss",
+            "train_comfort_upper_loss", "train_du_loss", "train_energy_loss",
             "train_cost_loss", "train_peak_loss",
         ],
         verbosity=cfg.epoch_verbose if cfg.verbose else 0,
         logout=[
             "train_loss", "dev_loss", "time", "comfort_lower_loss",
-            "comfort_upper_loss", "du_loss", "effort_loss", "cost_loss",
+            "comfort_upper_loss", "du_loss", "energy_loss", "cost_loss",
             "peak_loss",
         ],
         nested=False,

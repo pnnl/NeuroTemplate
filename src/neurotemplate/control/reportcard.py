@@ -11,7 +11,7 @@ Sections (in order):
    2. Policy architecture  — from control.policy.describe_policy
    3. Scenario             — horizons, controlled channels, bands, weights
    4. Objective balance    — which term was actually being optimised, and the
-                             magnitude and shape of the effort term
+                             magnitude and shape of the power signal
    5. Closed-loop performance — comfort table, actuation, energy
    6. Actuation            — per-control effort and time at each bound
    7. Band-jump response   — did the loop react when the reference moved
@@ -29,8 +29,8 @@ and ignored setpoint changes — every one of which has been shipped in a run
 whose pooled numbers looked fine.
 
 Only two of them assert anything: a dominated objective term and an ignored
-band jump. Actuation and effort-term shape are reported without a verdict,
-because bound-sitting and monotone effort terms are both normal in a correct
+band jump. Actuation and power-term shape are reported without a verdict,
+because bound-sitting and monotone power terms are both normal in a correct
 controller.
 """
 
@@ -132,7 +132,7 @@ def _scenario_section(cfg, sysid_cfg, nm_mapping: dict, controlled: list[str],
         _band_line("Train band", cfg.train_band()),
         _band_line("Test band", cfg.test_band()),
         f"- **Objective weights:** comfort={cfg.comfort_weight}, "
-        f"du={cfg.du_weight}, effort={cfg.effort_weight}, "
+        f"du={cfg.du_weight}, energy={cfg.energy_weight}, "
         f"cost={cfg.cost_weight}, peak={cfg.peak_weight} (q={cfg.peak_q:g})",
         f"- **Eval band seed:** {eval_band_seed} "
         "*(fixed, so runs are scored against the same band realization)*",

@@ -148,7 +148,7 @@ def actuation_bounds(
 
 
 # ---------------------------------------------------------------------
-# REQUIRED user hook: cooling power for the effort/energy objective
+# REQUIRED user hook: cooling power for the energy/cost/peak objectives
 # ---------------------------------------------------------------------
 # This dataset metres HVAC power directly: RTU Fan Power [W] and RTU DX Power
 # [W] are Y channels produced by the surrogate. Total electrical power is just
@@ -264,7 +264,7 @@ def power_metric(
         D:  disturbance trajectory     [batch, time, nd] (unused here;
             both power channels are metered directly in Y)
     Returns:
-        P [batch, time] in Watts (>= 0). The effort objective drives the
+        P [batch, time] in Watts (>= 0). The energy objective drives the
         closed-loop mean of this toward zero.
     """
     y = nm_mapping["Y"]

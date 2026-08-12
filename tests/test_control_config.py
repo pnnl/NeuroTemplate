@@ -34,11 +34,11 @@ def test_load_defaults_and_yaml(tmp_path):
 def test_set_override(tmp_path):
     path = _write(tmp_path, _YAML)
     cfg, _ = load_config_from_cli(
-        ["--config", str(path), "--set", "effort_weight=0",
+        ["--config", str(path), "--set", "energy_weight=0",
          "--set", "epochs=3"],
         default_config_path=None, cls=ControlConfig, config_dir=CONTROL_CONFIG_DIR,
     )
-    assert cfg.effort_weight == 0
+    assert cfg.energy_weight == 0
     assert cfg.epochs == 3
 
 
