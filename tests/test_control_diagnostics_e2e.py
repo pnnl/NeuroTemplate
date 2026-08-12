@@ -17,7 +17,7 @@ from neurotemplate.control.closed_loop import (
 )
 from neurotemplate.control.objective import (
     format_objective_report,
-    frac_power_zero,
+    power_diagnostics,
     objective_balance,
     objective_notes,
     objective_to_dict,
@@ -68,10 +68,10 @@ def _run_diagnostics(tmp_path=None, **overrides):
     term = power_term(cfg, nm, ns)
     weighted = cfg.energy_weight > 0 or cfg.cost_weight > 0 or cfg.peak_weight > 0
     if term is None or not weighted:
-        shapes, frac_zero = [], None
+        shapes, power_diag = [], None
     else:
         shapes = term_shapes(term, out, hmax, nm["U"], *u_bounds, ns)
-        frac_zero = frac_power_zero(term, out, hmax)
+        power_diag = power_diagnostics(term, out, hmax)
 
     arch = describe_policy(policy, cfg, sysid_cfg, nm, ns)
     notes = objective_notes(cfg, arch)
@@ -82,10 +82,10 @@ def _run_diagnostics(tmp_path=None, **overrides):
         eval_band_seed=EVAL_BAND_SEED, baseline=baseline,
         clears_reference=clears_reference(results, baseline),
         balance=balance, shapes=shapes,
-        frac_power_zero=frac_zero, objective_notes=notes,
+        power=power_diag, objective_notes=notes,
     )
     return dict(results=results, balance=balance, baseline=baseline,
-                shapes=shapes, notes=notes, frac_zero=frac_zero,
+                shapes=shapes, notes=notes, power=power_diag,
                 md=md, u_cols=nm["U"])
 
 
@@ -138,7 +138,7 @@ def test_everything_logged_is_json_serializable():
     logger = _FakeLogger()
     log_control_results(logger, d["results"], baseline=d["baseline"])
     logger.log_dict(
-        objective_to_dict(d["balance"], d["shapes"], d["frac_zero"],
+        objective_to_dict(d["balance"], d["shapes"], d["power"],
                           d["notes"]),
         name="objective_diagnostics.json",
     )
@@ -180,7 +180,11 @@ def test_the_grid_terms_reach_every_diagnostic(tmp_path):
     assert "Cost per window" in d["md"]
     # The power sweep is bound to the shared signal, not to the three terms.
     assert [s.u_name for s in d["shapes"]] == d["u_cols"]
-    assert d["frac_zero"] is not None
+    assert d["power"] is not None
+    # Metered power reads the surrogate's outputs, so the flat U-sweep must be
+    # reported as that rather than as an inert term.
+    assert d["power"].reads_outputs
+    assert "reads model outputs" in d["md"]
 
 
 def test_a_cost_term_with_no_price_preview_says_so(tmp_path):

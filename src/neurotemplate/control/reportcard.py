@@ -48,8 +48,10 @@ from neurotemplate.control.metrics import (
 )
 from neurotemplate.control.objective import (
     ObjectiveBalance,
+    PowerDiagnostics,
     TermShape,
     balance_to_markdown,
+    is_inert,
     shapes_to_markdown,
 )
 from neurotemplate.control.scenarios import horizons
@@ -150,7 +152,7 @@ def _scenario_section(cfg, sysid_cfg, nm_mapping: dict, controlled: list[str],
 
 def _objective_section(balance: ObjectiveBalance,
                        shapes: list[TermShape],
-                       frac_zero: Optional[float] = None,
+                       power: Optional[PowerDiagnostics] = None,
                        notes: Optional[list[str]] = None) -> str:
     """What the weights actually bought, measured on one batch before training.
 
@@ -188,17 +190,33 @@ def _objective_section(balance: ObjectiveBalance,
             "is monotone in actuator effort, and the trade-off that produces "
             "an interior optimum belongs to the summed objective, not to this "
             "term alone.\n",
-            shapes_to_markdown(shapes),
+            shapes_to_markdown(shapes,
+                               None if power is None else power.reads_outputs),
         ]
-    if frac_zero is not None:
+    if is_inert(shapes, power):
         body += [
             "",
-            f"- **Power exactly zero on {frac_zero * 100:.1f}% of scored "
-            "steps.** `power_metric` normally clamps at zero, and the clamp "
-            "kills the gradient there. Harmless for a mean energy term; for a "
-            "cost term it is not, because the near-zero steps are "
-            "disproportionately the cheap hours load is supposed to move "
-            "*into*. A large figure is a surrogate problem, not a weight.",
+            "**⚠️ The power term reads neither the commands nor the "
+            "surrogate's outputs.** Its sweep is flat because nothing it "
+            "depends on is being varied, and its gradient w.r.t. the rollout "
+            "is identically zero — so whatever weight it carries, it cannot "
+            "move the policy. Check `power_metric` against `nm_mapping`.",
+        ]
+    if power is not None:
+        body += [
+            "",
+            f"- **Power exactly zero on {power.frac_zero * 100:.1f}% of "
+            f"scored steps, of which the clamp kills the gradient on "
+            f"{power.frac_dead * 100:.1f}%** (of all scored steps). The "
+            "second number is the one to act on. A zero power reading is not "
+            "itself a defect — an ordinal or staged head predicting "
+            "\"compressor off\" is being right, and a straight-through "
+            "estimator still passes gradient there. A *dead* step is a "
+            "surrogate predicting negative power and getting clamped, which "
+            "is harmless for a mean energy term and not harmless for a cost "
+            "term, because those steps are disproportionately the cheap hours "
+            "load is supposed to move *into*. A large dead fraction is a "
+            "surrogate problem, not a weight.",
         ]
     if notes:
         body += [""] + [f"- {n}" for n in notes]
@@ -426,7 +444,7 @@ def render_control_reportcard(
     clears_reference: Optional[bool] = None,
     balance: Optional[ObjectiveBalance] = None,
     shapes: Optional[list[TermShape]] = None,
-    frac_power_zero: Optional[float] = None,
+    power: Optional[PowerDiagnostics] = None,
     objective_notes: Optional[list[str]] = None,
     run_name: Optional[str] = None,
     timestamp: Optional[str] = None,
@@ -447,8 +465,9 @@ def render_control_reportcard(
         balance:     Optional objective.ObjectiveBalance from the pre-training
                      forward pass; the section is skipped without it.
         shapes:      Optional objective.term_shapes(...) for the power signal.
-        frac_power_zero: Optional share of scored steps where power is clamped
-                     to zero (and so contributes no gradient).
+        power:       Optional objective.power_diagnostics(...): how often the
+                     power signal reads zero, how much of that is a dead
+                     gradient, and whether the term reads the rollout at all.
         objective_notes: Optional objective.objective_notes(...) prose.
 
     Returns:
@@ -469,7 +488,7 @@ def render_control_reportcard(
     ]
     if balance is not None:
         parts.append(_objective_section(balance, shapes or [],
-                                        frac_power_zero, objective_notes))
+                                        power, objective_notes))
     parts += [
         _performance_section(results),
         _actuation_section(results),

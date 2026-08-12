@@ -70,6 +70,25 @@ class ObjectiveBalance:
 
 
 @dataclass
+class PowerDiagnostics:
+    """What one backward pass through the power term says about it.
+
+    `frac_dead` is the number that carries a warning: power reading zero *and*
+    no gradient reaching the surrogate, which is the clamp having cut the
+    chain. `frac_zero` alone says nothing — see `power_diagnostics`.
+
+    `reads_outputs` is what makes a flat sweep readable. A term that is flat
+    across every actuation box is either metered power (which reads the
+    surrogate's outputs, and reaches the controls only through the dynamics)
+    or genuinely inert. Those look identical in the sweep and are opposite
+    findings.
+    """
+    frac_zero: float
+    frac_dead: float
+    reads_outputs: bool
+
+
+@dataclass
 class TermShape:
     """How an objective term varies as one control sweeps its actuation box."""
     u_name: str
@@ -85,8 +104,10 @@ class TermShape:
     def is_flat(self) -> bool:
         """The term does not read this control directly.
 
-        Normal for metered power, which the control reaches only through the
-        dynamics. Reported so a flat row is not misread as a missing sweep.
+        On its own this says nothing about whether the term works: metered
+        power is flat here and perfectly live (it reads the surrogate's
+        outputs), and an inert term is flat here too. `PowerDiagnostics.
+        reads_outputs` is what separates them.
         """
         scale = max(abs(sum(self.values) / len(self.values)), 1.0)
         return self.spread <= FLAT_TOL * scale
@@ -154,23 +175,60 @@ def objective_balance(loss, out: dict) -> ObjectiveBalance:
 
 
 @beartype
-def frac_power_zero(term_fn, out: dict, hmax: int) -> float:
-    """Share of scored steps where the power signal is exactly zero.
+def power_gradient(term_fn, out: dict, hmax: int) -> tuple[torch.Tensor, torch.Tensor]:
+    """(power, |∂power/∂yn| summed over channels) over the scored horizon.
+
+    Both are [batch, time]. The gradient is taken w.r.t. a fresh leaf copy of
+    `yn`, so this measures what the power term itself passes back to the
+    surrogate's outputs — the only place a clamp can silently cut the chain.
+
+    A term that does not read `yn` at all has no gradient to take, and gets an
+    all-zero one. That is the honest answer rather than an error: whether the
+    term reads the rollout is exactly what the caller is asking.
+    """
+    with torch.enable_grad():
+        yn = out["yn"][:, hmax:, :].detach().clone().requires_grad_(True)
+        power = term_fn(yn, out["U"][:, hmax:, :], out["D"][:, hmax:, :])
+        if not power.requires_grad:
+            return power.detach(), torch.zeros_like(power)
+        grad, = torch.autograd.grad(power.sum(), yn, allow_unused=True)
+        if grad is None:
+            return power.detach(), torch.zeros_like(power)
+        return power.detach(), grad.abs().sum(-1)
+
+
+@beartype
+def power_diagnostics(term_fn, out: dict, hmax: int) -> PowerDiagnostics:
+    """How often the power signal reads zero, how often that costs a gradient,
+    and whether the term reads the surrogate's outputs at all.
 
     The recommended `power_metric` shape ends in `.clamp_min(0.0)`, and
     wherever the surrogate predicts negative power that clamp zeroes the
     gradient. For a mean energy term that is a rounding detail. For a cost term
     it is not: the near-zero-power steps are disproportionately the cheap hours
-    the controller is supposed to be moving load *into*, so a large number here
-    means the cost gradient is missing exactly where it was needed.
+    the controller is supposed to be moving load *into*, so a large dead
+    fraction means the cost gradient is missing exactly where it was needed.
 
-    Reported, not judged — and it is a surrogate problem (a power head that
-    goes negative), not a weighting problem.
+    The two numbers are separate because a zero power reading is not by itself
+    a defect, and reporting only the forward value gets one whole class of head
+    exactly backwards. A regression head that predicts −101 W is clamped to
+    zero and stops passing gradient; an ordinal head that snaps to a real
+    compressor-off stage reports zero and *keeps* passing gradient, because
+    the clamp is inactive at exactly zero and the snap is a straight-through
+    estimator. The first is a surrogate problem worth acting on; the second is
+    the model being right. Measuring the gradient tells them apart without the
+    diagnostic needing to know what heads exist.
+
+    Reported, not judged — and a large `frac_dead` is a surrogate problem (a
+    power head that goes negative), not a weighting problem.
     """
-    with torch.no_grad():
-        power = term_fn(out["yn"][:, hmax:, :], out["U"][:, hmax:, :],
-                        out["D"][:, hmax:, :])
-        return float((power == 0).float().mean())
+    power, grad = power_gradient(term_fn, out, hmax)
+    is_zero = power == 0
+    return PowerDiagnostics(
+        frac_zero=float(is_zero.float().mean()),
+        frac_dead=float((is_zero & (grad == 0)).float().mean()),
+        reads_outputs=bool((grad != 0).any()),
+    )
 
 
 @beartype
@@ -266,12 +324,42 @@ def balance_to_markdown(balance: ObjectiveBalance) -> str:
 
 
 @beartype
-def shapes_to_markdown(shapes: list[TermShape]) -> str:
+def flat_sweep_reading(reads_outputs: Optional[bool]) -> str:
+    """What a flat row means, given whether the term reads the surrogate.
+
+    Shared by both renderers so the markdown and the stdout report cannot
+    drift into saying different things about the same measurement.
+    """
+    if reads_outputs is None:
+        return "flat in U"
+    if reads_outputs:
+        return "flat in U — reads model outputs"
+    return "INERT — reads neither U nor model outputs"
+
+
+@beartype
+def is_inert(shapes: list[TermShape],
+             power: Optional[PowerDiagnostics]) -> bool:
+    """The power term cannot move the policy: flat in every control *and* no
+    gradient into the surrogate's outputs.
+
+    Both halves are needed. Flat-in-U alone is the normal reading for metered
+    power, and no-gradient-into-yn alone is normal for a term computed from
+    the commands.
+    """
+    if power is None or not shapes:
+        return False
+    return not power.reads_outputs and all(s.is_flat for s in shapes)
+
+
+@beartype
+def shapes_to_markdown(shapes: list[TermShape],
+                       reads_outputs: Optional[bool] = None) -> str:
     rows = ["| Control | Term at lo | at mid | at hi | Minimised at |",
             "|---|---:|---:|---:|---:|"]
     for s in shapes:
         mid = len(s.values) // 2
-        where = ("flat (no direct effect)" if s.is_flat
+        where = (flat_sweep_reading(reads_outputs) if s.is_flat
                  else f"{s.minimised_at:.4g}")
         rows.append(
             f"| {s.u_name} | {s.values[0]:.4g} | {s.values[mid]:.4g} | "
@@ -283,7 +371,7 @@ def shapes_to_markdown(shapes: list[TermShape]) -> str:
 @beartype
 def objective_to_dict(balance: ObjectiveBalance,
                       shapes: list[TermShape],
-                      frac_zero: Optional[float] = None,
+                      power: Optional[PowerDiagnostics] = None,
                       notes: Optional[list[str]] = None) -> dict:
     """JSON-serializable objective diagnostics (for MLflow / disk)."""
     return {
@@ -300,7 +388,9 @@ def objective_to_dict(balance: ObjectiveBalance,
                        "minimised_at": s.minimised_at}
             for s in shapes
         },
-        "frac_power_zero": frac_zero,
+        "frac_power_zero": None if power is None else power.frac_zero,
+        "frac_power_dead": None if power is None else power.frac_dead,
+        "power_reads_outputs": None if power is None else power.reads_outputs,
         "notes": list(notes or []),
     }
 
@@ -308,7 +398,7 @@ def objective_to_dict(balance: ObjectiveBalance,
 @beartype
 def format_objective_report(balance: ObjectiveBalance,
                             shapes: list[TermShape],
-                            frac_zero: Optional[float] = None,
+                            power: Optional[PowerDiagnostics] = None,
                             notes: Optional[list[str]] = None) -> str:
     """Plain-text version for stdout, printed before training starts."""
     lines = ["Objective term balance (one batch, before training):"]
@@ -324,16 +414,25 @@ def format_objective_report(balance: ObjectiveBalance,
             "being optimised."
         )
     if shapes:
+        reads = None if power is None else power.reads_outputs
         lines.append("Power term across each actuation box (no verdict "
                      "attached — read it against the weights above):")
         for s in shapes:
-            where = ("flat, no direct effect" if s.is_flat
+            where = (flat_sweep_reading(reads) if s.is_flat
                      else f"minimised at {s.minimised_at:.4g}")
             lines.append(f"  {s.u_name:<22s} {s.values[0]:>12.4g} .. "
                          f"{s.values[-1]:<12.4g} {where}")
-    if frac_zero is not None:
-        lines.append(f"  power exactly zero on {frac_zero * 100:.1f}% of "
-                     "scored steps (clamped => no gradient there)")
+        if is_inert(shapes, power):
+            lines.append(
+                "  WARNING: the power term reads neither the commands nor the "
+                "surrogate's outputs. Whatever its weight, it cannot move the "
+                "policy — check `power_metric` against nm_mapping."
+            )
+    if power is not None:
+        lines.append(f"  power exactly zero on {power.frac_zero * 100:.1f}% of "
+                     "scored steps")
+        lines.append(f"  ...of which {power.frac_dead * 100:.1f}% of all steps "
+                     "also pass no gradient back (clamped => dead there)")
     for note in notes or []:
         lines.append(f"  NOTE: {note}")
     return "\n".join(lines)

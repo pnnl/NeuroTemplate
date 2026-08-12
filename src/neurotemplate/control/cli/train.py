@@ -30,10 +30,10 @@ from neurotemplate.control.closed_loop import (
 )
 from neurotemplate.control.objective import (
     format_objective_report,
-    frac_power_zero,
     objective_balance,
     objective_notes,
     objective_to_dict,
+    power_diagnostics,
     run_objective_pass,
     term_shapes,
 )
@@ -120,16 +120,16 @@ def main() -> None:
     power_weighted = (cfg.energy_weight > 0 or cfg.cost_weight > 0
                       or cfg.peak_weight > 0)
     if power is None or not power_weighted:
-        shapes, frac_zero = [], None
+        shapes, power_diag = [], None
     else:
         # One sweep serves all three power-derived terms: cost and peak are
         # reductions of the same signal, so sweeping them separately would
         # just rescale this.
         shapes = term_shapes(power, balance_out, hmax, nm_mapping["U"],
                              *u_bounds, norm_stats)
-        frac_zero = frac_power_zero(power, balance_out, hmax)
+        power_diag = power_diagnostics(power, balance_out, hmax)
     notes = objective_notes(cfg, arch)
-    print(format_objective_report(balance, shapes, frac_zero, notes))
+    print(format_objective_report(balance, shapes, power_diag, notes))
 
     cfg.run = "DPC " + cfg.run
     logger = MLFlowLogger(
@@ -191,12 +191,12 @@ def main() -> None:
         clears_reference=clears, best_dev_loss=best_dev,
         train_time_s=train_time_s,
         balance=balance, shapes=shapes,
-        frac_power_zero=frac_zero, objective_notes=notes,
+        power=power_diag, objective_notes=notes,
     )
     write_reportcard(md, Path(cfg.savedir), logger=logger)
     log_control_results(logger, results, baseline=baseline)
     if hasattr(logger, "log_dict"):
-        logger.log_dict(objective_to_dict(balance, shapes, frac_zero, notes),
+        logger.log_dict(objective_to_dict(balance, shapes, power_diag, notes),
                         name="objective_diagnostics.json")
 
     print(f"Comfort violation rate: "

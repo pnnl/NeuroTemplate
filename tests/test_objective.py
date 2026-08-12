@@ -19,8 +19,10 @@ from neurotemplate.control.objective import (
     TermShape,
     balance_to_markdown,
     format_objective_report,
+    is_inert,
     objective_balance,
     objective_to_dict,
+    power_diagnostics,
     run_objective_pass,
     shapes_to_markdown,
     term_shapes,
@@ -182,7 +184,102 @@ def test_a_term_that_ignores_the_control_reads_as_flat():
     (shape,) = _shapes(lambda yn, u, d: yn[:, :, 0])
 
     assert shape.is_flat
-    assert "flat (no direct effect)" in shapes_to_markdown([shape])
+    # Without the gradient measurement there is nothing to say beyond "flat".
+    assert "flat in U" in shapes_to_markdown([shape])
+    # With it, the two reasons a sweep can be flat are told apart.
+    assert "reads model outputs" in shapes_to_markdown([shape], True)
+    assert "INERT" in shapes_to_markdown([shape], False)
+
+
+# ── power_diagnostics ────────────────────────────────────────────
+
+
+HMAX = 2
+
+# A hand-built rollout rather than a real one: these are tests of a pure
+# function, and the point is a known mix of positive and negative power. Half
+# the scored steps are negative, so a clamp has something to bite on.
+_SCORED = torch.tensor([[-2.0, -1.0, 1.0, 2.0]])
+
+
+def _fake_out():
+    yn = torch.cat([torch.zeros(1, HMAX), _SCORED], dim=1)[:, :, None]
+    return {"yn": yn, "U": torch.ones(1, HMAX + 4, 1),
+            "D": torch.ones(1, HMAX + 4, 1)}
+
+
+def _diag(term_fn):
+    return power_diagnostics(term_fn, _fake_out(), HMAX)
+
+
+def _clamped(yn, u, d):
+    """A regression head that goes negative, clamped: no gradient below zero."""
+    return yn[:, :, 0].clamp_min(0.0)
+
+
+def _snapped(yn, u, d):
+    """The same forward values through a straight-through estimator.
+
+    This is what an ordinal head does at a predicted zero: the value is hard,
+    the backward path is smooth, so gradient still flows.
+    """
+    z = yn[:, :, 0]
+    return z + (z.clamp_min(0.0) - z).detach()
+
+
+def test_a_clamped_zero_is_dead_and_a_snapped_zero_is_not():
+    """The whole point: identical forward values, opposite gradient verdicts.
+
+    Reporting the forward value alone calls a correct "compressor off"
+    prediction a defect, which is what the v6 ordinal-head run ran into.
+    """
+    clamped, snapped = _diag(_clamped), _diag(_snapped)
+
+    # Half the scored steps are negative and both terms clamp them to zero.
+    assert clamped.frac_zero == snapped.frac_zero == 0.5
+    assert clamped.frac_dead == 0.5, "the clamp cut the chain at every zero"
+    assert snapped.frac_dead == 0.0, "the straight-through path still carries"
+
+
+def test_a_term_that_never_goes_negative_has_nothing_dead():
+    diag = _diag(lambda yn, u, d: yn[:, :, 0].exp())
+
+    assert diag.frac_zero == 0.0
+    assert diag.frac_dead == 0.0
+    assert diag.reads_outputs
+
+
+def test_a_term_reading_the_rollout_is_not_inert():
+    (shape,) = _shapes(lambda yn, u, d: yn[:, :, 0])
+    diag = _diag(lambda yn, u, d: yn[:, :, 0])
+
+    assert diag.reads_outputs
+    assert shape.is_flat
+    assert not is_inert([shape], diag)
+
+
+def test_a_term_reading_nothing_is_inert():
+    """Flat in U *and* no gradient into the rollout — the real alarm."""
+    def constant(yn, u, d):
+        return torch.ones(yn.shape[0], yn.shape[1])
+
+    (shape,) = _shapes(constant)
+    diag = _diag(constant)
+
+    assert not diag.reads_outputs
+    assert is_inert([shape], diag)
+    report = format_objective_report(ObjectiveBalance([], 0.0), [shape], diag)
+    assert "WARNING" in report and "cannot move the policy" in report
+
+
+def test_a_term_reading_only_the_commands_is_not_called_inert():
+    """It has no gradient into yn, but its sweep is not flat — not the alarm."""
+    (shape,) = _shapes(lambda yn, u, d: u[:, :, 0])
+    diag = _diag(lambda yn, u, d: u[:, :, 0])
+
+    assert not diag.reads_outputs
+    assert not shape.is_flat
+    assert not is_inert([shape], diag)
 
 
 def test_the_grid_spans_the_actuation_box():
