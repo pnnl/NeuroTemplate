@@ -202,11 +202,13 @@ def _power_objectives(cfg, nm_mapping, norm_stats, hmax, yn, u, d) -> list:
 
     term = power_term(cfg, nm_mapping, norm_stats)
     if term is None:
-        requested = ", ".join(f"{k}_weight" for k, w in weights.items() if w > 0)
+        requested = [f"{k}_weight" for k, w in weights.items() if w > 0]
         raise NotImplementedError(
-            f"{requested} > 0 requires control_user_defined.power_metric to "
-            "be implemented (set POWER_METRIC_IMPLEMENTED=True). Run with "
-            f"--set {requested.split(',')[0]}=0 until a power model exists."
+            f"{', '.join(requested)} > 0 requires "
+            "control_user_defined.power_metric to be implemented (set "
+            "POWER_METRIC_IMPLEMENTED=True). Run with "
+            + " ".join(f"--set {r}=0" for r in requested)
+            + " until a power model exists."
         )
 
     def _power(yn_v, u_v, d_v):

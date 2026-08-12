@@ -1,19 +1,17 @@
 """
 End-to-end wiring test for the control diagnostics.
 
-`nt control train` now runs three checks the pooled metrics cannot make — the
-the objective balance and the closed-loop behaviour audit —
-and threads all three into one reportcard. Each piece has unit tests; this
-walks the same sequence the CLI does, so a signature that drifts out of step
-fails here rather than an hour into a real run.
+`nt control train` runs several checks the pooled metrics cannot make — the
+objective balance, the power-signal sweep, the closed-loop behaviour audit,
+the residual box and the learned-vs-reference call — and threads all of them
+into one reportcard. Each piece has unit tests; this walks the same sequence
+the CLI does, so a signature that drifts out of step fails here rather than an
+hour into a real run.
 
 Everything above MLflow and argparse is exercised; those two are the CLI's
 own business.
 """
 
-import torch
-
-from neurotemplate.common.data_utils import get_sw_dict_multi
 from neurotemplate.control.closed_loop import (
     build_closed_loop, build_control_loss, build_problem, power_term,
 )

@@ -405,7 +405,8 @@ def build_reference_node(
     the Node reads plain current-step tensors. It has no parameters: it is
     evaluated, never trained.
     """
-    rule = getattr(load_control_hooks(cfg), "reference_control", None)
+    hooks = load_control_hooks(cfg)
+    rule = getattr(hooks, "reference_control", None)
     if rule is None:
         raise NotImplementedError(
             "control_user_defined.reference_control is not defined."
@@ -413,7 +414,7 @@ def build_reference_node(
     net = _ReferenceRule(
         rule, nm_mapping, norm_stats, h_ctrl=1,
         ny=len(nm_mapping["Y"]),
-        n_ctrl=len(load_control_hooks(cfg).controlled_channels(nm_mapping)[0]),
+        n_ctrl=len(hooks.controlled_channels(nm_mapping)[0]),
         nd=len(nm_mapping["D"]),
     ).to(sysid_cfg.device)
     return Node(net, ["yn", "ymin", "ymax", "D"], ["U"],

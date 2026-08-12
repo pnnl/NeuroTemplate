@@ -220,3 +220,11 @@ def test_price_stays_free_of_gradient_inside_the_loss(monkeypatch):
                    cost_weight=1.0)
     _, out, data = _rolled_out(s)
     assert data["price"].requires_grad is False
+
+
+def test_an_all_zero_power_window_does_not_poison_the_peak_gradient():
+    """M_q's root has an infinite derivative at 0, and power_metric's clamp
+    makes all-zero windows entirely plausible. Pin that it stays finite."""
+    p = torch.zeros(1, 4, requires_grad=True)
+    _soft_peak(p, 4.0).backward()
+    assert torch.isfinite(p.grad).all()
