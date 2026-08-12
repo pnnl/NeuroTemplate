@@ -119,11 +119,18 @@ class ResidualMetrics:
     most of the time, either the reference is wrong for this plant or the
     optimizer is riding a surrogate artifact into the wall. Both are things to
     know before reading the comfort number.
+
+    It is None at Δ = 0, where the question does not exist: every deviation is
+    trivially at the bound of a zero-width box, so the fraction is 1.0 and
+    means nothing. Δ = 0 is the configuration the library recommends running
+    first (it scores the bare rule), so this is a case worth stating rather
+    than a corner. `mean_abs_delta` still earns its place there — it is the
+    assertion that the residual path really is inert.
     """
     delta_cap: float        # Δ, the configured half-width, in physical units
     mean_abs_delta: float   # mean |commanded − reference|
     max_abs_delta: float
-    frac_at_cap: float      # share of (step, control) pairs pinned at ±Δ
+    frac_at_cap: Optional[float]  # share pinned at ±Δ; None when Δ = 0
 
 
 @dataclass
@@ -363,7 +370,10 @@ def residual_metrics(
         delta_cap=delta_cap,
         mean_abs_delta=float(delta.mean()),
         max_abs_delta=float(delta.max()),
-        frac_at_cap=float((delta >= delta_cap - tol).float().mean()),
+        # A zero-width box has no interior, so "pinned at the bound" is true of
+        # every step and says nothing. Reported as absent rather than as 100%.
+        frac_at_cap=(None if delta_cap == 0 else
+                     float((delta >= delta_cap - tol).float().mean())),
     )
 
 

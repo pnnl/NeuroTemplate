@@ -275,6 +275,18 @@ def test_residual_saturation_is_reported_in_the_actuation_section():
     assert "riding a surrogate artifact into the wall" in md
 
 
+def test_a_zero_width_residual_box_says_n_a_instead_of_100_percent():
+    from neurotemplate.control.metrics import ResidualMetrics
+
+    results = _make_results()
+    results.residual = ResidualMetrics(delta_cap=0.0, mean_abs_delta=0.0,
+                                       max_abs_delta=0.0, frac_at_cap=None)
+    md = _render(results=results)
+    assert "Pinned at ±Δ: n/a" in md
+    # ...and the advice about a binding cap must not follow it.
+    assert "riding a surrogate artifact into the wall" not in md
+
+
 def test_a_policy_that_clears_its_reference_says_so():
     md = _render(baseline=_make_results(offset=2.0), clears_reference=True)
     assert "clears its reference" in md

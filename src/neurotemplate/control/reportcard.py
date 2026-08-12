@@ -286,10 +286,25 @@ def _actuation_section(results) -> str:
             f"- **Residual vs. the reference rule** (Δ = ±{r.delta_cap:g}):",
             f"  - Mean |δ|: {r.mean_abs_delta:.4g}   max |δ|: "
             f"{r.max_abs_delta:.4g}",
-            f"  - Pinned at ±Δ on {r.frac_at_cap * 100:.1f}% of steps",
-            "  - A cap that binds most of the time means either the reference "
-            "is wrong for this plant or the optimizer is riding a surrogate "
-            "artifact into the wall. Read that before the comfort number.",
+        ]
+        if r.frac_at_cap is None:
+            body += [
+                "  - Pinned at ±Δ: n/a — Δ = 0, so the policy *is* the "
+                "reference rule and the box has no interior to bind. Mean |δ| "
+                "above is the check that the residual path is inert; anything "
+                "but zero there is a bug.",
+            ]
+        else:
+            body += [
+                f"  - Pinned at ±Δ on {r.frac_at_cap * 100:.1f}% of steps",
+                "  - A cap that binds most of the time means one of three "
+                "things: the reference is wrong for this plant, the optimizer "
+                "is riding a surrogate artifact into the wall, or the "
+                "incentive has simply outgrown what ±Δ can express. The third "
+                "is the cap doing its job. Read this before the comfort "
+                "number either way.",
+            ]
+        body += [
             "  - This is the *realized* deviation, measured after quantization "
             "and the actuator clamp. With `setpoint_step` on and a reference "
             "that is not itself grid-aligned, mean |δ| has a floor of half a "

@@ -320,7 +320,9 @@ def _flat_control_metrics(results: ControlResults, prefix: str) -> dict:
     if results.residual is not None:
         flat[f"{prefix}_residual_delta"] = results.residual.delta_cap
         flat[f"{prefix}_mean_abs_delta"] = results.residual.mean_abs_delta
-        flat[f"{prefix}_frac_delta_at_cap"] = results.residual.frac_at_cap
+        # Absent at Δ = 0, where a zero-width box makes the fraction vacuous.
+        if results.residual.frac_at_cap is not None:
+            flat[f"{prefix}_frac_delta_at_cap"] = results.residual.frac_at_cap
     return flat
 
 

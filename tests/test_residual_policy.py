@@ -208,6 +208,22 @@ def test_residual_metrics_measure_the_deployed_deviation():
     assert m.frac_at_cap == pytest.approx(1 / 3)
 
 
+def test_a_zero_width_box_reports_no_saturation_rather_than_all_of_it():
+    """Δ = 0 is the recommended first run — it scores the bare rule.
+
+    Every deviation is trivially at the bound of a zero-width box, so "pinned
+    on 100% of steps" is true and meaningless, and it drags in the reportcard's
+    warning about a cap that binds. Mean |δ| still earns its place: at Δ = 0 it
+    is the assertion that the residual path is inert.
+    """
+    u = torch.tensor([[[22.0], [23.0]]])
+    m = residual_metrics(u, u, delta_cap=0.0, tol=0.25)
+
+    assert m.frac_at_cap is None
+    assert m.mean_abs_delta == 0.0
+    assert m.max_abs_delta == 0.0
+
+
 def test_residual_metrics_reject_a_mismatched_reference():
     with pytest.raises(ValueError, match="must match"):
         residual_metrics(torch.zeros(1, 3, 1), torch.zeros(1, 2, 1), 1.0, 0.1)
