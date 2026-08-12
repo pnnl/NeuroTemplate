@@ -419,6 +419,16 @@ def _baseline_section(results, baseline, clears: Optional[bool] = None) -> str:
             verdict + " Judged on mean exceedance rather than violation rate: "
             "a threshold count saturates, and measured against a surrogate its "
             "argmin can select a substantially worse controller.",
+            "",
+            "**The bar this verdict clears moves with the surrogate.** The "
+            "reference is rolled out against the same frozen model as the "
+            "policy, so the rule's score is a property of that model's "
+            "actuation realism and not of the rule. A smooth power head sells "
+            "the rule fractional cooling that a staged plant cannot deliver, "
+            "and flatters it; a staged head does not. The same fixed rule has "
+            "been measured 28 points apart on two surrogates whose zone NRMSE "
+            "differed by 3%. Re-read this section after any change to the "
+            "surrogate's readout heads.",
         ]
     return _section("Baseline comparison", "\n".join(body))
 
