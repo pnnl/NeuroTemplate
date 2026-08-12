@@ -42,6 +42,10 @@ def make_nm_mapping() -> dict[str, list[str]]:
             "t": ["sec_elapsed"]}
 
 
+# Where the fixture plant record starts, in wall-clock time.
+PLANT_ORIGIN = "2024-08-02 06:35"
+
+
 def make_raw_df(n_rows: int = 80, seed: int = 0) -> pd.DataFrame:
     rng = np.random.default_rng(seed)
     data = {
@@ -57,7 +61,13 @@ def make_raw_df(n_rows: int = 80, seed: int = 0) -> pd.DataFrame:
         DIST[2]:  rng.integers(0, 2, n_rows).astype(float),
         "sec_elapsed": np.arange(n_rows, dtype=float) * 300.0,
     }
-    return pd.DataFrame(data)
+    # A DatetimeIndex like the one `get_data` sets, so anything reading the
+    # plant's wall clock (closed-loop plots, price_align: day) sees what it
+    # would see in a real run. Deliberately not midnight: a frame that starts
+    # at 00:00 hides every off-by-an-origin bug.
+    return pd.DataFrame(data, index=pd.date_range(
+        PLANT_ORIGIN, periods=n_rows, freq="5min", name="timestamp",
+    ))
 
 
 def make_norm_stats(raw_df: pd.DataFrame) -> dict:

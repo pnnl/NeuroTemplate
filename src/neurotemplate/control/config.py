@@ -80,10 +80,10 @@ class ControlConfig:
     #   "random" — a uniformly random offset. The tariff's peak lands at a
     #     random hour of the plant's day, which is what stops the policy
     #     reading the price channel as a clock.
-    #   "day" — the offset is snapped to a whole-day boundary in the price
-    #     file, so the day is random but the hours are the tariff's real
-    #     hours. Use this when the point is to SEE pre-cooling: an 8 pm peak
-    #     is drawn at 8 pm in every window and every plot. The cost is that a
+    #   "day" — the offset is chosen so the tariff's time of day matches the
+    #     plant window's own, with the day still drawn at random. Use this
+    #     when the point is to SEE pre-cooling: an 8 pm peak is drawn at the
+    #     plant's 8 pm in every window and every plot. The cost is that a
     #     series peaking at the same hour most days becomes learnable as that
     #     hour, so confirm a price response by re-scoring the trained policy
     #     against a tariff whose peak has been moved, not from the trace.

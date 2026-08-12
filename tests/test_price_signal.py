@@ -30,6 +30,7 @@ from neurotemplate.control.scenarios import (
 )
 from control_fixtures import (
     MIDNIGHT,
+    PLANT_ORIGIN,
     PRICE_SCALE,
     PRICE_SERIES,
     PRICE_STEPS_PER_DAY,
@@ -267,33 +268,48 @@ def _price_starts(s, tmp_path, align, start=MIDNIGHT, start_step=0, days=10,
     return data["price"][:, 0, 0]
 
 
-def test_day_alignment_starts_every_window_at_the_same_hour(tmp_path):
-    """The property the whole option exists for."""
+def _plant_time_of_day(s):
+    """Each window's start as a step of the plant's own day.
+
+    Windows stride by `in_steps` from the fixture record's 06:35 origin.
+    """
+    origin = pd.Timestamp(PLANT_ORIGIN)
+    origin_step = (origin.hour * 60 + origin.minute) // 5
+    n = _window(s)["yn"].shape[0]
+    stride = s["cfg"].in_steps
+    return (origin_step + stride * torch.arange(n)) % PRICE_STEPS_PER_DAY
+
+
+def test_day_alignment_draws_the_tariff_on_the_plants_clock(tmp_path):
+    """The property the whole option exists for: an 8 pm peak at the plant's
+    8 pm, so a pre-cool shows up where a buildings person would look for it."""
     s = full_setup()
+    expected = _plant_time_of_day(s)
     starts = _price_starts(s, tmp_path, "day")
 
     assert starts.numel() > 1, "need several windows for this to mean anything"
-    assert torch.all(starts == 0.0), f"windows began at steps {set(starts.tolist())}"
+    assert torch.equal(starts.long(), expected)
 
 
 def test_random_alignment_does_not(tmp_path):
     s = full_setup()
+    expected = _plant_time_of_day(s)
     starts = _price_starts(s, tmp_path, "random")
 
-    assert len(set(starts.tolist())) > 1, "offsets should not all coincide"
+    assert not torch.equal(starts.long(), expected)
 
 
-def test_day_alignment_finds_midnight_in_a_file_that_starts_elsewhere(tmp_path):
-    """A price export need not begin at midnight, so the day boundary is
-    found from the file's own first timestamp rather than assumed at row 0."""
+def test_day_alignment_reads_the_price_files_own_start_time(tmp_path):
+    """A price export need not begin at midnight, so where its rows sit within
+    their day is read from its first timestamp rather than assumed."""
     s = full_setup()
-    # 06:00 start => the file's first row sits 72 five-minute steps into its
-    # day, and the encoded series says so. Alignment must therefore land on
-    # series index 216, not on index 0.
+    expected = _plant_time_of_day(s)
+    # Same tariff, written from 06:00 instead of midnight: the encoded series
+    # is shifted to match, so the answer must not move.
     starts = _price_starts(s, tmp_path, "day", start="2026-01-01 06:00",
                            start_step=72)
 
-    assert torch.all(starts == 0.0)
+    assert torch.equal(starts.long(), expected)
 
 
 def test_day_alignment_still_varies_the_day(tmp_path):
@@ -319,12 +335,12 @@ def test_day_alignment_is_reproducible_under_a_seeded_generator(tmp_path):
     assert torch.equal(first, second)
 
 
-def test_day_alignment_needs_a_whole_day_of_record(tmp_path):
-    """A price file shorter than a day has no boundary to snap to."""
+def test_day_alignment_needs_a_price_record_that_reaches_the_hour(tmp_path):
+    """The plant record starts at 06:35, so a tariff that runs out before then
+    has no slice to offer that window."""
     s = full_setup()
     s["cfg"].price_align = "day"
-    short = torch.full((PRICE_STEPS_PER_DAY // 2, 1), 0.2)
-    install_price(s["cfg"], tmp_path, series=short, scale=1.0,
-                  start="2026-01-01 06:00")
-    with pytest.raises(ValueError, match="at least one whole day boundary"):
+    short = torch.full((60, 1), 0.2)   # 5 h, ending before the plant's 06:35
+    install_price(s["cfg"], tmp_path, series=short, scale=1.0)
+    with pytest.raises(ValueError, match="long enough to hold"):
         _window(s, generator=_gen(0))

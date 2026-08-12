@@ -33,7 +33,7 @@ from functools import lru_cache
 from typing import Optional
 
 import torch
-from pandas import DataFrame
+from pandas import DataFrame, Timestamp
 
 from neuromancer.dataset import DictDataset
 
@@ -128,34 +128,63 @@ def _load_price_series(path: str, column: Optional[str],
 
 
 @beartype
-def _day_aligned_starts(n_samples: int, series_len: int, nsteps: int,
-                        steps_per_day: int, phase: int,
-                        generator=None) -> torch.Tensor:
-    """Window starts drawn from whole-day boundaries in the price series.
+def _window_time_of_day(df: DataFrame, t: torch.Tensor,
+                        steps_per_day: int) -> torch.Tensor:
+    """Each window's first step, as a step index into the plant's own day.
 
-    `phase` is where row 0 sits within its own day, in steps, so the first
-    day boundary is `-phase mod steps_per_day` and legal starts step by a
-    whole day from there. The day is still drawn at random; only the
-    within-day position is pinned.
+    `t` is elapsed seconds from the file's first row, so the wall clock comes
+    from the dataframe's own DatetimeIndex — the one `get_data` sets.
     """
-    first = (-phase) % steps_per_day
-    n_days = (series_len - nsteps - first) // steps_per_day + 1
-    if n_days < 1:
+    origin = df.index[0]
+    if not isinstance(origin, Timestamp):
         raise ValueError(
-            f"price_align: day needs a price record with at least one whole "
-            f"day boundary at least {nsteps} steps from its end; this one has "
-            f"{series_len} steps with the first boundary at step {first}. Use "
-            "a longer price record, shorten the window, or set "
-            "price_align: random."
+            "price_align: day matches the tariff to the plant's clock, so the "
+            f"plant frame needs a DatetimeIndex; this one has {type(origin)}. "
+            "Frames from `get_data` carry one. Set price_align: random for a "
+            "frame that has no wall clock."
         )
-    days = torch.randint(0, int(n_days), (n_samples,), generator=generator)
+    step_seconds = 86400.0 / steps_per_day
+    origin_tod = float((origin - origin.normalize()).total_seconds())
+    starts = (origin_tod + t[:, 0, 0].double()) / step_seconds
+    return starts.round().long() % steps_per_day
+
+
+@beartype
+def _day_aligned_starts(series_len: int, nsteps: int, steps_per_day: int,
+                        phase: int, window_tod: torch.Tensor,
+                        generator=None) -> torch.Tensor:
+    """Price-series offsets whose time of day matches each window's.
+
+    `phase` is where the price file's row 0 sits within its own day, so price
+    index i has time of day `(phase + i) mod steps_per_day`. Solving that
+    against each window's own time of day gives the first legal offset, and
+    legal offsets then step by a whole day. The *day* is still drawn at
+    random; only the time of day is pinned.
+    """
+    first = (window_tod - phase) % steps_per_day
+    n_days = (series_len - nsteps - first) // steps_per_day + 1
+    if bool((n_days < 1).any()):
+        raise ValueError(
+            f"price_align: day needs a price record long enough to hold a "
+            f"{nsteps}-step window starting at each plant window's time of "
+            f"day; this one has {series_len} steps, which is not enough for "
+            f"the window starting at step {int(first[(n_days < 1).nonzero()[0, 0]])} "
+            "of its day. Use a longer price record, shorten the window, or "
+            "set price_align: random."
+        )
+    # rand() rather than randint() because the number of legal days differs
+    # per window (a later time of day has one fewer whole day behind it).
+    draw = torch.rand(window_tod.shape, generator=generator,
+                      dtype=torch.float32)
+    days = torch.minimum((draw * n_days).long(), n_days - 1)
     return first + days * steps_per_day
 
 
 @beartype
 def build_price(cfg, n_samples: int, nsteps: int, price_path: Optional[str],
-                generator=None,
-                steps_per_day: Optional[int] = None) -> Optional[torch.Tensor]:
+                generator=None, steps_per_day: Optional[int] = None,
+                window_tod: Optional[torch.Tensor] = None,
+                ) -> Optional[torch.Tensor]:
     """A sampled tariff of shape [n_samples, nsteps, 1], scaled, or None.
 
     Price is exogenous data the policy and the objective read and the dynamics
@@ -189,9 +218,9 @@ def build_price(cfg, n_samples: int, nsteps: int, price_path: Optional[str],
       random  (default) — a uniformly random step offset. The tariff's evening
         peak lands at a random hour of the plant's day, so nothing about the
         window's position can be read as a clock.
-      day — the offset is snapped to a whole-day boundary in the price file,
-        so the day is still random but the tariff's hours are its real hours.
-        This is what makes pre-cooling legible: an 8 pm peak is drawn at 8 pm
+      day — the offset is chosen so the tariff's time of day matches the
+        plant window's own, with the *day* still drawn at random. This is what
+        makes pre-cooling legible: an 8 pm peak is drawn at the plant's 8 pm,
         in every window and in every plot. It also partially re-opens the
         shortcut above — a series that peaks at hour 19 on most days is that
         much more learnable as "hour 19" — so a price response measured under
@@ -217,16 +246,16 @@ def build_price(cfg, n_samples: int, nsteps: int, price_path: Optional[str],
             f"{nsteps}. Use a longer price record or shorten train_pred_steps."
         )
     if cfg.price_align == "day":
-        if steps_per_day is None:
+        if steps_per_day is None or window_tod is None:
             raise ValueError(
                 "price_align: day needs a plant timestep that divides 24 h "
-                "evenly, so a window can start on a day boundary. This run's "
-                "timestep does not (or the window is too short to show one). "
-                "Set price_align: random."
+                "evenly, so the tariff's clock can be matched to the plant's. "
+                "This run's timestep does not (or the window is too short to "
+                "show one). Set price_align: random."
             )
         phase = round(midnight_offset * steps_per_day / 86400.0)
-        starts = _day_aligned_starts(n_samples, series.shape[0], nsteps,
-                                     steps_per_day, phase, generator)
+        starts = _day_aligned_starts(series.shape[0], nsteps, steps_per_day,
+                                     phase, window_tod, generator)
     else:
         starts = torch.randint(0, series.shape[0] - nsteps + 1, (n_samples,),
                                generator=generator)
@@ -322,8 +351,11 @@ def build_window_dict(
     # SystemPreview.forward, so the tariff is readable in the loss as
     # variable("price") and in `out["price"]` at evaluation time. Drawn after
     # the band, so turning price on does not shift the band realization.
+    steps_per_day = _steps_per_day(t)
+    tod = (None if steps_per_day is None or cfg.price_align != "day"
+           else _window_time_of_day(df, t, steps_per_day))
     price = build_price(cfg, n, W, price_path, generator,
-                        steps_per_day=_steps_per_day(t))
+                        steps_per_day=steps_per_day, window_tod=tod)
     if price is not None:
         out["price"] = price.to(device)
     return out

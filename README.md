@@ -19,12 +19,25 @@ Restructured from a flat script collection into an installable library. Phase A 
 - ✅ YAML + CLI override machinery, multi-path data fields (`Union[str, list[str]]`)
 - ✅ Hook discovery via `neurotemplate.hooks` (CWD + `cfg.user_hooks_path` override)
 - ✅ Single `nt <group> <verb>` dispatcher (replaces the five flat console scripts)
-- ✅ 170 / 170 tests passing
+- ✅ 439 / 439 tests passing
 - ✅ Control-side parity with sysid: policy family registry (`mlp` / `linear`), comfort + energy metrics, sectioned reportcard with a golden test, MLflow metric logging, optional rule-based baseline comparison
 - ☐ Phase B (scrub remaining HVAC vocabulary from library code; relocate runtime artifacts off CWD)
   - ⚠️ **Breaking hook change:** `plot_closed_loop` no longer greps D columns for `"outdoor"`/`"dry-bulb"` and no longer reaches into a private `_power_channel_indices`. Apps must add `power_channels` and `plot_context_channels` to `control_user_defined.py`; `has_power_channels` is removed (it is now the truthiness of `power_channels`).
 - ☐ Phase C (ship an in-repo `examples/rtu_mall/`, README templates, end-to-end smoke test)
   - ✅ [template/](template/) — copyable app skeleton: both hook files with every hook stubbed, both config dirs with every field annotated
+
+### Upgrading: breaking changes from the v6 follow-up
+
+Four signatures moved. All four fail loudly — none of them degrade silently.
+
+| Was | Now | Why |
+|---|---|---|
+| `preview_config()` returning a `"price"` key | `price_preview` in the control config | the hook cannot see the config, so one config wanting a price preview forced price paths onto every config sharing the hook file |
+| `plot_closed_loop(..., plot_dir)` | `plot_closed_loop(..., plot_dir, origins=[df.index[0] for df in test_dfs])` | `t` is elapsed seconds, so without the files' wall-clock origins every plot was dated 1970 |
+| `objective.frac_power_zero(...) -> float` | `objective.power_diagnostics(...) -> PowerDiagnostics` | the forward zero count alone reports a correct "compressor off" prediction as a dead gradient |
+| `render_control_reportcard(..., frac_power_zero=)` | `render_control_reportcard(..., power=)` | carries the above |
+
+`ResidualMetrics.frac_at_cap` is now `Optional[float]` and is `None` at Δ = 0, where a zero-width box made it vacuously 1.0.
 
 Open work tracked in [audit.md](audit.md).
 
@@ -146,11 +159,11 @@ The library draws its own window offsets out of each split's file, so price wind
 
 | | `random` (default) | `day` |
 |---|---|---|
-| offset | any step | snapped to a whole day in the price file |
-| the tariff's 8 pm peak | lands at a random hour of the plant's day | lands at 8 pm, in every window and every plot |
+| offset | any step | chosen so the tariff's time of day matches the window's |
+| the tariff's 8 pm peak | lands at a random hour of the plant's day | lands at the plant's 8 pm, in every window and every plot |
 | clock shortcut | closed | partly re-opened |
 
-**Use `day` when the point is to see pre-cooling.** Under `random` a real evening peak is drawn at a different hour in every window, so the pre-cool it should provoke averages away and no plot shows it — v6 had to work around this by cutting the eval price file down to exactly one window long, leaving `randint` a single legal offset. `day` keeps the day random (so day-to-day price variation still forces the policy to read the channel) and pins only the within-day phase. The cost is that a series peaking at hour 19 on most days becomes that much more learnable *as* hour 19, so under `day` a load-shifting trace is not by itself evidence of price response: re-score the trained policy with the peak moved to a different hour and check the load moves with it.
+**Use `day` when the point is to see pre-cooling.** Under `random` a real evening peak is drawn at a different hour in every window, so the pre-cool it should provoke averages away and no plot shows it — v6 had to work around this by cutting the eval price file down to exactly one window long, leaving `randint` a single legal offset. `day` keeps the day random (so day-to-day price variation still forces the policy to read the channel) and pins only the time of day, read off the plant frame's own `DatetimeIndex`. The cost is that a series peaking at hour 19 on most days becomes that much more learnable *as* hour 19, so under `day` a load-shifting trace is not by itself evidence of price response: re-score the trained policy with the peak moved to a different hour and check the load moves with it.
 
 `cost_weight` then weights `mean_t(price · power)`, and `peak_weight` weights the per-window power mean `M_q(power)` — all three power terms are reductions of one shared signal. Neither is solvable at the default `train_pred_steps: 48`; expect 144–288 steps, and expect `cost_weight` to need a price preview (`price_preview`) before it can shift load rather than merely react to it.
 
