@@ -62,11 +62,11 @@ def get_data(
 
     df = df.set_index("timestamp").reindex(idx)
 
-    # Convert frequency to total seconds
-    if df_freq == 'min':
-        freq_seconds = 60
-    else:
-        freq_seconds = pd.to_timedelta(df_freq).total_seconds()
+    # Convert frequency to total seconds. `pd.infer_freq` returns bare
+    # abbreviations for unit-multiple frequencies ("h", "D", "min"), and
+    # `pd.to_timedelta` rejects those — go through the offset, which resolves
+    # both those and the multiplied forms ("5min", "15min", "2h").
+    freq_seconds = pd.tseries.frequencies.to_offset(df_freq).nanos / 1e9
 
     assert freq_seconds > 0, f"Non-positive frequency inferred: {freq_seconds}"
 
