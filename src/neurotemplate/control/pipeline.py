@@ -441,12 +441,19 @@ def plot_closed_loop(
     nm_mapping: dict[str, list[str]],
     norm_stats: dict[str, dict[str, float]],
     plot_dir: Path,
+    origins: list,
 ) -> None:
     """
     One figure per rollout window: controlled zone temps + comfort band,
     setpoint(s), and (if present) fan/DX power. Each window goes in its own
     day-stamped folder under `plot_dir` with the underlying trajectory CSV
     alongside, so restyling never requires re-running the rollout.
+
+    `origins` is one wall-clock start timestamp per test file, in the order
+    the files were loaded (`[df.index[0] for df in test_dfs]`). It is required
+    rather than optional because `t` is *elapsed* seconds from its own file's
+    first row, so without the origins every plot is stamped 1970 — see the
+    timestamp block below.
     """
     import matplotlib
     matplotlib.use("Agg")
@@ -496,12 +503,23 @@ def plot_closed_loop(
     price = (None if "price" not in out else
              (out["price"][:, hmax:, 0] * scale).cpu())
 
-    # Per-step real timestamps (sec_elapsed is POSIX seconds; see
-    # data_utils._engineer_features).
-    t_unix = out["t"][:, hmax:, 0].cpu().numpy()
+    # Per-step wall-clock timestamps. `t` is `sec_elapsed`, which `get_data`
+    # rebases to zero at its file's first row, so it is elapsed seconds and
+    # not POSIX seconds — reading it as POSIX stamps every figure 1970-01-01
+    # and only preserves hour-of-day for files that happen to start at
+    # midnight. `source_idx` says which file each window came from, so the
+    # window's real clock is that file's origin plus its elapsed seconds.
+    t_elapsed = out["t"][:, hmax:, 0].cpu().numpy()
+    source_idx = out["source_idx"].cpu().numpy()
+    if len(origins) <= int(source_idx.max()):
+        raise ValueError(
+            f"plot_closed_loop got {len(origins)} origins but windows "
+            f"reference file index {int(source_idx.max())}. Pass one origin "
+            "per test file: [df.index[0] for df in test_dfs]."
+        )
     P = y.shape[1]
     steps = list(range(P))
-    dt_s = float(t_unix[0, 1] - t_unix[0, 0])
+    dt_s = float(t_elapsed[0, 1] - t_elapsed[0, 0])
     steps_per_hour = max(1, int(round(3600.0 / dt_s)))
     tick_steps = list(range(0, P, steps_per_hour))
     tick_labels = [str(i // steps_per_hour) for i in tick_steps]
@@ -510,7 +528,7 @@ def plot_closed_loop(
     n_rows = 3 if power else 2
     n_windows = y.shape[0]
     for w in range(n_windows):
-        ts = pd.to_datetime(t_unix[w], unit="s")
+        ts = origins[int(source_idx[w])] + pd.to_timedelta(t_elapsed[w], unit="s")
         day_name = ts[0].strftime("%b_%d")
         date_str = ts[0].strftime("%b-%d")
         day_dir = _unique_day_dir(plot_dir, day_name)

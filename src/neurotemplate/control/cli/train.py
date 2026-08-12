@@ -177,9 +177,12 @@ def main() -> None:
                   f"{'yes' if clears else 'NO — ship the reference'}")
 
     if cfg.plot:
+        # `t` is elapsed seconds from each file's first row, so the plots need
+        # the files' wall-clock origins to be stamped with the real dates.
         plot_closed_loop(
             cfg, sysid_cfg, out, nm_mapping, norm_stats,
             Path(cfg.savedir) / "plots",
+            origins=[df.index[0] for df in test_dfs],
         )
 
     md = render_control_reportcard(
