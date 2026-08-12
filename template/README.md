@@ -51,7 +51,7 @@ for the step-by-step:
 | Want | Implement | Then set |
 |---|---|---|
 | an energy objective, and the energy section of the reportcard | `power_metric` + `POWER_METRIC_IMPLEMENTED` | `energy_weight` |
-| price-driven load shifting | `train/dev/test_price_path` + `price_scale` in control.yaml, and a `"price"` entry in `preview_config` | `cost_weight` |
+| price-driven load shifting | `power_metric`, plus `train/dev/test_price_path` + `price_scale` in control.yaml | `cost_weight`, `price_preview` |
 | peak shaving | `power_metric` | `peak_weight`, `peak_q` |
 | a rule-based baseline, and the learned-vs-rule verdict | `reference_control` | *(nothing)* |
 | a policy bounded to that rule | `reference_control` | `residual_delta` |
@@ -78,6 +78,11 @@ nt model train --config model_configs/modeling.yaml --print-config
   at a real historical price series rather than a time-of-use table keyed on
   hour-of-day: a tariff that is a function of the clock is one the policy will
   learn *as* the clock, since the disturbances already carry that signal.
+- **`cost_weight` without `price_preview` cannot pre-cool.** Pre-cooling is an
+  action taken *before* the expensive block, so a policy whose only price
+  input is the current one can react but never shift. The reportcard flags
+  this combination, but it is easier to just set it: 48 steps = 4 h on
+  5-minute data.
 - **`residual_delta` must be at least one `setpoint_step`** if quantization is
   on. Below that every residual snaps back to zero and you train for an hour
   to reproduce the rule; the library rejects it rather than let that happen.

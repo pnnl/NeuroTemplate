@@ -379,6 +379,12 @@ def _denorm(x: torch.Tensor, col: str, nm_mapping: dict[str, list[str]],
 # responds to the input chosen at i-1, so the policy needs to see the band
 # it is steering into or it overshoots at every band change.
 #
+# The TARIFF preview is not here — it is `price_preview` in the control
+# config. How far ahead to look at the weather is a property of the plant and
+# is shared by every run against it; how far ahead to look at the price is a
+# per-run knob. Keeping it here meant one config wanting a price preview
+# forced price paths onto every other config sharing this file.
+#
 # @beartype
 # def preview_config(nm_mapping: dict[str, list[str]]) -> dict[str, int]:
 #     return {"band": 2, "Ambient Temperature [degC]": 2}

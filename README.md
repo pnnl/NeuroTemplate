@@ -126,9 +126,9 @@ The library imports each hook by attribute (no defaulting), so every row above e
 | `power_metric(yn, U, D, nm_mapping, norm_stats) -> Tensor` + `POWER_METRIC_IMPLEMENTED: bool` | required only when `energy_weight > 0` | energy / cost / peak objectives + energy reportcard |
 | `reference_control(yn_now, ymin_now, ymax_now, d_now, nm_mapping, norm_stats) -> Tensor` | optional | rule-based baseline **and** the residual policy's anchor |
 | `build_baseline_policy(cfg, sysid_cfg, nm_mapping, norm_stats) -> Node \| None` | optional; mutually exclusive with `reference_control` | escape hatch for a baseline a memoryless rule cannot express |
-| `preview_config(nm_mapping) -> {signal: n_steps}` | optional | per-column disturbance, comfort-band and price preview widths |
+| `preview_config(nm_mapping) -> {signal: n_steps}` | optional | per-column disturbance and comfort-band preview widths (the tariff preview is `price_preview` in the config) |
 
-The energy tariff is config, not a hook: `train_price_path` / `dev_price_path` / `test_price_path` (one CSV per split) + `price_scale` in `control.yaml`, required together only when `cost_weight > 0`.
+The energy tariff is config, not a hook: `train_price_path` / `dev_price_path` / `test_price_path` (one CSV per split) + `price_scale` + `price_preview` in `control.yaml`, required together only when `cost_weight > 0`.
 
 `power_metric` returns whatever units the use case meters; the library never converts, so the reportcard labels energy as `power·h`. Metered channels the surrogate already predicts are the best thing to return, because the energy numbers then mean something outside the run. An actuation proxy such as `(setpoint - ambient)²` is a fine alternative when nothing meters power — just read the energy section as relative rather than physical. What has actually cost campaigns here is the term's *scale*, not its shape: a proxy carried over from another dataset came out at 1.7× the entire comfort objective while every pooled metric looked fine. The objective-balance report and the shape sweep both print before training so that magnitude is on screen from the start.
 
@@ -142,7 +142,7 @@ The same hook is what `residual_delta` anchors to. Set it and the policy command
 
 The library draws its own window offsets out of each split's file, so price windows are deliberately independent of the weather windows they are scored beside — that removes the residual price↔weather correlation as a second route to the same shortcut, and it means the price record need not span the plant record. Reproducibility rides on the `generator` `build_price` is handed: `evaluate_closed_loop` reseeds it from `EVAL_BAND_SEED`, so the learned policy and the baseline are scored against a byte-identical tariff. Price is drawn after the band, so enabling it leaves band realizations unchanged.
 
-`cost_weight` then weights `mean_t(price · power)`, and `peak_weight` weights the per-window power mean `M_q(power)` — all three power terms are reductions of one shared signal. Neither is solvable at the default `train_pred_steps: 48`; expect 144–288 steps, and expect `cost_weight` to need a price preview (`preview_config()["price"]`) before it can shift load rather than merely react to it.
+`cost_weight` then weights `mean_t(price · power)`, and `peak_weight` weights the per-window power mean `M_q(power)` — all three power terms are reductions of one shared signal. Neither is solvable at the default `train_pred_steps: 48`; expect 144–288 steps, and expect `cost_weight` to need a price preview (`price_preview`) before it can shift load rather than merely react to it.
 
 The tables above are the canonical hook contract. To start writing hooks, copy [template/](template/) — it has all of them stubbed with the right signatures. For worked-through implementations (including an ordinal/bounded `data_head_config`), read [tests/fixtures/modeling_user_defined.py](tests/fixtures/modeling_user_defined.py) and [tests/fixtures/control_user_defined.py](tests/fixtures/control_user_defined.py).
 
@@ -214,11 +214,12 @@ To turn on price-driven control:
    resolution itself).
    *Do not build a time-of-use table keyed on hour-of-day* — see the hook
    contract above for why the policy will learn the clock instead of the price.
-4. **Give the policy a price preview**, or the cost term is not solvable:
+4. **Give the policy a price preview**, or the cost term is not solvable —
+   pre-cooling happens *before* the expensive block, so a policy that only
+   sees the current price can react but never shift:
 
-   ```python
-   def preview_config(nm_mapping):
-       return {"price": 48, "band": 2}    # 48 steps = 4 h at 5-minute data
+   ```yaml
+   price_preview: 48       # 48 steps = 4 h at 5-minute data
    ```
 
 5. **Set the weights and lengthen the rollout:**

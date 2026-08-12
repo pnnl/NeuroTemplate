@@ -64,6 +64,15 @@ class ControlConfig:
     # term multiplies the scale back in. Deliberately a pure scaling with no
     # shift, so a zero price stays a zero cost.
     price_scale: Optional[float] = None
+    # How many future price steps the policy sees, on top of the current one.
+    # This is what separates load *shifting* from a slightly more expensive
+    # thermostat: precooling is an action taken before the expensive block, so
+    # a policy whose only price input is the current one can react but not
+    # shift. Cover the price cycle you want it to anticipate (48 steps = 4 h
+    # on 5-minute data). Lives here rather than in `preview_config` because
+    # it is a per-run tuning knob, while the disturbance previews are a
+    # structural property of the plant that every run shares.
+    price_preview: int = 0
 
     # Optional path or dotted module name for the control hooks file.
     # If unset, the library looks for `control_user_defined.py` in CWD.
@@ -213,6 +222,18 @@ class ControlConfig:
         if self.price_scale is not None and self.price_scale <= 0:
             raise ValueError(
                 f"price_scale must be positive, got {self.price_scale}"
+            )
+        if self.price_preview < 0:
+            raise ValueError(
+                f"price_preview must be >= 0, got {self.price_preview}"
+            )
+        if self.price_preview > 0 and n_set == 0:
+            raise ValueError(
+                f"price_preview is {self.price_preview} but no "
+                "train_price_path/dev_price_path/test_price_path is set, so "
+                "no tariff reaches the rollout and there is nothing to "
+                "preview. Set the three price paths + price_scale, or set "
+                "price_preview to 0."
             )
 
         for name in [

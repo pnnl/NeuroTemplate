@@ -244,8 +244,8 @@ def objective_notes(cfg, arch: dict) -> list[str]:
         notes.append(
             "`cost_weight` > 0 but the policy previews 0 future price steps, "
             "so it can react to the current tariff and cannot shift load into "
-            "a cheaper hour. Add a `price` entry to `preview_config` covering "
-            "the price cycle."
+            "a cheaper hour. Set `price_preview` to cover the price cycle "
+            "(48 steps = 4 h on 5-minute data)."
         )
     if cfg.peak_weight > 0 and cfg.energy_weight == 0 and cfg.cost_weight == 0:
         notes.append(

@@ -36,6 +36,13 @@ test_data_path: data/test.csv
 # $/kWh unit the tariff is divided by so the policy sees an O(1) input.
 # Required (and must be > 0) whenever the three paths above are set.
 # price_scale: null
+# Future price steps the policy sees, on top of the current one. This is what
+# separates load *shifting* from a slightly more expensive thermostat:
+# precooling happens BEFORE the expensive block, so a policy that only sees
+# today's price can react but never shift. Cover the cycle you want it to
+# anticipate — 48 steps = 4 h on 5-minute data. A cost_weight > 0 with this
+# at 0 is flagged on the reportcard.
+# price_preview: 0
 
 # ── HORIZON ──────────────────────────────────────────────────────
 # Closed-loop rollout length during training.
@@ -87,7 +94,7 @@ energy_weight: 0.0
 # Load shifting: weights mean_t(price · power), in $/h. Additionally requires
 # the train/dev/test_price_path + price_scale fields above, which sample
 # windows out of a real historical price series. Only solvable if the policy
-# previews the price — see preview_config.
+# previews the price — see price_preview above.
 # cost_weight: 0.0
 # Peak shaving: weights the per-window power mean M_q, averaged over the
 # batch. Same units as energy, so the two weights are directly comparable.

@@ -197,4 +197,21 @@ def test_validate_accepts_a_complete_tariff():
     cfg.dev_price_path = "dev_price.csv"
     cfg.test_price_path = "test_price.csv"
     cfg.price_scale = 0.30
+    cfg.price_preview = 48
     cfg.validate()  # must not raise
+
+
+def test_validate_rejects_a_price_preview_with_no_tariff():
+    """Previewing a signal that never reaches the rollout is a dead input
+    width — caught at config load rather than at policy build."""
+    cfg = _runnable_cfg()
+    cfg.price_preview = 48
+    with pytest.raises(ValueError, match="no tariff reaches the rollout"):
+        cfg.validate()
+
+
+def test_validate_rejects_a_negative_price_preview():
+    cfg = _runnable_cfg()
+    cfg.price_preview = -1
+    with pytest.raises(ValueError, match="price_preview must be >= 0"):
+        cfg.validate()

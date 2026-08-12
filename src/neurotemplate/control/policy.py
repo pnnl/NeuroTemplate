@@ -272,45 +272,49 @@ def _preview_steps(hooks, cfg,
                    nm_mapping: dict[str, list[str]]) -> tuple[int, int, int]:
     """Resolve (disturbance, band, price) future-preview widths for the policy.
 
-    If the use case defines `preview_config(nm_mapping) -> {signal: n_steps}`,
-    use it: keys may be D column names (per-column disturbance preview), the
-    literal "band" (future comfort-band preview), or the literal "price"
-    (tariff forecast). The disturbance window is one block, so it is sized to
-    the largest per-column D value requested (columns asking for less just see
-    harmless extra lookahead). With no hook, fall back to the global
-    `cfg.d_preview` for disturbances and no band or price preview.
+    The tariff preview comes from `cfg.price_preview`; the other two come from
+    the use case's `preview_config(nm_mapping) -> {signal: n_steps}` hook, whose
+    keys may be D column names (per-column disturbance preview) or the literal
+    "band" (future comfort-band preview). The disturbance window is one block,
+    so it is sized to the largest per-column D value requested (columns asking
+    for less just see harmless extra lookahead). With no hook, fall back to the
+    global `cfg.d_preview` for disturbances and no band preview.
 
-    Price preview is what separates load *shifting* from a slightly more
-    expensive thermostat: precooling is an action taken before the expensive
-    block, so a policy whose only price input is the current one can react but
-    not shift.
+    The split is deliberate. How far ahead to look at the weather is a property
+    of the plant, shared by every run against it, and belongs in the hooks file.
+    How far ahead to look at the tariff is a per-run tuning knob — and while it
+    lived in the hook, one config wanting a price preview forced price paths
+    onto every other config sharing that hook file, because the hook cannot see
+    the config and so cannot ask whether a tariff is configured at all.
     """
+    price_future = cfg.price_preview
     preview = getattr(hooks, "preview_config", None)
     if preview is None:
-        return cfg.d_preview, 0, 0
+        return cfg.d_preview, 0, price_future
 
     spec = preview(nm_mapping)
-    allowed = set(nm_mapping["D"]) | {"band", "price"}
+    allowed = set(nm_mapping["D"]) | {"band"}
     for key, steps in spec.items():
+        if key == "price":
+            raise ValueError(
+                "preview_config no longer takes a 'price' key — the tariff "
+                "preview moved to the `price_preview` config field, so it can "
+                "vary per run without every config sharing this hook file "
+                f"needing price paths. Set `price_preview: {steps}` in the "
+                "control config and drop the key here."
+            )
         if key not in allowed:
             raise ValueError(
-                f"preview_config key '{key}' is not a D column, 'band' or "
-                f"'price'. Allowed: {sorted(allowed)}"
+                f"preview_config key '{key}' is not a D column or 'band'. "
+                f"Allowed: {sorted(allowed)}"
             )
         if not isinstance(steps, int) or steps < 0:
             raise ValueError(
                 f"preview_config['{key}'] must be a non-negative int, got {steps!r}"
             )
-    if spec.get("price", 0) > 0 and cfg.train_price_path is None:
-        raise ValueError(
-            "preview_config asks for a price preview but train_price_path is "
-            "not set, so no tariff reaches the rollout. Set "
-            "train_price_path/dev_price_path/test_price_path + price_scale, "
-            "or drop the 'price' key."
-        )
 
     d_future = max([spec.get(col, 0) for col in nm_mapping["D"]], default=0)
-    return d_future, spec.get("band", 0), spec.get("price", 0)
+    return d_future, spec.get("band", 0), price_future
 
 
 def _build_mlp_net(cfg, insize: int, nu: int, umin, umax) -> nn.Module:

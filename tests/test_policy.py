@@ -22,7 +22,7 @@ _NM = {"Y": ["z"], "U": ["sp"], "D": ["outdoor", "irr"], "t": ["sec"]}
 
 def test_preview_steps_falls_back_to_d_preview_without_hook():
     hooks = SimpleNamespace()  # no preview_config attribute
-    cfg = SimpleNamespace(d_preview=2)
+    cfg = SimpleNamespace(d_preview=2, price_preview=0)
     assert _preview_steps(hooks, cfg, _NM) == (2, 0, 0)
 
 
@@ -30,35 +30,37 @@ def test_preview_steps_reads_hook_and_takes_max_d():
     # outdoor asks for 1 future step, band for 3; the single D window takes the
     # largest per-column D request.
     hooks = SimpleNamespace(preview_config=lambda nm: {"band": 3, "outdoor": 1})
-    cfg = SimpleNamespace(d_preview=0)
+    cfg = SimpleNamespace(d_preview=0, price_preview=0)
     assert _preview_steps(hooks, cfg, _NM) == (1, 3, 0)
 
 
-def test_preview_steps_reads_price_when_a_tariff_exists():
-    hooks = SimpleNamespace(preview_config=lambda nm: {"price": 4})
-    cfg = SimpleNamespace(d_preview=0, train_price_path="prices.csv")
+def test_price_preview_comes_from_the_config_not_the_hook():
+    """It is a per-run knob, so it must not need the hooks file to change."""
+    hooks = SimpleNamespace()
+    cfg = SimpleNamespace(d_preview=0, price_preview=4)
     assert _preview_steps(hooks, cfg, _NM) == (0, 0, 4)
 
+    with_hook = SimpleNamespace(preview_config=lambda nm: {"band": 2})
+    assert _preview_steps(with_hook, cfg, _NM) == (0, 2, 4)
 
-def test_price_preview_without_a_tariff_hook_fails_fast():
-    """Previewing a signal that never reaches the rollout is a silent dead
-    input width, so say so at build time."""
+
+def test_a_price_key_in_the_hook_names_the_field_that_replaced_it():
     hooks = SimpleNamespace(preview_config=lambda nm: {"price": 4})
-    cfg = SimpleNamespace(d_preview=0, train_price_path=None)
-    with pytest.raises(ValueError, match="train_price_path is not set"):
+    cfg = SimpleNamespace(d_preview=0, price_preview=0)
+    with pytest.raises(ValueError, match="price_preview: 4"):
         _preview_steps(hooks, cfg, _NM)
 
 
 def test_preview_steps_rejects_unknown_signal():
     hooks = SimpleNamespace(preview_config=lambda nm: {"bogus": 1})
-    cfg = SimpleNamespace(d_preview=0)
-    with pytest.raises(ValueError, match="not a D column, 'band' or 'price'"):
+    cfg = SimpleNamespace(d_preview=0, price_preview=0)
+    with pytest.raises(ValueError, match="not a D column or 'band'"):
         _preview_steps(hooks, cfg, _NM)
 
 
 def test_preview_steps_rejects_negative():
     hooks = SimpleNamespace(preview_config=lambda nm: {"band": -1})
-    cfg = SimpleNamespace(d_preview=0)
+    cfg = SimpleNamespace(d_preview=0, price_preview=0)
     with pytest.raises(ValueError, match="non-negative int"):
         _preview_steps(hooks, cfg, _NM)
 
@@ -89,10 +91,9 @@ def test_policy_node_io():
     assert policy.output_keys == ["U"]
 
 
-def test_price_hook_adds_one_policy_input_per_previewed_step(monkeypatch, tmp_path):
+def test_price_adds_one_policy_input_per_previewed_step(tmp_path):
     """The tariff is a single column, so the policy's input width grows by
-    exactly 1 + price_preview when a use case defines one."""
-    import control_user_defined as cud
+    exactly 1 + price_preview."""
     s = full_setup(setpoint_step=0.0)
     cfg, sysid_cfg, nm, ns = s["cfg"], s["sysid_cfg"], s["nm"], s["norm_stats"]
 
@@ -103,8 +104,7 @@ def test_price_hook_adds_one_policy_input_per_previewed_step(monkeypatch, tmp_pa
     install_price(cfg, tmp_path)
     assert insize_of() == base + 1
 
-    monkeypatch.setattr(cud, "preview_config", lambda nm: {"price": 3},
-                        raising=False)
+    cfg.price_preview = 3
     assert insize_of() == base + 4
 
 
