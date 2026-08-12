@@ -25,7 +25,7 @@ from neuromancer.problem import Problem
 from neuromancer.constraint import variable
 from neuromancer.loss import PenaltyLoss
 
-from neurotemplate.control.scenarios import horizons
+from neurotemplate.control.scenarios import horizons, price_scale
 from neurotemplate.modeling.dynamics import make_reset_init
 from neurotemplate.hooks import load_control_hooks
 
@@ -99,6 +99,18 @@ def power_term(cfg, nm_mapping: dict[str, list[str]],
     return term
 
 
+def _penalty(expr, name: str):
+    """Label a scalar expression as a named objective term.
+
+    `Objective.minimize(name=...)` does NOT propagate to the Problem's output
+    keys — only `Constraint.update_name` does — so every term is wrapped in
+    `expr == 0` and named here. That is the whole incantation, in one place.
+    """
+    term = expr == 0
+    term.update_name(name)
+    return term
+
+
 @beartype
 def build_control_loss(
     cfg,
@@ -107,14 +119,22 @@ def build_control_loss(
     norm_stats: dict[str, dict[str, float]],
 ) -> PenaltyLoss:
     """
-    Build all control losses as scalar penalties wrapped in (expr == 0)
-    Constraints so they show up under their `update_name` labels in the
-    Problem output dict (Objective.minimize(name=...) does NOT propagate to
-    the output keys — only Constraint.update_name does).
+    Build all control losses as scalar penalties, summed with flat weights.
 
-    All terms go in PenaltyLoss.objectives; constraints=[] is intentional.
-    The effort term needs control_user_defined.power_metric; if requested
-    (effort_weight > 0) but unimplemented, fail fast.
+    Five terms, in three groups:
+
+      comfort  — squared band violation, both directions
+      du       — per-channel setpoint smoothness
+      energy / cost / peak — three *reductions of one power signal*
+
+    That last line is the only structural claim here: the per-step power
+    signal and the way it is reduced to a scalar are separate concerns.
+    `energy` is its mean, `cost` is its price-weighted mean, and `peak` is the
+    per-window power mean M_q — same signal, same units, three questions.
+
+    All three need control_user_defined.power_metric, and `cost` additionally
+    needs a `price_signal` hook; requesting one without its hook fails fast
+    rather than silently substituting a proxy.
 
     Nothing here checks that a weight suits the magnitude of what it
     multiplies — that is `control.objective`, run once on a real batch before
@@ -138,15 +158,12 @@ def build_control_loss(
     objectives = []
 
     if cfg.comfort_weight > 0:
-        lower_violation = torch.mean(relu(ymin_h - y_ctrl)**2)
-        comfort_lower_loss = cfg.comfort_weight * lower_violation == 0
-        comfort_lower_loss.update_name("comfort_lower_loss")
-
-        upper_violation = torch.mean(relu(y_ctrl - ymax_h)**2)
-        comfort_upper_loss = cfg.comfort_weight * upper_violation == 0
-        comfort_upper_loss.update_name("comfort_upper_loss")
-
-        objectives += [comfort_lower_loss, comfort_upper_loss]
+        objectives += [
+            _penalty(cfg.comfort_weight * torch.mean(relu(ymin_h - y_ctrl)**2),
+                     "comfort_lower_loss"),
+            _penalty(cfg.comfort_weight * torch.mean(relu(y_ctrl - ymax_h)**2),
+                     "comfort_upper_loss"),
+        ]
 
     du_weights = resolve_du_weights(cfg.du_weight, nm_mapping["U"])
     if any(w > 0 for w in du_weights):
@@ -156,37 +173,115 @@ def build_control_loss(
         # weight reproduces the pooled mean exactly.
         du = sum(w * torch.mean(du_abs[:, :, j])
                  for j, w in enumerate(du_weights)) / len(du_weights)
-        du_loss = du == 0
-        du_loss.update_name("du_loss")
-        objectives.append(du_loss)
+        objectives.append(_penalty(du, "du_loss"))
 
-    if cfg.effort_weight > 0:
-        term = power_term(cfg, nm_mapping, norm_stats)
-        if term is None:
-            raise NotImplementedError(
-                "effort_weight > 0 requires control_user_defined.power_metric "
-                "to be implemented (set POWER_METRIC_IMPLEMENTED=True). Run "
-                "with --set effort_weight=0 until a power model exists."
-            )
-
-        def _power(yn_v, u_v, d_v):
-            return term(
-                yn_v[:, hmax:, :], u_v[:, hmax:, :], d_v[:, hmax:, :],
-            )
-
-        power = variable([yn, u, d], _power, display_name="power")
-        mean_power = torch.mean(power)
-        effort_loss = cfg.effort_weight * mean_power == 0
-        effort_loss.update_name("effort_loss")
-        objectives.append(effort_loss)
+    objectives += _power_objectives(cfg, nm_mapping, norm_stats, hmax,
+                                    yn, u, d)
 
     if not objectives:
         raise ValueError(
-            "No active control objective. Set at least one of "
-            "comfort_weight / du_weight / effort_weight > 0."
+            "No active control objective. Set at least one of comfort_weight "
+            "/ du_weight / effort_weight / cost_weight / peak_weight > 0."
         )
 
     return PenaltyLoss(objectives, constraints=[])
+
+
+def _power_objectives(cfg, nm_mapping, norm_stats, hmax, yn, u, d) -> list:
+    """The energy / cost / peak terms, all reductions of one power signal.
+
+    Every reduction is a mean over the scored horizon (or a mean over the
+    batch of per-window scalars), so a weight tuned at P=48 means the same
+    thing at P=288. A sum would make each term's magnitude proportional to
+    `train_pred_steps`; the reportcard does the integration instead.
+    """
+    weights = {"effort": cfg.effort_weight, "cost": cfg.cost_weight,
+               "peak": cfg.peak_weight}
+    if not any(w > 0 for w in weights.values()):
+        return []
+
+    term = power_term(cfg, nm_mapping, norm_stats)
+    if term is None:
+        requested = ", ".join(f"{k}_weight" for k, w in weights.items() if w > 0)
+        raise NotImplementedError(
+            f"{requested} > 0 requires control_user_defined.power_metric to "
+            "be implemented (set POWER_METRIC_IMPLEMENTED=True). Run with "
+            f"--set {requested.split(',')[0]}=0 until a power model exists."
+        )
+
+    def _power(yn_v, u_v, d_v):
+        return term(yn_v[:, hmax:, :], u_v[:, hmax:, :], d_v[:, hmax:, :])
+
+    # Built once and reduced three ways, so the terms cannot drift apart:
+    # a cost that priced a different power signal than the energy term
+    # measured would be invisible on every report.
+    power = variable([yn, u, d], _power, display_name="power")   # [b, P]
+
+    objectives = []
+    if cfg.effort_weight > 0:
+        objectives.append(
+            _penalty(cfg.effort_weight * torch.mean(power), "effort_loss")
+        )
+
+    if cfg.cost_weight > 0:
+        scale = price_scale(cfg)
+        if scale is None:
+            raise NotImplementedError(
+                "cost_weight > 0 requires control_user_defined.price_signal "
+                "(plus PRICE_SCALE) so a tariff reaches the rollout. Run with "
+                "--set cost_weight=0 until a tariff exists. Falling back to a "
+                "flat price would silently turn the cost term into a rescaled "
+                "energy term."
+            )
+        # Price is data: no gradient, non-negative. So the cost term is a
+        # per-timestep *reweighting* of the energy gradient — it cannot flip
+        # the sign of anything the energy term was already doing.
+        price = variable("price")[:, hmax:, 0]           # [b, P], scaled
+        objectives.append(
+            _penalty(cfg.cost_weight * torch.mean(power * price * scale),
+                     "cost_loss")
+        )
+
+    if cfg.peak_weight > 0:
+        objectives.append(
+            _penalty(cfg.peak_weight * _soft_peak(power, float(cfg.peak_q)),
+                     "peak_loss")
+        )
+
+    return objectives
+
+
+def _soft_peak(power, q: float):
+    """Mean over the batch of each window's power mean M_q(p).
+
+        M_q(p) = ( mean_t p^q )^(1/q)     q=1 -> mean, q=2 -> RMS, q->inf -> max
+
+    Homogeneous of degree 1, so it has the same units and the same
+    weight-scaling behaviour as the energy term — `peak_weight` and
+    `effort_weight` are comparable on the balance report. A mean-square term
+    would be homogeneous of degree 2 instead, so switching the power metric
+    from kW to W would move its correct weight by 1e6 while every neighbour's
+    moved by 1e3. Given that mis-scaled weights are this library's most
+    frequent recorded failure, a term whose weight scales differently from its
+    neighbours is worth refusing.
+
+    The gradient `(1/P)·(p_t/M_q)^(q-1)` is dense over time and concentrated
+    on the high-power steps by a factor growing with q. A hard `torch.max`
+    would instead give one non-zero entry per window, and the policy would
+    learn to shave exactly one timestep.
+
+    Reduced per window and then averaged over the batch, never pooled: the
+    batch axis holds independent windows (different days, possibly different
+    files), so a pooled peak is the worst day's peak and gives gradient to one
+    window and none to the rest. Per-window-then-batch is also exactly
+    `EnergyMetrics.mean_window_peak`, so the thing being trained and the thing
+    being reported are the same quantity, soft vs. hard.
+
+    `relu` enforces p >= 0, which `power_metric` normally already does. For an
+    even q a large negative prediction would otherwise read as a peak.
+    """
+    per_window = torch.mean(torch.relu(power) ** q, dim=1) ** (1.0 / q)
+    return torch.mean(per_window)
 
 
 @beartype

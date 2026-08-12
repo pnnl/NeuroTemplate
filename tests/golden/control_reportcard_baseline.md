@@ -29,7 +29,7 @@
 - **Control U (1):** `setpoint [°C]`
 - **Train band:** lo ~ U[23.0, 27.0], width ~ U[0.5, 2.0], segments=1
 - **Test band:** lo ~ U[23.0, 27.0], width ~ U[0.5, 2.0], segments=4
-- **Objective weights:** comfort=50.0, du=10, effort=0.1
+- **Objective weights:** comfort=50.0, du=10, effort=0.1, cost=0.0, peak=0.0 (q=4)
 - **Eval band seed:** 12345 *(fixed, so runs are scored against the same band realization)*
 
 ## Objective balance
@@ -45,7 +45,7 @@ Each objective term on a single training batch, taken before the first optimizer
 
 **⚠️ One term is running the objective:** `effort_loss` at 2.3× everything else combined. Re-derive its weight against the magnitude of the quantity it multiplies. A weight that was right on the last dataset is not evidence about this one.
 
-Effort term swept across each actuation box, with the rest of the rollout held at its recorded values. This is the magnitude and shape of what `effort_weight` multiplies, reported so it can be weighed against the terms above. A minimum on an endpoint is not a defect — an honest power metric is monotone in actuator effort, and the trade-off that produces an interior optimum belongs to the summed objective, not to this term alone.
+The power signal swept across each actuation box, with the rest of the rollout held at its recorded values. One sweep serves all three power-derived terms — cost and peak are reductions of this same signal — so this is the magnitude and shape they all multiply, reported so it can be weighed against the terms above. A minimum on an endpoint is not a defect: an honest power metric is monotone in actuator effort, and the trade-off that produces an interior optimum belongs to the summed objective, not to this term alone.
 
 | Control | Term at lo | at mid | at hi | Minimised at |
 |---|---:|---:|---:|---:|

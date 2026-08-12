@@ -26,6 +26,7 @@ the scale of the term they are weighting, and decide for themselves.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Optional
 
 import torch
 
@@ -152,6 +153,52 @@ def objective_balance(loss, out: dict) -> ObjectiveBalance:
 
 
 @beartype
+def frac_power_zero(term_fn, out: dict, hmax: int) -> float:
+    """Share of scored steps where the power signal is exactly zero.
+
+    The recommended `power_metric` shape ends in `.clamp_min(0.0)`, and
+    wherever the surrogate predicts negative power that clamp zeroes the
+    gradient. For a mean energy term that is a rounding detail. For a cost term
+    it is not: the near-zero-power steps are disproportionately the cheap hours
+    the controller is supposed to be moving load *into*, so a large number here
+    means the cost gradient is missing exactly where it was needed.
+
+    Reported, not judged — and it is a surrogate problem (a power head that
+    goes negative), not a weighting problem.
+    """
+    with torch.no_grad():
+        power = term_fn(out["yn"][:, hmax:, :], out["U"][:, hmax:, :],
+                        out["D"][:, hmax:, :])
+        return float((power == 0).float().mean())
+
+
+@beartype
+def objective_notes(cfg, arch: dict) -> list[str]:
+    """Objective diagnostics that need the config, not a forward pass.
+
+    Both are the same kind of failure: a term that is switched on but cannot
+    do the thing it was switched on for. Reported as prose rather than raised,
+    because both configurations are legal and occasionally deliberate.
+    """
+    notes = []
+    if cfg.cost_weight > 0 and arch["price_preview"] == 0:
+        notes.append(
+            "`cost_weight` > 0 but the policy previews 0 future price steps, "
+            "so it can react to the current tariff and cannot shift load into "
+            "a cheaper hour. Add a `price` entry to `preview_config` covering "
+            "the price cycle."
+        )
+    if cfg.peak_weight > 0 and cfg.effort_weight == 0 and cfg.cost_weight == 0:
+        notes.append(
+            "`peak_weight` is the only power term. Flattening a profile by "
+            "*adding* off-peak load is a valid solution to min M_q(p) and a "
+            "bad outcome — carry a non-zero `effort_weight` or `cost_weight` "
+            "alongside it."
+        )
+    return notes
+
+
+@beartype
 def term_shapes(
     term_fn,
     out: dict,
@@ -234,7 +281,9 @@ def shapes_to_markdown(shapes: list[TermShape]) -> str:
 
 @beartype
 def objective_to_dict(balance: ObjectiveBalance,
-                      shapes: list[TermShape]) -> dict:
+                      shapes: list[TermShape],
+                      frac_zero: Optional[float] = None,
+                      notes: Optional[list[str]] = None) -> dict:
     """JSON-serializable objective diagnostics (for MLflow / disk)."""
     return {
         "total": balance.total,
@@ -244,18 +293,22 @@ def objective_to_dict(balance: ObjectiveBalance,
                      "dominates": t.dominates()}
             for t in balance.terms
         },
-        "effort_shape": {
+        "power_shape": {
             s.u_name: {"grid": s.grid, "values": s.values,
                        "flat": s.is_flat,
                        "minimised_at": s.minimised_at}
             for s in shapes
         },
+        "frac_power_zero": frac_zero,
+        "notes": list(notes or []),
     }
 
 
 @beartype
 def format_objective_report(balance: ObjectiveBalance,
-                            shapes: list[TermShape]) -> str:
+                            shapes: list[TermShape],
+                            frac_zero: Optional[float] = None,
+                            notes: Optional[list[str]] = None) -> str:
     """Plain-text version for stdout, printed before training starts."""
     lines = ["Objective term balance (one batch, before training):"]
     for t in balance.terms:
@@ -270,11 +323,16 @@ def format_objective_report(balance: ObjectiveBalance,
             "being optimised."
         )
     if shapes:
-        lines.append("Effort term across each actuation box (no verdict "
+        lines.append("Power term across each actuation box (no verdict "
                      "attached — read it against the weights above):")
         for s in shapes:
             where = ("flat, no direct effect" if s.is_flat
                      else f"minimised at {s.minimised_at:.4g}")
             lines.append(f"  {s.u_name:<22s} {s.values[0]:>12.4g} .. "
                          f"{s.values[-1]:<12.4g} {where}")
+    if frac_zero is not None:
+        lines.append(f"  power exactly zero on {frac_zero * 100:.1f}% of "
+                     "scored steps (clamped => no gradient there)")
+    for note in notes or []:
+        lines.append(f"  NOTE: {note}")
     return "\n".join(lines)

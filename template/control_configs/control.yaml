@@ -65,11 +65,34 @@ band_width_max: 2.0
 # fails at problem build.
 effort_weight: 0.0
 
-# These three weights do not port across datasets, and the library does not
-# try to guess them for you. It does check them: every run prints each term's
-# share of the objective on one batch before training, and sweeps the effort
-# term across the actuation box to see whether it has an interior minimum at
-# all. Read that output on iteration 1 — it is the cheapest thing in the run.
+# ── GRID RESPONSE ────────────────────────────────────────────────
+# Two more reductions of the SAME power signal `effort_weight` averages, so
+# all three need power_metric. Both default to off.
+#
+# Load shifting: weights mean_t(price · power), in $/h. Additionally requires
+# the control_user_defined.price_signal hook (plus PRICE_SCALE), and it is
+# only solvable if the policy previews the price — see preview_config.
+# cost_weight: 0.0
+# Peak shaving: weights the per-window power mean M_q, averaged over the
+# batch. Same units as effort, so the two weights are directly comparable.
+# peak_weight: 0.0
+# 1 = plain mean (no peak preference), 2 = RMS, larger = closer to a hard max.
+# peak_q: 4
+#
+# Two things to know before turning either on:
+#   - train_pred_steps: 48 is too short for both. At 5-minute data that is 4
+#     hours — shorter than a precool-plus-coast cycle, and blind to a daily
+#     peak. Expect 144-288 steps, which raises rollout memory roughly
+#     linearly. That is the main compute cost of the feature.
+#   - peak_weight alone will happily RAISE total energy: flattening a profile
+#     by adding off-peak load minimises M_q perfectly well. Always carry a
+#     non-zero effort_weight or cost_weight alongside it.
+
+# These weights do not port across datasets, and the library does not try to
+# guess them for you. It does check them: every run prints each term's share
+# of the objective on one batch before training, and sweeps the power signal
+# across the actuation box to see whether it has an interior minimum at all.
+# Read that output on iteration 1 — it is the cheapest thing in the run.
 
 # ── POLICY ───────────────────────────────────────────────────────
 # Family: mlp | linear ("linear" is a single saturated affine feedback law,

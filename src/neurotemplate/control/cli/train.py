@@ -30,7 +30,9 @@ from neurotemplate.control.closed_loop import (
 )
 from neurotemplate.control.objective import (
     format_objective_report,
+    frac_power_zero,
     objective_balance,
+    objective_notes,
     objective_to_dict,
     run_objective_pass,
     term_shapes,
@@ -103,20 +105,30 @@ def main() -> None:
     if cfg.verbose:
         print("Building policy + closed loop + loss...")
     policy_node = build_policy(cfg, sysid_cfg, nm_mapping, norm_stats)
+    arch = describe_policy(policy_node, cfg, sysid_cfg, nm_mapping, norm_stats)
     cl_system = build_closed_loop(dyn_node, policy_node, cfg, sysid_cfg)
     loss = build_control_loss(cfg, sysid_cfg, nm_mapping, norm_stats)
     problem = build_problem(cl_system, loss).to(cfg.device)
 
     # One forward pass before training: which term is actually being
-    # optimised, and does the effort term have an interior minimum at all.
+    # optimised, and does the power term have an interior minimum at all.
     # Both answers cost seconds here and an iteration each if skipped.
     balance_out = run_objective_pass(problem, next(iter(train_loader)))
     balance = objective_balance(loss, balance_out)
-    effort_term = power_term(cfg, nm_mapping, norm_stats)
-    shapes = [] if (effort_term is None or cfg.effort_weight == 0) else term_shapes(
-        effort_term, balance_out, hmax, nm_mapping["U"], *u_bounds, norm_stats,
-    )
-    print(format_objective_report(balance, shapes))
+    power = power_term(cfg, nm_mapping, norm_stats)
+    power_weighted = (cfg.effort_weight > 0 or cfg.cost_weight > 0
+                      or cfg.peak_weight > 0)
+    if power is None or not power_weighted:
+        shapes, frac_zero = [], None
+    else:
+        # One sweep serves all three power-derived terms: cost and peak are
+        # reductions of the same signal, so sweeping them separately would
+        # just rescale this.
+        shapes = term_shapes(power, balance_out, hmax, nm_mapping["U"],
+                             *u_bounds, norm_stats)
+        frac_zero = frac_power_zero(power, balance_out, hmax)
+    notes = objective_notes(cfg, arch)
+    print(format_objective_report(balance, shapes, frac_zero, notes))
 
     cfg.run = "DPC " + cfg.run
     logger = MLFlowLogger(
@@ -124,12 +136,14 @@ def main() -> None:
         savedir=cfg.savedir,
         stdout=[
             "train_loss", "dev_loss", "train_comfort_lower_loss",
-            "train_comfort_upper_loss", "train_du_loss", "train_effort_loss"
+            "train_comfort_upper_loss", "train_du_loss", "train_effort_loss",
+            "train_cost_loss", "train_peak_loss",
         ],
         verbosity=cfg.epoch_verbose if cfg.verbose else 0,
         logout=[
             "train_loss", "dev_loss", "time", "comfort_lower_loss",
-            "comfort_upper_loss", "du_loss", "effort"
+            "comfort_upper_loss", "du_loss", "effort_loss", "cost_loss",
+            "peak_loss",
         ],
         nested=False,
     )
@@ -164,17 +178,17 @@ def main() -> None:
             Path(cfg.savedir) / "plots",
         )
 
-    arch = describe_policy(policy_node, cfg, sysid_cfg, nm_mapping, norm_stats)
     md = render_control_reportcard(
         cfg, sysid_cfg, arch, nm_mapping, controlled, results,
         eval_band_seed=EVAL_BAND_SEED, baseline=baseline,
         best_dev_loss=best_dev, train_time_s=train_time_s,
         balance=balance, shapes=shapes,
+        frac_power_zero=frac_zero, objective_notes=notes,
     )
     write_reportcard(md, Path(cfg.savedir), logger=logger)
     log_control_results(logger, results, baseline=baseline)
     if hasattr(logger, "log_dict"):
-        logger.log_dict(objective_to_dict(balance, shapes),
+        logger.log_dict(objective_to_dict(balance, shapes, frac_zero, notes),
                         name="objective_diagnostics.json")
 
     print(f"Comfort violation rate: "

@@ -173,7 +173,7 @@ def test_objective_section_flags_a_dominant_term():
 def test_objective_section_reports_term_shape_without_judging_it():
     """The sweep is information. A monotone effort term is normal."""
     md = _render()
-    assert "Effort term swept across each actuation box" in md
+    assert "The power signal swept across each actuation box" in md
     assert "28" in md                      # where the minimum landed
     assert "minimised on a bound" not in md
     assert "No value of `effort_weight`" not in md

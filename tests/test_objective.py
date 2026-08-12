@@ -206,8 +206,8 @@ def test_objective_to_dict_is_serializable():
 
     payload = objective_to_dict(balance, [shape])
 
-    assert payload["effort_shape"][SETPT]["minimised_at"] == 26.0
-    assert payload["effort_shape"][SETPT]["values"] == [3.0, 2.0, 1.0]
+    assert payload["power_shape"][SETPT]["minimised_at"] == 26.0
+    assert payload["power_shape"][SETPT]["values"] == [3.0, 2.0, 1.0]
     json.dumps(payload)  # must not raise
 
 

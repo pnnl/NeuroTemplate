@@ -132,7 +132,8 @@ def _scenario_section(cfg, sysid_cfg, nm_mapping: dict, controlled: list[str],
         _band_line("Train band", cfg.train_band()),
         _band_line("Test band", cfg.test_band()),
         f"- **Objective weights:** comfort={cfg.comfort_weight}, "
-        f"du={cfg.du_weight}, effort={cfg.effort_weight}",
+        f"du={cfg.du_weight}, effort={cfg.effort_weight}, "
+        f"cost={cfg.cost_weight}, peak={cfg.peak_weight} (q={cfg.peak_q:g})",
         f"- **Eval band seed:** {eval_band_seed} "
         "*(fixed, so runs are scored against the same band realization)*",
     ]
@@ -140,7 +141,9 @@ def _scenario_section(cfg, sysid_cfg, nm_mapping: dict, controlled: list[str],
 
 
 def _objective_section(balance: ObjectiveBalance,
-                       shapes: list[TermShape]) -> str:
+                       shapes: list[TermShape],
+                       frac_zero: Optional[float] = None,
+                       notes: Optional[list[str]] = None) -> str:
     """What the weights actually bought, measured on one batch before training.
 
     Objective weights do not port across datasets, and the library's job is
@@ -168,15 +171,29 @@ def _objective_section(balance: ObjectiveBalance,
     if shapes:
         body += [
             "",
-            "Effort term swept across each actuation box, with the rest of "
-            "the rollout held at its recorded values. This is the magnitude "
-            "and shape of what `effort_weight` multiplies, reported so it can "
-            "be weighed against the terms above. A minimum on an endpoint is "
-            "not a defect — an honest power metric is monotone in actuator "
-            "effort, and the trade-off that produces an interior optimum "
-            "belongs to the summed objective, not to this term alone.\n",
+            "The power signal swept across each actuation box, with the rest "
+            "of the rollout held at its recorded values. One sweep serves all "
+            "three power-derived terms — cost and peak are reductions of this "
+            "same signal — so this is the magnitude and shape they all "
+            "multiply, reported so it can be weighed against the terms above. "
+            "A minimum on an endpoint is not a defect: an honest power metric "
+            "is monotone in actuator effort, and the trade-off that produces "
+            "an interior optimum belongs to the summed objective, not to this "
+            "term alone.\n",
             shapes_to_markdown(shapes),
         ]
+    if frac_zero is not None:
+        body += [
+            "",
+            f"- **Power exactly zero on {frac_zero * 100:.1f}% of scored "
+            "steps.** `power_metric` normally clamps at zero, and the clamp "
+            "kills the gradient there. Harmless for a mean energy term; for a "
+            "cost term it is not, because the near-zero steps are "
+            "disproportionately the cheap hours load is supposed to move "
+            "*into*. A large figure is a surrogate problem, not a weight.",
+        ]
+    if notes:
+        body += [""] + [f"- {n}" for n in notes]
     return _section("Objective balance", "\n".join(body))
 
 
@@ -358,6 +375,8 @@ def render_control_reportcard(
     baseline: Optional[object] = None,
     balance: Optional[ObjectiveBalance] = None,
     shapes: Optional[list[TermShape]] = None,
+    frac_power_zero: Optional[float] = None,
+    objective_notes: Optional[list[str]] = None,
     run_name: Optional[str] = None,
     timestamp: Optional[str] = None,
     best_dev_loss: Optional[float] = None,
@@ -374,7 +393,10 @@ def render_control_reportcard(
         baseline:    Optional ControlResults for the rule-based controller.
         balance:     Optional objective.ObjectiveBalance from the pre-training
                      forward pass; the section is skipped without it.
-        shapes:      Optional objective.term_shapes(...) for the effort term.
+        shapes:      Optional objective.term_shapes(...) for the power signal.
+        frac_power_zero: Optional share of scored steps where power is clamped
+                     to zero (and so contributes no gradient).
+        objective_notes: Optional objective.objective_notes(...) prose.
 
     Returns:
         Markdown string. The caller writes it to disk and logs it.
@@ -393,7 +415,8 @@ def render_control_reportcard(
                           eval_band_seed),
     ]
     if balance is not None:
-        parts.append(_objective_section(balance, shapes or []))
+        parts.append(_objective_section(balance, shapes or [],
+                                        frac_power_zero, objective_notes))
     parts += [
         _performance_section(results),
         _actuation_section(results),
