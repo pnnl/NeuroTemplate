@@ -240,3 +240,41 @@ def test_a_plain_policy_reports_no_residual():
     )
     results, _ = evaluate_closed_loop(cfg, sysid_cfg, cl, [s["norm_df"]], nm, ns)
     assert results.residual is None
+
+
+def test_a_grid_aligned_reference_leaves_no_snapping_floor(monkeypatch):
+    """Quantization plus an off-grid reference puts a floor of half a grid step
+    on mean |delta| that is snapping, not steering. A reference already on the
+    grid does not — and the reportcard says which case you are in."""
+    import control_user_defined as cud
+    from neurotemplate.control.metrics import residual_metrics
+
+    s = full_setup(residual_delta=1.0, setpoint_step=0.5)
+    cfg, sysid_cfg, nm, ns = s["cfg"], s["sysid_cfg"], s["nm"], s["norm_stats"]
+    _, _, hmax = horizons(cfg, sysid_cfg)
+    stretch = torch.tensor([ns[c]["stretch"] for c in nm["U"]])
+    shift = torch.tensor([ns[c]["shift"] for c in nm["U"]])
+
+    def measure(s):
+        _, out = _rollout(s)
+        u_ref = reference_over_horizon(cfg, out, hmax, nm, ns)
+        return residual_metrics(
+            (out["U"][:, hmax:, :] * stretch + shift).detach(),
+            (u_ref * stretch + shift).detach(), cfg.residual_delta, 0.25,
+        ).mean_abs_delta
+
+    # The fixture's midpoint rule is not grid-aligned, so a delta = 0 policy
+    # still shows a non-zero realized residual: the snap, not the network.
+    off_grid = measure(s)
+    assert off_grid > 0.05          # a real fraction of the 0.25 half-step floor
+
+    midpoint = cud.reference_control
+
+    def grid_aligned(yn, ymin, ymax, d, nm_mapping, norm_stats):
+        phys = midpoint(yn, ymin, ymax, d, nm_mapping, norm_stats) * stretch + shift
+        return ((phys / 0.5).round() * 0.5 - shift) / stretch
+
+    monkeypatch.setattr(cud, "reference_control", grid_aligned)
+    # What is left is float32 round-trip noise through normalize/denormalize,
+    # two orders of magnitude below the floor above.
+    assert measure(s) < off_grid / 100

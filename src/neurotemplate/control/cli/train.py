@@ -86,7 +86,7 @@ def main() -> None:
     # get_data_splits returns one list per split (length >= 1). Each file
     # is normalized independently and the resulting list flows through the
     # control loaders, which window each file in isolation — no rollout
-    # spans two files. See docs/multi-file-data.md.
+    # spans two files.
     train_raws, dev_raws, test_raws, _ = get_data_splits(cfg)
     train_dfs = [normalize_df(r, norm_stats) for r in train_raws]
     dev_dfs = [normalize_df(r, norm_stats) for r in dev_raws]

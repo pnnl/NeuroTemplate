@@ -272,6 +272,10 @@ def _actuation_section(results) -> str:
             "  - A cap that binds most of the time means either the reference "
             "is wrong for this plant or the optimizer is riding a surrogate "
             "artifact into the wall. Read that before the comfort number.",
+            "  - This is the *realized* deviation, measured after quantization "
+            "and the actuator clamp. With `setpoint_step` on and a reference "
+            "that is not itself grid-aligned, mean |δ| has a floor of half a "
+            "grid step that is snapping, not steering.",
         ]
     return _section("Actuation", "\n".join(body))
 

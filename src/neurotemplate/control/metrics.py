@@ -344,6 +344,12 @@ def residual_metrics(
     This is the *realized* residual — measured after quantization and after
     the actuator clamp — so it is the deviation that was actually deployed,
     not the network's pre-bound output.
+
+    One consequence worth knowing before reading `mean_abs_delta`: when
+    quantization is on and the reference rule is not itself snapped to the
+    same grid, `u` cannot equal `u_ref` even at δ = 0, so mean |δ| has a floor
+    of up to half a grid step which is snapping rather than steering. A rule
+    built over `bracket_band` is grid-aligned and has no such floor.
     """
     if u.shape != u_ref.shape:
         raise ValueError(

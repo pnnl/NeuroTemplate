@@ -84,7 +84,7 @@ the same standard flags (parsed by [common/config.py](src/neurotemplate/common/c
 my_app/
 ├── pyproject.toml              # depends on NeuroTemplate + the torch-harmonics override
 ├── modeling_user_defined.py    # six modeling hooks
-├── control_user_defined.py     # four control hooks (only if you train policies)
+├── control_user_defined.py     # the control hooks (only if you train policies)
 ├── model_configs/
 │   └── modeling.yaml
 ├── control_configs/
@@ -185,6 +185,98 @@ nt model train --config model_configs/modeling.yaml \
     --set epochs=10 --print-config
 ```
 
+## Two optional control capabilities
+
+Both are off by default and both fail fast rather than degrade, so a run that
+does not ask for them is unchanged.
+
+### Grid response: cost and peak-demand objectives
+
+`energy`, `cost` and `peak` are three *reductions of one power signal* —
+`mean_t(p)`, `mean_t(price·p)`, and the per-window power mean
+`M_q(p) = (mean_t p^q)^(1/q)` averaged over the batch. All three read the same
+`power_metric` output, so they cannot end up pricing different quantities.
+
+To turn on price-driven control:
+
+1. **Implement `power_metric` and set `POWER_METRIC_IMPLEMENTED = True`.**
+   Nothing else here works without it.
+2. **Get a real price series.** Sample: `grid_response.ipynb` in Neuromancer's
+   `examples/domain_examples/` downloads PG&E Hourly Flex Pricing from
+   `https://raw.githubusercontent.com/EladMichael/small_example_datasets/main/hourly-flex-prices-historical-sample.xlsx`.
+   Upsample it to your data's timestep (`repeat_interleave`).
+3. **Implement `price_signal(n_samples, nsteps, generator)`** to slice random
+   windows out of it, returning `[n_samples, nsteps, 1]` in $/kWh, plus
+   `PRICE_SCALE`. The template has the whole function in comments.
+   *Do not build a time-of-use table keyed on hour-of-day* — see the hook
+   contract above for why the policy will learn the clock instead of the price.
+4. **Give the policy a price preview**, or the cost term is not solvable:
+
+   ```python
+   def preview_config(nm_mapping):
+       return {"price": 48, "band": 2}    # 48 steps = 4 h at 5-minute data
+   ```
+
+5. **Set the weights and lengthen the rollout:**
+
+   ```yaml
+   energy_weight: 0.1      # keep one of these non-zero alongside peak_weight
+   cost_weight: 0.5
+   peak_weight: 0.1
+   peak_q: 4               # 1 = plain mean, 2 = RMS, larger -> hard max
+   train_pred_steps: 288   # 48 is 4 hours: too short to precool and coast
+   ```
+
+`train_pred_steps` is the real cost — rollout memory grows roughly linearly.
+
+### Residual control: bound the policy to a rule
+
+The policy commands `reference_control(...) + δ` with `|δ| ≤ residual_delta`
+instead of commanding a setpoint. This is a trust region on surrogate error,
+not a claim about what networks find easy to learn: training's gradient *and*
+its model-selection criterion both come from a surrogate whose held-out score
+is not the plant's, and a ±Δ box caps what that error can cost you.
+
+1. **Implement `reference_control`** (see the template; `control.policy.bracket_band`
+   does the hard part for a heating/cooling pair). Delete
+   `build_baseline_policy` if you have one — defining both raises.
+2. **Set `residual_delta`**, in physical units:
+
+   ```yaml
+   residual_delta: 1.0     # +/- 1 degC around the rule
+   setpoint_step: 0.5      # Delta below one grid step is rejected: every
+                           # residual would quantize back to zero
+   ```
+
+3. **Read the verdict.** The reportcard scores the rule on the same windows
+   against the same fixed-seed band and states whether the learned policy
+   cleared it on mean exceedance. It does not always. **A policy that does not
+   clear its reference should ship the reference** — that call is the reason
+   δ = 0 is worth scoring at all, because the Trainer checkpoints after each
+   epoch's optimizer steps and never considers δ = 0 itself.
+
+Δ bounds the **action**, not the outcome: the commanded setpoint stays within Δ
+of the rule's, the zone temperature does not, because the plant is in between.
+
+### Together
+
+This is the case the residual design is really for — the rule keeps comfort,
+δ answers the incentive, and Δ is an operator-legible knob ("how far from the
+comfort rule am I willing to move for money"):
+
+```yaml
+residual_delta: 1.0
+cost_weight: 0.5
+peak_weight: 0.1
+energy_weight: 0.1
+train_pred_steps: 288
+```
+
+One caveat if you deploy: a policy that reads price gains a fifth key
+(`"price"`) on its Node's `input_keys`. The residual alone leaves the Node
+signature untouched — that is why the rule is composed *inside* the policy's
+callable — but residual-plus-price needs the evaluator rebuilt.
+
 ## Diagnostics that run whether you ask or not
 
 Fit metrics and pooled comfort rates cannot see the failures that cost the
@@ -220,9 +312,20 @@ reportcard and in MLflow.
   the one that asserts something: a term carried over from another dataset once
   came out at 1.7× the whole comfort objective.
 - **Power term shape** — the power signal swept across each actuation box, so
-  its magnitude and shape sit next to the weights you are choosing. Reported
-  without a verdict: an honest power metric is monotone in actuator effort, and
-  the interior optimum belongs to the summed objective, not to this term alone.
+  its magnitude and shape sit next to the weights you are choosing. One sweep
+  serves all three power-derived terms, since cost and peak are reductions of
+  the same signal. Reported without a verdict: an honest power metric is
+  monotone in actuator effort, and the interior optimum belongs to the summed
+  objective, not to this term alone.
+- **Power clamped to zero** — the share of scored steps where the power signal
+  sits at exactly zero and so contributes no gradient. A rounding detail for a
+  mean energy term; not one for a cost term, because the near-zero steps are
+  disproportionately the cheap hours load is supposed to move *into*. A large
+  figure is a surrogate problem, not a weight.
+- **Objective notes** — configurations that are legal but cannot do what they
+  were switched on for: `cost_weight` with no price preview (reactive, not
+  shifting), and `peak_weight` as the only power term (minimisable by *adding*
+  off-peak load).
 
 **After the closed-loop evaluation:**
 
@@ -235,6 +338,11 @@ reportcard and in MLflow.
   the channel followed, and whether it got back in band. Two controllers
   measured at 16.6% and 17.9% pooled violation reacted to 0% and 75% of their
   cooling-demand jumps respectively; the pooled metric ranked them backwards.
+- **Residual saturation** — for a residual policy, Δ and the fraction of steps
+  δ spent pinned at ±Δ, measured *after* quantization and the actuator clamp so
+  it is the deviation actually deployed. A cap that binds most of the time means
+  either the rule is wrong for this plant or the optimizer is riding a surrogate
+  artifact into the wall. Read it before the comfort number.
 - **Baseline comparison and the ship/don't-ship call** — the same headline
   numbers for the learned policy and the rule, on identical windows and an
   identical band, plus an explicit verdict. For a residual policy this is also
@@ -288,7 +396,7 @@ src/neurotemplate/
     ├── policy.py        # policy_catalog (MLP/linear), build_policy, describe_policy, STEQuantize, residual policy
     ├── closed_loop.py   # build_closed_loop, build_control_loss, power_term
     ├── objective.py     # term balance + power-signal shape sweep
-    ├── scenarios.py     # BandSpec, build_window_dict, build_loaders
+    ├── scenarios.py     # BandSpec, build_window_dict, build_loaders, build_price
     ├── metrics.py       # ComfortMetrics, EnergyMetrics, ActuationMetrics, JumpResponse, ResidualMetrics
     ├── pipeline.py      # train_policy, evaluate_closed_loop, evaluate_baseline, clears_reference
     ├── reportcard.py    # render_control_reportcard
