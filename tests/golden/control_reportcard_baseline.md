@@ -88,11 +88,11 @@ Every step change in the reference band that left a controlled channel outside t
 
 Both controllers were rolled out on the same test windows against the same fixed-seed comfort band, so these numbers are directly comparable. Degree-hours is summed across controlled channels. Lower is better in every column, so a negative Δ favours the learned policy.
 
-| Controller | Mean exceedance | Violation rate (%) | Degree-hours | Mean \|Δu\| | Mean power | Peak power |
-|---|---:|---:|---:|---:|---:|---:|
-| Learned policy | 0.5 | 50 | 1 | 0.07143 | 1500 | 1500 |
-| Baseline | 1 | 50 | 2 | 0.07143 | 1000 | 1000 |
-| Δ (learned − baseline) | -0.5 | +0 | -1 | +0 | +500 | +500 |
+| Controller | Mean exceedance | Violation rate (%) | Degree-hours | Mean \|Δu\| | Mean power | Peak power | Cost per window |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| Learned policy | 0.5 | 50 | 1 | 0.07143 | 1500 | 1500 | n/a |
+| Baseline | 1 | 50 | 2 | 0.07143 | 1000 | 1000 | n/a |
+| Δ (learned − baseline) | -0.5 | +0 | -1 | +0 | +500 | +500 | n/a |
 
 ## Tracking error vs. comfort-band midpoint
 

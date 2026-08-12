@@ -169,6 +169,35 @@ def test_energy_rejects_wrong_rank():
         energy_metrics(torch.zeros(2, 3, 1), step_hours=1.0)
 
 
+def test_energy_cost_is_unset_without_a_tariff():
+    assert energy_metrics(torch.ones(2, 4), step_hours=1.0).energy_cost is None
+
+
+def test_energy_cost_integrates_price_against_power():
+    # One window, 4 steps of 0.5 h: 100 kW at $0.10 then 200 kW at $0.40.
+    power = torch.tensor([[100.0, 100.0, 200.0, 200.0]])
+    price = torch.tensor([[0.10, 0.10, 0.40, 0.40]])
+    e = energy_metrics(power, step_hours=0.5, price=price)
+    expected = (100 * 0.10 + 100 * 0.10 + 200 * 0.40 + 200 * 0.40) * 0.5
+    assert e.energy_cost == pytest.approx(expected)
+
+
+def test_energy_cost_prefers_the_cheap_hours_at_equal_energy():
+    """The number the whole feature exists to move: same kWh, different bill."""
+    price = torch.tensor([[0.10, 0.10, 0.40, 0.40]])
+    early = torch.tensor([[200.0, 200.0, 100.0, 100.0]])
+    late = torch.tensor([[100.0, 100.0, 200.0, 200.0]])
+    assert (energy_metrics(early, 0.5, price).total_energy
+            == pytest.approx(energy_metrics(late, 0.5, price).total_energy))
+    assert (energy_metrics(early, 0.5, price).energy_cost
+            < energy_metrics(late, 0.5, price).energy_cost)
+
+
+def test_energy_rejects_a_price_that_is_not_co_indexed():
+    with pytest.raises(ValueError, match="co-indexed"):
+        energy_metrics(torch.ones(2, 4), 1.0, price=torch.ones(2, 3))
+
+
 # ── renderers ────────────────────────────────────────────────────
 
 

@@ -36,6 +36,7 @@ units and energy in `power·h`. An app metering Watts converts to kWh itself.
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
+from typing import Optional
 
 import torch
 
@@ -78,6 +79,10 @@ class EnergyMetrics:
     total_energy: float      # mean over windows of ∫power dt, in power·h
     peak_power: float        # worst instantaneous draw anywhere
     mean_window_peak: float  # mean of per-window maxima — demand-charge proxy
+    # Mean over windows of ∫price·power dt. None when no tariff is defined.
+    # Units are price·power·h, and the library converts nothing: a
+    # `power_metric` in Watts against a PRICE_SCALE in $/kWh is off by 1000.
+    energy_cost: Optional[float] = None
 
 
 # A command within this share of the actuation range of a bound counts as
@@ -214,11 +219,14 @@ def comfort_metrics(
 
 
 @beartype
-def energy_metrics(power: torch.Tensor, step_hours: float) -> EnergyMetrics:
+def energy_metrics(power: torch.Tensor, step_hours: float,
+                   price: Optional[torch.Tensor] = None) -> EnergyMetrics:
     """
     Args:
         power: [batch, time] instantaneous power per rollout window.
         step_hours: rollout timestep in hours.
+        price: optional [batch, time] tariff in physical units, co-indexed
+            with `power`. None leaves `energy_cost` unset.
 
     Peak conventions, both reported because they answer different questions:
     `peak_power` is the worst instant anywhere in the evaluation, while
@@ -228,15 +236,23 @@ def energy_metrics(power: torch.Tensor, step_hours: float) -> EnergyMetrics:
     """
     if power.ndim != 2:
         raise ValueError(f"Expected 2D [batch, time] power; got {power.ndim}D")
+    if price is not None and price.shape != power.shape:
+        raise ValueError(
+            f"price {tuple(price.shape)} must be co-indexed with power "
+            f"{tuple(power.shape)} — same windows, same steps."
+        )
 
     power = power.detach().cpu()
     window_peaks = power.max(dim=1).values
+    cost = (None if price is None else
+            float((power * price.detach().cpu()).sum(dim=1).mean()) * step_hours)
 
     return EnergyMetrics(
         mean_power=float(power.mean()),
         total_energy=float(power.sum(dim=1).mean()) * step_hours,
         peak_power=float(power.max()),
         mean_window_peak=float(window_peaks.mean()),
+        energy_cost=cost,
     )
 
 

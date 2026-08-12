@@ -200,13 +200,20 @@ def _objective_section(balance: ObjectiveBalance,
 def _energy_lines(energy) -> list[str]:
     if energy is None:
         return ["- **Energy:** n/a *(power_metric not implemented)*"]
-    return [
+    lines = [
         "- **Energy** *(native units of `power_metric`; energy is power·h)*:",
         f"  - Mean power: {energy.mean_power:.4g}",
         f"  - Energy per window: {energy.total_energy:.4g}",
         f"  - Peak power (worst instant): {energy.peak_power:.4g}",
         f"  - Mean per-window peak: {energy.mean_window_peak:.4g}",
     ]
+    if energy.energy_cost is not None:
+        lines.append(
+            f"  - Cost per window: {energy.energy_cost:.4g} "
+            "*(∫price·power dt; price·power·h, unconverted — Watts against "
+            "$/kWh is off by 1000)*"
+        )
+    return lines
 
 
 def _performance_section(results) -> str:
@@ -289,14 +296,16 @@ def _response_section(results, u_names: list[str]) -> str:
 
 
 def _comparison_values(results) -> list[Optional[float]]:
-    """The six headline numbers, in table order. None renders as n/a."""
+    """The seven headline numbers, in table order. None renders as n/a."""
+    energy = results.energy
     return [
         results.comfort_mean_exceedance,
         results.comfort_violation_rate * 100.0,
         sum(m.degree_hours for m in results.comfort),
         results.mean_abs_du,
-        None if results.energy is None else results.energy.mean_power,
-        None if results.energy is None else results.energy.peak_power,
+        None if energy is None else energy.mean_power,
+        None if energy is None else energy.peak_power,
+        None if energy is None else energy.energy_cost,
     ]
 
 
@@ -331,8 +340,8 @@ def _baseline_section(results, baseline) -> str:
         "Lower is better in every column, so a negative Δ favours the "
         "learned policy.\n",
         r"| Controller | Mean exceedance | Violation rate (%) | Degree-hours "
-        r"| Mean \|Δu\| | Mean power | Peak power |",
-        "|---|---:|---:|---:|---:|---:|---:|",
+        r"| Mean \|Δu\| | Mean power | Peak power | Cost per window |",
+        "|---|---:|---:|---:|---:|---:|---:|---:|",
         _comparison_row("Learned policy", learned),
         _comparison_row("Baseline", rule),
         _comparison_row("Δ (learned − baseline)", delta, signed=True),

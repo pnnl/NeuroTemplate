@@ -191,6 +191,29 @@ def test_every_power_term_reaches_the_policy_parameters(monkeypatch, name,
     assert any(g is not None and float(g.abs().sum()) > 0 for g in grads)
 
 
+# ── The cost reaches the reportcard ──────────────────────────────
+
+
+def test_energy_cost_is_reported_when_a_tariff_exists(monkeypatch):
+    from neurotemplate.control.pipeline import evaluate_closed_loop
+
+    s = full_setup()
+    cfg, sysid_cfg, nm, ns = s["cfg"], s["sysid_cfg"], s["nm"], s["norm_stats"]
+    cl = build_closed_loop(
+        s["dyn_node"], build_policy(cfg, sysid_cfg, nm, ns), cfg, sysid_cfg,
+    )
+    before, _ = evaluate_closed_loop(cfg, sysid_cfg, cl, [s["norm_df"]], nm, ns)
+    assert before.energy.energy_cost is None
+
+    install_price_hook(monkeypatch)
+    cl = build_closed_loop(
+        s["dyn_node"], build_policy(cfg, sysid_cfg, nm, ns), cfg, sysid_cfg,
+    )
+    after, out = evaluate_closed_loop(cfg, sysid_cfg, cl, [s["norm_df"]], nm, ns)
+    assert after.energy.energy_cost is not None
+    assert "price" in out
+
+
 def test_price_stays_free_of_gradient_inside_the_loss(monkeypatch):
     install_price_hook(monkeypatch)
     s = full_setup(comfort_weight=0.0, du_weight=0.0, effort_weight=0.0,

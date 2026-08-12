@@ -217,7 +217,11 @@ def evaluate_closed_loop(
             out["yn"][:, hmax:, :], out["U"][:, hmax:, :], out["D"][:, hmax:, :],
             nm_mapping, norm_stats,
         )
-        energy = energy_metrics(power, step_hours)
+        # The tariff rides through the rollout untouched, so it is already
+        # co-indexed with the power it prices.
+        price = (None if "price" not in out else
+                 out["price"][:, hmax:, 0] * price_scale(cfg))
+        energy = energy_metrics(power, step_hours, price)
 
     return ControlResults(
         comfort_violation_rate=violation_rate,
@@ -287,6 +291,8 @@ def _flat_control_metrics(results: ControlResults, prefix: str) -> dict:
         flat[f"{prefix}_total_energy"] = results.energy.total_energy
         flat[f"{prefix}_peak_power"] = results.energy.peak_power
         flat[f"{prefix}_mean_window_peak"] = results.energy.mean_window_peak
+        if results.energy.energy_cost is not None:
+            flat[f"{prefix}_energy_cost"] = results.energy.energy_cost
     return flat
 
 
