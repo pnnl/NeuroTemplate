@@ -94,3 +94,55 @@ def test_validate_accepts_linear_policy():
     cfg.policy = "linear"
     cfg.policy_bound_method = "relu_clamp"
     cfg.validate()  # must not raise
+
+
+# ── Grid-response and residual knobs ─────────────────────────────
+
+
+@pytest.mark.parametrize("q", [0.0, 0.5, -1.0])
+def test_validate_rejects_peak_q_below_one(q):
+    """Below 1, M_q rewards spiky profiles — the opposite of the request."""
+    cfg = _runnable_cfg()
+    cfg.peak_q = q
+    with pytest.raises(ValueError, match="peak_q must be >= 1"):
+        cfg.validate()
+
+
+@pytest.mark.parametrize("field", ["cost_weight", "peak_weight"])
+def test_validate_rejects_negative_grid_weights(field):
+    cfg = _runnable_cfg()
+    setattr(cfg, field, -1.0)
+    with pytest.raises(ValueError, match=field):
+        cfg.validate()
+
+
+def test_validate_rejects_a_residual_narrower_than_the_setpoint_grid():
+    """The single most likely way to waste a campaign on the residual: every
+    delta snaps back to zero and nothing on any report says so."""
+    cfg = _runnable_cfg()
+    cfg.setpoint_step = 0.5
+    cfg.residual_delta = 0.2
+    with pytest.raises(ValueError, match="smaller than setpoint_step"):
+        cfg.validate()
+
+
+def test_validate_accepts_a_residual_at_or_above_one_grid_step():
+    cfg = _runnable_cfg()
+    cfg.setpoint_step = 0.5
+    cfg.residual_delta = 0.5
+    cfg.validate()  # must not raise
+
+
+def test_validate_accepts_a_zero_width_residual_box():
+    """0 means 'emit the reference exactly' — a floor to train nothing and
+    score, and not the same thing as a residual that quantizes away."""
+    cfg = _runnable_cfg()
+    cfg.residual_delta = 0.0
+    cfg.validate()  # must not raise
+
+
+def test_validate_rejects_a_negative_residual():
+    cfg = _runnable_cfg()
+    cfg.residual_delta = -0.5
+    with pytest.raises(ValueError, match="residual_delta must be >= 0"):
+        cfg.validate()

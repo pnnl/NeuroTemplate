@@ -146,13 +146,126 @@ class _QuantizedPolicy(nn.Module):
     """Compose the bounded MLP with STEQuantize while keeping the variadic
     forward signature the Neuromancer Node expects."""
 
-    def __init__(self, base: nn.Module, step, offset=0.0):
+    def __init__(self, base: nn.Module, quantize: STEQuantize):
         super().__init__()
         self.base = base
-        self.quantize = STEQuantize(step, offset)
+        self.quantize = quantize
 
     def forward(self, *args: torch.Tensor) -> torch.Tensor:
         return self.quantize(self.base(*args))
+
+
+def _current(x: torch.Tensor, block: int, width: int) -> torch.Tensor:
+    """The `block`-th step out of a flattened `(batch, window*width)` window."""
+    return x[:, block * width:(block + 1) * width]
+
+
+class _ReferenceRule(nn.Module):
+    """Adapt `control_user_defined.reference_control` to the policy's inputs.
+
+    The policy is handed *flattened* windows — `(batch, window, dim)` reshaped
+    to `(batch, window*dim)`, oldest-first, see `SystemPreview.get_mapped_data`
+    — and that flattening convention is library business which must not leak
+    into a use case's rule. This slices the current step back out and hands the
+    hook plain `[b, n]` tensors.
+
+    Deliberately memoryless: every rule-based controller in the record is a
+    function of the band and the current state, and it is what the deploy-side
+    callback can supply with no new plumbing. A rule that needs its own
+    integrator is out of scope — say so rather than adding a state-carrying
+    path for it.
+
+    Extra inputs beyond the four (a price preview, say) are accepted and
+    ignored: the rule holds comfort, and anything else is the residual's job.
+    """
+
+    def __init__(self, rule, nm_mapping: dict[str, list[str]],
+                 norm_stats: dict[str, dict[str, float]],
+                 h_ctrl: int, ny: int, n_ctrl: int, nd: int):
+        super().__init__()
+        self.rule = rule
+        self.nm_mapping = nm_mapping
+        self.norm_stats = norm_stats
+        # Which block of each flattened window holds the current step. yn and
+        # D look `h_ctrl - 1` steps back, so it is the last of their history;
+        # the band has no history, so it is the first.
+        self.yn_at, self.ny = h_ctrl - 1, ny
+        self.d_at, self.nd = h_ctrl - 1, nd
+        self.n_ctrl = n_ctrl
+
+    def forward(self, yn: torch.Tensor, ymin: torch.Tensor,
+                ymax: torch.Tensor, d: torch.Tensor, *_) -> torch.Tensor:
+        return self.rule(
+            _current(yn, self.yn_at, self.ny),
+            _current(ymin, 0, self.n_ctrl),
+            _current(ymax, 0, self.n_ctrl),
+            _current(d, self.d_at, self.nd),
+            self.nm_mapping,
+            self.norm_stats,
+        )
+
+
+class _ResidualPolicy(nn.Module):
+    """Command a bounded deviation from a reference rule, not a setpoint.
+
+        δ = MLP_bounds(window)                    bounded to [-Δ, +Δ]
+        u = clamp(quantize(u_ref + δ), umin, umax)
+
+    The point is not that a network finds it easier to learn zero than
+    identity — the `linear` family already expresses `u = sat(Kx + b)`, so
+    representing the rule was never the binding constraint. The point is that
+    a bounded residual is **a trust region on surrogate error**: the optimizer's
+    gradient and the model-selection criterion both come from a surrogate whose
+    own held-out score can be anti-correlated with plant fidelity, and a ±Δ box
+    caps what that error can cost you without needing to fix it.
+
+    What it buys, in descending order: a hard cap on deployed deviation; an
+    exactly-recoverable δ = 0 point that `evaluate_baseline` scores on the same
+    band and the same windows; and a start at the rule itself.
+
+    Note Δ bounds the *action*, not the outcome. The commanded setpoint stays
+    within Δ of the rule's; the zone temperature does not, because the plant is
+    in between. A setpoint→zone gain well under 1 °C/°C makes Δ = 1 °C of
+    setpoint comfortably under 1 °C of zone deviation — state it that way
+    rather than as a comfort guarantee.
+
+    Order is easy to get backwards and matters: the reference is already
+    grid-snapped and δ is not, so the **sum** is what gets snapped, and the
+    clamp comes **last** — quantizing after clamping can push a value back
+    outside the actuator box.
+    """
+
+    def __init__(self, base: nn.Module, reference: _ReferenceRule,
+                 umin: torch.Tensor, umax: torch.Tensor,
+                 quantize=None):
+        super().__init__()
+        self.base = base
+        self.reference = reference
+        self.quantize = quantize
+        self.register_buffer("umin", umin)
+        self.register_buffer("umax", umax)
+
+    def forward(self, *args: torch.Tensor) -> torch.Tensor:
+        u = self.reference(*args) + self.base(*args)
+        if self.quantize is not None:
+            u = self.quantize(u)
+        return torch.clamp(u, self.umin, self.umax)
+
+
+def _zero_final_layer(net: nn.Module) -> None:
+    """Start the residual at δ ≡ 0, exactly.
+
+    Both bound methods send a pre-bound output of 0 to the centre of a
+    symmetric box: `sigmoid_scale` gives 2Δ·σ(0) − Δ = 0, and `relu_clamp` is
+    the identity there. So zeroing the last linear layer makes the policy emit
+    the reference rule exactly at initialization — training starts at the rule.
+    The gradient at that point is also maximal (σ′(0) = ¼), so it is a
+    responsive start, not a dead one.
+    """
+    last = net.linear[-1]
+    nn.init.zeros_(last.weight)
+    if last.bias is not None:
+        nn.init.zeros_(last.bias)
 
 
 def _preview_steps(hooks, cfg,
@@ -243,6 +356,106 @@ policy_catalog = {
 POLICY_BOUND_METHODS = list(blocks.MLP_bounds.bound_methods)
 
 
+def _u_scaling(nm_mapping, norm_stats, device) -> tuple[torch.Tensor, torch.Tensor]:
+    """(stretch, shift) per U column — the physical↔normalized conversion."""
+    def col(key):
+        return torch.tensor([norm_stats[c][key] for c in nm_mapping["U"]],
+                            dtype=torch.float32, device=device)
+    return col("stretch"), col("shift")
+
+
+def _reference_rule(cfg, hooks, nm_mapping, norm_stats,
+                    h_ctrl: int, ny: int, n_ctrl: int, nd: int):
+    """The residual's anchor rule, or None when `residual_delta` is unset.
+
+    No silent "no reference → plain policy" path: a residual anchored to a bad
+    rule is a bad controller with extra steps, and the fix for that is to write
+    the rule, not to quietly drop the anchor.
+    """
+    if cfg.residual_delta is None:
+        return None
+    rule = getattr(hooks, "reference_control", None)
+    if rule is None:
+        raise NotImplementedError(
+            f"residual_delta is set ({cfg.residual_delta}) but "
+            "control_user_defined.reference_control is not defined, so there "
+            "is no rule for the residual to deviate from. Implement the hook, "
+            "or set residual_delta to null for a plain policy."
+        )
+    return _ReferenceRule(rule, nm_mapping, norm_stats, h_ctrl, ny, n_ctrl, nd)
+
+
+@beartype
+def build_reference_node(
+    cfg,
+    sysid_cfg,
+    nm_mapping: dict[str, list[str]],
+    norm_stats: dict[str, dict[str, float]],
+) -> Node:
+    """The use case's reference rule as a standalone controller Node.
+
+    One rule, two consumers. The same `reference_control` the residual policy
+    is anchored to is what `evaluate_baseline` scores, so the δ = 0 floor and
+    the baseline column are the same controller by construction. Two copies of
+    a cooling inset is two places for it to drift, and the record says that
+    inset is what decides whether the rule works at all.
+
+    A history of one step and no band preview means every window collapses to
+    the current step, so `_ReferenceRule`'s slicing is the identity here and
+    the Node reads plain current-step tensors. It has no parameters: it is
+    evaluated, never trained.
+    """
+    rule = getattr(load_control_hooks(cfg), "reference_control", None)
+    if rule is None:
+        raise NotImplementedError(
+            "control_user_defined.reference_control is not defined."
+        )
+    net = _ReferenceRule(
+        rule, nm_mapping, norm_stats, h_ctrl=1,
+        ny=len(nm_mapping["Y"]),
+        n_ctrl=len(load_control_hooks(cfg).controlled_channels(nm_mapping)[0]),
+        nd=len(nm_mapping["D"]),
+    ).to(sysid_cfg.device)
+    return Node(net, ["yn", "ymin", "ymax", "D"], ["U"],
+                name="Reference rule")
+
+
+@beartype
+def reference_over_horizon(
+    cfg,
+    out: dict,
+    hmax: int,
+    nm_mapping: dict[str, list[str]],
+    norm_stats: dict[str, dict[str, float]],
+) -> torch.Tensor:
+    """The reference rule replayed on a recorded rollout, [b, P, nu] normalized.
+
+    The rule is memoryless, so every (window, step) can be evaluated at once by
+    folding time into the batch axis. What comes back is exactly the command
+    the rule would have issued at each step of this trajectory, which makes
+    `U[:, hmax:] - u_ref` the *realized* residual — after quantization and
+    after the actuator clamp, i.e. the deviation that was actually deployed.
+
+    Mind the one-step offset. The rollout starts at `start_iter = hmax - 1`,
+    so the command appended at `U[hmax + k]` was chosen from the signals at
+    index `hmax - 1 + k`. Reading the inputs at `hmax + k` instead would
+    silently compare each command against the *next* step's rule, which on a
+    band that moves is a residual that never was.
+    """
+    rule = getattr(load_control_hooks(cfg), "reference_control", None)
+    if rule is None:
+        raise NotImplementedError(
+            "control_user_defined.reference_control is not defined."
+        )
+    P = out["U"].shape[1] - hmax
+    start = hmax - 1
+    parts = [out[k][:, start:start + P, :]
+             for k in ("yn", "ymin", "ymax", "D")]
+    b = parts[0].shape[0]
+    flat = [x.reshape(b * P, x.shape[-1]) for x in parts]
+    return rule(*flat, nm_mapping, norm_stats).reshape(b, P, -1)
+
+
 @beartype
 def build_policy(
     cfg,
@@ -286,25 +499,34 @@ def build_policy(
 
     umin, umax = hooks.actuation_bounds(nm_mapping, norm_stats)
     umin, umax = umin.to(device), umax.to(device)
+    u_stretch, u_shift = _u_scaling(nm_mapping, norm_stats, device)
 
-    net = policy_catalog[cfg.policy](cfg, insize, nu, umin, umax).to(device)
+    reference = _reference_rule(cfg, hooks, nm_mapping, norm_stats,
+                                h_ctrl, ny, n_ctrl, nd)
+    if reference is None:
+        net_min, net_max = umin, umax
+    else:
+        # A residual policy is bounded to a symmetric box around the rule, in
+        # physical units converted per U column exactly as setpoint_step is.
+        delta_norm = cfg.residual_delta / u_stretch
+        net_min, net_max = -delta_norm, delta_norm
 
+    net = policy_catalog[cfg.policy](cfg, insize, nu, net_min, net_max).to(device)
+
+    quantize = None
     if cfg.setpoint_step > 0:
         # Quantization is in physical °C, but the policy emits normalized U;
         # convert step + shift per channel so the physical grid lands at
         # multiples of cfg.setpoint_step (not multiples of step shifted by
         # the column mean).
-        u_stretch = torch.tensor(
-            [norm_stats[c]["stretch"] for c in nm_mapping["U"]],
-            dtype=torch.float32, device=device,
-        )
-        u_shift = torch.tensor(
-            [norm_stats[c]["shift"] for c in nm_mapping["U"]],
-            dtype=torch.float32, device=device,
-        )
-        step_norm = cfg.setpoint_step / u_stretch
-        offset_norm = u_shift / u_stretch
-        net = _QuantizedPolicy(net, step_norm, offset_norm).to(device)
+        quantize = STEQuantize(cfg.setpoint_step / u_stretch,
+                               u_shift / u_stretch)
+
+    if reference is not None:
+        _zero_final_layer(net)
+        net = _ResidualPolicy(net, reference, umin, umax, quantize).to(device)
+    elif quantize is not None:
+        net = _QuantizedPolicy(net, quantize).to(device)
 
     input_map = {
         "yn": {"past": h_ctrl - 1, "future": 0, "pad_mode": "nearest"},
@@ -357,10 +579,12 @@ def describe_policy(
     ny*H_ctrl + 2*n_ctrl*(1+band) + nd*(H_ctrl+d) + (1+price) sum by eye — a
     wrong window is otherwise an invisible failure.
     """
-    # Unwrap: Node -> (_QuantizedPolicy) -> MLP_bounds
+    # Unwrap: Node -> (_ResidualPolicy | _QuantizedPolicy) -> MLP_bounds
     raw = policy_node.callable
-    quantized = isinstance(raw, _QuantizedPolicy)
-    net = raw.base if quantized else raw
+    residual = isinstance(raw, _ResidualPolicy)
+    wrapped = isinstance(raw, (_ResidualPolicy, _QuantizedPolicy))
+    net = raw.base if wrapped else raw
+    quantized = raw.quantize is not None if wrapped else False
 
     hooks = load_control_hooks(cfg)
     _, h_ctrl, _ = horizons(cfg, sysid_cfg)
@@ -368,12 +592,14 @@ def describe_policy(
 
     # Actuator limits are set in normalized U space by the actuation_bounds
     # hook; report them in physical units, which is what a reader can sanity
-    # check against the building.
+    # check against the building. For a residual policy the network's own box
+    # is ±Δ, so the limits the commands actually live in are the clamp's.
     u_cols = nm_mapping["U"]
     stretch = torch.tensor([norm_stats[c]["stretch"] for c in u_cols])
     shift = torch.tensor([norm_stats[c]["shift"] for c in u_cols])
-    umin_phys = (net.min.detach().cpu() * stretch + shift).tolist()
-    umax_phys = (net.max.detach().cpu() * stretch + shift).tolist()
+    lo, hi = (raw.umin, raw.umax) if residual else (net.min, net.max)
+    umin_phys = (lo.detach().cpu() * stretch + shift).tolist()
+    umax_phys = (hi.detach().cpu() * stretch + shift).tolist()
 
     return {
         "family": cfg.policy,
@@ -393,4 +619,5 @@ def describe_policy(
         "umax_phys": umax_phys,
         "quantized": quantized,
         "setpoint_step": cfg.setpoint_step,
+        "residual_delta": cfg.residual_delta if residual else None,
     }

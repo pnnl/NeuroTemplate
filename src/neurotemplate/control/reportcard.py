@@ -104,6 +104,14 @@ def _policy_section(arch: dict) -> str:
         + ")",
         f"- **Output width:** {arch['outsize']}",
         f"- **Setpoint quantization:** {quant}",
+    ]
+    if arch["residual_delta"] is not None:
+        rows.append(
+            f"- **Residual box:** ±{arch['residual_delta']:g} around "
+            "`reference_control` *(the network commands the deviation, not "
+            "the setpoint; Δ bounds the action, not the zone temperature)*"
+        )
+    rows += [
         "- **Actuation bounds (physical units):**",
         bounds,
     ]
@@ -253,6 +261,18 @@ def _actuation_section(results) -> str:
         "the same way here as one that is stuck.\n",
         actuation_to_markdown(results.actuation),
     ]
+    r = results.residual
+    if r is not None:
+        body += [
+            "",
+            f"- **Residual vs. the reference rule** (Δ = ±{r.delta_cap:g}):",
+            f"  - Mean |δ|: {r.mean_abs_delta:.4g}   max |δ|: "
+            f"{r.max_abs_delta:.4g}",
+            f"  - Pinned at ±Δ on {r.frac_at_cap * 100:.1f}% of steps",
+            "  - A cap that binds most of the time means either the reference "
+            "is wrong for this plant or the optimizer is riding a surrogate "
+            "artifact into the wall. Read that before the comfort number.",
+        ]
     return _section("Actuation", "\n".join(body))
 
 
@@ -316,14 +336,14 @@ def _comparison_row(label: str, values: list[Optional[float]],
     return f"| {label} | " + " | ".join(cells) + " |"
 
 
-def _baseline_section(results, baseline) -> str:
+def _baseline_section(results, baseline, clears: Optional[bool] = None) -> str:
     """Learned vs. rule-based, scored on the identical band realization."""
     if baseline is None:
         return _section(
             "Baseline comparison",
-            "*(none — `control_user_defined.build_baseline_policy` is not "
-            "defined, so there is no rule-based controller to compare "
-            "against.)*",
+            "*(none — neither `control_user_defined.reference_control` nor "
+            "`build_baseline_policy` is defined, so there is no rule-based "
+            "controller to compare against.)*",
         )
 
     learned = _comparison_values(results)
@@ -346,6 +366,23 @@ def _baseline_section(results, baseline) -> str:
         _comparison_row("Baseline", rule),
         _comparison_row("Δ (learned − baseline)", delta, signed=True),
     ]
+    if clears is not None:
+        verdict = (
+            "**✅ The learned policy clears its reference** on mean "
+            "exceedance."
+            if clears else
+            "**⚠️ The learned policy does not clear its reference** on mean "
+            "exceedance. **Ship the reference.** Training is scored against a "
+            "surrogate whose held-out error is not the plant's, and the rule "
+            "is the one controller here whose behaviour does not depend on "
+            "that. Nothing about a longer run changes that arithmetic."
+        )
+        body += [
+            "",
+            verdict + " Judged on mean exceedance rather than violation rate: "
+            "a threshold count saturates, and measured against a surrogate its "
+            "argmin can select a substantially worse controller.",
+        ]
     return _section("Baseline comparison", "\n".join(body))
 
 
@@ -382,6 +419,7 @@ def render_control_reportcard(
     *,
     eval_band_seed: int,
     baseline: Optional[object] = None,
+    clears_reference: Optional[bool] = None,
     balance: Optional[ObjectiveBalance] = None,
     shapes: Optional[list[TermShape]] = None,
     frac_power_zero: Optional[float] = None,
@@ -400,6 +438,8 @@ def render_control_reportcard(
         results:     ControlResults for the learned policy.
         eval_band_seed: The fixed seed the evaluation band was drawn with.
         baseline:    Optional ControlResults for the rule-based controller.
+        clears_reference: Optional pipeline.clears_reference(...) verdict; the
+                     baseline section renders it as a ship/don't-ship call.
         balance:     Optional objective.ObjectiveBalance from the pre-training
                      forward pass; the section is skipped without it.
         shapes:      Optional objective.term_shapes(...) for the power signal.
@@ -430,7 +470,7 @@ def render_control_reportcard(
         _performance_section(results),
         _actuation_section(results),
         _response_section(results, nm_mapping["U"]),
-        _baseline_section(results, baseline),
+        _baseline_section(results, baseline, clears_reference),
         _tracking_section(results),
         _hyperparameters_section(cfg),
     ]

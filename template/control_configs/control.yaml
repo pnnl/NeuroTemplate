@@ -112,6 +112,29 @@ energy_weight: 0.0
 # narrowest band and will cost you violations.
 # setpoint_step: 0.5
 
+# ── RESIDUAL CONTROL ─────────────────────────────────────────────
+# Half-width of the residual box, in physical units (°C). Unset (null) is a
+# plain policy over the actuation box. Set it and the policy commands
+# `reference_control(...) + δ` with |δ| <= residual_delta, which requires the
+# control_user_defined.reference_control hook.
+#
+# What it buys is not that a network finds zero easier to learn than identity —
+# it is a trust region on surrogate error. Training's gradient and its
+# model-selection criterion both come from a surrogate whose held-out score is
+# not the plant's, and a ±Δ box caps what that error can cost you. Δ is also
+# an operator-legible knob: "how far from the comfort rule am I willing to
+# move for money."
+#
+# Δ bounds the ACTION, not the outcome: the commanded setpoint stays within Δ
+# of the rule's, the zone temperature does not, because the plant is in
+# between. With a setpoint→zone gain under 1 °C/°C, Δ = 1 °C of setpoint is
+# comfortably under 1 °C of zone deviation. State it that way.
+#
+# 0.0 emits the reference exactly — a floor to train nothing and score.
+# A Δ smaller than setpoint_step is rejected: every δ would quantize back to
+# zero, and you would train for an hour to reproduce the rule.
+# residual_delta: null
+
 # ── TRAINING ─────────────────────────────────────────────────────
 # epochs: 300
 # epoch_verbose: 1

@@ -40,6 +40,7 @@ from neurotemplate.control.objective import (
 from neurotemplate.control.reportcard import render_control_reportcard
 from neurotemplate.control.pipeline import (
     EVAL_BAND_SEED,
+    clears_reference,
     train_policy,
     evaluate_baseline,
     evaluate_closed_loop,
@@ -165,12 +166,15 @@ def main() -> None:
     baseline = evaluate_baseline(
         cfg, sysid_cfg, dyn_node, test_dfs, nm_mapping, norm_stats,
     )
+    clears = clears_reference(results, baseline)
     if cfg.verbose:
         if baseline is None:
-            print("No baseline defined (build_baseline_policy hook absent).")
+            print("No baseline defined (no reference_control hook).")
         else:
             print("Baseline comfort violation rate: "
                   f"{baseline.comfort_violation_rate * 100:.2f}%")
+            print("Learned policy clears its reference: "
+                  f"{'yes' if clears else 'NO — ship the reference'}")
 
     if cfg.plot:
         plot_closed_loop(
@@ -181,7 +185,8 @@ def main() -> None:
     md = render_control_reportcard(
         cfg, sysid_cfg, arch, nm_mapping, controlled, results,
         eval_band_seed=EVAL_BAND_SEED, baseline=baseline,
-        best_dev_loss=best_dev, train_time_s=train_time_s,
+        clears_reference=clears, best_dev_loss=best_dev,
+        train_time_s=train_time_s,
         balance=balance, shapes=shapes,
         frac_power_zero=frac_zero, objective_notes=notes,
     )

@@ -55,6 +55,7 @@ def _make_arch():
         "umax_phys": [28.0],
         "quantized": True,
         "setpoint_step": 0.5,
+        "residual_delta": None,
     }
 
 
@@ -200,7 +201,7 @@ def test_linear_policy_renders_without_hidden_sizes():
 
 def test_missing_baseline_says_why():
     md = _render(baseline=None)
-    assert "build_baseline_policy" in md
+    assert "reference_control" in md
     assert "| Baseline |" not in md
 
 
@@ -251,3 +252,38 @@ def test_snapshot_matches_golden():
         f"Control reportcard rendering changed.\n"
         f"If intentional, regenerate via: REGEN_GOLDEN=1 pytest {__file__}"
     )
+
+
+# ── Residual policy ──────────────────────────────────────────────
+
+
+def test_residual_box_is_reported_on_the_policy_section():
+    arch = _make_arch()
+    arch["residual_delta"] = 1.5
+    md = _render(arch=arch)
+    assert "**Residual box:** ±1.5 around `reference_control`" in md
+
+
+def test_residual_saturation_is_reported_in_the_actuation_section():
+    from neurotemplate.control.metrics import ResidualMetrics
+
+    results = _make_results()
+    results.residual = ResidualMetrics(delta_cap=1.0, mean_abs_delta=0.9,
+                                       max_abs_delta=1.0, frac_at_cap=0.87)
+    md = _render(results=results)
+    assert "Pinned at ±Δ on 87.0% of steps" in md
+    assert "riding a surrogate artifact into the wall" in md
+
+
+def test_a_policy_that_clears_its_reference_says_so():
+    md = _render(baseline=_make_results(offset=2.0), clears_reference=True)
+    assert "clears its reference" in md
+    assert "Ship the reference" not in md
+
+
+def test_a_policy_that_does_not_clear_its_reference_is_told_to_ship_the_rule():
+    """The decision rule is the whole point of scoring delta = 0: without it
+    the residual's floor is rhetorical."""
+    md = _render(baseline=_make_results(offset=0.5), clears_reference=False)
+    assert "does not clear its reference" in md
+    assert "**Ship the reference.**" in md

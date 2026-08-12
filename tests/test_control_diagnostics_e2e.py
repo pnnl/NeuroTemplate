@@ -19,18 +19,21 @@ from neurotemplate.control.closed_loop import (
 )
 from neurotemplate.control.objective import (
     format_objective_report,
+    frac_power_zero,
     objective_balance,
+    objective_notes,
     objective_to_dict,
     run_objective_pass,
     term_shapes,
 )
 from neurotemplate.control.pipeline import (
-    EVAL_BAND_SEED, evaluate_closed_loop, log_control_results,
+    EVAL_BAND_SEED, clears_reference, evaluate_baseline, evaluate_closed_loop,
+    log_control_results,
 )
 from neurotemplate.control.policy import build_policy, describe_policy
 from neurotemplate.control.reportcard import render_control_reportcard
 from neurotemplate.control.scenarios import build_loaders, horizons
-from control_fixtures import full_setup
+from control_fixtures import full_setup, install_price_hook
 import control_user_defined as hooks
 
 
@@ -45,8 +48,10 @@ class _FakeLogger:
         self.dicts[name] = d
 
 
-def _run_diagnostics(**overrides):
+def _run_diagnostics(monkeypatch=None, **overrides):
     """The CLI's diagnostic sequence, minus MLflow and argparse."""
+    if monkeypatch is not None:
+        install_price_hook(monkeypatch)
     s = full_setup(**overrides)
     cfg, sysid_cfg, nm, ns = s["cfg"], s["sysid_cfg"], s["nm"], s["norm_stats"]
     _, _, hmax = horizons(cfg, sysid_cfg)
@@ -63,19 +68,27 @@ def _run_diagnostics(**overrides):
     out = run_objective_pass(problem, next(iter(train_loader)))
     balance = objective_balance(loss, out)
     term = power_term(cfg, nm, ns)
-    shapes = [] if (term is None or cfg.energy_weight == 0) else term_shapes(
-        term, out, hmax, nm["U"], *u_bounds, ns,
-    )
+    weighted = cfg.energy_weight > 0 or cfg.cost_weight > 0 or cfg.peak_weight > 0
+    if term is None or not weighted:
+        shapes, frac_zero = [], None
+    else:
+        shapes = term_shapes(term, out, hmax, nm["U"], *u_bounds, ns)
+        frac_zero = frac_power_zero(term, out, hmax)
 
+    arch = describe_policy(policy, cfg, sysid_cfg, nm, ns)
+    notes = objective_notes(cfg, arch)
     results, _ = evaluate_closed_loop(cfg, sysid_cfg, cl, test_dfs, nm, ns)
+    baseline = evaluate_baseline(cfg, sysid_cfg, s["dyn_node"], test_dfs, nm, ns)
     md = render_control_reportcard(
-        cfg, sysid_cfg, describe_policy(policy, cfg, sysid_cfg, nm, ns),
-        nm, hooks.controlled_channels(nm)[0], results,
-        eval_band_seed=EVAL_BAND_SEED,
+        cfg, sysid_cfg, arch, nm, hooks.controlled_channels(nm)[0], results,
+        eval_band_seed=EVAL_BAND_SEED, baseline=baseline,
+        clears_reference=clears_reference(results, baseline),
         balance=balance, shapes=shapes,
+        frac_power_zero=frac_zero, objective_notes=notes,
     )
-    return dict(results=results, balance=balance,
-                shapes=shapes, md=md, u_cols=nm["U"])
+    return dict(results=results, balance=balance, baseline=baseline,
+                shapes=shapes, notes=notes, frac_zero=frac_zero,
+                md=md, u_cols=nm["U"])
 
 
 def test_every_diagnostic_section_reaches_the_reportcard():
@@ -125,16 +138,20 @@ def test_everything_logged_is_json_serializable():
 
     d = _run_diagnostics(energy_weight=1.0)
     logger = _FakeLogger()
-    log_control_results(logger, d["results"])
-    logger.log_dict(objective_to_dict(d["balance"], d["shapes"]),
-                    name="objective_diagnostics.json")
+    log_control_results(logger, d["results"], baseline=d["baseline"])
+    logger.log_dict(
+        objective_to_dict(d["balance"], d["shapes"], d["frac_zero"],
+                          d["notes"]),
+        name="objective_diagnostics.json",
+    )
 
     for payload in logger.dicts.values():
         json.dumps(payload)
     assert all(isinstance(v, (int, float)) for v in logger.metrics.values())
-    # The three headline behavioural keys, present without anyone asking.
+    # The headline behavioural keys, present without anyone asking.
     assert any(k.endswith("_frac_saturated") for k in logger.metrics)
     assert "control_mean_exceedance" in logger.metrics
+    assert "control_clears_reference" in logger.metrics
 
 
 def test_the_stdout_report_is_printable_before_training():
@@ -144,3 +161,47 @@ def test_the_stdout_report_is_printable_before_training():
         assert term in text
 
 
+
+
+# ── Grid response and residual control, through the same sequence ─
+
+
+def test_the_grid_terms_reach_every_diagnostic(monkeypatch):
+    """cost and peak show up on the balance report, in the reportcard and in
+    the energy section with nothing told about them by name."""
+    d = _run_diagnostics(monkeypatch, energy_weight=1.0, cost_weight=1.0,
+                         peak_weight=1.0)
+
+    assert {t.name for t in d["balance"].terms} == {
+        "comfort_lower_loss", "comfort_upper_loss", "du_loss",
+        "energy_loss", "cost_loss", "peak_loss",
+    }
+    for term in ("cost_loss", "peak_loss"):
+        assert term in d["md"]
+    assert d["results"].energy.energy_cost is not None
+    assert "Cost per window" in d["md"]
+    # The power sweep is bound to the shared signal, not to the three terms.
+    assert [s.u_name for s in d["shapes"]] == d["u_cols"]
+    assert d["frac_zero"] is not None
+
+
+def test_a_cost_term_with_no_price_preview_says_so(monkeypatch):
+    d = _run_diagnostics(monkeypatch, energy_weight=1.0, cost_weight=1.0)
+    assert any("cannot shift load" in n for n in d["notes"])
+    assert "cannot shift load" in d["md"]
+
+
+def test_peak_alone_is_flagged_as_raising_energy(monkeypatch):
+    d = _run_diagnostics(monkeypatch, energy_weight=0.0, peak_weight=1.0)
+    assert any("only power term" in n for n in d["notes"])
+
+
+def test_a_residual_run_reports_its_box_and_its_verdict():
+    d = _run_diagnostics(residual_delta=1.0)
+
+    assert d["results"].residual is not None
+    assert "**Residual box:** ±1 around `reference_control`" in d["md"]
+    assert "Pinned at ±Δ on" in d["md"]
+    # An untrained policy may land either side of its reference; what has to
+    # be there is the call, not a particular answer.
+    assert "clear its reference" in d["md"] or "clears its reference" in d["md"]

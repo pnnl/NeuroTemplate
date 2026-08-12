@@ -109,6 +109,13 @@ class ControlConfig:
     # thermostat steps. Straight-through estimator on backward, so gradients
     # still flow as if the output were continuous. 0 disables quantization.
     setpoint_step: float = 0.5
+    # Half-width of the residual box, in physical units (°C). None disables the
+    # residual entirely (a plain policy over the actuation box). Set it and the
+    # policy commands `reference_control(...) + δ` with |δ| <= residual_delta,
+    # which caps how far a surrogate error can move the deployed setpoint.
+    # 0.0 emits the reference rule exactly — a useful floor to train nothing
+    # and score. Requires the control_user_defined.reference_control hook.
+    residual_delta: Optional[float] = None
 
     # ── Training ─────────────────────────────────────────────────
     epochs: int = 300
@@ -179,6 +186,25 @@ class ControlConfig:
                 f"peak_q must be >= 1, got {self.peak_q}. 1 is the plain mean; "
                 "larger values approach a hard max."
             )
+
+        if self.residual_delta is not None:
+            if self.residual_delta < 0:
+                raise ValueError(
+                    f"residual_delta must be >= 0, got {self.residual_delta}. "
+                    "0 emits the reference rule exactly; null disables the "
+                    "residual."
+                )
+            # The single most likely way to waste a campaign on this feature:
+            # every δ snaps back to zero and you get a rule that trained for an
+            # hour, with nothing on any report to say so.
+            if 0 < self.residual_delta < self.setpoint_step:
+                raise ValueError(
+                    f"residual_delta ({self.residual_delta}) is smaller than "
+                    f"setpoint_step ({self.setpoint_step}), so every residual "
+                    "quantizes back to zero and the policy can only ever emit "
+                    "the reference rule. Raise it to at least one grid step, "
+                    "or set setpoint_step: 0."
+                )
 
         # du_weight is per-channel-capable, so it is checked by value rather
         # than by field. Column names can only be resolved against the

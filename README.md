@@ -124,12 +124,18 @@ The library imports each hook by attribute (no defaulting), so every row above e
 | `power_channels(nm_mapping) -> [col]` | must be defined; return `[]` when nothing is metered | closed-loop plot power row + energy metrics |
 | `plot_context_channels(nm_mapping) -> [col]` | must be defined; return `[]` for none | D traces overlaid on the closed-loop temperature axis |
 | `power_metric(yn, U, D, nm_mapping, norm_stats) -> Tensor` + `POWER_METRIC_IMPLEMENTED: bool` | required only when `energy_weight > 0` | energy / cost / peak objectives + energy reportcard |
-| `build_baseline_policy(cfg, sysid_cfg, nm_mapping, norm_stats) -> Node \| None` | optional | rule-based controller scored alongside the learned policy |
-| `preview_config(nm_mapping) -> {signal: n_steps}` | optional | per-column disturbance + comfort-band preview widths |
+| `reference_control(yn_now, ymin_now, ymax_now, d_now, nm_mapping, norm_stats) -> Tensor` | optional | rule-based baseline **and** the residual policy's anchor |
+| `build_baseline_policy(cfg, sysid_cfg, nm_mapping, norm_stats) -> Node \| None` | optional; mutually exclusive with `reference_control` | escape hatch for a baseline a memoryless rule cannot express |
+| `price_signal(t) -> Tensor` + `PRICE_SCALE: float` | required only when `cost_weight > 0` | the energy tariff in the rollout, the cost objective, `energy_cost` |
+| `preview_config(nm_mapping) -> {signal: n_steps}` | optional | per-column disturbance, comfort-band and price preview widths |
 
 `power_metric` returns whatever units the use case meters; the library never converts, so the reportcard labels energy as `power·h`. Metered channels the surrogate already predicts are the best thing to return, because the energy numbers then mean something outside the run. An actuation proxy such as `(setpoint - ambient)²` is a fine alternative when nothing meters power — just read the energy section as relative rather than physical. What has actually cost campaigns here is the term's *scale*, not its shape: a proxy carried over from another dataset came out at 1.7× the entire comfort objective while every pooled metric looked fine. The objective-balance report and the shape sweep both print before training so that magnitude is on screen from the start.
 
-If `build_baseline_policy` is defined, `nt control train` rolls that controller out on the same test windows against the same fixed-seed comfort band and adds a learned-vs-baseline table to the reportcard. Without it the comparison section just says so. The returned `Node` must write `["U"]` and have no trainable parameters — it is only ever evaluated, never trained.
+If `reference_control` is defined, `nt control train` rolls that rule out on the same test windows against the same fixed-seed comfort band, adds a learned-vs-baseline table to the reportcard, and states plainly whether the learned policy cleared its own reference on mean exceedance. **A policy that does not clear its reference should ship the reference** — training is scored against a surrogate whose held-out error is not the plant's, and the rule is the one controller here whose behaviour does not depend on that. Without a rule the comparison section just says so.
+
+The same hook is what `residual_delta` anchors to. Set it and the policy commands `reference_control(...) + δ` with `|δ| ≤ residual_delta` instead of commanding a setpoint outright: the rule keeps comfort, δ answers whatever else is being optimised, and the ±Δ box is a trust region on surrogate error rather than a claim about the network. The reportcard reports the box and the fraction of steps δ spent pinned at it — a cap that binds most of the time means either the rule is wrong for this plant or the optimizer is riding a surrogate artifact into the wall. Note Δ bounds the *action*, not the outcome: the commanded setpoint stays within Δ of the rule's, the zone temperature does not, because the plant is in between.
+
+`price_signal` is the switch for price-driven control. It receives the window's own `t` and returns `price / PRICE_SCALE`, so the tariff is aligned to `yn` by construction and identical between the learned and baseline evaluations with no seed discipline. Price rides in the rollout dict rather than as a D column: a D column would need the frozen surrogate retrained, and would tell the dynamics model that electricity price drives zone temperature. `cost_weight` then weights `mean_t(price · power)`, and `peak_weight` weights the per-window power mean `M_q(power)` — all three power terms are reductions of one shared signal. Neither is solvable at the default `train_pred_steps: 48`; expect 144–288 steps, and expect `cost_weight` to need a price preview (`preview_config()["price"]`) before it can shift load rather than merely react to it.
 
 The tables above are the canonical hook contract. To start writing hooks, copy [template/](template/) — it has all of them stubbed with the right signatures. For worked-through implementations (including an ordinal/bounded `data_head_config`), read [tests/fixtures/modeling_user_defined.py](tests/fixtures/modeling_user_defined.py) and [tests/fixtures/control_user_defined.py](tests/fixtures/control_user_defined.py).
 
@@ -223,6 +229,12 @@ reportcard and in MLflow.
   the channel followed, and whether it got back in band. Two controllers
   measured at 16.6% and 17.9% pooled violation reacted to 0% and 75% of their
   cooling-demand jumps respectively; the pooled metric ranked them backwards.
+- **Baseline comparison and the ship/don't-ship call** — the same headline
+  numbers for the learned policy and the rule, on identical windows and an
+  identical band, plus an explicit verdict. For a residual policy this is also
+  the δ = 0 score, which is what turns its floor from rhetorical into a
+  decision: the Trainer checkpoints after each epoch's optimizer steps, so
+  δ = 0 is never itself a candidate and has to be scored on purpose.
 
 ## Programmatic use
 
@@ -267,12 +279,12 @@ src/neurotemplate/
 │   └── cli/             # train, optuna, load, debug_heads
 └── control/
     ├── config.py        # ControlConfig
-    ├── policy.py        # policy_catalog (MLP/linear), build_policy, describe_policy, STEQuantize
+    ├── policy.py        # policy_catalog (MLP/linear), build_policy, describe_policy, STEQuantize, residual policy
     ├── closed_loop.py   # build_closed_loop, build_control_loss, power_term
     ├── objective.py     # term balance + power-signal shape sweep
     ├── scenarios.py     # BandSpec, build_window_dict, build_loaders
-    ├── metrics.py       # ComfortMetrics, EnergyMetrics, ActuationMetrics, JumpResponse
-    ├── pipeline.py      # train_policy, evaluate_closed_loop, evaluate_baseline
+    ├── metrics.py       # ComfortMetrics, EnergyMetrics, ActuationMetrics, JumpResponse, ResidualMetrics
+    ├── pipeline.py      # train_policy, evaluate_closed_loop, evaluate_baseline, clears_reference
     ├── reportcard.py    # render_control_reportcard
     ├── load.py          # load_frozen_dynamics
     └── cli/             # train

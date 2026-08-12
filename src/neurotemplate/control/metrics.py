@@ -112,6 +112,21 @@ class ActuationMetrics:
 
 
 @dataclass
+class ResidualMetrics:
+    """How far a residual policy's commands sat from their reference rule.
+
+    `frac_at_cap` is the line that earns its place: if the ±Δ box is binding
+    most of the time, either the reference is wrong for this plant or the
+    optimizer is riding a surrogate artifact into the wall. Both are things to
+    know before reading the comfort number.
+    """
+    delta_cap: float        # Δ, the configured half-width, in physical units
+    mean_abs_delta: float   # mean |commanded − reference|
+    max_abs_delta: float
+    frac_at_cap: float      # share of (step, control) pairs pinned at ±Δ
+
+
+@dataclass
 class JumpResponse:
     """The loop's answer to reference-band step changes, one demand direction.
 
@@ -308,6 +323,42 @@ def actuation_metrics(
             u_max=float(u_max[j]),
         ))
     return results
+
+
+@beartype
+def residual_metrics(
+    u: torch.Tensor,
+    u_ref: torch.Tensor,
+    delta_cap: float,
+    tol: float,
+) -> ResidualMetrics:
+    """
+    Args:
+        u:     [batch, time, nu] commanded controls in physical units.
+        u_ref: [batch, time, nu] the reference rule's commands, same units.
+        delta_cap: the configured Δ, in physical units.
+        tol:   how close to Δ counts as pinned. Half a setpoint grid step is
+            the natural choice when quantization is on, because the commanded
+            deviation can only land on grid points.
+
+    This is the *realized* residual — measured after quantization and after
+    the actuator clamp — so it is the deviation that was actually deployed,
+    not the network's pre-bound output.
+    """
+    if u.shape != u_ref.shape:
+        raise ValueError(
+            f"u {tuple(u.shape)} and u_ref {tuple(u_ref.shape)} must match"
+        )
+    if delta_cap < 0:
+        raise ValueError(f"delta_cap must be >= 0, got {delta_cap}")
+
+    delta = (u - u_ref).detach().cpu().abs()
+    return ResidualMetrics(
+        delta_cap=delta_cap,
+        mean_abs_delta=float(delta.mean()),
+        max_abs_delta=float(delta.max()),
+        frac_at_cap=float((delta >= delta_cap - tol).float().mean()),
+    )
 
 
 def _band_jumps(lo: torch.Tensor, hi: torch.Tensor) -> list[int]:

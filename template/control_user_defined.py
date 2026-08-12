@@ -286,49 +286,85 @@ def _denorm(x: torch.Tensor, col: str, nm_mapping: dict[str, list[str]],
 
 
 # ---------------------------------------------------------------------
-# Optional: a rule-based controller to score the learned policy against
+# Optional: the reference rule — baseline, and the residual policy's anchor
 # ---------------------------------------------------------------------
-def build_baseline_policy(cfg, sysid_cfg, nm_mapping, norm_stats):
-    """
-    Return a Neuromancer Node writing ["U"], or None to skip the comparison
-    (the reportcard then says the section is empty).
+# Worth the fifteen lines twice over. Defined, it does two jobs:
+#
+#   1. `nt control train` rolls it out on the same test windows against the
+#      same fixed-seed band and adds a learned-vs-rule table to the reportcard.
+#      It is the only thing that tells you whether the learned policy is
+#      beating the obvious rule — and the reportcard says outright that a
+#      policy which does not clear its reference should ship the reference.
+#   2. With `residual_delta` set, the policy commands `reference_control(...)
+#      + δ` with |δ| bounded, instead of commanding a setpoint outright. The
+#      rule keeps comfort; δ answers whatever else you are optimising (price,
+#      peak) inside a box you can point at. Δ is an operator-legible knob:
+#      "how far from the comfort rule am I willing to move for money."
+#
+# Three deliberate restrictions: current step only, unflattened (the library
+# slices the window for you); memoryless (a rule with its own integrator is
+# out of scope — use `build_baseline_policy` below for that); normalized in,
+# normalized U out, the same space the learned policy emits.
+#
+# LEAVE COMMENTED OUT if you have no rule. Do not define it *and*
+# `build_baseline_policy` — two copies of one rule is two places for the
+# cooling inset to drift, and the library raises rather than pick one.
+#
+# @beartype
+# def reference_control(
+#     yn_now: torch.Tensor,      # [b, ny]     current state, normalized
+#     ymin_now: torch.Tensor,    # [b, n_ctrl] current band, normalized
+#     ymax_now: torch.Tensor,    # [b, n_ctrl]
+#     d_now: torch.Tensor,       # [b, nd]     current disturbances, normalized
+#     nm_mapping: dict[str, list[str]],
+#     norm_stats: dict[str, dict[str, float]],
+# ) -> torch.Tensor:             # [b, nu]     normalized U
+#     """Bracket the comfort band with a (cooling, heating) setpoint pair."""
+#     from neurotemplate.control.policy import bracket_band
+#
+#     controlled, _ = controlled_channels(nm_mapping)
+#     s = norm_stats[controlled[0]]
+#     lo = ymin_now * s["stretch"] + s["shift"]        # °C
+#     hi = ymax_now * s["stretch"] + s["shift"]
+#     cool, heat = bracket_band(lo, hi, step=0.5, cool_inset=0.3)
+#
+#     umin, umax = actuation_bounds(nm_mapping, norm_stats)
+#     u_cols = nm_mapping["U"]                         # [cooling, heating]
+#     phys = torch.cat([cool, heat], dim=-1)
+#     shift = torch.tensor([norm_stats[c]["shift"] for c in u_cols])
+#     stretch = torch.tensor([norm_stats[c]["stretch"] for c in u_cols])
+#     return torch.clamp((phys - shift) / stretch, umin, umax)
+#
+# On what rule to write, for a two-actuator heating/cooling setpoint pair:
+# **bracket the band** — heating at the band floor, cooling at (or just
+# inside) the band ceiling, so the two setpoints straddle the band rather than
+# both aiming at one target. `control.policy.bracket_band` implements it, and
+# its docstring records the two details that are easy to get backwards: round
+# each setpoint toward the band *interior*, and treat the cooling inset as a
+# correction for a setpoint→zone gain under 1 °C/°C, not as a safety margin
+# (too large and the two setpoints collide and it stops bracketing at all).
+#
+# A plain band-midpoint rule (`0.5 * (ymin + ymax)` on both actuators) is
+# simpler and worth having as a sanity check, but it does not bracket, so it
+# gives up the deadband the two actuators could be holding. See
+# tests/fixtures/control_user_defined.py for that one, complete.
 
-    Worth the twenty lines: it is the only thing that tells you whether the
-    learned policy is beating the obvious rule. The Node must have no
-    trainable parameters — it is evaluated, never trained — and emit
-    normalized U, the same space the learned policy emits.
 
-        from neuromancer.system import Node
-        umin, umax = actuation_bounds(nm_mapping, norm_stats)
-        net = MyRule(umin.to(sysid_cfg.device), umax.to(sysid_cfg.device))
-        return Node(net.to(sysid_cfg.device), ["ymin", "ymax"], ["U"],
-                    name="Bracket baseline")
-
-    Inputs can be any of the closed-loop signals ("yn", "ymin", "ymax", "D");
-    see tests/fixtures/control_user_defined.py for a complete worked example.
-
-    On what rule to write, for a two-actuator heating/cooling setpoint pair:
-    **bracket the band** — put the heating setpoint at the band floor and the
-    cooling setpoint at (or just inside) the band ceiling, so the two
-    setpoints straddle the band rather than both aiming at one target. Two
-    details decide whether it works, and both are easy to get backwards:
-
-      - **Round each setpoint toward the band interior** (heating up, cooling
-        down) when snapping to a quantization grid. Rounding outward puts a
-        setpoint outside the band it is supposed to hold.
-      - **A small inset on the cooling side is a correction, not a safety
-        margin.** A zone typically floats *above* its cooling setpoint,
-        because the plant's setpoint→zone gain is well under 1 °C/°C. Aiming
-        exactly at the ceiling therefore violates constantly. But the useful
-        inset range can be narrower than one grid step: too large an inset
-        makes the two setpoints collide, and the rule stops bracketing at all.
-        Measure the gain and sweep the inset rather than guessing.
-
-    A plain band-midpoint rule (`0.5 * (ymin + ymax)` on both actuators) is
-    simpler and worth having as a sanity check, but it does not bracket, so it
-    gives up the deadband the two actuators could be holding.
-    """
-    return None
+# ---------------------------------------------------------------------
+# Optional escape hatch: a baseline a memoryless rule cannot express
+# ---------------------------------------------------------------------
+# Only for a rule that genuinely needs its own state (an integrator, a
+# staged-equipment timer). Return a Neuromancer Node writing ["U"] with no
+# trainable parameters — it is evaluated, never trained — reading any of the
+# closed-loop signals ("yn", "ymin", "ymax", "D"). Mutually exclusive with
+# `reference_control`, and it cannot anchor a residual policy.
+#
+# def build_baseline_policy(cfg, sysid_cfg, nm_mapping, norm_stats):
+#     from neuromancer.system import Node
+#     umin, umax = actuation_bounds(nm_mapping, norm_stats)
+#     net = MyStatefulRule(umin.to(sysid_cfg.device), umax.to(sysid_cfg.device))
+#     return Node(net.to(sysid_cfg.device), ["ymin", "ymax"], ["U"],
+#                 name="Stateful baseline")
 
 
 # ---------------------------------------------------------------------

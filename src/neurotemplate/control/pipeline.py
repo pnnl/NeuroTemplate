@@ -28,16 +28,23 @@ from neurotemplate.control.metrics import (
     ComfortMetrics,
     EnergyMetrics,
     JumpResponse,
+    ResidualMetrics,
+    SATURATION_TOL,
     actuation_metrics,
     actuation_to_dict,
     comfort_metrics,
     comfort_to_dict,
     energy_metrics,
     hours_per_step,
+    residual_metrics,
     response_audit,
     response_to_dict,
 )
 from neurotemplate.control.closed_loop import build_closed_loop
+from neurotemplate.control.policy import (
+    build_reference_node,
+    reference_over_horizon,
+)
 from neurotemplate.control.scenarios import (
     build_window_dict_multi,
     horizons,
@@ -64,6 +71,7 @@ class ControlResults:
     tracking: list[ChannelMetrics]     # per-zone error vs band midpoint
     energy: Optional[EnergyMetrics]    # None if power_metric not implemented
     eval_time_s: float
+    residual: Optional[ResidualMetrics] = None   # None unless residual_delta
 
     @property
     def energy_proxy(self) -> Optional[float]:
@@ -223,6 +231,18 @@ def evaluate_closed_loop(
                  out["price"][:, hmax:, 0] * price_scale(cfg))
         energy = energy_metrics(power, step_hours, price)
 
+    # How much of the ±Δ box a residual policy actually used. Replaying the
+    # (memoryless) rule on the recorded trajectory gives the command it would
+    # have issued at each step, so U - u_ref is the deviation that was deployed.
+    residual = None
+    if cfg.residual_delta is not None:
+        u_ref = reference_over_horizon(cfg, out, hmax, nm_mapping, norm_stats)
+        tol = (0.5 * cfg.setpoint_step if cfg.setpoint_step > 0
+               else SATURATION_TOL * max(cfg.residual_delta, 1e-12))
+        residual = residual_metrics(
+            U, u_ref * u_stretch + u_shift, cfg.residual_delta, tol,
+        )
+
     return ControlResults(
         comfort_violation_rate=violation_rate,
         comfort_mean_exceedance=mean_exceedance,
@@ -233,6 +253,7 @@ def evaluate_closed_loop(
         tracking=tracking,
         energy=energy,
         eval_time_s=eval_time_s,
+        residual=residual,
     ), out
 
 
@@ -258,6 +279,9 @@ def log_control_results(
     if baseline is not None:
         flat.update(_flat_control_metrics(baseline, prefix="baseline"))
         payload["baseline"] = _control_metrics_dict(baseline)
+        flat["control_clears_reference"] = float(
+            clears_reference(results, baseline)
+        )
 
     logger.log_metrics(flat)
     if hasattr(logger, "log_dict"):
@@ -293,6 +317,10 @@ def _flat_control_metrics(results: ControlResults, prefix: str) -> dict:
         flat[f"{prefix}_mean_window_peak"] = results.energy.mean_window_peak
         if results.energy.energy_cost is not None:
             flat[f"{prefix}_energy_cost"] = results.energy.energy_cost
+    if results.residual is not None:
+        flat[f"{prefix}_residual_delta"] = results.residual.delta_cap
+        flat[f"{prefix}_mean_abs_delta"] = results.residual.mean_abs_delta
+        flat[f"{prefix}_frac_delta_at_cap"] = results.residual.frac_at_cap
     return flat
 
 
@@ -305,11 +333,51 @@ def _control_metrics_dict(results: ControlResults) -> dict:
         "actuation": actuation_to_dict(results.actuation),
         "response": response_to_dict(results.response),
         "energy": None if results.energy is None else asdict(results.energy),
+        "residual": (None if results.residual is None
+                     else asdict(results.residual)),
         "tracking": metrics_to_dict(results.tracking),
     }
 
 
 # ── Rule-based baseline (optional) ───────────────────────────────
+
+
+@beartype
+def baseline_node(
+    cfg,
+    sysid_cfg,
+    nm_mapping: dict[str, list[str]],
+    norm_stats: dict[str, dict[str, float]],
+) -> Optional[object]:
+    """The rule-based controller to score alongside the learned policy.
+
+    Two hooks can supply one, and a use case must not define both:
+
+      `reference_control` — the memoryless rule, and the one to prefer. It is
+      also the residual policy's anchor, so using it here makes the baseline
+      column and the δ = 0 floor the same controller by construction.
+      `build_baseline_policy` — the escape hatch for a rule a memoryless
+      function cannot express. Returns a Node, or None to skip the comparison.
+
+    Neither defined means there is simply nothing to compare against.
+    """
+    hooks = load_control_hooks(cfg)
+    rule = getattr(hooks, "reference_control", None)
+    build = getattr(hooks, "build_baseline_policy", None)
+
+    if rule is not None and build is not None:
+        raise ValueError(
+            "control_user_defined defines both reference_control and "
+            "build_baseline_policy, so there are two definitions of one rule "
+            "and two places for a cooling inset to drift apart. Keep "
+            "reference_control (the residual policy is anchored to it) and "
+            "delete the other — or keep build_baseline_policy if the rule "
+            "genuinely cannot be written memorylessly."
+        )
+    if rule is not None:
+        return build_reference_node(cfg, sysid_cfg, nm_mapping, norm_stats)
+    return None if build is None else build(cfg, sysid_cfg, nm_mapping,
+                                            norm_stats)
 
 
 @beartype
@@ -323,29 +391,46 @@ def evaluate_baseline(
 ) -> Optional[ControlResults]:
     """Score the use case's rule-based controller on the same test rollouts.
 
-    `control_user_defined.build_baseline_policy(cfg, sysid_cfg, nm_mapping,
-    norm_stats) -> Node` is optional: without it there is simply nothing to
-    compare against and this returns None. Same shape as the
-    POWER_METRIC_IMPLEMENTED check — the hook's presence is the switch.
-
     The comparison is apples-to-apples because evaluate_closed_loop reseeds
     the band from EVAL_BAND_SEED, so the baseline sees a byte-identical
     comfort band on byte-identical test windows. The baseline is never
     trained: it has no trainable parameters by construction.
+
+    With a residual policy this is also the δ = 0 score, which is what turns
+    the residual's floor from rhetorical into something you can decide on —
+    see `clears_reference`.
     """
-    build = getattr(load_control_hooks(cfg), "build_baseline_policy", None)
-    if build is None:
+    node = baseline_node(cfg, sysid_cfg, nm_mapping, norm_stats)
+    if node is None:
         return None
 
-    baseline_node = build(cfg, sysid_cfg, nm_mapping, norm_stats)
-    if baseline_node is None:
-        return None
-
-    cl = build_closed_loop(dyn_node, baseline_node, cfg, sysid_cfg)
+    cl = build_closed_loop(dyn_node, node, cfg, sysid_cfg)
     results, _ = evaluate_closed_loop(
         cfg, sysid_cfg, cl, test_dfs, nm_mapping, norm_stats,
     )
     return results
+
+
+@beartype
+def clears_reference(results: ControlResults,
+                     baseline: Optional[ControlResults]) -> Optional[bool]:
+    """Did the learned policy beat the rule it is anchored to? None if no rule.
+
+    Scored on mean exceedance rather than violation rate: a threshold count
+    saturates, and measured against a surrogate rather than the plant its
+    argmin can select a substantially worse controller.
+
+    Why this needs saying at all: the floor a residual promises is not
+    automatic. Neuromancer's Trainer checkpoints the best model after each
+    epoch's optimizer steps, so the δ = 0 point is never itself a candidate —
+    by the first evaluation δ is already non-zero. `evaluate_baseline` scores
+    that point explicitly on a byte-identical band; this is the decision rule
+    that makes the score mean something. **A submission that does not clear
+    its own reference should ship the reference.**
+    """
+    if baseline is None:
+        return None
+    return results.comfort_mean_exceedance <= baseline.comfort_mean_exceedance
 
 
 @beartype
