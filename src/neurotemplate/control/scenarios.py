@@ -128,6 +128,22 @@ def _load_price_series(path: str, column: Optional[str],
 
 
 @beartype
+def _steps_per_day(t: torch.Tensor) -> Optional[int]:
+    """Plant timesteps in 24 h, read off the window's own `sec_elapsed`.
+
+    None when a window is too short to show a timestep, or when the timestep
+    does not divide a day — `price_align: day` is the only caller and it says
+    so itself rather than silently rounding.
+    """
+    if t.shape[1] < 2:
+        return None
+    dt = float(t[0, 1, 0] - t[0, 0, 0])
+    if dt <= 0 or 86400.0 % dt != 0:
+        return None
+    return int(86400.0 / dt)
+
+
+@beartype
 def _window_time_of_day(df: DataFrame, t: torch.Tensor,
                         steps_per_day: int) -> torch.Tensor:
     """Each window's first step, as a step index into the plant's own day.
@@ -253,6 +269,12 @@ def build_price(cfg, n_samples: int, nsteps: int, price_path: Optional[str],
                 "This run's timestep does not (or the window is too short to "
                 "show one). Set price_align: random."
             )
+        if window_tod.shape[0] != n_samples:
+            raise ValueError(
+                f"window_tod has {window_tod.shape[0]} entries but "
+                f"{n_samples} windows were asked for; it carries one time of "
+                "day per window."
+            )
         phase = round(midnight_offset * steps_per_day / 86400.0)
         starts = _day_aligned_starts(series.shape[0], nsteps, steps_per_day,
                                      phase, window_tod, generator)
@@ -264,22 +286,6 @@ def build_price(cfg, n_samples: int, nsteps: int, price_path: Optional[str],
     # absorb load. The cost term then correctly wants more of it, which is why
     # a non-zero energy or comfort weight alongside it is not optional.
     return series[idx] / scale
-
-
-@beartype
-def _steps_per_day(t: torch.Tensor) -> Optional[int]:
-    """Plant timesteps in 24 h, read off the window's own `sec_elapsed`.
-
-    None when a window is too short to show a timestep, or when the timestep
-    does not divide a day — `price_align: day` is the only caller and it says
-    so itself rather than silently rounding.
-    """
-    if t.shape[1] < 2:
-        return None
-    dt = float(t[0, 1, 0] - t[0, 0, 0])
-    if dt <= 0 or 86400.0 % dt != 0:
-        return None
-    return int(86400.0 / dt)
 
 
 def _sliding(df: DataFrame, cols: list[str], steps: int, stride: int,
