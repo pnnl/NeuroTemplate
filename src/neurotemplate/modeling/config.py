@@ -106,6 +106,9 @@ class ModelingConfig:
     # timestep, and for a reachability bound the horizon is load-bearing.
     synth_hours: float = 4.0
     synth_n_plot: int = 4
+    # Y-axis unit label on the synthetic-scenario figures. Override if your
+    # state channels aren't in Celsius.
+    synth_y_unit: str = "°C"
 
     def validate(self) -> None:
         for name in [

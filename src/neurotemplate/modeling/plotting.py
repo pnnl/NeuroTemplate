@@ -2,7 +2,7 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Optional
 
 from neurotemplate.hooks import load_modeling_hooks
 
@@ -16,6 +16,16 @@ from neurotemplate._typing import beartype
 plt.rcParams['lines.linewidth'] = 4
 plt.rcParams['text.usetex'] = False
 plt.rcParams['font.family'] = 'serif'
+
+# Fixed-order categorical palette for synthetic-scenario state lines, plus the
+# muted tones used for the ambient signal, rollout boundary, and gridlines.
+_STATE_COLORS = [
+    "#2a78d6", "#eb6834", "#1baf7a", "#eda100",
+    "#e87ba4", "#008300", "#4a3aa7", "#e34948",
+]
+_AMBIENT_COLOR = "#898781"
+_BOUNDARY_COLOR = "#c3c2b7"
+_GRID_COLOR = "#e1e0d9"
 
 
 # Sanitize a string for filesystem-friendly filenames.
@@ -155,7 +165,7 @@ def plot_synthetic(
     freq_s: float = 300.0,
     n_plot: int = 4,
     verbose: bool = False,
-    temp_range: Optional[Tuple[float, float]] = None,
+    y_unit: str = "°C",
 ) -> None:
     """
     One figure per synthetic-scenario instance: the state channels against the
@@ -168,7 +178,7 @@ def plot_synthetic(
         run_dir: directory for the figures (CSVs go in `synth_data/` beside).
         freq_s: seconds per timestep, for the x axis.
         n_plot: max instances drawn per scenario.
-        temp_range: (lo, hi) baseline for the y axis; expanded to fit the data.
+        y_unit: y-axis unit label, e.g. "°C" (the default) or "°F".
     """
     plot_dir = Path(run_dir)
     plot_dir.mkdir(parents=True, exist_ok=True)
@@ -190,28 +200,27 @@ def plot_synthetic(
         t_input = t_minutes[:len(ambient[0])]
 
         for row in range(min(n_plot, preds.shape[0])):
-            fig, ax = plt.subplots(1, 1)
-            fig.suptitle(name, fontsize=14)
+            fig, ax = plt.subplots(1, 1, figsize=(8, 4.5))
+            fig.suptitle(name, fontsize=13, fontweight="bold")
 
-            for label in states:
+            for i, label in enumerate(states):
                 z = channels.index(label)
-                ax.plot(t_minutes, preds[row, :, z].numpy(), "-", label=label)
-            ax.axvline(t_minutes[seed_steps - 1], color="gray",
+                color = _STATE_COLORS[i % len(_STATE_COLORS)]
+                ax.plot(t_minutes, preds[row, :, z].numpy(), "-",
+                        color=color, linewidth=2, label=label)
+            ax.axvline(t_minutes[seed_steps - 1], color=_BOUNDARY_COLOR,
                        linestyle="--", linewidth=1, label="Rollout start")
-            ax.step(t_input, ambient[row].numpy(), where="post", color="blue",
-                    linestyle=":", alpha=0.6, label="Ambient")
+            ax.step(t_input, ambient[row].numpy(), where="post",
+                    color=_AMBIENT_COLOR, linestyle=":", linewidth=1.5,
+                    alpha=0.9, label="Ambient")
 
-            ax.set_ylabel("Physical units")
+            ax.set_ylabel(f"Temperature ({y_unit})")
             ax.set_xlabel("Time (minutes)")
-            ax.grid(True, alpha=0.3)
-            ax.legend(loc="best", fontsize=8)
-
-            if temp_range is not None:
-                margin = 0.5
-                data_min = min(preds[row].min().item(), ambient[row].min().item())
-                data_max = max(preds[row].max().item(), ambient[row].max().item())
-                ax.set_ylim(min(temp_range[0], data_min) - margin,
-                            max(temp_range[1], data_max) + margin)
+            ax.margins(y=0.15)
+            ax.grid(True, alpha=0.6, color=_GRID_COLOR, linewidth=0.8)
+            ax.spines["top"].set_visible(False)
+            ax.spines["right"].set_visible(False)
+            ax.legend(loc="best", fontsize=8, frameon=False)
 
             fig.tight_layout()
             fname = safe_name(name)

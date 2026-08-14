@@ -240,13 +240,11 @@ def _run_physics_checks(
 
     if cfg.plot:
         synth_dir = plot_run_dir / "synthetic"
-        states = synth_cfg.states
         plot_synthetic(
             [s.trace(cfg.synth_n_plot) for s in scenarios],
             run_dir=str(synth_dir),
             freq_s=freq_s, n_plot=cfg.synth_n_plot, verbose=cfg.verbose,
-            temp_range=(min(norm_stats[c]["min"] for c in states),
-                        max(norm_stats[c]["max"] for c in states)),
+            y_unit=cfg.synth_y_unit,
         )
         if logger is not None and hasattr(logger, "_mlflow"):
             logger._mlflow.log_artifact(str(synth_dir), artifact_path="plots")
