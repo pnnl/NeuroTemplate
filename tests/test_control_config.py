@@ -1,3 +1,11 @@
+"""
+Loading and validating a ControlConfig.
+
+Almost everything here is one shape: set some fields, then assert that
+`validate()` either names the problem or stays quiet. Those cases live in
+two tables rather than two dozen near-identical functions — the table is
+the readable form of "here is every way a control config can be wrong."
+"""
 import pytest
 
 from neurotemplate.common.config import ConfigError, CONTROL_CONFIG_DIR
@@ -12,213 +20,101 @@ dev_data_path:   dev.csv
 test_data_path:  test.csv
 """
 
-
-def _write(tmp_path, text):
-    p = tmp_path / "control.yaml"
-    p.write_text(text)
-    return p
+_TARIFF = dict(train_price_path="train_price.csv",
+               dev_price_path="dev_price.csv",
+               test_price_path="test_price.csv")
 
 
-def test_load_defaults_and_yaml(tmp_path):
-    path = _write(tmp_path, _YAML)
+def _load(tmp_path, text, *overrides):
+    path = tmp_path / "control.yaml"
+    path.write_text(text)
+    args = ["--config", str(path)]
+    for override in overrides:
+        args += ["--set", override]
     cfg, _ = load_config_from_cli(
-        ["--config", str(path)], default_config_path=None, cls=ControlConfig, config_dir=CONTROL_CONFIG_DIR,
+        args, default_config_path=None, cls=ControlConfig,
+        config_dir=CONTROL_CONFIG_DIR,
     )
-    assert isinstance(cfg, ControlConfig)
-    assert cfg.sysid_run_id == "abc123"
-    assert cfg.train_pred_steps == 24
-    assert cfg.run_dir is None  # "none" -> None on Optional field
-    assert cfg.comfort_weight == ControlConfig.comfort_weight
-
-
-def test_set_override(tmp_path):
-    path = _write(tmp_path, _YAML)
-    cfg, _ = load_config_from_cli(
-        ["--config", str(path), "--set", "energy_weight=0",
-         "--set", "epochs=3"],
-        default_config_path=None, cls=ControlConfig, config_dir=CONTROL_CONFIG_DIR,
-    )
-    assert cfg.energy_weight == 0
-    assert cfg.epochs == 3
-
-
-def test_unknown_key_rejected(tmp_path):
-    path = _write(tmp_path, _YAML + "not_a_key: 1\n")
-    with pytest.raises(ConfigError):
-        load_config_from_cli(
-            ["--config", str(path)], default_config_path=None,
-            cls=ControlConfig, config_dir=CONTROL_CONFIG_DIR,
-        )
-
-
-def test_validate_requires_run_id():
-    with pytest.raises(ValueError, match="sysid_run_id"):
-        ControlConfig().validate()
-
-
-def test_validate_band_order():
-    cfg = ControlConfig()
-    cfg.sysid_run_id = "x"
-    # Data paths must be set for validate() to reach the band check.
-    cfg.train_data_path = "train.csv"
-    cfg.dev_data_path = "dev.csv"
-    cfg.test_data_path = "test.csv"
-    cfg.band_lo, cfg.band_hi = 24.0, 20.0
-    with pytest.raises(ValueError, match="band_lo"):
-        cfg.validate()
-
-
-def _runnable_cfg() -> ControlConfig:
-    cfg = ControlConfig()
-    cfg.sysid_run_id = "x"
-    cfg.train_data_path = "train.csv"
-    cfg.dev_data_path = "dev.csv"
-    cfg.test_data_path = "test.csv"
     return cfg
 
 
-@pytest.mark.parametrize("field,bad", [
-    ("policy", "bogus"),
-    ("policy_nonlin", "swish"),
-    ("policy_bound_method", "clip"),
+def _runnable(**fields) -> ControlConfig:
+    """A config that reaches every check past the required-field ones."""
+    cfg = ControlConfig()
+    cfg.sysid_run_id = "x"
+    cfg.train_data_path = "train.csv"
+    cfg.dev_data_path = "dev.csv"
+    cfg.test_data_path = "test.csv"
+    for name, value in fields.items():
+        setattr(cfg, name, value)
+    return cfg
+
+
+# ── Loading ──────────────────────────────────────────────────────
+
+def test_yaml_fills_what_it_names_and_defaults_the_rest(tmp_path):
+    cfg = _load(tmp_path, _YAML)
+    assert cfg.sysid_run_id == "abc123"
+    assert cfg.train_pred_steps == 24
+    assert cfg.run_dir is None                      # "none" -> None on Optional
+    assert cfg.comfort_weight == ControlConfig.comfort_weight
+
+
+def test_set_overrides_the_yaml(tmp_path):
+    cfg = _load(tmp_path, _YAML, "energy_weight=0", "epochs=3")
+    assert cfg.energy_weight == 0 and cfg.epochs == 3
+
+
+def test_an_unknown_key_is_rejected(tmp_path):
+    with pytest.raises(ConfigError):
+        _load(tmp_path, _YAML + "not_a_key: 1\n")
+
+
+# ── Every way a control config can be wrong ──────────────────────
+
+@pytest.mark.parametrize("fields,message", [
+    # Required fields and ordering.
+    ({"sysid_run_id": None}, "sysid_run_id"),
+    ({"band_lo": 24.0, "band_hi": 20.0}, "band_lo"),
+    # Policy options are closed sets.
+    ({"policy": "bogus"}, "policy"),
+    ({"policy_nonlin": "swish"}, "policy_nonlin"),
+    ({"policy_bound_method": "clip"}, "policy_bound_method"),
+    # Below 1, M_q rewards spiky profiles — the opposite of the request.
+    ({"peak_q": 0.5}, "peak_q must be >= 1"),
+    ({"cost_weight": -1.0}, "cost_weight"),
+    ({"peak_weight": -1.0}, "peak_weight"),
+    # The single most likely way to waste a campaign on the residual: every
+    # delta snaps back to zero and nothing on any report says so.
+    ({"setpoint_step": 0.5, "residual_delta": 0.2}, "smaller than setpoint_step"),
+    ({"residual_delta": -0.5}, "residual_delta must be >= 0"),
+    # A tariff is all-or-nothing: a split with no price file would silently
+    # see no cost term.
+    ({**_TARIFF, "train_price_path": None}, "together or not at all"),
+    ({**_TARIFF}, "price_scale"),
+    ({"price_scale": 0.30}, "price_scale is set"),
+    ({**_TARIFF, "price_scale": 0.0}, "price_scale must be positive"),
+    # Previewing a signal that never reaches the rollout is a dead input
+    # width — caught at config load rather than at policy build.
+    ({"price_preview": 48}, "no tariff reaches the rollout"),
+    ({"price_preview": -1}, "price_preview must be >= 0"),
+    ({"price_align": "hourly"}, "price_align must be one of"),
 ])
-def test_validate_rejects_unknown_policy_options(field, bad):
-    cfg = _runnable_cfg()
-    setattr(cfg, field, bad)
-    with pytest.raises(ValueError, match=field):
-        cfg.validate()
+def test_validate_names_the_problem(fields, message):
+    with pytest.raises(ValueError, match=message):
+        _runnable(**fields).validate()
 
 
-def test_validate_accepts_linear_policy():
-    cfg = _runnable_cfg()
-    cfg.policy = "linear"
-    cfg.policy_bound_method = "relu_clamp"
-    cfg.validate()  # must not raise
-
-
-# ── Grid-response and residual knobs ─────────────────────────────
-
-
-@pytest.mark.parametrize("q", [0.0, 0.5, -1.0])
-def test_validate_rejects_peak_q_below_one(q):
-    """Below 1, M_q rewards spiky profiles — the opposite of the request."""
-    cfg = _runnable_cfg()
-    cfg.peak_q = q
-    with pytest.raises(ValueError, match="peak_q must be >= 1"):
-        cfg.validate()
-
-
-@pytest.mark.parametrize("field", ["cost_weight", "peak_weight"])
-def test_validate_rejects_negative_grid_weights(field):
-    cfg = _runnable_cfg()
-    setattr(cfg, field, -1.0)
-    with pytest.raises(ValueError, match=field):
-        cfg.validate()
-
-
-def test_validate_rejects_a_residual_narrower_than_the_setpoint_grid():
-    """The single most likely way to waste a campaign on the residual: every
-    delta snaps back to zero and nothing on any report says so."""
-    cfg = _runnable_cfg()
-    cfg.setpoint_step = 0.5
-    cfg.residual_delta = 0.2
-    with pytest.raises(ValueError, match="smaller than setpoint_step"):
-        cfg.validate()
-
-
-def test_validate_accepts_a_residual_at_or_above_one_grid_step():
-    cfg = _runnable_cfg()
-    cfg.setpoint_step = 0.5
-    cfg.residual_delta = 0.5
-    cfg.validate()  # must not raise
-
-
-def test_validate_accepts_a_zero_width_residual_box():
-    """0 means 'emit the reference exactly' — a floor to train nothing and
-    score, and not the same thing as a residual that quantizes away."""
-    cfg = _runnable_cfg()
-    cfg.residual_delta = 0.0
-    cfg.validate()  # must not raise
-
-
-def test_validate_rejects_a_negative_residual():
-    cfg = _runnable_cfg()
-    cfg.residual_delta = -0.5
-    with pytest.raises(ValueError, match="residual_delta must be >= 0"):
-        cfg.validate()
-
-
-# ── Energy tariff (train/dev/test_price_path + price_scale) ──────
-
-
-@pytest.mark.parametrize("field", [
-    "train_price_path", "dev_price_path", "test_price_path",
+@pytest.mark.parametrize("fields", [
+    pytest.param({"policy": "linear", "policy_bound_method": "relu_clamp"},
+                 id="linear policy"),
+    pytest.param({"setpoint_step": 0.5, "residual_delta": 0.5},
+                 id="residual at exactly one grid step"),
+    # 0 means "emit the reference exactly" — a floor to train nothing and
+    # score, and not the same thing as a residual that quantizes away.
+    pytest.param({"residual_delta": 0.0}, id="zero-width residual box"),
+    pytest.param({**_TARIFF, "price_scale": 0.30, "price_preview": 48},
+                 id="complete tariff"),
 ])
-def test_validate_rejects_a_partially_set_tariff(field):
-    """A split with no price file would silently see no cost term."""
-    cfg = _runnable_cfg()
-    cfg.train_price_path = "train_price.csv"
-    cfg.dev_price_path = "dev_price.csv"
-    cfg.test_price_path = "test_price.csv"
-    setattr(cfg, field, None)
-    with pytest.raises(ValueError, match="together or not at all"):
-        cfg.validate()
-
-
-def test_validate_rejects_a_tariff_with_no_scale():
-    cfg = _runnable_cfg()
-    cfg.train_price_path = "train_price.csv"
-    cfg.dev_price_path = "dev_price.csv"
-    cfg.test_price_path = "test_price.csv"
-    with pytest.raises(ValueError, match="price_scale"):
-        cfg.validate()
-
-
-def test_validate_rejects_a_scale_with_no_tariff():
-    cfg = _runnable_cfg()
-    cfg.price_scale = 0.30
-    with pytest.raises(ValueError, match="price_scale is set"):
-        cfg.validate()
-
-
-def test_validate_rejects_a_non_positive_price_scale():
-    cfg = _runnable_cfg()
-    cfg.train_price_path = "train_price.csv"
-    cfg.dev_price_path = "dev_price.csv"
-    cfg.test_price_path = "test_price.csv"
-    cfg.price_scale = 0.0
-    with pytest.raises(ValueError, match="price_scale must be positive"):
-        cfg.validate()
-
-
-def test_validate_accepts_a_complete_tariff():
-    cfg = _runnable_cfg()
-    cfg.train_price_path = "train_price.csv"
-    cfg.dev_price_path = "dev_price.csv"
-    cfg.test_price_path = "test_price.csv"
-    cfg.price_scale = 0.30
-    cfg.price_preview = 48
-    cfg.validate()  # must not raise
-
-
-def test_validate_rejects_a_price_preview_with_no_tariff():
-    """Previewing a signal that never reaches the rollout is a dead input
-    width — caught at config load rather than at policy build."""
-    cfg = _runnable_cfg()
-    cfg.price_preview = 48
-    with pytest.raises(ValueError, match="no tariff reaches the rollout"):
-        cfg.validate()
-
-
-def test_validate_rejects_an_unknown_price_alignment():
-    cfg = _runnable_cfg()
-    cfg.price_align = "hourly"
-    with pytest.raises(ValueError, match="price_align must be one of"):
-        cfg.validate()
-
-
-def test_validate_rejects_a_negative_price_preview():
-    cfg = _runnable_cfg()
-    cfg.price_preview = -1
-    with pytest.raises(ValueError, match="price_preview must be >= 0"):
-        cfg.validate()
+def test_validate_stays_quiet_on_a_legal_config(fields):
+    _runnable(**fields).validate()

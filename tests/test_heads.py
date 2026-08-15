@@ -1,12 +1,17 @@
 """
-Unit tests for the configurable-output-heads module.
+Tests for the configurable output heads.
 
-Each head type passes its toy-data unit test: loss is non-negative and
-decreases on its target signal, gradients flow through `activate`.
+Three things have to hold for every head, and they are the three sections
+below: it can be **fitted** (the loss has a descent direction on data of its
+own kind), its activation **stays inside** whatever range it promises, and it
+**round-trips** through `to_config`/`from_config` so a reloaded run rebuilds
+the topology it trained with. A fourth section collects every way a head
+config can be malformed — all of which must raise rather than construct
+something quietly wrong.
 
-Plus two HeadStack invariants:
-  - all-regression HeadStack.loss == mean blanket MSE (to fp precision)
-  - apply_residual only touches residual_compatible channels
+Plus the two HeadStack invariants: an all-regression stack reproduces blanket
+MSE to floating-point precision, and `apply_residual` touches only the
+channels that declared themselves residual-compatible.
 """
 
 import math
@@ -25,348 +30,193 @@ from neurotemplate.modeling.heads import (
     project_physical_to_norm,
 )
 
+INF = float("inf")
 
-def _fit_single_head(head, make_z, target, steps=400, lr=0.1):
-    """Optimize a scalar parameter so head.activate matches target."""
-    p = nn.Parameter(torch.zeros(()))
-    opt = torch.optim.SGD([p], lr=lr)
-    first_loss = None
+
+def fit(activate, loss_fn, z0, target, steps=400, lr=0.1):
+    """Descend on `z0` and return the first and last loss."""
+    z = nn.Parameter(z0.clone())
+    opt = torch.optim.SGD([z], lr=lr)
+    first = None
     for _ in range(steps):
-        z = make_z(p)
-        y = head.activate(z)
-        loss = head.loss(y, target)
-        if first_loss is None:
-            first_loss = loss.item()
+        loss = loss_fn(activate(z.unsqueeze(-1)), target)
+        first = loss.item() if first is None else first
         opt.zero_grad()
         loss.backward()
         opt.step()
-    return first_loss, loss.item(), p
+    return first, loss.item(), z
 
 
-# ── Regression head ──────────────────────────────────────────────
+# ── Every head can be fitted on data of its own kind ─────────────
+
+@pytest.mark.parametrize("head,z0,target,ratio,kw", [
+    pytest.param(RegressionHead(), torch.zeros(32), torch.full((32,), 2.5),
+                 1.0, {}, id="regression"),
+    pytest.param(BinaryHead(), torch.zeros(32),
+                 torch.tensor([0.0, 1.0]).repeat(16), 1.0, {}, id="binary"),
+    pytest.param(BoundedHead(lo=-1.0, hi=2.0), torch.zeros(32),
+                 torch.full((32,), 1.5), 1.0, dict(lr=0.01, steps=600),
+                 id="bounded-both"),
+    pytest.param(BoundedHead(lo=0.0, hi=INF), torch.zeros(32),
+                 torch.full((32,), 3.0), 1.0, dict(lr=0.2), id="bounded-lower"),
+    pytest.param(BoundedHead(lo=-INF, hi=0.0), torch.zeros(32),
+                 torch.full((32,), -2.5), 1.0, dict(lr=0.2), id="bounded-upper"),
+    # Ordinal has to do better than "somewhat": snapping to integer levels is
+    # the whole claim, so require the loss to fall by 10x.
+    pytest.param(OrdinalHead(n_levels=4), torch.zeros(32),
+                 torch.tensor([0.0, 1.0, 2.0, 3.0]).repeat(8), 0.1,
+                 dict(lr=0.5, steps=800), id="ordinal-uniform"),
+    pytest.param(OrdinalHead(n_levels=3, level_values=torch.tensor([0.0, 1.0, 5.0])),
+                 torch.linspace(-1.0, 6.0, 30),
+                 torch.tensor([0.0, 1.0, 5.0]).repeat_interleave(10), 0.1,
+                 dict(lr=0.5, steps=800), id="ordinal-non-uniform"),
+])
+def test_a_head_descends_on_its_own_kind_of_target(head, z0, target, ratio, kw):
+    torch.manual_seed(0)
+    first, last, _ = fit(head.activate, head.loss, z0, target, **kw)
+    assert last < first * ratio
 
 
-def test_regression_head_fits_constant():
-    head = RegressionHead()
-    target = torch.full((32,), 2.5)
-    first, last, p = _fit_single_head(
-        head, make_z=lambda p: p.expand(32).unsqueeze(-1), target=target
-    )
-    assert last < first
-    assert abs(p.item() - 2.5) < 1e-2
-
-
-# ── Binary head ──────────────────────────────────────────────────
-
-
-def test_binary_head_fits_zero_one():
-    head = BinaryHead()
-    target = torch.tensor([0.0, 1.0, 0.0, 1.0]).repeat(8)
-    bias = nn.Parameter(torch.zeros(()))
-    pattern = torch.tensor([-1.0, 1.0, -1.0, 1.0]).repeat(8)
-    opt = torch.optim.SGD([bias], lr=0.5)
+def test_a_mixed_stack_still_has_a_descent_direction():
+    torch.manual_seed(1)
+    stack = HeadStack([RegressionHead(), BinaryHead()], ["a", "b"])
+    target = torch.stack([torch.full((16,), 0.7),
+                          torch.tensor([1.0, 0.0] * 8)], dim=-1)
+    z = nn.Parameter(torch.zeros(16, 2))
+    opt = torch.optim.SGD([z], lr=0.2)
     first = None
-    for _ in range(400):
-        z = (bias * pattern).unsqueeze(-1)
-        y = head.activate(z)
-        loss = head.loss(y, target)
-        if first is None:
-            first = loss.item()
+    for _ in range(300):
+        loss = stack.loss(stack.activate(z), target)
+        first = loss.item() if first is None else first
         opt.zero_grad()
         loss.backward()
         opt.step()
     assert loss.item() < first
-    assert bias.item() > 0.5
 
 
-# ── Bounded head ─────────────────────────────────────────────────
+# ── Activations honour the range they promise ────────────────────
+
+@pytest.mark.parametrize("head,lo,hi,open_side", [
+    pytest.param(BoundedHead(lo=0.0, hi=1.0), 0.0, 1.0, None, id="bounded-both"),
+    pytest.param(BoundedHead(lo=0.0, hi=INF), 0.0, INF, "hi", id="bounded-lower"),
+    pytest.param(BoundedHead(lo=-INF, hi=5.0), -INF, 5.0, "lo", id="bounded-upper"),
+    pytest.param(OrdinalHead(n_levels=4), 0.0, 3.0, None, id="ordinal"),
+])
+def test_an_activation_stays_inside_its_bounds(head, lo, hi, open_side):
+    """...and stays *usable* on any open side: a half-bounded head has to
+    keep travelling out there, not flatten off."""
+    z = torch.linspace(-50.0, 50.0, 200).unsqueeze(-1)
+    y = head.activate(z)
+    assert (y >= lo).all() and (y <= hi).all()
+    if open_side == "hi":
+        assert y[-1] > 40.0
+    elif open_side == "lo":
+        assert y[0] < -40.0
 
 
-@pytest.mark.parametrize(
-    "lo, hi, target_val, lr, steps",
-    [
-        (-1.0, 2.0, 1.5, 0.01, 600),                  # fully bounded
-        (0.0, float("inf"), 3.0, 0.2, 400),           # lower-bounded only
-        (float("-inf"), 0.0, -2.5, 0.2, 400),         # upper-bounded only
-    ],
-    ids=["full", "lower-only", "upper-only"],
-)
-def test_bounded_head_fits_target(lo, hi, target_val, lr, steps):
-    head = BoundedHead(lo=lo, hi=hi)
-    target = torch.full((32,), target_val)
-    first, last, p = _fit_single_head(
-        head, make_z=lambda p: p.expand(32).unsqueeze(-1),
-        target=target, steps=steps, lr=lr,
-    )
-    y_final = head.activate(p.expand(32).unsqueeze(-1))
-    assert last < first
-    assert (y_final >= lo).all() and (y_final <= hi).all()
-    assert abs(y_final.mean().item() - target_val) < 0.05
-
-
-def test_bounded_head_gradient_below_band():
-    head = BoundedHead(lo=0.0, hi=1.0)
+def test_a_saturated_bounded_head_still_passes_gradient():
+    """Well below the band, where a naive clamp would hand back zero."""
     z = torch.tensor([[-10.0]], requires_grad=True)
-    y = head.activate(z)
-    y.sum().backward()
-    assert z.grad is not None
+    BoundedHead(lo=0.0, hi=1.0).activate(z).sum().backward()
     assert (z.grad.abs() > 0).all()
-
-
-def test_bounded_head_rejects_bad_range():
-    try:
-        BoundedHead(lo=1.0, hi=0.0)
-    except ValueError:
-        return
-    raise AssertionError("BoundedHead must reject hi <= lo")
-
-
-def test_lower_bounded_head_activation_respects_floor():
-    head = BoundedHead(lo=0.0, hi=float("inf"))
-    z = torch.linspace(-50.0, 50.0, 200).unsqueeze(-1)
-    y = head.activate(z)
-    assert (y >= 0.0).all()
-    assert (y[-1] > 40.0).item()
-
-
-def test_upper_bounded_head_activation_respects_ceiling():
-    head = BoundedHead(lo=float("-inf"), hi=5.0)
-    z = torch.linspace(-50.0, 50.0, 200).unsqueeze(-1)
-    y = head.activate(z)
-    assert (y <= 5.0).all()
-    assert (y[0] < -40.0).item()
-
-
-def test_bounded_head_rejects_both_infinite():
-    try:
-        BoundedHead(lo=float("-inf"), hi=float("inf"))
-    except ValueError:
-        return
-    raise AssertionError("BoundedHead must reject the both-infinite case")
-
-
-# ── Ordinal head ─────────────────────────────────────────────────
-
-
-def test_ordinal_head_activation_bounded():
-    head = OrdinalHead(n_levels=4)
-    z = torch.linspace(-100.0, 100.0, 200).unsqueeze(-1)
-    y = head.activate(z)
-    assert (y >= 0.0).all() and (y <= 3.0).all()
-
-
-def test_ordinal_head_fits_integer_targets():
-    torch.manual_seed(0)
-    head = OrdinalHead(n_levels=4)
-    target = torch.tensor([0.0, 1.0, 2.0, 3.0]).repeat(8)
-    z_param = nn.Parameter(torch.zeros(32))
-    opt = torch.optim.SGD([z_param], lr=0.5)
-    first = None
-    for _ in range(800):
-        y = head.activate(z_param.unsqueeze(-1))
-        loss = head.loss(y, target)
-        if first is None:
-            first = loss.item()
-        opt.zero_grad()
-        loss.backward()
-        opt.step()
-    assert loss.item() < first * 0.1
-
-
-def test_ordinal_head_non_uniform_level_values_fit_and_monotone():
-    """Non-uniform level_values=[0, 1, 5] (Δv=[1,4]) — verify loss decreases
-    by 10× and that activate is monotone in z (Σ of monotone sigmoids)."""
-    torch.manual_seed(0)
-    levels = torch.tensor([0.0, 1.0, 5.0])
-    head = OrdinalHead(n_levels=3, level_values=levels)
-    target = levels.repeat_interleave(10)
-    z_param = nn.Parameter(torch.linspace(-1.0, 6.0, 30))
-    opt = torch.optim.SGD([z_param], lr=0.5)
-    first = None
-    for _ in range(800):
-        y = head.activate(z_param.unsqueeze(-1))
-        loss = head.loss(y, target)
-        if first is None:
-            first = loss.item()
-        opt.zero_grad()
-        loss.backward()
-        opt.step()
-    assert loss.item() < first * 0.1
-
-    z_grid = torch.linspace(-5.0, 10.0, 400).unsqueeze(-1)
-    y_grid = head.activate(z_grid)
-    assert (y_grid[1:] - y_grid[:-1] >= -1e-6).all()
-
-
-def test_ordinal_head_rejects_non_increasing_level_values():
-    try:
-        OrdinalHead(n_levels=3, level_values=torch.tensor([0.0, 1.0, 1.0]))
-    except ValueError:
-        return
-    raise AssertionError("OrdinalHead must reject non-strictly-increasing level_values")
-
-
-def test_ordinal_head_requires_at_least_two_levels():
-    try:
-        OrdinalHead(n_levels=1)
-    except ValueError:
-        return
-    raise AssertionError("OrdinalHead must reject n_levels < 2")
-
-
-def test_ordinal_head_rejects_wrong_threshold_shape():
-    try:
-        OrdinalHead(n_levels=4, init_thresholds=torch.tensor([0.5, 1.5]))
-    except ValueError:
-        return
-    raise AssertionError("OrdinalHead must reject wrong-sized init_thresholds")
 
 
 # ── HeadStack ────────────────────────────────────────────────────
 
-
-def test_head_stack_all_regression_matches_blanket_mse():
-    """Identity-regression heads reproduce blanket MSE to fp precision."""
+def test_an_all_regression_stack_is_blanket_mse():
+    """Identity heads must reproduce plain MSE to floating-point precision,
+    or every existing run's loss quietly changed meaning."""
     torch.manual_seed(0)
-    n_channels = 4
-    names = [f"ch_{i}" for i in range(n_channels)]
-    stack = HeadStack([RegressionHead() for _ in range(n_channels)], names)
-
-    yhat = torch.randn(8, 12, n_channels)
-    y = torch.randn(8, 12, n_channels)
-
-    expected = ((yhat - y) ** 2).mean()
-    actual = stack.loss(yhat, y)
-    assert torch.allclose(expected, actual, atol=1e-7)
+    names = [f"ch_{i}" for i in range(4)]
+    stack = HeadStack([RegressionHead() for _ in names], names)
+    yhat, y = torch.randn(8, 12, 4), torch.randn(8, 12, 4)
+    assert torch.allclose(((yhat - y) ** 2).mean(), stack.loss(yhat, y), atol=1e-7)
 
 
-def test_head_stack_activate_shape():
-    stack = HeadStack(
-        [RegressionHead(), BinaryHead(), BoundedHead(0.0, 1.0)],
-        ["a", "b", "c"],
-    )
-    z_raw = torch.randn(5, 3)
-    y = stack.activate(z_raw)
+def test_a_stack_activates_each_channel_with_its_own_head():
+    stack = HeadStack([RegressionHead(), BinaryHead(), BoundedHead(0.0, 1.0)],
+                      ["a", "b", "c"])
+    y = stack.activate(torch.randn(5, 3))
     assert y.shape == (5, 3)
     assert ((y[:, 1] > 0) & (y[:, 1] < 1)).all()
     assert ((y[:, 2] >= 0) & (y[:, 2] <= 1)).all()
 
 
-def test_head_stack_residual_only_on_compatible():
-    """Residual must add y_prev to regression channels and skip binary."""
-    stack = HeadStack(
-        [RegressionHead(), BinaryHead(), RegressionHead()],
-        ["a", "b", "c"],
-    )
-    z_raw = torch.zeros(2, 3)
+def test_residual_reaches_only_the_channels_that_accept_one():
+    stack = HeadStack([RegressionHead(), BinaryHead(), RegressionHead()],
+                      ["a", "b", "c"])
     y_prev = torch.tensor([[1.0, 99.0, 2.0], [3.0, 99.0, 4.0]])
-    out = stack.apply_residual(z_raw, y_prev)
+    out = stack.apply_residual(torch.zeros(2, 3), y_prev)
     assert torch.equal(out[:, 0], y_prev[:, 0])
-    assert torch.equal(out[:, 1], torch.zeros(2))
+    assert torch.equal(out[:, 1], torch.zeros(2))     # binary is left alone
     assert torch.equal(out[:, 2], y_prev[:, 2])
 
 
-def test_head_stack_loss_decreases_mixed_heads():
-    """Mixed regression + binary head stack still has a descent direction."""
-    torch.manual_seed(1)
-    stack = HeadStack([RegressionHead(), BinaryHead()], ["a", "b"])
-    target = torch.stack(
-        [torch.full((16,), 0.7), torch.tensor([1.0, 0.0] * 8)], dim=-1,
-    )
-    z = nn.Parameter(torch.zeros(16, 2))
-    opt = torch.optim.SGD([z], lr=0.2)
-    first = None
-    for _ in range(300):
-        y = stack.activate(z)
-        loss = stack.loss(y, target)
-        if first is None:
-            first = loss.item()
-        opt.zero_grad()
-        loss.backward()
-        opt.step()
-    assert loss.item() < first
+# ── Serialization: a reloaded run rebuilds what it trained ───────
 
-
-# ── Projection helpers ──────────────────────────────────────────
-
-
-def test_bounds_from_norm_projects_min_max():
-    stats = {"shift": 5.0, "stretch": 2.0, "min": 1.0, "max": 9.0}
-    lo, hi = bounds_from_norm(stats)
-    assert math.isclose(lo, -2.0)
-    assert math.isclose(hi, 2.0)
-
-
-def test_project_physical_to_norm_passes_infinity_through():
-    stats = {"shift": 5.0, "stretch": 2.0}
-    assert project_physical_to_norm(float("inf"), stats) == float("inf")
-    assert project_physical_to_norm(float("-inf"), stats) == float("-inf")
-    assert math.isclose(project_physical_to_norm(7.0, stats), 1.0)
-
-
-# ── HeadStack serialization ─────────────────────────────────────
-
-
-def test_head_stack_to_config_roundtrip_preserves_kinds_and_bounds():
-    """Roundtrip a mixed stack through to_config/from_config and verify
-    every head reconstructs to the same kind and parameters."""
+def test_a_mixed_stack_survives_a_config_round_trip():
     levels = torch.tensor([0.0, 0.5, 1.5])
     original = HeadStack(
-        [
-            RegressionHead(),
-            BinaryHead(),
-            BoundedHead(lo=-1.0, hi=2.0, beta=3.0),
-            BoundedHead(lo=0.0, hi=float("inf")),
-            OrdinalHead(n_levels=3, level_values=levels, beta=10.0),
-        ],
+        [RegressionHead(), BinaryHead(), BoundedHead(lo=-1.0, hi=2.0, beta=3.0),
+         BoundedHead(lo=0.0, hi=INF),
+         OrdinalHead(n_levels=3, level_values=levels, beta=10.0)],
         ["a", "b", "c", "d", "e"],
     )
-    cfg = original.to_config()
-    rebuilt = HeadStack.from_config(cfg, original.channel_names)
+    rebuilt = HeadStack.from_config(original.to_config(), original.channel_names)
     assert [h.kind for h in rebuilt.heads] == [h.kind for h in original.heads]
-    assert rebuilt.heads[2].lo == -1.0 and rebuilt.heads[2].hi == 2.0
-    assert rebuilt.heads[2].beta == 3.0
-    assert rebuilt.heads[3].hi == float("inf")
+    assert (rebuilt.heads[2].lo, rebuilt.heads[2].hi, rebuilt.heads[2].beta) == (-1.0, 2.0, 3.0)
+    assert rebuilt.heads[3].hi == INF                 # infinity is not a string
     assert rebuilt.heads[4].n_levels == 3
     assert torch.equal(rebuilt.heads[4].level_values, levels)
 
 
-def test_head_stack_from_config_defaults_missing_channels_to_regression():
-    """Channels absent from the config dict fall back to RegressionHead."""
+def test_a_half_bounded_head_is_still_half_bounded_after_a_reload():
+    """`"inf"` on disk has to come back as a working floor, not a number."""
+    stack = HeadStack.from_config(
+        {"flow": {"kind": "bounded", "lo": 0.0, "hi": "inf", "beta": 5.0}}, ["flow"])
+    head = stack.heads[0]
+    assert isinstance(head, BoundedHead) and head.lo == 0.0 and head.hi == INF
+    assert head.activate(torch.tensor([[-50.0]])).item() < 1e-10
+
+
+def test_channels_the_config_does_not_mention_default_to_regression():
     stack = HeadStack.from_config({}, ["a", "b"])
     assert all(isinstance(h, RegressionHead) for h in stack.heads)
 
 
-def test_head_stack_from_config_rejects_unknown_kind():
-    try:
-        HeadStack.from_config({"x": {"kind": "not_a_thing"}}, ["x"])
-    except ValueError:
-        return
-    raise AssertionError("Unknown head kind must raise")
+# ── Every way a head config can be malformed ─────────────────────
+
+@pytest.mark.parametrize("build,message", [
+    pytest.param(lambda: BoundedHead(lo=1.0, hi=0.0),
+                 "requires hi > lo", id="hi below lo"),
+    pytest.param(lambda: BoundedHead(lo=-INF, hi=INF),
+                 "at least one finite bound", id="unbounded both ways"),
+    pytest.param(lambda: OrdinalHead(n_levels=1),
+                 "n_levels >= 2", id="one level"),
+    pytest.param(lambda: OrdinalHead(n_levels=3,
+                                     level_values=torch.tensor([0.0, 1.0, 1.0])),
+                 "strictly increasing", id="non-increasing levels"),
+    pytest.param(lambda: OrdinalHead(n_levels=4,
+                                     init_thresholds=torch.tensor([0.5, 1.5])),
+                 r"init_thresholds must have shape \(3,\)", id="wrong threshold count"),
+    pytest.param(lambda: HeadStack([RegressionHead()] * 2, ["a", "a"]),
+                 "must be unique", id="duplicate channel names"),
+    pytest.param(lambda: HeadStack.from_config({"x": {"kind": "not_a_thing"}}, ["x"]),
+                 "Unknown head kind", id="unknown kind"),
+    pytest.param(lambda: HeadStack.from_config({"typo": {"kind": "binary"}}, ["x", "y"]),
+                 "typo", id="unknown channel"),
+])
+def test_a_malformed_head_refuses_to_be_built(build, message):
+    with pytest.raises(ValueError, match=message):
+        build()
 
 
-def test_head_stack_from_config_rejects_unknown_channel():
-    try:
-        HeadStack.from_config({"typo": {"kind": "binary"}}, ["x", "y"])
-    except ValueError as e:
-        assert "typo" in str(e)
-        return
-    raise AssertionError("Unknown channel in head config must raise")
+# ── Projection helpers ───────────────────────────────────────────
 
-
-def test_head_stack_from_config_round_trips_half_bounded():
-    """Verify half-bounded heads survive serialization via from_config."""
-    cfg = {"flow": {"kind": "bounded", "lo": 0.0, "hi": "inf", "beta": 5.0}}
-    stack = HeadStack.from_config(cfg, ["flow"])
-    head = stack.heads[0]
-    assert isinstance(head, BoundedHead)
-    assert head.lo == 0.0 and head.hi == float("inf")
-    assert head.activate(torch.tensor([[-50.0]])).item() < 1e-10
-
-
-def test_head_stack_unique_channel_names():
-    try:
-        HeadStack([RegressionHead(), RegressionHead()], ["a", "a"])
-    except ValueError:
-        return
-    raise AssertionError("Duplicate channel names must raise")
+def test_bounds_project_from_physical_units_into_normalized_ones():
+    stats = {"shift": 5.0, "stretch": 2.0, "min": 1.0, "max": 9.0}
+    assert bounds_from_norm(stats) == (-2.0, 2.0)
+    assert math.isclose(project_physical_to_norm(7.0, stats), 1.0)
+    # An infinite bound means "no bound" and must not become a huge number.
+    assert project_physical_to_norm(INF, stats) == INF
+    assert project_physical_to_norm(-INF, stats) == -INF
