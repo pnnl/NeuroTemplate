@@ -105,6 +105,30 @@ def test_render_handles_missing_optional_blocks():
     assert "**fd:**" not in md
 
 
+def test_a_per_zone_model_shows_each_zones_time_constants():
+    """The one number a 2r2c run exists to be checked on has to reach the
+    page, labelled with the zone and the channel it belongs to."""
+    arch = _make_arch()
+    arch["factory"] = "2r2c"
+    arch["blocks"] = {"fy": {
+        "class": "PerZoneBlock", "param_count": 2504, "out_features": 2,
+        "zones": {
+            "north": {"class": "RCBlock", "param_count": 1252,
+                      "time_constants_h": {"north T": {"fast": 0.6, "slow": 13.4}}},
+            "south": {"class": "RCBlock", "param_count": 1252,
+                      "time_constants_h": {"south T": {"fast": 0.4, "slow": 21.0}}},
+        },
+    }, "fu": None, "fd": None}
+    md = render_reportcard(
+        cfg=_make_cfg(), arch=arch, test_metrics=_make_metrics(),
+        nm_mapping={"Y": ["north T", "south T"], "U": [], "D": []},
+        run_name="x", timestamp="2026-01-01T00:00:00",
+    )
+    assert "zone `north`" in md and "zone `south`" in md
+    assert "north T: tau_fast=0.60 h, tau_slow=13.40 h" in md
+    assert "south T: tau_fast=0.40 h, tau_slow=21.00 h" in md
+
+
 def test_snapshot_matches_golden():
     """Pin the rendered output for the NSSM-M baseline. Update via REGEN_GOLDEN=1."""
     md = render_reportcard(
