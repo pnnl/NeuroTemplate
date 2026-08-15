@@ -291,6 +291,12 @@ rc_tau_mass_zone_h: 4.0   # mass <-> zone, from the mass's side
 # rc_train_taus: false    # only with a rollout long enough to identify them
 ```
 
+If you have no free-decay episode to read the prior off, `nt model optuna` can
+choose it on held-out dev loss like any other hyperparameter — put
+`cfg.rc_tau_ambient_h = trial.suggest_float(...)` in `hyper_args`. That is a
+different claim from identifying it (dev loss is not the storage either), but
+it does at least pick the prior the data prefers rather than the one we shipped.
+
 Those three are components, not modes. The modes they produce on 5-minute
 data — `tau_fast = 0.60 h`, `tau_slow = 13.40 h` — are what the reportcard
 prints, per zone and per channel:
