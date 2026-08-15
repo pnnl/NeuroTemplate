@@ -8,9 +8,10 @@ without any further knowledge of your data.
 The file must be named `modeling_user_defined.py` and live in the directory
 you run `nt` from, or be pointed at by `user_hooks_path` in your YAML.
 
-Every function here except `hyper_args` and `tie_norm_stats` is imported by
-attribute with no default, so all of them must exist even when the body is a
-trivial return. Fill in `data_mapping` first; the rest have working defaults.
+Every function here except `hyper_args`, `tie_norm_stats` and `zone_mapping`
+is imported by attribute with no default, so all of them must exist even when
+the body is a trivial return. Fill in `data_mapping` first; the rest have
+working defaults.
 """
 
 from __future__ import annotations
@@ -174,6 +175,43 @@ def column_norm_config(
     #     elif "occupancy" in col.lower():
     #         overrides[col] = None
     return overrides
+
+
+# ---------------------------------------------------------------------
+# Optional: split the states into independent zones
+# ---------------------------------------------------------------------
+@beartype
+def zone_mapping(
+    nm_mapping: dict[str, list[str]],
+    cfg: Config,
+) -> Optional[dict[str, dict[str, list[str]]]]:
+    """
+    Group Y channels into zones, each getting its own sub-model. Called only
+    if this function exists; delete it, or return None, for a single zone
+    holding every channel.
+
+    A zone owns its own Y channels and its own U channels; every zone sees
+    every D channel, and any U channel no zone claims is shared with all of
+    them — which is what you want for one air handler serving several zones.
+    Y must partition exactly: each state in one zone and no state left out.
+
+        return {
+            "north": {"Y": ["North Zone Temperature [degC]"],
+                      "U": ["North Setpoint [degC]"]},
+            "south": {"Y": ["South Zone Temperature [degC]"],
+                      "U": ["South Setpoint [degC]"]},
+        }
+        # "AHU Fan Speed [-]" is claimed by neither, so both zones get it.
+
+    `model: 2r2c` is per-zone whether or not this hook exists — with no hook
+    each Y channel still gets its own RC network, driven by every U channel.
+    Declaring zones is how you say *which setpoint drives which zone*. For
+    `mlp` and `gru` the split only happens with `per_zone: true`.
+
+    Zones are independent by construction: no term in one zone's update reads
+    another zone's state. Inter-zone conduction is not modeled.
+    """
+    return None
 
 
 # ---------------------------------------------------------------------

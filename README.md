@@ -4,7 +4,7 @@ A library of generic, time-series, data-driven black-box modeling and control bu
 
 The repo contains two sister subsystems:
 
-- **Modeling** — train a system-identification surrogate `y_{k+1} = f(y_k, u_k, d_k) [+ y_k]` from data, with an optional gradient-sign penalty, post-training physics assertions (equilibrium / step response / reachability / free decay), Optuna search, MLflow tracking. Model families: `mlp`, `nssm`, `lssm`, `gru`.
+- **Modeling** — train a system-identification surrogate `y_{k+1} = f(y_k, u_k, d_k) [+ y_k]` from data, with an optional gradient-sign penalty, post-training physics assertions (equilibrium / step response / reachability / free decay), Optuna search, MLflow tracking. Model families: `mlp`, `nssm`, `lssm`, `gru` (black box) and `2r2c` (grey box — a thermal network with a hidden mass, for buildings whose storage matters). Any of them can be split one-per-zone.
 - **Control** — train a differentiable predictive control (DPC) policy against a frozen surrogate. Closed-loop rollouts, comfort-band penalties, optional energy, cost and peak-demand objectives, setpoint quantization. Policy families: `mlp`, `linear` (a saturated affine feedback law). Optionally scores a rule-based baseline alongside the learned policy.
 
 Both sides share a thin `common/` layer (YAML/CLI loader, CSV + sliding-window data utilities, per-channel metrics).
@@ -19,12 +19,13 @@ Restructured from a flat script collection into an installable library. Phase A 
 - ✅ YAML + CLI override machinery, multi-path data fields (`Union[str, list[str]]`)
 - ✅ Hook discovery via `neurotemplate.hooks` (CWD + `cfg.user_hooks_path` override)
 - ✅ Single `nt <group> <verb>` dispatcher (replaces the five flat console scripts)
-- ✅ 439 / 439 tests passing
+- ✅ 474 / 474 tests passing
 - ✅ Control-side parity with sysid: policy family registry (`mlp` / `linear`), comfort + energy metrics, sectioned reportcard with a golden test, MLflow metric logging, optional rule-based baseline comparison
 - ☐ Phase B (scrub remaining HVAC vocabulary from library code; relocate runtime artifacts off CWD)
   - ⚠️ **Breaking hook change:** `plot_closed_loop` no longer greps D columns for `"outdoor"`/`"dry-bulb"` and no longer reaches into a private `_power_channel_indices`. Apps must add `power_channels` and `plot_context_channels` to `control_user_defined.py`; `has_power_channels` is removed (it is now the truthiness of `power_channels`).
 - ☐ Phase C (ship an in-repo `examples/rtu_mall/`, README templates, end-to-end smoke test)
   - ✅ [template/](template/) — copyable app skeleton: both hook files with every hook stubbed, both config dirs with every field annotated
+- ✅ `2r2c` grey-box thermal family and the per-zone model split (see [Model families](#model-families))
 
 ### Upgrading: breaking changes from the v6 follow-up
 
@@ -124,8 +125,9 @@ The library finds the hook files automatically: by default it looks for `modelin
 | `sub_plot(df_true, col_name) -> tuple \| None` | must be defined; return `None` for default | per-column subplot guidance |
 | `hyper_args(trial, base_cfg) -> Config` | required only for `nt model optuna` | Optuna trial setup |
 | `tie_norm_stats(nm_mapping, norm_stats, cfg) -> norm_stats` | optional | post-process norm stats before they are frozen (e.g. force two columns onto a shared `shift`/`stretch`) |
+| `zone_mapping(nm_mapping, cfg) -> {zone: {Y: [col], U: [col]}} \| None` | optional | split Y and U into independent per-zone sub-models (see [Zones](#zones)) |
 
-The library imports each hook by attribute (no defaulting), so every row above except `hyper_args` and `tie_norm_stats` must exist in `modeling_user_defined.py`, even when the body just returns a trivial value. `hyper_args` is only looked up on the code path that needs it; `tie_norm_stats` is `hasattr`-gated and skipped when absent.
+The library imports each hook by attribute (no defaulting), so every row above except `hyper_args`, `tie_norm_stats` and `zone_mapping` must exist in `modeling_user_defined.py`, even when the body just returns a trivial value. `hyper_args` is only looked up on the code path that needs it; `tie_norm_stats` and `zone_mapping` are `hasattr`-gated and skipped when absent.
 
 ### Control (`control_user_defined.py`)
 
@@ -208,6 +210,136 @@ Inspect a fully-resolved config without running anything:
 nt model train --config model_configs/modeling.yaml \
     --set epochs=10 --print-config
 ```
+
+## Model families
+
+| `model` | Kind | What it is |
+|---|---|---|
+| `mlp` | black box | one MLP over the flattened `[y \| u \| d]` window |
+| `nssm` | black box | separable: `fy(y) + fu(u) + fd(d)`, each an MLP |
+| `lssm` | black box | the same, linear |
+| `gru` | black box | stateful — its memory outlives `in_steps` |
+| `2r2c` | grey box | a thermal network: zone air, a hidden mass, and a learned heat input |
+| `dummy` | neither | a passthrough that mints a checkpoint without identifying anything |
+
+### 2R2C: when the storage is what you need
+
+The black-box families predict the next zone temperature from a window of
+recent observations. That is enough to be accurate one step ahead, and it is
+why they can still be wrong about the thing load shifting depends on: **how
+long a temperature difference survives.** A model scored over a four-hour
+rollout can re-derive the zone from the last few setpoints and never learn
+to integrate. Coolth stored at midday is then gone by the evening peak, and
+pre-cooling cannot pay inside the model whatever the real building does.
+
+`2r2c` builds the storage in instead of hoping for it. Zone air is one
+capacitance, the building's mass — walls, slab, furniture — is a second,
+hidden one, and heat moves between zone and ambient and between zone and
+mass through one resistance each:
+
+```
+    ambient ──R_o──┬── zone air (C_z) ──R_m── mass (C_m)
+                   │
+                heat input
+```
+
+The state update is fixed physics; only the heat input `g` is learned, by an
+MLP over the current `u` and `d`. We have no plug-load channel and no
+zone-level heat metering, so `g` is where all of that goes — along with the
+solar gain and the conduction to outdoors, which is why nothing has to tell
+the block which `D` column is the weather.
+
+Because `g` reads inputs and never the state, two things hold whatever the
+MLP learns:
+
+- **A rollout cannot diverge**, at any horizon, under any input — including
+  the adversarial inputs a DPC policy will go looking for.
+- **The two time constants are readable in hours** on the reportcard, so you
+  can check them against the building rather than taking the surrogate's word.
+
+Measured on `data/excited` in the RTU-mall app, where the envelope decays at
+6.4–10.9 h — a 5.8 h half-life at the mid-range estimate — this is how long a
+2 °C head start survives with the compressor held off:
+
+| | building | `2r2c` | `nssm` | `mlp` | `gru` | `lssm` |
+|---|---|---|---|---|---|---|
+| half-life | 5.80 h | **6.08 h** | 3.92 h | 8.00 h | 14.50 h | 1.17 h |
+| left after 12 h | 23.8% | **32.0%** | 4.0% | 7.4% | 66.3% | ~0% |
+
+`2r2c` is the closest of any family, at a third of `nssm`'s parameters. It
+pays for that in test RMSE (0.54 against 0.41–0.44), which is the trade the
+family exists to make: rollout RMSE cannot see the storage, and load
+shifting cannot live without it.
+
+**The time constants are a prior, not a fit**, and they default to frozen.
+The mass temperature is unobserved, so every rollout has to seed it from an
+`in_steps` window an hour long at most, against a state that lags by many
+hours. Left trainable, the optimizer discovers that shortening the slow mode
+is a cheaper way to absorb that wrong seed than fixing the forcing — on
+synthetic data from a known 31.6 h building, seeded truthfully training moves
+`tau_slow` 13.4 → 16.5 h, and seeded the way a real rollout must, the same
+training drives it to 8.7 h. Letting the window choose its own seed does not
+help; an hour of zone temperature carries no information about a ten-hour
+state. So set the prior from what you know — a free-decay episode gives it
+directly — and read back what you built:
+
+```yaml
+model: 2r2c
+rc_tau_ambient_h: 2.0     # zone <-> ambient
+rc_tau_zone_mass_h: 1.0   # zone <-> mass, from the zone's side
+rc_tau_mass_zone_h: 4.0   # mass <-> zone, from the mass's side
+# rc_train_taus: false    # only with a rollout long enough to identify them
+```
+
+Those three are components, not modes. The modes they produce on 5-minute
+data — `tau_fast = 0.60 h`, `tau_slow = 13.40 h` — are what the reportcard
+prints, per zone and per channel:
+
+```
+- **fy:** `PerZoneBlock`, params=2,504, in=42, out=2
+  - **zone `north`:** `RCBlock`, params=1,252, in=30, out=1
+    - North Zone Air Temperature [°C]: tau_fast=0.60 h, tau_slow=13.40 h
+```
+
+What it gives up: `g` cannot see the state, so it cannot represent a
+thermostat deadband. "The compressor is off whenever the setpoint is above
+the zone" is a function of the *difference*, and `2r2c` renders it as a
+monotone response to setpoint with no cut-off — smooth cooling where the
+real plant's is staged. That is the price of the stability guarantee, and it
+is why this is one family among several rather than the only one.
+
+### Zones
+
+A *zone* is a group of Y channels that gets its own sub-model: its own
+parameters, its own hidden state, and no term reading any other zone's
+state. Declare them with the optional `zone_mapping` hook:
+
+```python
+def zone_mapping(nm_mapping, cfg):
+    return {
+        "north": {"Y": ["North Zone Air Temperature [°C]"],
+                  "U": ["North Cooling Setpoint [°C]"]},
+        "south": {"Y": ["South Zone Air Temperature [°C]"],
+                  "U": ["South Cooling Setpoint [°C]"]},
+    }
+```
+
+Each zone owns its own Y and U channels and sees every D channel. **U need
+not partition:** any control no zone claims is shared with all of them,
+which is what you want for one air handler serving several zones. Y must
+partition exactly, and anything else — a state claimed twice, a state left
+out, a column that is not in the mapping — is named before the first epoch
+runs.
+
+`2r2c` is per-zone whether or not the hook exists: with no hook, each Y
+channel still gets its own RC network, driven by every U channel. Declaring
+zones is how you say *which setpoint drives which zone*. For `mlp` and `gru`
+the split is opt-in with `per_zone: true`, so you can run 2R2C-per-zone and
+MLP-per-zone against each other on the same mapping.
+
+Inter-zone conduction is not modeled. Zones are independent by construction,
+and a building whose zones exchange meaningful heat is outside what this
+buys you.
 
 ## Two optional control capabilities
 
@@ -440,7 +572,10 @@ src/neurotemplate/
 │   └── reportcard.py    # _section, write_reportcard (shared by both sides)
 ├── modeling/
 │   ├── config.py        # ModelingConfig
-│   ├── dynamics.py      # SSMGrad, GRUBlock, get_dynamics  (NSSM/LSSM/MLP/GRU)
+│   ├── dynamics.py      # SSMGrad, GRUBlock, PerZoneBlock, get_dynamics
+│   ├── rc.py            # RCBlock — the 2R2C thermal network
+│   ├── zones.py         # build_zones — the Y/U partition behind per-zone models
+│   ├── windows.py       # positions inside the flattened history window
 │   ├── heads.py         # HeadStack (regression / binary / bounded / ordinal)
 │   ├── loss.py          # build_loss
 │   ├── gradient_sampling.py  # SampledGradientPenalty

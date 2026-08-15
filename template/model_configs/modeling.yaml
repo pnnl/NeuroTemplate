@@ -20,19 +20,42 @@ test_data_path: data/test.csv
 # user_hooks_path: null
 
 # ── MODEL ────────────────────────────────────────────────────────
-# Family: mlp | nssm | lssm | gru | dummy ("dummy" is a passthrough used to
-# mint a checkpoint without identifying anything).
+# Family: mlp | nssm | lssm | gru | 2r2c | dummy. "2r2c" is the grey-box
+# thermal model — see the 2R2C block below. "dummy" is a passthrough used to
+# mint a checkpoint without identifying anything.
 # model: nssm
 # Context length: how much history the model sees before the first scored
 # prediction, and the stride between training windows. Every family reads it as
-# a flattened input window; gru also carries a hidden state, so during a rollout
-# its memory runs past in_steps.
+# a flattened input window; gru and 2r2c also carry a hidden state, so during a
+# rollout their memory runs past in_steps.
 # in_steps: 12
 # Hidden width is 2**log2_hidden_size.
 # log2_hidden_size: 8
 # num_layers: 3
 # Predict the delta from the current state instead of the state itself.
 # residual: true
+# Give each zone from the zone_mapping hook its own sub-model, with its own
+# parameters and hidden state. mlp and gru only; 2r2c is always per-zone.
+# per_zone: false
+
+# ── 2R2C ─────────────────────────────────────────────────────────
+# Only read when model: 2r2c. The RC network's three component time constants
+# in hours — zone<->ambient, zone<->mass from the zone's side, and mass<->zone
+# from the mass's side. The last two differ by the capacitance ratio
+# C_mass / C_zone, so 1 against 4 makes the mass four times heavier than the
+# air. The defaults give a 0.6 h fast mode and a 13.4 h slow one on 5-minute
+# data; the reportcard prints what you actually got.
+#
+# These are a prior, not a fit. The mass temperature is unobserved, so a
+# training rollout cannot identify them, and left trainable the optimizer
+# shortens the slow mode to hide a mass it had to guess. Set them from what
+# you know: a measured free-decay time constant is what tau_slow should match.
+# rc_tau_ambient_h: 2.0
+# rc_tau_zone_mass_h: 1.0
+# rc_tau_mass_zone_h: 4.0
+# Let training move the three above. Worth it only when the rollout is long
+# relative to the slow mode and the data excites it.
+# rc_train_taus: false
 
 # ── TRAIN ────────────────────────────────────────────────────────
 # epochs: 300
