@@ -373,26 +373,19 @@ def test_validate_names_every_problem_at_once():
     assert "expected -1 or +1" in message
 
 
-def test_validate_demands_a_declared_sign_for_every_control():
-    """The coverage gap `responds` exists to close: an untested actuator."""
-    spec = SynthSpec(states=[ZONE], ambient=AMBIENT, off={SETPT: 26.0},
-                     responds={})
-
-    with pytest.raises(ValueError) as exc:
-        spec.validate(NM)
-
-    assert "declares no state that these controls move" in str(exc.value)
-    assert SETPT in str(exc.value)
-
-
-def test_validate_rejects_an_empty_state_list():
-    with pytest.raises(ValueError, match="`states` is empty"):
-        SynthSpec(states=[], ambient=AMBIENT, off={SETPT: 26.0}).validate(NM)
-
-
-def test_validate_rejects_stray_off_columns():
-    spec = _spec(off={SETPT: 26.0, "not a column": 1.0})
-    with pytest.raises(ValueError, match="not in the mapping"):
+@pytest.mark.parametrize("spec,message", [
+    # The coverage gap `responds` exists to close: an untested actuator.
+    pytest.param(SynthSpec(states=[ZONE], ambient=AMBIENT, off={SETPT: 26.0},
+                           responds={}),
+                 "declares no state that these controls move",
+                 id="a control nothing responds to"),
+    pytest.param(SynthSpec(states=[], ambient=AMBIENT, off={SETPT: 26.0}),
+                 "`states` is empty", id="no states at all"),
+    pytest.param(_spec(off={SETPT: 26.0, "not a column": 1.0}),
+                 "not in the mapping", id="an off value for a stray column"),
+])
+def test_validate_rejects_a_spec_that_cannot_be_run(spec, message):
+    with pytest.raises(ValueError, match=message):
         spec.validate(NM)
 
 

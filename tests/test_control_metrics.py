@@ -1,3 +1,11 @@
+"""
+Tests for the closed-loop metrics: comfort, energy, and the renderers and
+MLflow keys built on them.
+
+The comfort cases are a table of scenarios, because that is what they are —
+one band, one trajectory through it, and the numbers that should fall out.
+Everything that rejects malformed input is a second table at the end.
+"""
 import pytest
 import torch
 
@@ -20,112 +28,54 @@ def test_hours_per_step_from_posix_seconds():
     assert hours_per_step(t) == pytest.approx(1.0 / 12.0)
 
 
-def test_hours_per_step_needs_two_steps():
-    with pytest.raises(ValueError, match="at least 2 timesteps"):
-        hours_per_step(torch.zeros(1, 1, 1))
-
-
-def test_hours_per_step_rejects_non_increasing_time():
-    t = torch.tensor([[[10.0], [10.0]]])
-    with pytest.raises(ValueError, match="Non-increasing"):
-        hours_per_step(t)
-
-
 # ── comfort_metrics ──────────────────────────────────────────────
 
+BAND_LO, BAND_HI = 20.0, 25.0
 
-def test_comfort_half_the_horizon_one_degree_above():
-    """One channel sitting 1.0 above the band for exactly half of a 2-hour
-    horizon: rate 0.5, all of it 'above', mean excursion 1.0, 1.0 degree-hours."""
-    n_steps = 8
-    step_hours = 2.0 / n_steps  # 2 h total
-    y = torch.full((1, n_steps, 1), 22.0)
-    y[:, n_steps // 2:, :] = 26.0        # 1.0 above the 25.0 ceiling
-    ymin = torch.full((1, n_steps, 1), 20.0)
-    ymax = torch.full((1, n_steps, 1), 25.0)
 
+def _band(shape):
+    return torch.full(shape, BAND_LO), torch.full(shape, BAND_HI)
+
+
+@pytest.mark.parametrize("y,step_hours,expected", [
+    # 1.0 above the ceiling for exactly half of a 2 h horizon.
+    pytest.param(torch.tensor([[22.0] * 4 + [26.0] * 4]).reshape(1, 8, 1), 0.25,
+                 dict(violation_rate=0.5, frac_above=0.5, frac_below=0.0,
+                      mean_violation=1.0, max_violation=1.0, degree_hours=1.0),
+                 id="half the horizon, one degree above"),
+    # One step 2.0 below and one 1.0 above: mean is over violating steps only.
+    pytest.param(torch.tensor([[[18.0], [26.0], [22.0], [22.0]]]), 1.0,
+                 dict(violation_rate=0.5, frac_above=0.25, frac_below=0.25,
+                      mean_violation=1.5, max_violation=2.0, degree_hours=3.0),
+                 id="below and above are counted apart"),
+    # No violating step must give 0, not a NaN from an empty mean.
+    pytest.param(torch.full((2, 5, 1), 22.0), 1.0,
+                 dict(violation_rate=0.0, mean_violation=0.0,
+                      max_violation=0.0, degree_hours=0.0),
+                 id="all in band"),
+    # Degree-hours is a per-window integral averaged over windows, so one bad
+    # window out of two halves the reported figure.
+    pytest.param(torch.cat([torch.full((1, 4, 1), 26.0),
+                            torch.full((1, 4, 1), 22.0)]), 0.25,
+                 dict(violation_rate=0.5, degree_hours=0.5),
+                 id="one bad window out of two"),
+])
+def test_comfort_reads_a_trajectory_through_the_band(y, step_hours, expected):
+    ymin, ymax = _band(y.shape)
     (m,) = comfort_metrics(y, ymin, ymax, ["zone"], step_hours)
-
     assert m.name == "zone"
-    assert m.violation_rate == pytest.approx(0.5)
-    assert m.frac_above == pytest.approx(0.5)
-    assert m.frac_below == pytest.approx(0.0)
-    assert m.mean_violation == pytest.approx(1.0)
-    assert m.max_violation == pytest.approx(1.0)
-    # 1.0 excursion held for 1.0 h
-    assert m.degree_hours == pytest.approx(1.0)
+    for field, value in expected.items():
+        assert getattr(m, field) == pytest.approx(value), field
 
 
-def test_comfort_separates_below_from_above():
-    y = torch.tensor([[[18.0], [26.0], [22.0], [22.0]]])  # 1 below, 1 above
-    ymin = torch.full((1, 4, 1), 20.0)
-    ymax = torch.full((1, 4, 1), 25.0)
-
-    (m,) = comfort_metrics(y, ymin, ymax, ["zone"], step_hours=1.0)
-
-    assert m.frac_below == pytest.approx(0.25)
-    assert m.frac_above == pytest.approx(0.25)
-    assert m.violation_rate == pytest.approx(0.5)
-    # excursions are 2.0 (below) and 1.0 (above) -> mean 1.5 over violating steps
-    assert m.mean_violation == pytest.approx(1.5)
-    assert m.max_violation == pytest.approx(2.0)
-    assert m.degree_hours == pytest.approx(3.0)
-
-
-def test_comfort_all_in_band_is_all_zeros():
-    y = torch.full((2, 5, 1), 22.0)
-    ymin = torch.full((2, 5, 1), 20.0)
-    ymax = torch.full((2, 5, 1), 25.0)
-
-    (m,) = comfort_metrics(y, ymin, ymax, ["zone"], step_hours=1.0)
-
-    assert m.violation_rate == 0.0
-    assert m.mean_violation == 0.0   # no violating steps: 0, not NaN
-    assert m.max_violation == 0.0
-    assert m.degree_hours == 0.0
-
-
-def test_comfort_degree_hours_averages_across_windows():
-    """Degree-hours is a per-window integral averaged over windows, so one bad
-    window out of two halves the reported figure."""
-    y = torch.full((2, 4, 1), 22.0)
-    y[0] = 26.0                          # window 0 is 1.0 above throughout
-    ymin = torch.full((2, 4, 1), 20.0)
-    ymax = torch.full((2, 4, 1), 25.0)
-
-    (m,) = comfort_metrics(y, ymin, ymax, ["zone"], step_hours=0.25)
-
-    # window 0: 4 steps x 1.0 x 0.25 h = 1.0; window 1: 0.0 -> mean 0.5
-    assert m.degree_hours == pytest.approx(0.5)
-    assert m.violation_rate == pytest.approx(0.5)
-
-
-def test_comfort_is_per_channel():
-    y = torch.stack([
-        torch.full((4,), 26.0),   # channel 0 always above
-        torch.full((4,), 22.0),   # channel 1 always in band
-    ], dim=-1).unsqueeze(0)
-    ymin = torch.full((1, 4, 2), 20.0)
-    ymax = torch.full((1, 4, 2), 25.0)
-
+def test_comfort_is_reported_per_channel():
+    y = torch.stack([torch.full((4,), 26.0),      # always above
+                     torch.full((4,), 22.0)],     # always in band
+                    dim=-1).unsqueeze(0)
+    ymin, ymax = _band(y.shape)
     hot, ok = comfort_metrics(y, ymin, ymax, ["hot", "ok"], step_hours=1.0)
-
     assert hot.violation_rate == pytest.approx(1.0)
     assert ok.violation_rate == pytest.approx(0.0)
-
-
-def test_comfort_rejects_shape_mismatch():
-    with pytest.raises(ValueError, match="Shape mismatch"):
-        comfort_metrics(
-            torch.zeros(1, 4, 1), torch.zeros(1, 3, 1), torch.zeros(1, 3, 1),
-            ["zone"], 1.0,
-        )
-
-
-def test_comfort_rejects_name_count_mismatch():
-    z = torch.zeros(1, 4, 2)
-    with pytest.raises(ValueError, match="channel_names"):
-        comfort_metrics(z, z, z, ["only_one"], 1.0)
 
 
 # ── energy_metrics ───────────────────────────────────────────────
@@ -164,11 +114,6 @@ def test_energy_single_spike_moves_peak_but_barely_moves_window_peak():
     )
 
 
-def test_energy_rejects_wrong_rank():
-    with pytest.raises(ValueError, match="2D"):
-        energy_metrics(torch.zeros(2, 3, 1), step_hours=1.0)
-
-
 def test_energy_cost_is_unset_without_a_tariff():
     assert energy_metrics(torch.ones(2, 4), step_hours=1.0).energy_cost is None
 
@@ -191,11 +136,6 @@ def test_energy_cost_prefers_the_cheap_hours_at_equal_energy():
             == pytest.approx(energy_metrics(late, 0.5, price).total_energy))
     assert (energy_metrics(early, 0.5, price).energy_cost
             < energy_metrics(late, 0.5, price).energy_cost)
-
-
-def test_energy_rejects_a_price_that_is_not_co_indexed():
-    with pytest.raises(ValueError, match="co-indexed"):
-        energy_metrics(torch.ones(2, 4), 1.0, price=torch.ones(2, 3))
 
 
 # ── renderers ────────────────────────────────────────────────────
@@ -299,3 +239,26 @@ def test_log_control_results_handles_missing_energy_and_logger():
     assert logger.dicts["control_metrics.json"]["learned"]["energy"] is None
 
     log_control_results(None, r)  # must be a no-op, not a crash
+
+
+# ── Every way the inputs can be malformed ────────────────────────
+
+@pytest.mark.parametrize("call,message", [
+    pytest.param(lambda: hours_per_step(torch.zeros(1, 1, 1)),
+                 "at least 2 timesteps", id="one timestep"),
+    pytest.param(lambda: hours_per_step(torch.tensor([[[10.0], [10.0]]])),
+                 "Non-increasing", id="time that does not advance"),
+    pytest.param(lambda: comfort_metrics(torch.zeros(1, 4, 1), torch.zeros(1, 3, 1),
+                                         torch.zeros(1, 3, 1), ["zone"], 1.0),
+                 "Shape mismatch", id="band shorter than the trajectory"),
+    pytest.param(lambda: comfort_metrics(*[torch.zeros(1, 4, 2)] * 3,
+                                         ["only_one"], 1.0),
+                 "channel_names", id="one name for two channels"),
+    pytest.param(lambda: energy_metrics(torch.zeros(2, 3, 1), step_hours=1.0),
+                 "2D", id="power with a channel axis"),
+    pytest.param(lambda: energy_metrics(torch.ones(2, 4), 1.0, price=torch.ones(2, 3)),
+                 "co-indexed", id="price shorter than power"),
+])
+def test_malformed_input_is_named_rather_than_averaged_over(call, message):
+    with pytest.raises(ValueError, match=message):
+        call()
