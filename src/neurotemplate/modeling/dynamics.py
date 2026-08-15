@@ -204,21 +204,20 @@ class PerZoneBlock(nn.Module):
         zones: the partition, from `zones.build_zones`.
         widths: `(ny, nu, nd)` of the full mapping.
         in_steps: history window length.
-        make_block: `(ny, nu, nd) -> nn.Module` for one zone's sub-block.
+        make_block: `(zone, nd) -> nn.Module` for one zone's sub-block. The
+            zone carries its own `ny`, `nu` and channel names; `nd` is shared.
             Called once per zone, so every zone gets its own parameters.
     """
 
     def __init__(self, zones: list[Zone], widths: tuple[int, int, int],
-                 in_steps: int, make_block: Callable[[int, int, int], nn.Module]):
+                 in_steps: int, make_block: Callable[[Zone, int], nn.Module]):
         super().__init__()
         ny, _, nd = widths
         self.zone_names = [z.name for z in zones]
         self.in_features = in_steps * sum(widths)
         self.out_features = ny
 
-        self.blocks = nn.ModuleList(
-            [make_block(z.ny, z.nu, nd) for z in zones]
-        )
+        self.blocks = nn.ModuleList([make_block(z, nd) for z in zones])
         for i, zone in enumerate(zones):
             self.register_buffer(
                 f"_gather_{i}",
@@ -369,8 +368,8 @@ def get_mlp(cfg: ModelingConfig, nm_mapping: dict[str, list[str]],
     if cfg.per_zone:
         fy = PerZoneBlock(
             zones, (ny, nu, nd), cfg.in_steps,
-            make_block=lambda z_ny, z_nu, z_nd: make_mlp(
-                z_ny, cfg.in_steps * (z_ny + z_nu + z_nd)),
+            make_block=lambda zone, z_nd: make_mlp(
+                zone.ny, cfg.in_steps * (zone.ny + zone.nu + z_nd)),
         )
     else:
         fy = make_mlp(ny, cfg.in_steps * (ny + nu + nd))
@@ -427,10 +426,13 @@ def get_gru(cfg: ModelingConfig, nm_mapping: dict[str, list[str]],
             hidden_size=(2**cfg.log2_hidden_size), num_layers=cfg.num_layers,
         )
 
+    def make_zone_gru(zone: Zone, z_nd: int) -> nn.Module:
+        return make_gru(zone.ny, zone.nu, z_nd)
+
     # Same in_steps window as every other family. The GRU is additionally
     # stateful, so its memory outlives the window during a rollout — but the
     # window is what warms it, so no caller-side priming is needed.
-    fy = (PerZoneBlock(zones, (ny, nu, nd), cfg.in_steps, make_block=make_gru)
+    fy = (PerZoneBlock(zones, (ny, nu, nd), cfg.in_steps, make_block=make_zone_gru)
           if cfg.per_zone else make_gru(ny, nu, nd))
     return SSMGrad(
         fy, None, None, ny, nu, nd,
@@ -466,11 +468,12 @@ def get_2r2c(cfg: ModelingConfig, nm_mapping: dict[str, list[str]],
 
     fy = PerZoneBlock(
         zones, (ny, nu, nd), cfg.in_steps,
-        make_block=lambda z_ny, z_nu, z_nd: RCBlock(
-            z_ny, z_nu, z_nd, cfg.in_steps,
+        make_block=lambda zone, z_nd: RCBlock(
+            zone.ny, zone.nu, z_nd, cfg.in_steps,
             steps_per_hour=cfg.steps_per_hour,
             hidden_size=(2**cfg.log2_hidden_size),
             num_layers=cfg.num_layers,
+            channel_names=zone.y_names,
         ),
     )
     return SSMGrad(

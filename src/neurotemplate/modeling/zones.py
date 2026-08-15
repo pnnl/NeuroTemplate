@@ -53,6 +53,9 @@ class Zone:
     name: str
     y_idx: tuple[int, ...]
     u_idx: tuple[int, ...]
+    #: The Y column names behind `y_idx`, carried so a block can label its
+    #: per-channel numbers on the reportcard without being handed nm_mapping.
+    y_names: tuple[str, ...]
 
     @property
     def ny(self) -> int:
@@ -91,7 +94,8 @@ def build_zones(
     y_cols, u_cols = nm_mapping["Y"], nm_mapping["U"]
 
     if zone_spec is None:
-        return [Zone("all", tuple(range(len(y_cols))), tuple(range(len(u_cols))))]
+        return [Zone("all", tuple(range(len(y_cols))),
+                     tuple(range(len(u_cols))), tuple(y_cols))]
 
     if not zone_spec:
         raise ValueError("zone_mapping returned an empty mapping; return None instead.")
@@ -130,6 +134,7 @@ def build_zones(
     # Whatever no zone asked for is shared equipment: hand it to everyone.
     shared_u = [i for i in range(len(u_cols)) if i not in claimed_u]
     return [
-        Zone(name, tuple(y_idx), tuple(sorted(u_idx + shared_u)))
+        Zone(name, tuple(y_idx), tuple(sorted(u_idx + shared_u)),
+             tuple(y_cols[i] for i in y_idx))
         for name, y_idx, u_idx in per_zone
     ]

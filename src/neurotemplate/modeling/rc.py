@@ -181,10 +181,12 @@ class RCBlock(nn.Module):
     """
 
     def __init__(self, ny: int, nu: int, nd: int, in_steps: int,
-                 steps_per_hour: float, hidden_size: int, num_layers: int):
+                 steps_per_hour: float, hidden_size: int, num_layers: int,
+                 channel_names: tuple[str, ...] = ()):
         super().__init__()
         self.widths = (ny, nu, nd)
         self.ny = ny
+        self.channel_names = channel_names or tuple(f"y{i}" for i in range(ny))
         self.in_steps = in_steps
         self.in_features = in_steps * (ny + nu + nd)
         self.out_features = ny
@@ -289,6 +291,9 @@ class RCBlock(nn.Module):
             tau_fast, tau_slow = mode_taus(*self.rates())
         per_hour = self.steps_per_hour
         return {
-            "tau_fast_h": [round(float(t) / per_hour, 3) for t in tau_fast],
-            "tau_slow_h": [round(float(t) / per_hour, 3) for t in tau_slow],
+            "time_constants_h": {
+                name: {"fast": round(float(fast) / per_hour, 3),
+                       "slow": round(float(slow) / per_hour, 3)}
+                for name, fast, slow in zip(self.channel_names, tau_fast, tau_slow)
+            }
         }

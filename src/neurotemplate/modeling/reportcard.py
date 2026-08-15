@@ -88,9 +88,16 @@ def _summary_section(
     return _section("Summary", "\n".join(rows))
 
 
-def _block_line(name: str, info: Optional[dict]) -> Optional[str]:
+def _block_lines(name: str, info: Optional[dict], indent: str = "") -> list[str]:
+    """One bullet for a block, plus nested bullets for what it reports itself.
+
+    A per-zone block nests one bullet per zone; a 2R2C block adds the time
+    constants it learned. `tau_slow` is the storage number — how long a
+    temperature difference survives — so it is worth reading against what
+    you know about the building.
+    """
     if info is None:
-        return None
+        return []
     parts = [f"`{info['class']}`", f"params={info['param_count']:,}"]
     if "hsizes" in info and info["hsizes"]:
         parts.append(f"hsizes={info['hsizes']}")
@@ -98,7 +105,14 @@ def _block_line(name: str, info: Optional[dict]) -> Optional[str]:
         parts.append(f"in={info['in_features']}")
     if "out_features" in info:
         parts.append(f"out={info['out_features']}")
-    return f"- **{name}:** " + ", ".join(parts)
+    lines = [f"{indent}- **{name}:** " + ", ".join(parts)]
+
+    for channel, taus in info.get("time_constants_h", {}).items():
+        lines.append(f"{indent}  - {channel}: tau_fast={taus['fast']:.2f} h, "
+                     f"tau_slow={taus['slow']:.2f} h")
+    for zone_name, sub in info.get("zones", {}).items():
+        lines += _block_lines(f"zone `{zone_name}`", sub, indent + "  ")
+    return lines
 
 
 def _architecture_section(arch: dict) -> str:
@@ -112,11 +126,9 @@ def _architecture_section(arch: dict) -> str:
     ]
     blocks = arch.get("blocks", {})
     block_lines = [
-        line for line in (
-            _block_line("fy", blocks.get("fy")),
-            _block_line("fu", blocks.get("fu")),
-            _block_line("fd", blocks.get("fd")),
-        ) if line is not None
+        line
+        for key in ("fy", "fu", "fd")
+        for line in _block_lines(key, blocks.get(key))
     ]
     if block_lines:
         lines.append("")
