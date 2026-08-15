@@ -50,6 +50,16 @@ class ModelingConfig:
     log2_hidden_size: int = 8
     num_layers: int = 3
     residual: bool = True
+    # Give each zone its own sub-model, with its own parameters and hidden
+    # state and no term reading another zone's state. Which channels form a
+    # zone comes from the optional `zone_mapping` hook; without it there is
+    # one zone holding everything, and this flag only costs a wrapper.
+    # `2r2c` is per-zone by construction and rejects this flag.
+    per_zone: bool = False
+    # Timesteps per hour, resolved from the data's sampling frequency by the
+    # CLI (like `device` and `seed`) rather than set in YAML. Only `2r2c`
+    # reads it, to place its time constants in real hours.
+    steps_per_hour: Optional[float] = None
 
     # ---- TRAIN ---------------------------------------------------------------
     epochs: int = 300
@@ -131,9 +141,20 @@ class ModelingConfig:
         ]:
             check_non_negative(self, name)
 
-        check_one_of(self, "model", ["mlp", "nssm", "lssm", "gru", "dummy"])
+        check_one_of(self, "model", ["mlp", "nssm", "lssm", "gru", "2r2c", "dummy"])
         check_one_of(self, "save_config", ["last_step", "all", "None", None])
         check_max(self, "in_steps", MAX_IN_STEPS)
+
+        # Imported here rather than at module scope: dynamics imports this
+        # config module, so a top-level import would be circular.
+        from neurotemplate.modeling.dynamics import PER_ZONE_FAMILIES
+        if self.per_zone and self.model not in PER_ZONE_FAMILIES:
+            extra = (" 2r2c is already per-zone and needs no flag."
+                     if self.model == "2r2c" else "")
+            raise ValueError(
+                f"per_zone is not supported for model '{self.model}'; "
+                f"available: {list(PER_ZONE_FAMILIES)}.{extra}"
+            )
 
         if (self.grad_gain > 0) and (self.grad_path is None):
             raise ValueError("grad_gain set but not grad_path")

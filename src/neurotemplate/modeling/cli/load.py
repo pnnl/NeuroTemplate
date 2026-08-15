@@ -101,9 +101,11 @@ def _resolve_head_stack(
     return load_modeling_hooks(cfg).data_head_config(nm_mapping, norm_stats)
 
 
-def _load_dyn_sys(cfg, nm_mapping, head_stack, weights_path: Path):
+def _load_dyn_sys(cfg, nm_mapping, head_stack, zone_spec, weights_path: Path):
     """Build the dynamics system and load weights from disk."""
-    dyn_sys = get_dynamics(cfg, nm_mapping, head_stack=head_stack).to(cfg.device)
+    dyn_sys = get_dynamics(
+        cfg, nm_mapping, head_stack=head_stack, zone_spec=zone_spec,
+    ).to(cfg.device)
     state = torch.load(weights_path, map_location=cfg.device)
 
     if isinstance(state, dict):
@@ -177,7 +179,11 @@ def load_trained_dynamics(
         raise FileNotFoundError(f"Weights not found at {weights_path}")
 
     head_stack = _resolve_head_stack(cfg, artifacts_dir, nm_mapping, norm_stats)
-    dyn_sys = _load_dyn_sys(cfg, nm_mapping, head_stack, weights_path)
+    # Absent for the single-zone runs that are the common case; a per-zone run
+    # always writes it, so its absence is an answer rather than a gap.
+    zone_spec_path = artifacts_dir / "zone_spec.json"
+    zone_spec = _load_json(zone_spec_path) if zone_spec_path.exists() else None
+    dyn_sys = _load_dyn_sys(cfg, nm_mapping, head_stack, zone_spec, weights_path)
     return dyn_sys, cfg, nm_mapping, norm_stats
 
 

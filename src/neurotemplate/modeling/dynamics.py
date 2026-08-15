@@ -47,7 +47,10 @@ from neurotemplate._typing import beartype
 from neuromancer.system import Node, SystemPreview
 from neuromancer.modules import blocks
 
+from neurotemplate.modeling import windows
 from neurotemplate.modeling.heads import HeadStack
+from neurotemplate.modeling.rc import RCBlock
+from neurotemplate.modeling.zones import Zone, build_zones
 
 
 class GRUBlock(nn.Module):
@@ -88,33 +91,16 @@ class GRUBlock(nn.Module):
         self.output = nn.Linear(hidden_size, outsize, bias=bias)
         self._h: Optional[torch.Tensor] = None
 
-        # SSMGrad hands us cat([y_window, u_window, d_window]) — key-major:
-        # [y_0..y_{s-1}, u_0..u_{s-1}, d_0..d_{s-1}]. A GRU reads time-major:
-        # [y_0,u_0,d_0, y_1,u_1,d_1, ...]. The reorder is a fixed permutation
-        # of positions — it depends only on (widths, in_steps), never on the
-        # data — so compute it once here instead of on every call.
-        block_starts = []
-        offset = 0
-        for w in self.widths:
-            block_starts.append(offset)
-            offset += in_steps * w
-
-        perm = [
-            start + t * w + j
-            for t in range(in_steps)
-            for start, w in zip(block_starts, self.widths)
-            for j in range(w)
-        ]
+        # SSMGrad hands us a key-major window (see `windows`). A GRU reads
+        # time-major, and the reorder is a fixed permutation of positions —
+        # it depends only on (widths, in_steps), never on the data — so
+        # compute it once here instead of on every call.
         self.register_buffer(
-            "_seq_perm", torch.tensor(perm, dtype=torch.long), persistent=False
+            "_seq_perm",
+            torch.tensor(windows.time_major(self.widths, in_steps), dtype=torch.long),
+            persistent=False,
         )
-
-        # The newest timestep is a contiguous chunk at the end of each
-        # per-key block — no gather needed, just three static slices.
-        self._last_step_slices = [
-            slice(start + (in_steps - 1) * w, start + in_steps * w)
-            for start, w in zip(block_starts, self.widths)
-        ]
+        self._last_step_slices = windows.last_step(self.widths, in_steps)
 
     def reset(self) -> None:
         """Clear hidden state. Call before each new sequence."""
@@ -200,6 +186,85 @@ class GRUBlock(nn.Module):
         return self.output(out[:, -1, :])          # [batch, outsize]
 
 
+class PerZoneBlock(nn.Module):
+    """
+    One independent sub-block per zone, over the one window they all share.
+
+    Each sub-block sees only its own zone's Y and U columns plus every D
+    column (see `zones` for what a zone owns), predicts only its own Y
+    channels, and never reads another zone's state. The wrapper does two
+    things and nothing else: gather each zone's slice out of the shared
+    flattened window, and put the per-zone outputs back in Y order.
+
+    Both are fixed permutations of positions, so both are `index_select`
+    against a buffer computed at construction — which keeps the whole thing
+    vmap-safe, and so keeps the sampled gradient penalty working.
+
+    Args:
+        zones: the partition, from `zones.build_zones`.
+        widths: `(ny, nu, nd)` of the full mapping.
+        in_steps: history window length.
+        make_block: `(ny, nu, nd) -> nn.Module` for one zone's sub-block.
+            Called once per zone, so every zone gets its own parameters.
+    """
+
+    def __init__(self, zones: list[Zone], widths: tuple[int, int, int],
+                 in_steps: int, make_block: Callable[[int, int, int], nn.Module]):
+        super().__init__()
+        ny, _, nd = widths
+        self.zone_names = [z.name for z in zones]
+        self.in_features = in_steps * sum(widths)
+        self.out_features = ny
+
+        self.blocks = nn.ModuleList(
+            [make_block(z.ny, z.nu, nd) for z in zones]
+        )
+        for i, zone in enumerate(zones):
+            self.register_buffer(
+                f"_gather_{i}",
+                torch.tensor(
+                    windows.gather_columns(
+                        widths, in_steps,
+                        (zone.y_idx, zone.u_idx, tuple(range(nd))),
+                    ),
+                    dtype=torch.long,
+                ),
+                persistent=False,
+            )
+
+        # Sub-block outputs concatenate in zone order; this puts them back in
+        # the order nm_mapping["Y"] lists, which is the order the loss and the
+        # autoregressive feedback both assume.
+        zone_order = [i for zone in zones for i in zone.y_idx]
+        self.register_buffer(
+            "_to_y_order",
+            torch.tensor(
+                [zone_order.index(i) for i in range(ny)], dtype=torch.long
+            ),
+            persistent=False,
+        )
+
+    def reset(self) -> None:
+        """Clear every stateful sub-block. No-op for stateless ones."""
+        for block in self.blocks:
+            reset = getattr(block, "reset", None)
+            if reset is not None:
+                reset()
+
+    def reg_error(self) -> torch.Tensor:
+        errors = [b.reg_error() for b in self.blocks if hasattr(b, "reg_error")]
+        return torch.mean(torch.stack(errors)) if errors else torch.zeros(())
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        dim = x.ndim - 1
+        out = torch.cat(
+            [block(x.index_select(dim, getattr(self, f"_gather_{i}")))
+             for i, block in enumerate(self.blocks)],
+            dim=-1,
+        )
+        return out.index_select(dim, self._to_y_order)
+
+
 class SSMGrad(nn.Module):
     """
     State space model for discrete-time dynamics:
@@ -278,19 +343,38 @@ class SSMGrad(nn.Module):
 
 
 # ── Model factory functions ──────────────────────────────────────
+#
+# Every factory takes the same (cfg, nm_mapping, zones) so the catalog can
+# dispatch on name alone. `zones` is the Y/U partition (see `zones`); the
+# families that model all outputs jointly ignore it, and `validate()` rejects
+# `per_zone` for those rather than letting it silently do nothing.
+
+def _widths(nm_mapping: dict[str, list[str]]) -> tuple[int, int, int]:
+    """(ny, nu, nd) — the channel counts every factory starts from."""
+    return tuple(len(nm_mapping[key]) for key in ("Y", "U", "D"))
+
 
 @beartype
-def get_mlp(cfg: ModelingConfig, nm_mapping: dict[str, list[str]]) -> SSMGrad:
-    ny = len(nm_mapping['Y'])
-    nu = len(nm_mapping['U'])
-    nd = len(nm_mapping['D'])
-    insize = (ny + nu + nd) * cfg.in_steps
+def get_mlp(cfg: ModelingConfig, nm_mapping: dict[str, list[str]],
+            zones: list[Zone]) -> SSMGrad:
+    ny, nu, nd = _widths(nm_mapping)
 
-    fy = blocks.MLP(
-        insize=insize, outsize=ny, bias=True,
-        linear_map=nn.Linear, nonlin=nn.ReLU,
-        hsizes=cfg.num_layers * [(2**cfg.log2_hidden_size)],
-    )
+    def make_mlp(out: int, insize: int) -> nn.Module:
+        return blocks.MLP(
+            insize=insize, outsize=out, bias=True,
+            linear_map=nn.Linear, nonlin=nn.ReLU,
+            hsizes=cfg.num_layers * [(2**cfg.log2_hidden_size)],
+        )
+
+    if cfg.per_zone:
+        fy = PerZoneBlock(
+            zones, (ny, nu, nd), cfg.in_steps,
+            make_block=lambda z_ny, z_nu, z_nd: make_mlp(
+                z_ny, cfg.in_steps * (z_ny + z_nu + z_nd)),
+        )
+    else:
+        fy = make_mlp(ny, cfg.in_steps * (ny + nu + nd))
+
     return SSMGrad(
         fy, None, None, ny, nu, nd,
         cfg.in_steps, cfg.residual, separable=False,
@@ -298,10 +382,9 @@ def get_mlp(cfg: ModelingConfig, nm_mapping: dict[str, list[str]]) -> SSMGrad:
 
 
 @beartype
-def get_nssm(cfg: ModelingConfig, nm_mapping: dict[str, list[str]]) -> SSMGrad:
-    ny = len(nm_mapping['Y'])
-    nu = len(nm_mapping['U'])
-    nd = len(nm_mapping['D'])
+def get_nssm(cfg: ModelingConfig, nm_mapping: dict[str, list[str]],
+             zones: list[Zone]) -> SSMGrad:
+    ny, nu, nd = _widths(nm_mapping)
     s = cfg.in_steps
 
     fy = blocks.MLP(s*ny, ny, bias=True, linear_map=nn.Linear,
@@ -318,10 +401,9 @@ def get_nssm(cfg: ModelingConfig, nm_mapping: dict[str, list[str]]) -> SSMGrad:
 
 
 @beartype
-def get_lssm(cfg: ModelingConfig, nm_mapping: dict[str, list[str]]) -> SSMGrad:
-    ny = len(nm_mapping['Y'])
-    nu = len(nm_mapping['U'])
-    nd = len(nm_mapping['D'])
+def get_lssm(cfg: ModelingConfig, nm_mapping: dict[str, list[str]],
+             zones: list[Zone]) -> SSMGrad:
+    ny, nu, nd = _widths(nm_mapping)
     s = cfg.in_steps
 
     fy = blocks.Linear(s*ny, ny, bias=True, linear_map=nn.Linear)
@@ -335,21 +417,65 @@ def get_lssm(cfg: ModelingConfig, nm_mapping: dict[str, list[str]]) -> SSMGrad:
 
 
 @beartype
-def get_gru(cfg: ModelingConfig, nm_mapping: dict[str, list[str]]) -> SSMGrad:
-    ny = len(nm_mapping['Y'])
-    nu = len(nm_mapping['U'])
-    nd = len(nm_mapping['D'])
+def get_gru(cfg: ModelingConfig, nm_mapping: dict[str, list[str]],
+            zones: list[Zone]) -> SSMGrad:
+    ny, nu, nd = _widths(nm_mapping)
 
-    fy = GRUBlock(
-        ny, nu, nd, cfg.in_steps, outsize=ny,
-        hidden_size=(2**cfg.log2_hidden_size), num_layers=cfg.num_layers,
-    )
+    def make_gru(z_ny: int, z_nu: int, z_nd: int) -> nn.Module:
+        return GRUBlock(
+            z_ny, z_nu, z_nd, cfg.in_steps, outsize=z_ny,
+            hidden_size=(2**cfg.log2_hidden_size), num_layers=cfg.num_layers,
+        )
+
     # Same in_steps window as every other family. The GRU is additionally
     # stateful, so its memory outlives the window during a rollout — but the
     # window is what warms it, so no caller-side priming is needed.
+    fy = (PerZoneBlock(zones, (ny, nu, nd), cfg.in_steps, make_block=make_gru)
+          if cfg.per_zone else make_gru(ny, nu, nd))
     return SSMGrad(
         fy, None, None, ny, nu, nd,
         cfg.in_steps, cfg.residual, separable=False,
+    )
+
+
+@beartype
+def get_2r2c(cfg: ModelingConfig, nm_mapping: dict[str, list[str]],
+             zones: list[Zone]) -> SSMGrad:
+    """Grey-box thermal model: one 2R2C network per zone. See `rc`.
+
+    Always per-zone — an RC network describes *a* zone, and with no
+    `zone_mapping` hook the single default zone still gives each Y channel
+    its own network, just driven by every U channel.
+    """
+    ny, nu, nd = _widths(nm_mapping)
+
+    if not cfg.residual:
+        raise ValueError(
+            "2r2c requires residual=True: the RC block predicts the "
+            "temperature *increment*, which SSMGrad adds to the current "
+            "state. With residual=False the increment would be read as an "
+            "absolute temperature."
+        )
+    if cfg.steps_per_hour is None:
+        raise ValueError(
+            "2r2c needs cfg.steps_per_hour to place its time constants. The "
+            "CLI sets it from the data's sampling frequency; set it by hand "
+            "(steps_per_hour = 3600 / timestep_seconds) if you are building "
+            "a model outside the CLI."
+        )
+
+    fy = PerZoneBlock(
+        zones, (ny, nu, nd), cfg.in_steps,
+        make_block=lambda z_ny, z_nu, z_nd: RCBlock(
+            z_ny, z_nu, z_nd, cfg.in_steps,
+            steps_per_hour=cfg.steps_per_hour,
+            hidden_size=(2**cfg.log2_hidden_size),
+            num_layers=cfg.num_layers,
+        ),
+    )
+    return SSMGrad(
+        fy, None, None, ny, nu, nd,
+        cfg.in_steps, residual=True, separable=False,
     )
 
 
@@ -375,7 +501,8 @@ class _SetpointPassthrough(nn.Module):
 
 
 @beartype
-def get_dummy(cfg: ModelingConfig, nm_mapping: dict[str, list[str]]) -> SSMGrad:
+def get_dummy(cfg: ModelingConfig, nm_mapping: dict[str, list[str]],
+              zones: list[Zone]) -> SSMGrad:
     """Content-free surrogate that predicts zone temp = cooling setpoint.
 
     Used to test whether the DPC policy can be trained against a trivially
@@ -383,9 +510,7 @@ def get_dummy(cfg: ModelingConfig, nm_mapping: dict[str, list[str]]) -> SSMGrad:
     temp is driven by its own setpoint) and must run in physical units
     (norm_type=None) so setpoint and zone temp share units.
     """
-    ny = len(nm_mapping['Y'])
-    nu = len(nm_mapping['U'])
-    nd = len(nm_mapping['D'])
+    ny, nu, nd = _widths(nm_mapping)
     if ny != nu:
         raise ValueError(
             f"dummy model needs one setpoint per zone temp: ny ({ny}) must "
@@ -403,8 +528,13 @@ model_catalog = {
     "nssm": get_nssm,
     "lssm": get_lssm,
     "gru": get_gru,
+    "2r2c": get_2r2c,
     "dummy": get_dummy,
 }
+
+#: Families whose block topology can be split per zone. `2r2c` is absent
+#: because it is per-zone unconditionally, not because it cannot be.
+PER_ZONE_FAMILIES = ("mlp", "gru")
 
 
 # ── Model description (for reportcard) ───────────────────────────
@@ -430,6 +560,15 @@ def _describe_block(block: Optional[nn.Module]) -> Optional[dict]:
         info["in_features"] = block.in_features
     if hasattr(block, "out_features"):
         info["out_features"] = block.out_features
+    if isinstance(block, PerZoneBlock):
+        info["zones"] = {
+            name: _describe_block(sub)
+            for name, sub in zip(block.zone_names, block.blocks)
+        }
+    # A block that can say something about itself in its own vocabulary —
+    # RCBlock reports the time constants it learned — says it here.
+    if hasattr(block, "describe"):
+        info.update(block.describe())
     return info
 
 
@@ -512,6 +651,7 @@ def get_dynamics(
     cfg: ModelingConfig,
     nm_mapping: dict[str, list[str]],
     head_stack: Optional[HeadStack] = None,
+    zone_spec: Optional[dict[str, dict[str, list[str]]]] = None,
 ) -> SystemPreview:
     """
     Wrap a dynamics model in a Neuromancer SystemPreview for autoregressive rollout.
@@ -523,6 +663,10 @@ def get_dynamics(
     SystemPreview handles temporal windowing via input_map: at each rollout
     step i, the Node receives a window of model.in_steps past values for each
     input, flattened to [batch, model.in_steps*features].
+
+    `zone_spec` is the optional `zone_mapping` hook's result, splitting Y and
+    U across independent zones (see `zones`). None means one zone holding
+    every channel, which is the right answer for a single-zone building.
     """
     if cfg.model not in model_catalog:
         raise ValueError(
@@ -530,7 +674,8 @@ def get_dynamics(
             f"Available: {list(model_catalog.keys())}"
         )
 
-    model = model_catalog[cfg.model](cfg, nm_mapping)
+    zones = build_zones(nm_mapping, zone_spec)
+    model = model_catalog[cfg.model](cfg, nm_mapping, zones)
 
     # Heads are attached post-construction so each factory stays focused
     # on its own block topology. The first-pass model output width is
@@ -542,6 +687,19 @@ def get_dynamics(
                 f"head_stack.raw_width={head_stack.raw_width} does not match "
                 f"model.ny={model.ny}; factories (currently) assume width-1 heads."
             )
+        # 2r2c produces an increment, and only a residual-compatible head
+        # adds the current state back. A head that does not would read the
+        # increment as an absolute temperature — silently, and only wrong
+        # by however much the zone is away from zero.
+        if cfg.model == "2r2c":
+            blind = [name for name, head in zip(head_stack.channel_names,
+                                                head_stack.heads)
+                     if not head.residual_compatible]
+            if blind:
+                raise ValueError(
+                    f"2r2c predicts increments, so every Y channel needs a "
+                    f"residual-compatible head; {blind} are not."
+                )
         model.head_stack = head_stack
 
     # Temporal windowing: the gathered window must be exactly as wide as the

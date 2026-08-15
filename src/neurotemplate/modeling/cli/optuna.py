@@ -49,6 +49,7 @@ def objective(
     nm_mapping: dict[str, list[str]],
     norm_stats: dict[str, dict[str, float]],
     head_stack: Optional[HeadStack],
+    zone_spec: Optional[dict[str, dict[str, list[str]]]] = None,
 ) -> float:
     """Train under suggested hyperparameters across multiple seeds; return mean dev loss."""
     trial_cfg = load_modeling_hooks(cfg).hyper_args(trial, cfg)
@@ -73,6 +74,7 @@ def objective(
             grad_masks=trial_grad_masks,
             norm_stats=norm_stats,
             head_stack=head_stack,
+            zone_spec=zone_spec,
             global_logger=None,
         )
 
@@ -115,7 +117,9 @@ def main() -> None:
 
     # ── Data, normalization, synth_cfg (all shared across trials) ─
     train_raws, dev_raws, test_raws, freq_s = get_data_splits(cfg)
+    cfg.steps_per_hour = 3600.0 / freq_s
     nm_mapping = data_mapping(df=train_raws[0], cfg=cfg)
+    zone_spec = hooks.zone_mapping(nm_mapping, cfg) if hasattr(hooks, "zone_mapping") else None
 
     norm_overrides = column_norm_config(nm_mapping)
     import pandas as _pd
@@ -158,7 +162,7 @@ def main() -> None:
     study.optimize(
         lambda trial: objective(
             trial, cfg, train_dfs, dev_dfs,
-            nm_mapping, norm_stats, head_stack,
+            nm_mapping, norm_stats, head_stack, zone_spec,
         ),
         n_trials=cfg.n_trials,
         n_jobs=1,
@@ -212,7 +216,7 @@ def main() -> None:
         nm_mapping=nm_mapping, norm_stats=norm_stats,
         grad_masks=grad_masks, synth_cfg=synth_cfg,
         freq_s=freq_s, logger=global_logger,
-        head_stack=head_stack,
+        head_stack=head_stack, zone_spec=zone_spec,
         extra_metrics={"search_time": search_time_s},
     )
 

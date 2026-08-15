@@ -63,10 +63,12 @@ def main() -> None:
         print("Loading data...")
 
     train_raws, dev_raws, test_raws, freq_s = get_data_splits(cfg)
+    cfg.steps_per_hour = 3600.0 / freq_s
     # Column classification only needs the schema — first train df is
     # enough since `_validate_split_columns` already enforced cross-file
     # column match.
     nm_mapping = data_mapping(df=train_raws[0], cfg=cfg)
+    zone_spec = hooks.zone_mapping(nm_mapping, cfg) if hasattr(hooks, "zone_mapping") else None
 
     norm_overrides = column_norm_config(nm_mapping)
     # Stats pooled across all training files so per-column ranges reflect
@@ -123,7 +125,7 @@ def main() -> None:
         nm_mapping=nm_mapping, norm_stats=norm_stats,
         grad_masks=grad_masks, synth_cfg=synth_cfg,
         freq_s=freq_s, logger=global_logger,
-        head_stack=head_stack,
+        head_stack=head_stack, zone_spec=zone_spec,
     )
 
     if cfg.verbose and hasattr(global_logger, "run"):
