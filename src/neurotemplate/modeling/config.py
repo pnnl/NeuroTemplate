@@ -61,6 +61,27 @@ class ModelingConfig:
     # reads it, to place its time constants in real hours.
     steps_per_hour: Optional[float] = None
 
+    # ---- 2R2C ----------------------------------------------------------------
+    # The RC network's three component time constants, in hours: zone<->ambient,
+    # zone<->mass from the zone's side, and mass<->zone from the mass's side.
+    # These are the storage *prior*, and the reportcard prints the two modes
+    # they produce (0.6 h and 13.4 h at these defaults on 5-minute data).
+    #
+    # They are a prior rather than a fitted parameter because a training
+    # rollout cannot identify them: the mass temperature is unobserved, every
+    # rollout has to guess it from an in_steps window that is far shorter than
+    # the mass lags, and a wrong guess is cheaper to absorb by shortening the
+    # slow mode than by fixing the forcing. Left trainable, the optimizer does
+    # exactly that. Set these from what you know about the building — a
+    # measured free-decay time constant is the number tau_slow should match.
+    rc_tau_ambient_h: float = 2.0
+    rc_tau_zone_mass_h: float = 1.0
+    rc_tau_mass_zone_h: float = 4.0
+    # Let training move the three above. Only worth it when the rollout is
+    # long relative to the slow mode AND the data excites it; otherwise it
+    # drags tau_slow down and the reportcard's number stops being checkable.
+    rc_train_taus: bool = False
+
     # ---- TRAIN ---------------------------------------------------------------
     epochs: int = 300
     epoch_verbose: int = 1
@@ -140,6 +161,9 @@ class ModelingConfig:
             "synth_hours", "synth_n_plot",
         ]:
             check_non_negative(self, name)
+
+        for name in ["rc_tau_ambient_h", "rc_tau_zone_mass_h", "rc_tau_mass_zone_h"]:
+            check_positive(self, name)
 
         check_one_of(self, "model", ["mlp", "nssm", "lssm", "gru", "2r2c", "dummy"])
         check_one_of(self, "save_config", ["last_step", "all", "None", None])

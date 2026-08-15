@@ -63,6 +63,27 @@ under any input — including the adversarial inputs a DPC policy will find.
 reportcard. `tau_slow` is the number pre-cooling lives on, and you can check
 it against the building instead of taking the surrogate's word for it.
 
+The storage is a prior, not a fit
+================================
+
+The three rates default to **frozen** (`cfg.rc_train_taus`). That is not
+timidity, it is what the data supports. The mass temperature is unobserved,
+so every rollout has to seed it from the `in_steps` window — an hour at
+most, against a mass that lags by many. The seed is therefore wrong, and
+the optimizer has two ways to reduce the damage: fix the forcing, or
+shorten the slow mode so the wrong seed matters less. It picks the second.
+Measured on synthetic data from a known 31.6 h building, seeded with the
+true mass, training moves tau_slow the right way (13.4 h -> 16.5 h); seeded
+the way a real rollout must seed it, the same training drives it to 8.7 h.
+Letting the window's own history choose the seed does not help, because an
+hour of zone temperature carries no information about a ten-hour state.
+
+So `tau_slow` is something you assert and the reportcard reads back, not
+something the fit discovers. Set it from what you know — a free-decay
+episode gives it directly — and let training learn the heat input around
+it. Unfreeze only when the rollout is long relative to the slow mode and
+the data actually excites it.
+
 What it gives up
 ================
 
@@ -91,20 +112,20 @@ from neurotemplate.modeling import windows
 #: with essentially no thermal inertia.
 MIN_TAU_STEPS = 2.0
 
-#: Initial *component* time constants in hours: zone<->ambient, zone<->mass
+#: Default *component* time constants in hours: zone<->ambient, zone<->mass
 #: from the zone's side, and mass<->zone from the mass's side. The last two
 #: differ by the capacitance ratio C_m / C_z = a_m / a_c, so 1 h against 4 h
-#: starts the mass four times heavier than the air.
+#: makes the mass four times heavier than the air. Override per run with
+#: `cfg.rc_tau_ambient_h` and friends.
 #:
-#: What the optimizer actually sees are the *emergent* modes, which are not
-#: any of these three: at a 5-minute timestep this triple starts the block at
-#: tau_fast = 0.6 h and tau_slow = 13.4 h. That is an ordinary commercial
-#: building, and it is a deliberate starting point — beginning with no
-#: storage would ask gradient descent to discover the slow mode from a
-#: rollout too short to show it.
-INIT_TAU_AMBIENT_H = 2.0
-INIT_TAU_ZONE_MASS_H = 1.0
-INIT_TAU_MASS_ZONE_H = 4.0
+#: These three are not the numbers you read off the model. The *modes* are,
+#: and they are neither of the three: at a 5-minute timestep this triple
+#: gives tau_fast = 0.6 h and tau_slow = 13.4 h — an ordinary commercial
+#: building. `mode_taus` is the conversion, and the reportcard prints it, so
+#: set these, train, and read back what you actually built.
+DEFAULT_TAU_AMBIENT_H = 2.0
+DEFAULT_TAU_ZONE_MASS_H = 1.0
+DEFAULT_TAU_MASS_ZONE_H = 4.0
 
 
 def _init_theta(tau_hours: float, steps_per_hour: float) -> float:
@@ -182,6 +203,10 @@ class RCBlock(nn.Module):
 
     def __init__(self, ny: int, nu: int, nd: int, in_steps: int,
                  steps_per_hour: float, hidden_size: int, num_layers: int,
+                 tau_hours: tuple[float, float, float] = (
+                     DEFAULT_TAU_AMBIENT_H, DEFAULT_TAU_ZONE_MASS_H,
+                     DEFAULT_TAU_MASS_ZONE_H),
+                 train_taus: bool = False,
                  channel_names: tuple[str, ...] = ()):
         super().__init__()
         self.widths = (ny, nu, nd)
@@ -198,10 +223,11 @@ class RCBlock(nn.Module):
         _, self._u_last, self._d_last = windows.last_step(self.widths, in_steps)
 
         self._theta = nn.ParameterDict({
-            name: nn.Parameter(torch.full((ny,), _init_theta(hours, steps_per_hour)))
-            for name, hours in (("ambient", INIT_TAU_AMBIENT_H),
-                                ("zone_mass", INIT_TAU_ZONE_MASS_H),
-                                ("mass_zone", INIT_TAU_MASS_ZONE_H))
+            name: nn.Parameter(
+                torch.full((ny,), _init_theta(hours, steps_per_hour)),
+                requires_grad=train_taus,
+            )
+            for name, hours in zip(("ambient", "zone_mass", "mass_zone"), tau_hours)
         })
 
         # Heat input, from the current inputs only — never from the state.
