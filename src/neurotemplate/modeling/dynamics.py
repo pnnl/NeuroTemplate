@@ -218,18 +218,19 @@ class PerZoneBlock(nn.Module):
         self.out_features = ny
 
         self.blocks = nn.ModuleList([make_block(z, nd) for z in zones])
-        for i, zone in enumerate(zones):
-            self.register_buffer(
-                f"_gather_{i}",
-                torch.tensor(
-                    windows.gather_columns(
-                        widths, in_steps,
-                        (zone.y_idx, zone.u_idx, tuple(range(nd))),
-                    ),
-                    dtype=torch.long,
-                ),
-                persistent=False,
-            )
+
+        # Every zone's gather indices live in one buffer, so they follow the
+        # module onto its device together; `_spans` says which stretch of it
+        # belongs to which zone.
+        gathers, self._spans, cursor = [], [], 0
+        for zone in zones:
+            indices = windows.gather_columns(
+                widths, in_steps, (zone.y_idx, zone.u_idx, tuple(range(nd))))
+            gathers += indices
+            self._spans.append(slice(cursor, cursor + len(indices)))
+            cursor += len(indices)
+        self.register_buffer(
+            "_gather", torch.tensor(gathers, dtype=torch.long), persistent=False)
 
         # Sub-block outputs concatenate in zone order; this puts them back in
         # the order nm_mapping["Y"] lists, which is the order the loss and the
@@ -255,10 +256,10 @@ class PerZoneBlock(nn.Module):
         return torch.mean(torch.stack(errors)) if errors else torch.zeros(())
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        dim = x.ndim - 1
+        dim = x.ndim - 1                    # the feature axis, batched or not
         out = torch.cat(
-            [block(x.index_select(dim, getattr(self, f"_gather_{i}")))
-             for i, block in enumerate(self.blocks)],
+            [block(x.index_select(dim, self._gather[span]))
+             for block, span in zip(self.blocks, self._spans)],
             dim=-1,
         )
         return out.index_select(dim, self._to_y_order)

@@ -134,8 +134,8 @@ def _init_theta(tau_hours: float, steps_per_hour: float) -> float:
     Inverts `tau = MIN_TAU_STEPS + softplus(theta)`. Coarse data can make a
     requested time constant unrepresentable — at an hourly timestep the
     1 h zone<->mass default is below the two-step floor — so the request is
-    clamped rather than allowed to produce a NaN. The floor is a starting
-    point either way, and training moves it.
+    clamped rather than allowed to produce a NaN. The reportcard prints what
+    the clamp settled on.
     """
     tau_steps = max(tau_hours * steps_per_hour, MIN_TAU_STEPS + 1.0)
     return math.log(math.expm1(tau_steps - MIN_TAU_STEPS))
@@ -196,9 +196,14 @@ class RCBlock(nn.Module):
     Args:
         ny / nu / nd: channel counts for this block's own slice of Y, U, D.
         in_steps: history window length.
-        steps_per_hour: timesteps per hour, used only to turn the initial
-            time constants from hours into steps.
+        steps_per_hour: timesteps per hour. Only ever used to convert time
+            constants between hours and steps — on the way in for
+            `tau_hours`, on the way out for `describe`.
         hidden_size / num_layers: size of the learned heat-input MLP.
+        tau_hours: the storage prior, `(ambient, zone_mass, mass_zone)`.
+        train_taus: let the optimizer move that prior. Off by default; the
+            module docstring explains why.
+        channel_names: Y column names, for labelling `describe`.
     """
 
     def __init__(self, ny: int, nu: int, nd: int, in_steps: int,
@@ -238,10 +243,10 @@ class RCBlock(nn.Module):
             linear_map=nn.Linear, nonlin=nn.ReLU,
             hsizes=num_layers * [hidden_size],
         )
-        # Start with no forcing at all, so the first epochs see a pure
-        # free-decay building and the optimizer shapes the storage before it
-        # shapes the heat input. Without this the MLP's O(1) initial output
-        # swamps a normalized temperature step, which is O(0.01).
+        # Start with no forcing at all. A freshly initialized MLP emits O(1),
+        # and one step of a normalized temperature is O(0.01), so an untouched
+        # gain would swamp the RC dynamics for the first epochs and the
+        # optimizer would spend them undoing its own initialization.
         final = self.gain.linear[-1]
         nn.init.zeros_(final.weight)
         nn.init.zeros_(final.bias)

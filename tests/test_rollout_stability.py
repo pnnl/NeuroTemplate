@@ -80,13 +80,13 @@ def test_monotone_truth_is_not_flagged():
     assert s.drift_ratio == pytest.approx(1.0)
 
 
-def test_flat_prediction_is_flagged():
-    """The other degenerate mode: a model that stops moving at all."""
-    true = _cycle()
-    flat = torch.full((1, 100, 1), 24.0)
-    s = rollout_stability(flat, true, ["zone"])[0]
+def test_a_prediction_that_stops_moving_is_flagged():
+    """The other degenerate mode, and the one that reads as rise fraction 0
+    rather than 1: a model that has stopped responding at all."""
+    s = rollout_stability(torch.full((1, 100, 1), 24.0), _cycle(), ["zone"])[0]
     assert s.pred_rise_fraction == pytest.approx(0.0)
     assert s.rise_excess > 0.25
+    assert s.looks_like_ramp()
 
 
 def _staged(n: int = 96) -> torch.Tensor:
@@ -128,13 +128,6 @@ def test_a_real_ramp_on_a_held_signal_is_still_flagged():
     assert s.looks_like_ramp()
 
 
-def test_stuck_flat_prediction_is_flagged_as_a_ramp():
-    """The other monotone degenerate case: rise fraction 0, not 1."""
-    s = rollout_stability(torch.full((1, 96, 1), 400.0), _cycle(96), ["y"])[0]
-    assert s.pred_rise_fraction == pytest.approx(0.0)
-    assert s.looks_like_ramp()
-
-
 def test_looks_like_ramp_requires_both_conditions():
     """Neither condition alone is sufficient, in both directions."""
     # Monotone prediction AND monotone truth: extreme, but excess is 0.
@@ -166,12 +159,9 @@ def test_drift_ratio_is_inf_when_only_prediction_drifts():
     assert s.true_drift == pytest.approx(0.0)
     assert s.drift_ratio == float("inf")
 
-
-def test_neither_drifts_gives_ratio_one():
-    """0/0 resolves to 1.0 (healthy), not NaN — nothing is wrong here."""
-    y = torch.zeros(1, 20, 1)
-    s = rollout_stability(y, y, ["y"])[0]
-    assert s.drift_ratio == pytest.approx(1.0)
+    # ...and the 0/0 case beside it resolves to 1.0 (healthy), not NaN.
+    still = torch.zeros(1, 20, 1)
+    assert rollout_stability(still, still, ["y"])[0].drift_ratio == pytest.approx(1.0)
 
 
 def test_averaged_over_windows_not_pooled():
