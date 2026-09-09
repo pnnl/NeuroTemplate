@@ -36,7 +36,8 @@ from neurotemplate.common.data_utils import (
 )
 from neurotemplate.modeling.experiment import resolve_device, set_seeds, train_with_curriculum
 from neurotemplate.modeling.heads import HeadStack
-from neurotemplate.modeling.pipeline import train_and_evaluate
+from neurotemplate.modeling.pipeline import resolve_block_spec, train_and_evaluate
+from neurotemplate.modeling.reportcard import spread_stats
 from neurotemplate.hooks import load_modeling_hooks
 
 
@@ -49,9 +50,14 @@ def objective(
     nm_mapping: dict[str, list[str]],
     norm_stats: dict[str, dict[str, float]],
     head_stack: Optional[HeadStack],
-    zone_spec: Optional[dict[str, dict[str, list[str]]]] = None,
+    block_spec: Optional[dict[str, dict]] = None,
 ) -> float:
-    """Train under suggested hyperparameters across multiple seeds; return mean dev loss."""
+    """Train under suggested hyperparameters across multiple seeds; return mean dev loss.
+
+    Prints the seeds' min/median/max dev loss (via `spread_stats`) when
+    `cfg.verbose` — free, since the losses are already in hand, and it says
+    whether the search is discriminating between trials or chasing noise.
+    """
     trial_cfg = load_modeling_hooks(cfg).hyper_args(trial, cfg)
     trial_cfg.epochs = trial_cfg.trial_epochs
     trial_cfg.verbose = False
@@ -82,6 +88,12 @@ def objective(
         trial.report(sum(losses) / len(losses), step=i)
         if trial.should_prune():
             raise TrialPruned()
+
+    if cfg.verbose:
+        spread = spread_stats(losses)
+        print(f"  trial {trial.number}: dev_loss across {len(losses)} seeds "
+              f"min={spread.min:.4f} median={spread.median:.4f} "
+              f"max={spread.max:.4f}")
 
     return sum(losses) / len(losses)
 
@@ -182,6 +194,9 @@ def main() -> None:
         print("\n" + "=" * 60)
         print("PHASE 2: Full Training with Best Hyperparameters")
         print("=" * 60)
+        if cfg.ensemble_seeds > 1:
+            print(f"Ensemble: {cfg.ensemble_seeds} seeds "
+                  f"({cfg.seed}..{cfg.seed + cfg.ensemble_seeds - 1})")
 
     set_seeds(cfg.seed)
     unknown = [k for k in study.best_params if not hasattr(cfg, k)]

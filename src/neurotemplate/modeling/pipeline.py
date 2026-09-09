@@ -14,9 +14,15 @@ non-trivial steps):
 and passed to the evaluation path. None means "physics checks disabled for
 this run" — the single fact, not a re-check at every callsite. Training never
 sees it: the scenarios are assertions on the trained surrogate, not a loss.
+
+`train_and_evaluate` also owns the seed-ensemble loop (`cfg.ensemble_seeds`):
+every number this module produces is otherwise a single seed's draw, and this
+is the one place that both trains a final model and produces the reportcard,
+so it is the DRY home for turning several draws into a reported spread. See
+ModelingConfig.ensemble_seeds and reportcard.EnsembleSpread.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from time import perf_counter as tic
 from typing import Optional
@@ -42,7 +48,11 @@ from neurotemplate.common.metrics import (
 from neurotemplate.common.reportcard import write_reportcard as _write_reportcard
 from neurotemplate.modeling.dynamics import describe_dynamics
 from neurotemplate.modeling.plotting import plot_predictions, plot_synthetic
-from neurotemplate.modeling.reportcard import render_reportcard as _render_reportcard
+from neurotemplate.modeling.reportcard import (
+    EnsembleSpread,
+    render_reportcard as _render_reportcard,
+    spread_stats,
+)
 from neurotemplate.modeling.scenarios import (
     ReadoutSummary,
     ScenarioOutcome,
@@ -288,6 +298,7 @@ def render_reportcard(
     best_dev_loss: Optional[float] = None,
     train_time_s: Optional[float] = None,
     split_sizes: Optional[dict[str, object]] = None,
+    ensemble: Optional[EnsembleSpread] = None,
 ) -> str:
     """
     Render the markdown reportcard for one run.
@@ -297,6 +308,9 @@ def render_reportcard(
     coverage check — head bounds live in normalized space, so the
     normalized split is what we want to compare against. Multi-file
     splits are concatenated for the coverage check only.
+
+    `ensemble` is the optional cfg.ensemble_seeds > 1 spread (see
+    train_and_evaluate); None renders no extra section.
     """
     arch = describe_dynamics(dyn_sys, cfg)
     if test_dfs is None:
@@ -314,6 +328,7 @@ def render_reportcard(
         physics=test_results.physics,
         physics_steps=test_results.physics_steps,
         readouts=test_results.readouts,
+        ensemble=ensemble,
         nm_mapping=nm_mapping,
         head_stack=head_stack,
         norm_stats=norm_stats,
@@ -393,6 +408,129 @@ def log_test_results(
             )
 
 
+# ── Seed ensemble ─────────────────────────────────────────────────
+#
+# `cfg.ensemble_seeds > 1` reruns train + evaluate at cfg.seed + 1 ..
+# cfg.seed + ensemble_seeds - 1 (the primary, seed + 0, is trained by
+# train_and_evaluate itself) and reduces the per-seed results to an
+# EnsembleSpread. No block, family, or hook ever sees a seed — this loop
+# is the only place one is threaded, via the global RNG set_seeds() reseeds.
+
+
+def _tau_slow_by_channel(arch: dict) -> dict[str, float]:
+    """Flatten describe_dynamics's nested block info to {channel: tau_slow}.
+
+    Walks the same `blocks` nesting dynamics._describe_block builds (a
+    BlockStack's per-block descriptors, each optionally nested again). Only
+    2r2c blocks carry `time_constants_h`, so every other family is simply
+    absent from the result.
+    """
+    out: dict[str, float] = {}
+
+    def walk(info: Optional[dict]) -> None:
+        if info is None:
+            return
+        for channel, taus in info.get("time_constants_h", {}).items():
+            out[channel] = taus["slow"]
+        for sub in info.get("blocks", {}).values():
+            walk(sub)
+
+    for key in ("fy", "fu", "fd"):
+        walk(arch.get("blocks", {}).get(key))
+    return out
+
+
+def _build_ensemble_spread(
+    n_seeds: int,
+    per_seed_metrics: list[list[ChannelMetrics]],
+    per_seed_physics: list[Optional[list[ScenarioResult]]],
+    per_seed_tau_slow: list[dict[str, float]],
+) -> EnsembleSpread:
+    """Group each metric's per-seed values under its channel/key and reduce
+    with `spread_stats`. Every list argument has one entry per seed, in the
+    same order (primary first)."""
+    rmse: dict[str, list[float]] = {}
+    for metrics in per_seed_metrics:
+        for m in metrics:
+            rmse.setdefault(m.name, []).append(m.rmse)
+
+    physics: dict[str, list[float]] = {}
+    for results in per_seed_physics:
+        for r in (results or []):
+            physics.setdefault(r.key, []).append(r.value)
+
+    tau_slow: dict[str, list[float]] = {}
+    for taus in per_seed_tau_slow:
+        for channel, value in taus.items():
+            tau_slow.setdefault(channel, []).append(value)
+
+    return EnsembleSpread(
+        n_seeds=n_seeds,
+        rmse={k: spread_stats(v) for k, v in rmse.items()},
+        physics={k: spread_stats(v) for k, v in physics.items()},
+        tau_slow={k: spread_stats(v) for k, v in tau_slow.items()},
+    )
+
+
+def _run_ensemble_members(
+    cfg: ModelingConfig,
+    *,
+    train_dfs: list[DataFrame],
+    dev_dfs: list[DataFrame],
+    test_dfs: list[DataFrame],
+    nm_mapping: dict[str, list[str]],
+    norm_stats: dict,
+    grad_masks: dict,
+    synth_cfg: Optional[SynthSpec],
+    freq_s: float,
+    head_stack: Optional[HeadStack],
+    block_spec: Optional[dict[str, dict]],
+    plot_run_dir: Path,
+    primary_dyn_sys,
+    primary_test_results: TestResults,
+) -> EnsembleSpread:
+    """Train `cfg.ensemble_seeds - 1` more models (seeds cfg.seed + 1 ..
+    cfg.seed + ensemble_seeds - 1), score each through the same evaluation
+    path as the primary, and return the spread across the whole ensemble
+    (primary included).
+
+    Quiet and unplotted: only the primary model's weights, plots, and MLflow
+    artifacts are kept (see ModelingConfig.ensemble_seeds) — these extra
+    members exist purely to widen the spread this function returns.
+    """
+    quiet_cfg = replace(cfg, plot=False, verbose=False)
+
+    per_seed_metrics = [primary_test_results.metrics]
+    per_seed_physics = [primary_test_results.physics]
+    per_seed_tau_slow = [_tau_slow_by_channel(describe_dynamics(primary_dyn_sys, cfg))]
+
+    for i in range(1, cfg.ensemble_seeds):
+        if cfg.verbose:
+            print(f"Training ensemble member {i + 1}/{cfg.ensemble_seeds} "
+                  f"(seed={cfg.seed + i})...")
+        set_seeds(cfg.seed + i)
+        dyn_sys, _ = train_with_curriculum(
+            cfg=quiet_cfg,
+            train_dfs=train_dfs, dev_dfs=dev_dfs,
+            nm_mapping=nm_mapping, grad_masks=grad_masks, norm_stats=norm_stats,
+            head_stack=head_stack, block_spec=block_spec,
+            global_logger=None,
+        )
+        test_results = evaluate_and_plot(
+            cfg=quiet_cfg, dyn_sys=dyn_sys, test_dfs=test_dfs,
+            nm_mapping=nm_mapping, norm_stats=norm_stats,
+            synth_cfg=synth_cfg, freq_s=freq_s,
+            plot_run_dir=plot_run_dir, logger=None, grad_masks=grad_masks,
+        )
+        per_seed_metrics.append(test_results.metrics)
+        per_seed_physics.append(test_results.physics)
+        per_seed_tau_slow.append(_tau_slow_by_channel(describe_dynamics(dyn_sys, cfg)))
+
+    return _build_ensemble_spread(
+        cfg.ensemble_seeds, per_seed_metrics, per_seed_physics, per_seed_tau_slow,
+    )
+
+
 # ── Single full training run (consolidates main + optuna Phase 2) ──
 
 
@@ -421,13 +559,26 @@ def train_and_evaluate(
     calls train_with_curriculum directly — it deliberately skips
     eval/plot/reportcard for speed.
 
+    When `cfg.ensemble_seeds > 1`, this also trains that many more models at
+    cfg.seed + 1 .. cfg.seed + ensemble_seeds - 1 (see `_run_ensemble_members`)
+    and reports the spread across all of them. The primary run (this one, at
+    cfg.seed + 0) stays the one whose weights are logged, whose plots are
+    written, and whose reportcard is rendered — the ensemble adds error bars
+    around that one artifact, it does not change what artifact you get.
+
     `extra_metrics` lets the caller log run-level numbers that aren't part
     of the standard set (e.g. optuna's `search_time`).
 
-    Returns a dict with dyn_sys, best_dev_loss, train_time_s, and
-    test_results so the entry point can print a final summary.
+    Returns a dict with dyn_sys, best_dev_loss, train_time_s, test_results,
+    and ensemble (None unless cfg.ensemble_seeds > 1) so the entry point can
+    print a final summary.
     """
     train_t0 = tic()
+    # Reseed here rather than trust the caller to have left the RNG at
+    # cfg.seed: the ensemble loop below reseeds at cfg.seed + i for i > 0,
+    # and the primary (i = 0) needs the same explicit contract rather than
+    # an implicit "whatever the caller last seeded".
+    set_seeds(cfg.seed)
     dyn_sys, best_dev_loss = train_with_curriculum(
         cfg=cfg,
         train_dfs=train_dfs,
@@ -475,6 +626,17 @@ def train_and_evaluate(
     if cfg.verbose:
         print(f"Test inference time: {test_results.test_time_s:.2f}s")
 
+    ensemble = None
+    if cfg.ensemble_seeds > 1:
+        ensemble = _run_ensemble_members(
+            cfg,
+            train_dfs=train_dfs, dev_dfs=dev_dfs, test_dfs=test_dfs,
+            nm_mapping=nm_mapping, norm_stats=norm_stats, grad_masks=grad_masks,
+            synth_cfg=synth_cfg, freq_s=freq_s, head_stack=head_stack,
+            block_spec=block_spec, plot_run_dir=plot_run_dir,
+            primary_dyn_sys=dyn_sys, primary_test_results=test_results,
+        )
+
     md = render_reportcard(
         cfg=cfg, dyn_sys=dyn_sys, test_results=test_results,
         norm_stats=norm_stats, nm_mapping=nm_mapping,
@@ -487,6 +649,7 @@ def train_and_evaluate(
             name: {"rows": sum(len(d) for d in dfs), "files": len(dfs)}
             for name, dfs in (("train", train_dfs), ("dev", dev_dfs), ("test", test_dfs))
         },
+        ensemble=ensemble,
     )
     write_reportcard(md, Path(cfg.savedir), logger=logger)
 
@@ -495,4 +658,5 @@ def train_and_evaluate(
         "best_dev_loss": best_dev_loss,
         "train_time_s": train_time_s,
         "test_results": test_results,
+        "ensemble": ensemble,
     }

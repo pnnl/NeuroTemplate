@@ -18,6 +18,11 @@ logged to MLflow. Sections (in order):
                               synthetic states the recorded data never contains
   6b. Readout channels      — order statistics for the Y channels that are not
                               thermal states; reported without a verdict
+  6c. Seed ensemble spread  — min/median/max of test RMSE, physics-check
+                              values, and tau_slow across cfg.ensemble_seeds
+                              independently-trained models. Present only when
+                              ensemble_seeds > 1; every other number on this
+                              page is a single seed's draw.
   8. Bounded channel coverage — for each bounded head, whether any test
                               samples fall outside the head's [lo, hi]
   9. Hyperparameters        — lr, batch_size, train_pred_steps, curriculum, gains
@@ -57,6 +62,98 @@ from neurotemplate.modeling.scenarios import (
 from neurotemplate.common.reportcard import _fmt_float, _section
 
 from neurotemplate._typing import beartype
+
+
+# ── Seed ensemble spread ──────────────────────────────────────────
+#
+# Every number elsewhere on the reportcard comes from one trained model —
+# one draw from whatever the seed happened to give. `pipeline.train_and_
+# evaluate` optionally trains `cfg.ensemble_seeds` models (see that field's
+# comment in ModelingConfig) and hands the per-seed results here to be
+# turned into the spread these types describe. `spread_stats` is also used
+# directly by cli/optuna.py to report the spread of a trial's per-seed dev
+# losses — the same order-statistics question, asked of a different metric.
+
+
+@dataclass(frozen=True)
+class SeedSpread:
+    """min/median/max of one metric across an ensemble of seeds.
+
+    Order statistics, not mean +/- std: a handful of seeds is nowhere near
+    enough to trust a Gaussian assumption, and printing a stray min or max
+    is honest about that instead of implying more precision than a handful
+    of draws support.
+    """
+    min: float
+    median: float
+    max: float
+
+
+def spread_stats(values: list[float]) -> SeedSpread:
+    """Build a SeedSpread from one metric's per-seed values."""
+    return SeedSpread(min=min(values), median=statistics.median(values), max=max(values))
+
+
+@dataclass(frozen=True)
+class EnsembleSpread:
+    """Spread across `cfg.ensemble_seeds` independently-trained models.
+
+    Built by pipeline.train_and_evaluate from the same TestResults and
+    describe_dynamics structures a single-seed run already produces — see
+    ModelingConfig.ensemble_seeds. Each dict is keyed by whatever
+    distinguishes one of its rows from another; empty dicts render nothing.
+    """
+    n_seeds: int
+    rmse: dict[str, SeedSpread]        # channel -> spread
+    physics: dict[str, SeedSpread]     # "scenario | channel" -> spread
+    tau_slow: dict[str, SeedSpread]    # channel -> spread (2r2c models only)
+
+
+def _spread_table(rows: list[tuple[str, SeedSpread]]) -> list[str]:
+    """A 4-column min/median/max markdown table, one row per named spread."""
+    lines = ["| Channel | Min | Median | Max |", "|---|---:|---:|---:|"]
+    for name, s in rows:
+        lines.append(f"| {name} | {s.min:.4g} | {s.median:.4g} | {s.max:.4g} |")
+    return lines
+
+
+def _ensemble_section(ensemble: Optional[EnsembleSpread]) -> Optional[str]:
+    """Min/median/max across the seed ensemble, one table per metric family.
+
+    Returns None when there is no ensemble (cfg.ensemble_seeds == 1), which
+    is what keeps that case's rendering byte-identical to a run built before
+    this feature existed.
+    """
+    if ensemble is None:
+        return None
+
+    body = [
+        f"Across **{ensemble.n_seeds}** independently-trained seeds "
+        f"(`cfg.seed` .. `cfg.seed + {ensemble.n_seeds - 1}`). Only the "
+        "first seed's weights are logged, plotted, and behind every other "
+        "number on this page — this section is the error bar around them.\n"
+    ]
+
+    if ensemble.rmse:
+        body.append("**Test RMSE (physical units):**\n")
+        body += _spread_table(sorted(ensemble.rmse.items()))
+        body.append("")
+
+    if ensemble.tau_slow:
+        body.append("**`tau_slow` (hours):**\n")
+        body += _spread_table(sorted(ensemble.tau_slow.items()))
+        body.append("")
+
+    if ensemble.physics:
+        body.append("**Physics-check values:**\n")
+        body.append("| Scenario | Channel | Min | Median | Max |")
+        body.append("|---|---|---:|---:|---:|")
+        for key, s in sorted(ensemble.physics.items()):
+            scenario, channel = key.split(" | ", 1)
+            body.append(f"| {scenario} | `{channel}` | {s.min:.4g} | "
+                        f"{s.median:.4g} | {s.max:.4g} |")
+
+    return _section("Seed ensemble spread", "\n".join(body))
 
 
 def _head_label(head) -> str:
@@ -440,6 +537,7 @@ def render_reportcard(
     physics: Optional[list[ScenarioResult]] = None,
     physics_steps: Optional[int] = None,
     readouts: Optional[list[ReadoutSummary]] = None,
+    ensemble: Optional[EnsembleSpread] = None,
     head_stack: Optional[HeadStack] = None,
     norm_stats: Optional[dict] = None,
     test_df: Optional[pd.DataFrame] = None,
@@ -461,6 +559,11 @@ def render_reportcard(
                        callers that only have per-channel metrics; the section
                        is then skipped.
         nm_mapping:    {"Y": [...], "U": [...], "D": [...]} from data_mapping.
+        ensemble:      Optional EnsembleSpread from cfg.ensemble_seeds > 1
+                       independently-trained models. None (the default)
+                       renders no extra section, which is what keeps
+                       ensemble_seeds=1 byte-identical to a run built before
+                       this feature existed.
         head_stack:    Optional HeadStack; when provided, non-regression Y
                        columns are annotated with their head kind in the data
                        section (e.g. "bounded [0, +∞]").
@@ -494,6 +597,9 @@ def render_reportcard(
         readout_md = _readouts_section(readouts)
         if readout_md is not None:
             parts.append(readout_md)
+    ensemble_md = _ensemble_section(ensemble)
+    if ensemble_md is not None:
+        parts.append(ensemble_md)
     coverage = _bounded_coverage_section(head_stack, test_df)
     if coverage is not None:
         parts.append(coverage)

@@ -10,10 +10,17 @@ file (e.g. after an intentional rendering change), run:
 import os
 from pathlib import Path
 
+import pytest
+
 from neurotemplate.modeling.config import ModelingConfig as Config
 from neurotemplate.common.config import dict_to_dataclass
 from neurotemplate.common.metrics import per_channel_metrics
-from neurotemplate.modeling.reportcard import render_reportcard
+from neurotemplate.modeling.reportcard import (
+    EnsembleSpread,
+    SeedSpread,
+    render_reportcard,
+    spread_stats,
+)
 
 import torch
 
@@ -255,3 +262,69 @@ def test_stability_section_states_the_rollout_horizon():
         run_name="x", timestamp="2026-01-01T00:00:00",
     )
     assert "**47-step**" in md
+
+
+# ── Seed ensemble spread (cfg.ensemble_seeds > 1) ─────────────────
+
+@pytest.mark.parametrize("values,expected", [
+    ([3.0, 1.0, 2.0], SeedSpread(min=1.0, median=2.0, max=3.0)),      # odd count
+    ([1.0, 2.0, 3.0, 4.0], SeedSpread(min=1.0, median=2.5, max=4.0)),  # even count
+    ([5.0], SeedSpread(min=5.0, median=5.0, max=5.0)),                # single seed
+])
+def test_spread_stats_reports_min_median_max(values, expected):
+    """Hand-constructed per-seed value lists — the correctness this dataclass
+    exists to deliver, independent of anything reportcard-shaped."""
+    assert spread_stats(values) == expected
+
+
+def _make_ensemble(**over) -> EnsembleSpread:
+    fields = dict(
+        n_seeds=3,
+        rmse={"zone_a [°C]": SeedSpread(0.40, 0.43, 0.47)},
+        physics={"Equilibrium | zone_a [°C]": SeedSpread(0.01, 0.02, 0.03)},
+        tau_slow={"north T": SeedSpread(12.0, 13.4, 15.0)},
+    )
+    fields.update(over)
+    return EnsembleSpread(**fields)
+
+
+def test_ensemble_section_is_absent_when_there_is_no_ensemble():
+    """ensemble=None (cfg.ensemble_seeds == 1) must not add a section — this
+    is what keeps that case's rendering identical to a run built before the
+    ensemble feature existed."""
+    md = render_reportcard(
+        cfg=_make_cfg(), arch=_make_arch(), test_metrics=_make_metrics(),
+        nm_mapping={"Y": ["zone_a [°C]", "zone_b [°C]"], "U": [], "D": []},
+        run_name="x", timestamp="2026-01-01T00:00:00",
+    )
+    assert "Seed ensemble spread" not in md
+
+
+def test_ensemble_section_reports_min_median_max_per_metric():
+    md = render_reportcard(
+        cfg=_make_cfg(), arch=_make_arch(), test_metrics=_make_metrics(),
+        nm_mapping={"Y": ["zone_a [°C]", "zone_b [°C]"], "U": [], "D": []},
+        ensemble=_make_ensemble(),
+        run_name="x", timestamp="2026-01-01T00:00:00",
+    )
+    assert "## Seed ensemble spread" in md
+    assert "Across **3** independently-trained seeds" in md
+    # RMSE and tau_slow tables follow metrics_to_markdown's plain-name style.
+    assert "| zone_a [°C] | 0.4 | 0.43 | 0.47 |" in md
+    assert "| north T | 12 | 13.4 | 15 |" in md
+    # The physics table follows scenarios.checks_to_markdown's backtick style.
+    assert "| Equilibrium | `zone_a [°C]` | 0.01 | 0.02 | 0.03 |" in md
+
+
+def test_ensemble_section_skips_empty_metric_families():
+    """A 2r2c-free ensemble has no tau_slow to report, and one with
+    synth_cfg=None has no physics — each empty dict must render nothing."""
+    md = render_reportcard(
+        cfg=_make_cfg(), arch=_make_arch(), test_metrics=_make_metrics(),
+        nm_mapping={"Y": ["zone_a [°C]", "zone_b [°C]"], "U": [], "D": []},
+        ensemble=_make_ensemble(physics={}, tau_slow={}),
+        run_name="x", timestamp="2026-01-01T00:00:00",
+    )
+    assert "## Seed ensemble spread" in md
+    assert "tau_slow" not in md
+    assert "Physics-check values" not in md

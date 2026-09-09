@@ -114,6 +114,13 @@ class ModelingConfig:
     seed: int = -1
     device: Optional[str] = None
     verbose: bool = True
+    # How many independently-seeded models train_and_evaluate trains (each at
+    # cfg.seed + i) and evaluates, reporting the min/median/max spread across
+    # them instead of a single seed's draw. 1 reproduces today's single-model
+    # behaviour exactly. Only the primary (offset-0) model's weights are
+    # logged, plotted, and rendered on the reportcard — the ensemble adds
+    # error bars around that one artifact, it does not change what you get.
+    ensemble_seeds: int = 1
 
     # ---- LOGGING -------------------------------------------------------------
     savedir: str = field(default_factory=default_savedir)
@@ -155,7 +162,7 @@ class ModelingConfig:
             "batch_size", "in_steps", "log2_hidden_size", "num_layers",
             "epochs", "epoch_verbose", "train_pred_steps",
             "dev_pred_steps", "test_window", "test_stride",
-            "curriculum_ratio",
+            "curriculum_ratio", "ensemble_seeds",
         ]:
             check_positive(self, name)
 
