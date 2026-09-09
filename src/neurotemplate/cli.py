@@ -9,6 +9,8 @@ before. Groups mirror the package layout:
     nt model optuna         # neurotemplate.modeling.cli.optuna
     nt model load           # neurotemplate.modeling.cli.load
     nt model debug-heads    # neurotemplate.modeling.cli.debug_heads
+    nt data heads           # neurotemplate.modeling.cli.data (which head does this Y column want?)
+    nt data decay           # neurotemplate.modeling.cli.data (what is the envelope time constant?)
     nt control train        # neurotemplate.control.cli.train
 """
 from __future__ import annotations
@@ -25,6 +27,8 @@ COMMANDS: dict[tuple[str, str], str] = {
     ("model", "optuna"):      "neurotemplate.modeling.cli.optuna:main",
     ("model", "load"):        "neurotemplate.modeling.cli.load:main",
     ("model", "debug-heads"): "neurotemplate.modeling.cli.debug_heads:main",
+    ("data", "heads"):        "neurotemplate.modeling.cli.data:heads_main",
+    ("data", "decay"):        "neurotemplate.modeling.cli.data:decay_main",
     ("control", "train"):     "neurotemplate.control.cli.train:main",
 }
 
