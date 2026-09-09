@@ -25,6 +25,7 @@ from neuromancer.problem import Problem
 from neuromancer.constraint import variable
 from neuromancer.loss import PenaltyLoss
 
+from neurotemplate.control.policy import regulated_channels
 from neurotemplate.control.scenarios import horizons, price_scale
 from neurotemplate.modeling.dynamics import make_reset_init
 from neurotemplate.hooks import load_control_hooks
@@ -142,7 +143,7 @@ def build_control_loss(
     """
     hooks = load_control_hooks(cfg)
     _, _, hmax = horizons(cfg, sysid_cfg)
-    _, ctrl_idx = hooks.controlled_channels(nm_mapping)
+    _, reg_idx = regulated_channels(hooks, nm_mapping)
 
     yn = variable("yn")
     ymin = variable("ymin")
@@ -150,8 +151,8 @@ def build_control_loss(
     u = variable("U")
     d = variable("D")
 
-    # Predicted controlled channels over the horizon vs. the band.
-    y_ctrl = yn[:, hmax:, ctrl_idx]      # [b, P, n_ctrl]
+    # Predicted regulated channels over the horizon vs. the band.
+    y_ctrl = yn[:, hmax:, reg_idx]      # [b, P, n_ctrl]
     ymin_h = ymin[:, hmax:, :]           # [b, P, n_ctrl]
     ymax_h = ymax[:, hmax:, :]
 

@@ -44,6 +44,7 @@ from neurotemplate.control.closed_loop import build_closed_loop
 from neurotemplate.control.policy import (
     build_reference_node,
     reference_over_horizon,
+    regulated_channels,
 )
 from neurotemplate.control.scenarios import (
     build_window_dict_multi,
@@ -153,7 +154,7 @@ def evaluate_closed_loop(
     """
     hooks = load_control_hooks(cfg)
     _, _, hmax = horizons(cfg, sysid_cfg)
-    controlled, ctrl_idx = hooks.controlled_channels(nm_mapping)
+    regulated, reg_idx = regulated_channels(hooks, nm_mapping)
     device = sysid_cfg.device
 
     # Deterministic comfort band for evaluation: a fixed seed (independent of
@@ -185,14 +186,14 @@ def evaluate_closed_loop(
     # Plumb source_idx through `out` so plot_closed_loop can route per-batch.
     out["source_idx"] = source_idx
 
-    y_shift, y_stretch = _phys(norm_stats, controlled, device)
-    y_ctrl = out["yn"][:, hmax:, ctrl_idx] * y_stretch + y_shift  # [b,P,nc]
+    y_shift, y_stretch = _phys(norm_stats, regulated, device)
+    y_ctrl = out["yn"][:, hmax:, reg_idx] * y_stretch + y_shift  # [b,P,nc]
     ymin = data["ymin"][:, hmax:, :] * y_stretch + y_shift
     ymax = data["ymax"][:, hmax:, :] * y_stretch + y_shift
 
     step_hours = hours_per_step(out["t"][:, hmax:, :])
-    comfort = comfort_metrics(y_ctrl, ymin, ymax, controlled, step_hours)
-    # Two pooled headline numbers across all controlled channels. The rate is
+    comfort = comfort_metrics(y_ctrl, ymin, ymax, regulated, step_hours)
+    # Two pooled headline numbers across all regulated channels. The rate is
     # what an operator asks about; the exceedance is what to tune on, because a
     # threshold count saturates and, scored against a surrogate rather than the
     # plant, its argmin can select a substantially worse controller.
@@ -201,7 +202,7 @@ def evaluate_closed_loop(
     mean_exceedance = excursion.mean().item()
 
     mid = 0.5 * (ymin + ymax)
-    tracking = per_channel_metrics(y_ctrl, mid, controlled)
+    tracking = per_channel_metrics(y_ctrl, mid, regulated)
 
     u_cols = nm_mapping["U"]
     u_shift, u_stretch = _phys(norm_stats, u_cols, device)
@@ -216,7 +217,7 @@ def evaluate_closed_loop(
     u_hi = umax_n.to(device) * u_stretch + u_shift
     actuation = actuation_metrics(U, u_cols, u_lo, u_hi)
     response = response_audit(
-        y_ctrl, ymin, ymax, U, controlled, u_cols, u_lo, u_hi,
+        y_ctrl, ymin, ymax, U, regulated, u_cols, u_lo, u_hi,
     )
 
     energy = None
@@ -446,7 +447,7 @@ def plot_closed_loop(
     origins: list,
 ) -> None:
     """
-    One figure per rollout window: controlled zone temps + comfort band,
+    One figure per rollout window: regulated zone temps + comfort band,
     setpoint(s), and (if present) fan/DX power. Each window goes in its own
     day-stamped folder under `plot_dir` with the underlying trajectory CSV
     alongside, so restyling never requires re-running the rollout.
@@ -466,13 +467,13 @@ def plot_closed_loop(
 
     hooks = load_control_hooks(cfg)
     _, _, hmax = horizons(cfg, sysid_cfg)
-    controlled, ctrl_idx = hooks.controlled_channels(nm_mapping)
+    regulated, reg_idx = regulated_channels(hooks, nm_mapping)
     device = sysid_cfg.device
-    y_shift, y_stretch = _phys(norm_stats, controlled, device)
+    y_shift, y_stretch = _phys(norm_stats, regulated, device)
     u_cols = nm_mapping["U"]
     u_shift, u_stretch = _phys(norm_stats, u_cols, device)
 
-    y = (out["yn"][:, hmax:, ctrl_idx] * y_stretch + y_shift).cpu()
+    y = (out["yn"][:, hmax:, reg_idx] * y_stretch + y_shift).cpu()
     ymin = (out["ymin"][:, hmax:, :] * y_stretch + y_shift).cpu()
     ymax = (out["ymax"][:, hmax:, :] * y_stretch + y_shift).cpu()
     U = (out["U"][:, hmax:, :] * u_stretch + u_shift).cpu()
@@ -539,7 +540,7 @@ def plot_closed_loop(
         # Trajectory CSV alongside the figure so plots can be restyled
         # without re-running the rollout.
         csv_data = {}
-        for j, name in enumerate(controlled):
+        for j, name in enumerate(regulated):
             csv_data[name] = y[w, :, j].numpy()
             csv_data[f"{name} ymin"] = ymin[w, :, j].numpy()
             csv_data[f"{name} ymax"] = ymax[w, :, j].numpy()
@@ -559,7 +560,7 @@ def plot_closed_loop(
             n_rows, 1, sharex=True, figsize=(10, 3 * n_rows),
         )
         ax0, ax1 = axes[0], axes[1]
-        for j, name in enumerate(controlled):
+        for j, name in enumerate(regulated):
             ax0.plot(steps, y[w, :, j], label=name, lw=1.0)
         ax0.fill_between(
             steps, ymin[w, :, 0], ymax[w, :, 0],

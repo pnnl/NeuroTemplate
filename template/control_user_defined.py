@@ -13,8 +13,8 @@ with the surrogate's states and inputs.
 The file must be named `control_user_defined.py` and live in the directory
 you run `nt` from, or be pointed at by `user_hooks_path` in your YAML.
 
-Fill in `controlled_channels` first. `comfort_band_signal` and
-`actuation_bounds` below are generic and work unedited.
+Fill in `regulated` first. `comfort_band_signal` and `actuation_bounds`
+below are generic and work unedited.
 """
 
 from __future__ import annotations
@@ -30,26 +30,27 @@ from neurotemplate.control.scenarios import BandSpec
 # ---------------------------------------------------------------------
 # Required: which Y channels the comfort band applies to
 # ---------------------------------------------------------------------
-# The states the policy is judged on. Everything else in Y is along for the
-# ride. Names must match the surrogate's Y columns exactly.
-CONTROLLED_COLUMNS: list[str] = [
+# The states the policy is judged on — the OCP *regulated output*. Everything
+# else in Y is along for the ride. Names must match the surrogate's Y columns
+# exactly.
+REGULATED_COLUMNS: list[str] = [
     # "Tank Temperature [degC]",
 ]
 
 
 @beartype
-def controlled_channels(
+def regulated(
     nm_mapping: dict[str, list[str]],
 ) -> tuple[list[str], list[int]]:
     """Return (column names, their integer indices into nm_mapping["Y"])."""
     y_cols = nm_mapping["Y"]
-    missing = [c for c in CONTROLLED_COLUMNS if c not in y_cols]
-    if missing or not CONTROLLED_COLUMNS:
+    missing = [c for c in REGULATED_COLUMNS if c not in y_cols]
+    if missing or not REGULATED_COLUMNS:
         raise ValueError(
-            "CONTROLLED_COLUMNS must name columns present in the surrogate's "
-            f"Y. Missing: {missing or CONTROLLED_COLUMNS}; Y = {y_cols}"
+            "REGULATED_COLUMNS must name columns present in the surrogate's "
+            f"Y. Missing: {missing or REGULATED_COLUMNS}; Y = {y_cols}"
         )
-    return list(CONTROLLED_COLUMNS), [y_cols.index(c) for c in CONTROLLED_COLUMNS]
+    return list(REGULATED_COLUMNS), [y_cols.index(c) for c in REGULATED_COLUMNS]
 
 
 # ---------------------------------------------------------------------
@@ -65,7 +66,7 @@ def comfort_band_signal(
     generator: Optional[torch.Generator] = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
-    Build (ymin, ymax) of shape [n_samples, nsteps, n_controlled] in
+    Build (ymin, ymax) of shape [n_samples, nsteps, n_regulated] in
     NORMALIZED space. The band knobs come from YAML via `band`.
 
     The implementation below is plant-agnostic and needs no edits: per
@@ -83,8 +84,8 @@ def comfort_band_signal(
     if k > nsteps:
         raise ValueError(f"band.sub_samples ({k}) cannot exceed nsteps ({nsteps})")
 
-    controlled, _ = controlled_channels(nm_mapping)
-    n_ctrl = len(controlled)
+    regulated_cols, _ = regulated(nm_mapping)
+    n_ctrl = len(regulated_cols)
 
     # One (width, low) per (sample, segment); channels share the band.
     widths = band.width_min + (band.width_max - band.width_min) * torch.rand(
@@ -105,8 +106,8 @@ def comfort_band_signal(
     ymin_phys = seg_lows.expand(n_samples, nsteps, n_ctrl)
     ymax_phys = (seg_lows + seg_widths).expand(n_samples, nsteps, n_ctrl)
 
-    shift = torch.tensor([norm_stats[c]["shift"] for c in controlled])
-    stretch = torch.tensor([norm_stats[c]["stretch"] for c in controlled])
+    shift = torch.tensor([norm_stats[c]["shift"] for c in regulated_cols])
+    stretch = torch.tensor([norm_stats[c]["stretch"] for c in regulated_cols])
 
     return (ymin_phys - shift) / stretch, (ymax_phys - shift) / stretch
 
@@ -305,7 +306,74 @@ def _denorm(x: torch.Tensor, col: str, nm_mapping: dict[str, list[str]],
 # LEAVE COMMENTED OUT if you have no rule. Do not define it *and*
 # `build_baseline_policy` — two copies of one rule is two places for the
 # cooling inset to drift, and the library raises rather than pick one.
-#
+
+
+@beartype
+def bracket_band(
+    lo: torch.Tensor,
+    hi: torch.Tensor,
+    step: float,
+    cool_inset: float = 0.0,
+    heat_inset: float = 0.0,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Straddle a comfort band with a (cooling, heating) setpoint pair.
+
+    Example code for the commented-out `reference_control` below, not a
+    library-blessed algorithm: it is a two-stage HVAC thermostat convention
+    (bracket the band instead of both stages aiming at one target) specific
+    to a heating/cooling actuator pair, so it lives in the template rather
+    than in `control.policy` — the library has no opinion on what a
+    rule-based controller should do, only on how one plugs into the residual
+    policy and the baseline table `evaluate_baseline` scores. Adapt or
+    replace this for a different plant's actuators.
+
+    It puts heating at the band floor and cooling at the band ceiling so the
+    two actuators bracket the band, instead of both chasing one target.
+
+    Everything is in physical units (°C), and both setpoints are snapped to the
+    `step` grid **toward the band interior** — heating rounds up, cooling
+    down. Rounding outward would place a setpoint outside the band it is meant
+    to hold, which is the easy mistake here.
+
+    The insets pull each setpoint further inside its edge. `cool_inset` is
+    normally the one that matters: a zone floats *above* its cooling setpoint
+    because the plant's setpoint→zone gain is well under 1 °C/°C, so aiming
+    exactly at the ceiling violates constantly. Treat the inset as a
+    *correction* for that gain, measured on the plant — not as a safety margin
+    to be increased for comfort. Overshooting it is actively harmful: once the
+    two setpoints collide the rule stops bracketing and falls back to the
+    collapse branch below, and on a coarse grid that can happen within a single
+    grid step.
+
+    When the band is too narrow to seat both setpoints on the grid, both
+    collapse to one grid point near the band midpoint. Letting heating command
+    *above* cooling would make the two stages fight each other, which is worse
+    than giving up the deadband.
+
+    Args:
+        lo, hi: comfort band edges, any broadcast-compatible shape, in °C.
+        step: setpoint quantization in °C (e.g. 0.5). Must be > 0.
+        cool_inset: °C to pull the cooling setpoint below the band ceiling.
+        heat_inset: °C to pull the heating setpoint above the band floor.
+
+    Returns:
+        (cooling, heating), each the shape of `lo`/`hi` broadcast together.
+    """
+    if step <= 0:
+        raise ValueError(f"step must be > 0, got {step}")
+    if cool_inset < 0 or heat_inset < 0:
+        raise ValueError(
+            f"insets must be >= 0, got cool={cool_inset}, heat={heat_inset}"
+        )
+
+    heat = torch.ceil((lo + heat_inset) / step) * step
+    cool = torch.floor((hi - cool_inset) / step) * step
+
+    mid = torch.round(0.5 * (lo + hi) / step) * step
+    collapse = heat > cool
+    return torch.where(collapse, mid, cool), torch.where(collapse, mid, heat)
+
+
 # @beartype
 # def reference_control(
 #     yn_now: torch.Tensor,      # [b, ny]     current state, normalized
@@ -316,10 +384,8 @@ def _denorm(x: torch.Tensor, col: str, nm_mapping: dict[str, list[str]],
 #     norm_stats: dict[str, dict[str, float]],
 # ) -> torch.Tensor:             # [b, nu]     normalized U
 #     """Bracket the comfort band with a (cooling, heating) setpoint pair."""
-#     from neurotemplate.control.policy import bracket_band
-#
-#     controlled, _ = controlled_channels(nm_mapping)
-#     s = norm_stats[controlled[0]]
+#     regulated_cols, _ = regulated(nm_mapping)
+#     s = norm_stats[regulated_cols[0]]
 #     lo = ymin_now * s["stretch"] + s["shift"]        # °C
 #     hi = ymax_now * s["stretch"] + s["shift"]
 #     cool, heat = bracket_band(lo, hi, step=0.5, cool_inset=0.3)
@@ -334,8 +400,8 @@ def _denorm(x: torch.Tensor, col: str, nm_mapping: dict[str, list[str]],
 # On what rule to write, for a two-actuator heating/cooling setpoint pair:
 # **bracket the band** — heating at the band floor, cooling at (or just
 # inside) the band ceiling, so the two setpoints straddle the band rather than
-# both aiming at one target. `control.policy.bracket_band` implements it, and
-# its docstring records the two details that are easy to get backwards: round
+# both aiming at one target. `bracket_band` above implements it, and its
+# docstring records the two details that are easy to get backwards: round
 # each setpoint toward the band *interior*, and treat the cooling inset as a
 # correction for a setpoint→zone gain under 1 °C/°C, not as a safety margin
 # (too large and the two setpoints collide and it stops bracketing at all).

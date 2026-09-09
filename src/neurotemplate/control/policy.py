@@ -23,6 +23,7 @@ selects a dynamics family on the sys-id side:
 
 from __future__ import annotations
 
+from typing import Optional
 
 import torch
 import torch.nn as nn
@@ -32,6 +33,7 @@ from neuromancer.modules import blocks
 
 from neurotemplate.control.scenarios import horizons
 from neurotemplate.hooks import load_control_hooks
+from neurotemplate.modeling import windows
 
 from neurotemplate._typing import beartype
 
@@ -45,63 +47,29 @@ POLICY_NONLIN = {
     "silu": nn.SiLU,
 }
 
+# Position of "D" among the policy net's positional inputs. Fixed by the
+# input_keys list build_policy constructs — ["yn", "ymin", "ymax", "D"], with
+# "price" (if any) always appended after — so this never moves.
+_D_ARG_INDEX = 3
 
-@beartype
-def bracket_band(
-    lo: torch.Tensor,
-    hi: torch.Tensor,
-    step: float,
-    cool_inset: float = 0.0,
-    heat_inset: float = 0.0,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Straddle a comfort band with a (cooling, heating) setpoint pair.
 
-    A reference rule for `build_baseline_policy`, and a strong baseline: it
-    puts heating at the band floor and cooling at the band ceiling so the two
-    actuators bracket the band, instead of both chasing one target.
+def regulated_channels(hooks, nm_mapping: dict[str, list[str]]
+                       ) -> tuple[list[str], list[int]]:
+    """The OCP regulated output: (names, Y-indices) of the Y channels the
+    objective bands and the reportcard scores.
 
-    Everything is in physical units (°C), and both setpoints are snapped to the
-    `step` grid **toward the band interior** — heating rounds up, cooling rounds
-    down. Rounding outward would place a setpoint outside the band it is meant
-    to hold, which is the easy mistake here.
-
-    The insets pull each setpoint further inside its edge. `cool_inset` is
-    normally the one that matters: a zone floats *above* its cooling setpoint
-    because the plant's setpoint→zone gain is well under 1 °C/°C, so aiming
-    exactly at the ceiling violates constantly. Treat the inset as a
-    *correction* for that gain, measured on the plant — not as a safety margin
-    to be increased for comfort. Overshooting it is actively harmful: once the
-    two setpoints collide the rule stops bracketing and falls back to the
-    collapse branch below, and on a coarse grid that can happen within a single
-    grid step.
-
-    When the band is too narrow to seat both setpoints on the grid, both
-    collapse to one grid point near the band midpoint. Letting heating command
-    *above* cooling would make the two stages fight each other, which is worse
-    than giving up the deadband.
-
-    Args:
-        lo, hi: comfort band edges, any broadcast-compatible shape, in °C.
-        step: setpoint quantization in °C (e.g. 0.5). Must be > 0.
-        cool_inset: °C to pull the cooling setpoint below the band ceiling.
-        heat_inset: °C to pull the heating setpoint above the band floor.
-
-    Returns:
-        (cooling, heating), each the shape of `lo`/`hi` broadcast together.
+    Prefers the use case's `regulated` hook; falls back to the older
+    `controlled_channels` name so a hooks file written before the rename
+    keeps working. One fallback, defined once here rather than at each of
+    this function's call sites.
     """
-    if step <= 0:
-        raise ValueError(f"step must be > 0, got {step}")
-    if cool_inset < 0 or heat_inset < 0:
-        raise ValueError(
-            f"insets must be >= 0, got cool={cool_inset}, heat={heat_inset}"
+    fn = getattr(hooks, "regulated", None) or getattr(hooks, "controlled_channels", None)
+    if fn is None:
+        raise AttributeError(
+            "control_user_defined must define `regulated(nm_mapping)` "
+            "(the older name `controlled_channels` also still works)."
         )
-
-    heat = torch.ceil((lo + heat_inset) / step) * step
-    cool = torch.floor((hi - cool_inset) / step) * step
-
-    mid = torch.round(0.5 * (lo + hi) / step) * step
-    collapse = heat > cool
-    return torch.where(collapse, mid, cool), torch.where(collapse, mid, heat)
+    return fn(nm_mapping)
 
 
 class STEQuantize(nn.Module):
@@ -153,6 +121,33 @@ class _QuantizedPolicy(nn.Module):
 
     def forward(self, *args: torch.Tensor) -> torch.Tensor:
         return self.quantize(self.base(*args))
+
+
+class _PreviewGather(nn.Module):
+    """Narrow the D window to the (column, timestep) pairs actually declared.
+
+    SystemPreview's input_map gives one window per key, so the D tensor the
+    Node hands the policy is always sized to `d_future`, the deepest preview
+    any single D column declared (see `_d_preview_gather`). A column that
+    asked for less would otherwise see extra future it never requested. This
+    applies the narrowing gather in front of whatever net build_policy
+    constructed for the trainable inputs.
+
+    A fixed permutation computed once at construction, applied with
+    `index_select` against a registered buffer — same discipline as
+    `PerZoneBlock` (modeling/dynamics.py): no data-dependent control flow.
+    """
+
+    def __init__(self, base: nn.Module, gather: torch.Tensor, d_index: int):
+        super().__init__()
+        self.base = base
+        self.d_index = d_index
+        self.register_buffer("_gather", gather, persistent=False)
+
+    def forward(self, *args: torch.Tensor) -> torch.Tensor:
+        args = list(args)
+        args[self.d_index] = args[self.d_index].index_select(-1, self._gather)
+        return self.base(*args)
 
 
 def _current(x: torch.Tensor, block: int, width: int) -> torch.Tensor:
@@ -268,29 +263,21 @@ def _zero_final_layer(net: nn.Module) -> None:
         nn.init.zeros_(last.bias)
 
 
-def _preview_steps(hooks, cfg,
-                   nm_mapping: dict[str, list[str]]) -> tuple[int, int, int]:
-    """Resolve (disturbance, band, price) future-preview widths for the policy.
+def _validated_preview_spec(hooks, nm_mapping: dict[str, list[str]]
+                            ) -> Optional[dict[str, int]]:
+    """Read + validate control_user_defined.preview_config, or None if unset.
 
-    The tariff preview comes from `cfg.price_preview`; the other two come from
-    the use case's `preview_config(nm_mapping) -> {signal: n_steps}` hook, whose
-    keys may be D column names (per-column disturbance preview) or the literal
-    "band" (future comfort-band preview). The disturbance window is one block,
-    so it is sized to the largest per-column D value requested (columns asking
-    for less just see harmless extra lookahead). With no hook, fall back to the
-    global `cfg.d_preview` for disturbances and no band preview.
-
-    The split is deliberate. How far ahead to look at the weather is a property
-    of the plant, shared by every run against it, and belongs in the hooks file.
-    How far ahead to look at the tariff is a per-run tuning knob — and while it
-    lived in the hook, one config wanting a price preview forced price paths
-    onto every other config sharing that hook file, because the hook cannot see
-    the config and so cannot ask whether a tariff is configured at all.
+    None (the hook is missing) is a different case from {} (the hook is
+    defined but names nothing): the former falls back to `cfg.d_preview`
+    below, the latter turns disturbance preview off entirely. Shared by
+    `_preview_steps` (the single largest-depth summary the shared D/band
+    windows are sized to) and `_d_preview_by_column` (every column's own
+    depth, which is what the policy actually gathers down to), so the hook
+    is read and validated in exactly one place.
     """
-    price_future = cfg.price_preview
     preview = getattr(hooks, "preview_config", None)
     if preview is None:
-        return cfg.d_preview, 0, price_future
+        return None
 
     spec = preview(nm_mapping)
     allowed = set(nm_mapping["D"]) | {"band"}
@@ -312,9 +299,89 @@ def _preview_steps(hooks, cfg,
             raise ValueError(
                 f"preview_config['{key}'] must be a non-negative int, got {steps!r}"
             )
+    return spec
 
+
+def _preview_steps(hooks, cfg,
+                   nm_mapping: dict[str, list[str]]) -> tuple[int, int, int]:
+    """Resolve (disturbance, band, price) future-preview widths for the policy.
+
+    The tariff preview comes from `cfg.price_preview`; the other two come from
+    the use case's `preview_config(nm_mapping) -> {signal: n_steps}` hook, whose
+    keys may be D column names (per-column disturbance preview) or the literal
+    "band" (future comfort-band preview). The disturbance *window* is one
+    block, so it is sized to the largest per-column D value requested — a
+    column asking for less is gathered back down to its own depth before the
+    net sees it (`_d_preview_by_column`, `_d_preview_gather`), so "largest
+    value requested" here is a window size, not what any one column reads.
+    With no hook, fall back to the global `cfg.d_preview` for disturbances and
+    no band preview.
+
+    The split with price is deliberate. How far ahead to look at the weather
+    is a property of the plant, shared by every run against it, and belongs in
+    the hooks file. How far ahead to look at the tariff is a per-run tuning
+    knob — and while it lived in the hook, one config wanting a price preview
+    forced price paths onto every other config sharing that hook file, because
+    the hook cannot see the config and so cannot ask whether a tariff is
+    configured at all.
+    """
+    price_future = cfg.price_preview
+    spec = _validated_preview_spec(hooks, nm_mapping)
+    if spec is None:
+        return cfg.d_preview, 0, price_future
     d_future = max([spec.get(col, 0) for col in nm_mapping["D"]], default=0)
     return d_future, spec.get("band", 0), price_future
+
+
+def _d_preview_by_column(hooks, cfg, nm_mapping: dict[str, list[str]]
+                         ) -> list[int]:
+    """Each D column's own declared preview depth, in nm_mapping["D"] order.
+
+    `_preview_steps` collapses these to one number — the largest, because
+    that's all the shared window can be sized to. This keeps every column's
+    own value, which `_d_preview_gather` uses to narrow that shared window
+    back down to what each column actually asked for.
+    """
+    spec = _validated_preview_spec(hooks, nm_mapping)
+    if spec is None:
+        return [cfg.d_preview] * len(nm_mapping["D"])
+    return [spec.get(col, 0) for col in nm_mapping["D"]]
+
+
+def _d_preview_gather(nd: int, h_ctrl: int, d_future: int,
+                      d_depths: list[int]) -> Optional[torch.Tensor]:
+    """Indices narrowing the shared D window to each column's own depth.
+
+    The D tensor SystemPreview hands the policy is one window, time-major,
+    covering `h_ctrl - 1` past steps, the current step, and `d_future` future
+    steps (see `SystemPreview.get_mapped_data`) — `d_future` being the deepest
+    depth any single column declared, since the window can't vary by column.
+
+    When every column declared the same depth (including the all-zero
+    default) that window already is what was asked for, so this returns None
+    and build_policy leaves the net exactly as it was before per-column
+    preview existed. Otherwise it keeps, at every past/current step, all `nd`
+    columns (always fully visible), and at future step k (1-indexed from the
+    current step) only the columns whose declared depth is >= k.
+
+    Reuses `windows.key_blocks`/`per_step` for the per-timestep offsets — the
+    same position arithmetic `PerZoneBlock` uses — rather than re-deriving
+    `t * nd + j` here.
+    """
+    if all(depth == d_future for depth in d_depths):
+        return None
+
+    in_steps = h_ctrl + d_future
+    block = windows.key_blocks((nd,), in_steps)[0]
+    steps = windows.per_step(block, nd, in_steps)
+
+    indices = []
+    for t, step in enumerate(steps):
+        future_step = t - h_ctrl + 1        # <= 0 for the past/current steps
+        cols = (range(nd) if future_step <= 0 else
+               [j for j in range(nd) if d_depths[j] >= future_step])
+        indices.extend(step.start + j for j in cols)
+    return torch.tensor(indices, dtype=torch.long)
 
 
 def _build_mlp_net(cfg, insize: int, nu: int, umin, umax) -> nn.Module:
@@ -419,7 +486,7 @@ def build_reference_node(
     net = _ReferenceRule(
         rule, nm_mapping, norm_stats, h_ctrl=1,
         ny=len(nm_mapping["Y"]),
-        n_ctrl=len(hooks.controlled_channels(nm_mapping)[0]),
+        n_ctrl=len(regulated_channels(hooks, nm_mapping)[0]),
         nd=len(nm_mapping["D"]),
     ).to(sysid_cfg.device)
     return Node(net, ["yn", "ymin", "ymax", "D"], ["U"],
@@ -480,7 +547,7 @@ def build_policy(
     nd = len(nm_mapping["D"])
     hooks = load_control_hooks(cfg)
     _, h_ctrl, _ = horizons(cfg, sysid_cfg)
-    n_ctrl = len(hooks.controlled_channels(nm_mapping)[0])
+    n_ctrl = len(regulated_channels(hooks, nm_mapping)[0])
     device = sysid_cfg.device
 
     # How many future steps each previewed signal feeds the policy. A use case
@@ -488,18 +555,26 @@ def build_policy(
     # preview, comfort-band preview and price preview; otherwise fall back to
     # the global cfg.d_preview (disturbances only, nothing else previewed).
     d_future, band_future, price_future = _preview_steps(hooks, cfg, nm_mapping)
+    d_depths = _d_preview_by_column(hooks, cfg, nm_mapping)
     # The tariff reaches the policy exactly when a price path is configured.
     reads_price = cfg.train_price_path is not None
 
     # Flattened window widths (see SystemPreview.get_mapped_data):
     #   yn : past = H_ctrl-1, future = 0                 -> ny * H_ctrl
-    #   D  : past = H_ctrl-1, future = d_future          -> nd * (H_ctrl + d_future)
+    #   D  : past+current = H_ctrl, plus each column's own future depth
+    #                                                     -> h_ctrl*nd + sum(d_depths)
     #   ymin/ymax: current + band_future preview steps   -> n_ctrl*(1+band_future) each
     #   price: current + price_future preview steps      -> 1 * (1+price_future)
+    #
+    # D's term is h_ctrl*nd + sum(d_depths) rather than nd*(h_ctrl+d_future):
+    # the window SystemPreview builds is sized to d_future, the largest depth
+    # any column declared, but a column asking for less is gathered down to
+    # its own depth before the net sees it (_d_preview_gather below). The two
+    # formulas agree exactly when every column shares one depth.
     insize = (
         ny * h_ctrl
         + 2 * n_ctrl * (1 + band_future)
-        + nd * (h_ctrl + d_future)
+        + h_ctrl * nd + sum(d_depths)
         + (1 + price_future if reads_price else 0)
     )
 
@@ -530,6 +605,16 @@ def build_policy(
 
     if reference is not None:
         _zero_final_layer(net)
+
+    # Per-column D preview is a gather in front of whatever net was just
+    # built, applied before the residual/quantize wrapping below so both the
+    # reference (which slices its own current step directly, see
+    # _ReferenceRule) and the trainable net see the same D tensor either way.
+    d_gather = _d_preview_gather(nd, h_ctrl, d_future, d_depths)
+    if d_gather is not None:
+        net = _PreviewGather(net, d_gather.to(device), _D_ARG_INDEX)
+
+    if reference is not None:
         net = _ResidualPolicy(net, reference, umin, umax, quantize).to(device)
     elif quantize is not None:
         net = _QuantizedPolicy(net, quantize).to(device)
@@ -582,19 +667,22 @@ def describe_policy(
     between config and reality shows up on the card.
 
     Window widths are reported alongside `insize` so a reader can re-check the
-    ny*H_ctrl + 2*n_ctrl*(1+band) + nd*(H_ctrl+d) + (1+price) sum by eye — a
-    wrong window is otherwise an invisible failure.
+    ny*H_ctrl + 2*n_ctrl*(1+band) + [h_ctrl*nd + sum(per-column D depths)] +
+    (1+price) sum by eye — a wrong window is otherwise an invisible failure.
     """
-    # Unwrap: Node -> (_ResidualPolicy | _QuantizedPolicy) -> MLP_bounds
+    # Unwrap: Node -> (_ResidualPolicy | _QuantizedPolicy) -> [_PreviewGather] -> MLP_bounds
     raw = policy_node.callable
     residual = isinstance(raw, _ResidualPolicy)
     wrapped = isinstance(raw, (_ResidualPolicy, _QuantizedPolicy))
     net = raw.base if wrapped else raw
     quantized = raw.quantize is not None if wrapped else False
+    if isinstance(net, _PreviewGather):
+        net = net.base
 
     hooks = load_control_hooks(cfg)
     _, h_ctrl, _ = horizons(cfg, sysid_cfg)
     d_future, band_future, price_future = _preview_steps(hooks, cfg, nm_mapping)
+    d_depths = _d_preview_by_column(hooks, cfg, nm_mapping)
 
     # Actuator limits are set in normalized U space by the actuation_bounds
     # hook; report them in physical units, which is what a reader can sanity
@@ -614,7 +702,9 @@ def describe_policy(
         "insize": int(net.in_features),
         "outsize": int(net.out_features),
         "h_ctrl": h_ctrl,
+        "ny": len(nm_mapping["Y"]),
         "d_preview": d_future,
+        "d_preview_by_column": dict(zip(nm_mapping["D"], d_depths)),
         "band_preview": band_future,
         "price_preview": price_future,
         "reads_price": "price" in policy_node.input_keys,

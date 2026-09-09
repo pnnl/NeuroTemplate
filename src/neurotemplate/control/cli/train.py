@@ -24,7 +24,11 @@ from neurotemplate.modeling.experiment import resolve_device, set_seeds
 from neurotemplate.control.config import ControlConfig, load_config_from_cli, CONTROL_CONFIG_DIR
 from neurotemplate.control.load import load_frozen_dynamics
 from neurotemplate.control.scenarios import build_loaders, horizons
-from neurotemplate.control.policy import build_policy, describe_policy
+from neurotemplate.control.policy import (
+    build_policy,
+    describe_policy,
+    regulated_channels,
+)
 from neurotemplate.control.closed_loop import (
     build_closed_loop, build_control_loss, build_problem, power_term,
 )
@@ -101,7 +105,7 @@ def main() -> None:
     # there before spending an hour training against a band nothing can hold.
     hooks = load_control_hooks(cfg)
     u_bounds = hooks.actuation_bounds(nm_mapping, norm_stats)
-    controlled, _ = hooks.controlled_channels(nm_mapping)
+    regulated, _ = regulated_channels(hooks, nm_mapping)
 
     if cfg.verbose:
         print("Building policy + closed loop + loss...")
@@ -186,7 +190,7 @@ def main() -> None:
         )
 
     md = render_control_reportcard(
-        cfg, sysid_cfg, arch, nm_mapping, controlled, results,
+        cfg, sysid_cfg, arch, nm_mapping, regulated, results,
         eval_band_seed=EVAL_BAND_SEED, baseline=baseline,
         clears_reference=clears, best_dev_loss=best_dev,
         train_time_s=train_time_s,

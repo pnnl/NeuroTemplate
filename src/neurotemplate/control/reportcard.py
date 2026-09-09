@@ -105,6 +105,8 @@ def _policy_section(arch: dict) -> str:
            else "")
         + ")",
         f"- **Output width:** {arch['outsize']}",
+        f"- **Observation:** Policy observes all {arch['ny']} Y channels — "
+        "no measurement restriction.",
         f"- **Setpoint quantization:** {quant}",
     ]
     if arch["residual_delta"] is not None:
@@ -481,7 +483,8 @@ def render_control_reportcard(
 
     Args:
         arch:        Output of control.policy.describe_policy(...).
-        controlled:  Controlled channel names (hooks.controlled_channels).
+        controlled:  Regulated channel names (the `regulated` hook, or the
+                     older `controlled_channels` name it falls back to).
         results:     ControlResults for the learned policy.
         eval_band_seed: The fixed seed the evaluation band was drawn with.
         baseline:    Optional ControlResults for the rule-based controller.

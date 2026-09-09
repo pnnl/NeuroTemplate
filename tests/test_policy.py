@@ -8,10 +8,14 @@ from neurotemplate.control.policy import (
     POLICY_BOUND_METHODS,
     POLICY_NONLIN,
     STEQuantize,
+    _PreviewGather,
+    _d_preview_by_column,
+    _d_preview_gather,
     _preview_steps,
     build_policy,
     describe_policy,
     policy_catalog,
+    regulated_channels,
 )
 from neurotemplate.control.closed_loop import build_closed_loop
 from control_user_defined import actuation_bounds

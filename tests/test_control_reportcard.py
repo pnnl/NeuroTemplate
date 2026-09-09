@@ -44,6 +44,7 @@ def _make_arch():
         "insize": 27,
         "outsize": 1,
         "h_ctrl": 12,
+        "ny": 1,
         "d_preview": 0,
         "band_preview": 0,
         "price_preview": 0,
@@ -188,6 +189,14 @@ def test_objective_section_skipped_without_a_diagnostic_pass():
 def test_actuation_bounds_reported_in_physical_units():
     md = _render()
     assert "`setpoint [°C]`: [22, 28]" in md
+
+
+def test_policy_section_states_full_observation():
+    """Every DPC policy reads all of yn -- state that as an architectural
+    fact, not leave it silent."""
+    md = _render()
+    assert ("Policy observes all 1 Y channels — no measurement restriction."
+           in md)
 
 
 def test_linear_policy_renders_without_hidden_sizes():

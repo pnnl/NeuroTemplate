@@ -1,5 +1,13 @@
 """The bracket rule: straddle the comfort band with two setpoints.
 
+`bracket_band` lives in template/control_user_defined.py, not in the library
+(see the comment above its definition there for why) — it is example code
+for the `reference_control` hook, one plant's HVAC thermostat convention, and
+not something control.policy calls. Loaded here by file path rather than by
+module name: tests/fixtures/ already puts a stub module named
+`control_user_defined` on sys.path for the hook-discovery tests, and importing
+by name would collide with that.
+
 Measured on a real single-zone plant, this rule holds a 0.5-2.0 °C-wide random
 comfort band to 2.5-6.2% violation across four buildings with no model at all,
 where aiming both setpoints at the band edge gives 21.8-56.7%. These tests pin
@@ -11,10 +19,17 @@ backwards:
   - heating never commands above cooling (the stages would fight).
 """
 
+import importlib.util
+from pathlib import Path
+
 import pytest
 import torch
 
-from neurotemplate.control.policy import bracket_band
+_TEMPLATE_PATH = Path(__file__).resolve().parent.parent / "template" / "control_user_defined.py"
+_spec = importlib.util.spec_from_file_location("template_control_user_defined", _TEMPLATE_PATH)
+_template_control = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(_template_control)
+bracket_band = _template_control.bracket_band
 
 
 def test_setpoints_land_on_the_grid():
