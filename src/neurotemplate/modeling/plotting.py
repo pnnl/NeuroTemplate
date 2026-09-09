@@ -4,6 +4,7 @@ import matplotlib.pyplot as plt
 from pathlib import Path
 from typing import Optional
 
+from neurotemplate.common.data_utils import axis_label, unit_of
 from neurotemplate.hooks import load_modeling_hooks
 
 from neurotemplate._typing import beartype
@@ -162,10 +163,11 @@ def plot_predictions(
 def plot_synthetic(
     traces: list[dict],
     run_dir: str,
+    norm_stats: dict,
     freq_s: float = 300.0,
     n_plot: int = 4,
     verbose: bool = False,
-    y_unit: str = "°C",
+    fallback_unit: Optional[str] = None,
 ) -> None:
     """
     One figure per synthetic-scenario instance: the state channels against the
@@ -176,9 +178,17 @@ def plot_synthetic(
     Args:
         traces: dicts from `scenario.trace(n)`; empty ones are skipped.
         run_dir: directory for the figures (CSVs go in `synth_data/` beside).
+        norm_stats: per-column stats dict — supplies each trace's y-axis unit
+            via each state column's own "[unit]" name suffix (see
+            `common.data_utils.unit_of`). A trace's states can disagree
+            (a mixed-unit Y across per-block families is exactly the case
+            this exists for), in which case the axis goes unit-less rather
+            than printing a wrong label.
         freq_s: seconds per timestep, for the x axis.
         n_plot: max instances drawn per scenario.
-        y_unit: y-axis unit label, e.g. "°C" (the default) or "°F".
+        fallback_unit: unit used for a state column whose name carries none
+            of its own — the deprecated `cfg.synth_y_unit`. None column units
+            with no fallback set just render "Temperature", unit-less.
     """
     plot_dir = Path(run_dir)
     plot_dir.mkdir(parents=True, exist_ok=True)
@@ -199,6 +209,15 @@ def plot_synthetic(
         # (no input drives the final state).
         t_input = t_minutes[:len(ambient[0])]
 
+        # Each state's own unit, falling back to `fallback_unit` (the
+        # deprecated cfg.synth_y_unit) only for a column whose name carries
+        # none. A one-off stand-in norm_stats so `axis_label` — the same
+        # unit-agreement logic every other axis label uses — need not know
+        # about the fallback at all.
+        with_fallback = {c: {"unit": unit_of(norm_stats, c) or fallback_unit}
+                          for c in states}
+        ylabel = axis_label(with_fallback, states, "Temperature")
+
         for row in range(min(n_plot, preds.shape[0])):
             fig, ax = plt.subplots(1, 1, figsize=(8, 4.5))
             fig.suptitle(name, fontsize=13, fontweight="bold")
@@ -214,7 +233,7 @@ def plot_synthetic(
                     color=_AMBIENT_COLOR, linestyle=":", linewidth=1.5,
                     alpha=0.9, label="Ambient")
 
-            ax.set_ylabel(f"Temperature ({y_unit})")
+            ax.set_ylabel(ylabel)
             ax.set_xlabel("Time (minutes)")
             ax.margins(y=0.15)
             ax.grid(True, alpha=0.6, color=_GRID_COLOR, linewidth=0.8)

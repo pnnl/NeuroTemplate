@@ -271,9 +271,9 @@ def _run_physics_checks(
         synth_dir = plot_run_dir / "synthetic"
         plot_synthetic(
             [s.trace(cfg.synth_n_plot) for s in scenarios],
-            run_dir=str(synth_dir),
+            run_dir=str(synth_dir), norm_stats=norm_stats,
             freq_s=freq_s, n_plot=cfg.synth_n_plot, verbose=cfg.verbose,
-            y_unit=cfg.synth_y_unit,
+            fallback_unit=cfg.synth_y_unit,
         )
         if logger is not None and hasattr(logger, "_mlflow"):
             logger._mlflow.log_artifact(str(synth_dir), artifact_path="plots")

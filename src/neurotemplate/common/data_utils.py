@@ -1,6 +1,7 @@
 import pandas as pd
 import torch
 import json
+import re
 import warnings
 from typing import Optional
 
@@ -493,6 +494,72 @@ def to_df(
         return df
 
 
+# Trailing bracketed token on a column name, e.g. the "[°C]" in
+# "Zone Air Temperature [°C]". Anchored to the end of the string so a
+# bracket that isn't the last thing in the name doesn't count.
+_TRAILING_UNIT_RE = re.compile(r"\[([^\[\]]*)\]\s*$")
+
+
+@beartype
+def parse_column_unit(col: str) -> Optional[str]:
+    """Extract a column's unit from its own name: the trailing "[...]".
+
+    "Zone Air Temperature [°C]" -> "°C"; "Ambient Temperature [degC]" ->
+    "degC"; "Total DX Power [W]" -> "W". Purely positional — the last
+    bracket pair, only if it is also the end of the string — and purely
+    extractive: whatever is between the brackets is returned verbatim, with
+    no attempt to normalize or validate it as a real unit string. That's the
+    dataset owner's business, not this function's.
+
+    Returns None when there is no trailing bracket, when a bracket exists
+    but isn't at the end (e.g. "Foo [note] Bar"), or when it's empty
+    ("Foo []"). A column with no unit is not an error: `unit_of` and
+    `axis_label` both degrade to the bare column/role name, and a column
+    that doesn't follow this naming convention can still get a unit via the
+    `tie_norm_stats` hook, which runs after this and can set
+    `norm_stats[col]["unit"]` directly.
+    """
+    match = _TRAILING_UNIT_RE.search(col)
+    if match is None:
+        return None
+    unit = match.group(1).strip()
+    return unit or None
+
+
+@beartype
+def unit_of(norm_stats: dict[str, dict[str, float]], col: str) -> Optional[str]:
+    """The unit for `col`, or None if there isn't one to report.
+
+    Covers three cases the same way: `col` absent from `norm_stats`, its
+    name carrying no parseable unit, and `norm_stats` reloaded from a run
+    trained before per-column units existed (no "unit" key at all). None of
+    these is an error — callers fall back to the bare column/role name.
+    """
+    return norm_stats.get(col, {}).get("unit")
+
+
+@beartype
+def axis_label(
+    norm_stats: dict[str, dict[str, float]],
+    cols: list[str],
+    fallback: str,
+) -> str:
+    """Axis label for a group of columns plotted on one axis.
+
+    Renders "<fallback> [unit]" when every column in `cols` shares one known
+    unit; otherwise (units disagree, or none is known) renders bare
+    `fallback`. Mixed units are real here, not hypothetical: a comfort band
+    can span zones, a setpoint axis can span actuators, a power row can span
+    meters, and none of those is a single physical channel.
+    """
+    units = {unit_of(norm_stats, c) for c in cols}
+    if len(units) == 1:
+        unit = units.pop()
+        if unit is not None:
+            return f"{fallback} [{unit}]"
+    return fallback
+
+
 # Compute per-column statistics and normalization parameters.
 # The returned dict contains all descriptive stats for each column,
 # plus "shift" and "stretch" determined by the chosen norm_type.
@@ -522,7 +589,10 @@ def compute_norm_stats(
             present in the dict use the global norm_type.
     Returns:
         norm_stats: {col_name: {"shift", "stretch", "min", "max",
-                                 "mean", "stddev", "median"}}
+                                 "mean", "stddev", "median", "unit"}}
+            "unit" is `parse_column_unit(col_name)` — None unless the column
+            name ends in a bracketed token. Override it per-column with the
+            `tie_norm_stats` hook if your names don't follow that convention.
     """
     # Validate overrides up-front so bad values fail at startup.
     for col, nt in (column_overrides or {}).items():
@@ -595,6 +665,7 @@ def compute_norm_stats(
             "mean": col_mean,
             "stddev": col_std,
             "median": col_median,
+            "unit": parse_column_unit(col),
         }
 
     return {col: col_stats(col) for col in df.columns}

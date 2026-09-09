@@ -7,6 +7,10 @@ looks right. These tests use non-midnight, non-1970 origins so that mistake
 cannot pass.
 """
 
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+
 import pandas as pd
 import pytest
 
@@ -98,3 +102,31 @@ def test_too_few_origins_fails_loudly(tmp_path):
             s["cfg"], s["sysid_cfg"], out, s["nm"], s["norm_stats"],
             tmp_path / "plots", origins=[ORIGIN_A],
         )
+
+
+def test_axis_labels_reflect_the_columns_own_units(tmp_path, monkeypatch):
+    """Every fixture column names its unit (see control_fixtures.py), so the
+    three closed-loop axes must read it back rather than the old hardcoded
+    "Temp [°C]" / "Setpoint [°C]" / "Power": regulated is Zone Air
+    Temperature alone (°C), the setpoint is also °C, and both power meters
+    are W."""
+    captured_labels = []
+    real_close = plt.close
+
+    def close_and_capture(fig):
+        captured_labels.append([ax.get_ylabel() for ax in fig.axes])
+        real_close(fig)
+
+    monkeypatch.setattr(plt, "close", close_and_capture)
+
+    s, out = rollout()
+    plot_closed_loop(
+        s["cfg"], s["sysid_cfg"], out, s["nm"], s["norm_stats"],
+        tmp_path / "plots", origins=[ORIGIN_A],
+    )
+
+    assert captured_labels, "plot_closed_loop never closed a figure"
+    ax0_label, ax1_label, ax2_label = captured_labels[0]
+    assert ax0_label == "Regulated [°C]"
+    assert ax1_label == "Control input [°C]"
+    assert ax2_label == "Power [W]"

@@ -16,6 +16,7 @@ import torch
 
 from neuromancer.trainer import Trainer
 
+from neurotemplate.common.data_utils import axis_label
 from neurotemplate.common.metrics import (
     ChannelMetrics,
     _safe_metric_key,
@@ -568,18 +569,18 @@ def plot_closed_loop(
         )
         for name, series in context.items():
             ax0.plot(steps, series[w], label=name, lw=0.9, linestyle="--")
-        ax0.set_ylabel("Temp [°C]")
+        ax0.set_ylabel(axis_label(norm_stats, regulated, "Regulated"))
         ax0.set_title(f"Closed loop — {ts[0].strftime('%Y-%m-%d')}")
         ax0.legend(fontsize=6, ncol=2)
         for j, name in enumerate(u_cols):
             ax1.plot(steps, U[w, :, j], label=name, lw=1.0)
-        ax1.set_ylabel("Setpoint [°C]")
+        ax1.set_ylabel(axis_label(norm_stats, u_cols, "Control input"))
         ax1.legend(fontsize=6, ncol=2)
         if power:
             ax2 = axes[2]
             for name, series in power.items():
                 ax2.plot(steps, series[w], label=name, lw=1.0)
-            ax2.set_ylabel("Power")
+            ax2.set_ylabel(axis_label(norm_stats, list(power), "Power"))
             ax2.legend(fontsize=6, ncol=2)
             bottom_ax = ax2
         else:

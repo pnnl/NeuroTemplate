@@ -8,10 +8,13 @@ import torch
 from neurotemplate.modeling.config import ModelingConfig as Config
 from neurotemplate.common.config import dict_to_dataclass
 from neurotemplate.common.data_utils import (
+    axis_label,
     normalize_df,
     compute_norm_stats,
     get_sw_dict,
     get_sw_dict_multi,
+    parse_column_unit,
+    unit_of,
     unnormalize_df,
 )
 
@@ -215,3 +218,66 @@ def test_multi_file_single_element_matches_legacy(synthetic_df, nm_mapping, cfg)
     for key in single:
         assert torch.equal(single[key], multi[key]), f"{key} mismatch"
     assert (multi["source_idx"] == 0).all()
+
+
+# ── Units: parsed from a column's own name, carried on norm_stats ───
+
+
+@pytest.mark.parametrize("col,expected", [
+    ("North Zone Air Temperature [°C]", "°C"),
+    ("Ambient Temperature [degC]", "degC"),
+    ("Total DX Power [W]", "W"),
+    ("Cooling Stage Signal [-]", "-"),
+    ("sec_elapsed", None),          # no brackets at all
+    ("Foo [note] Bar", None),       # bracket present, but not trailing
+    ("Foo []", None),               # trailing bracket, nothing inside
+])
+def test_parse_column_unit(col, expected):
+    assert parse_column_unit(col) == expected
+
+
+def test_compute_norm_stats_populates_unit_per_column():
+    df = pd.DataFrame({
+        "Zone Air Temperature [°C]": [20.0, 21.0, 22.0],
+        "sec_elapsed": [0.0, 300.0, 600.0],
+    })
+    stats = compute_norm_stats(df, norm_type="z_score")
+    assert stats["Zone Air Temperature [°C]"]["unit"] == "°C"
+    assert stats["sec_elapsed"]["unit"] is None
+
+
+def test_unit_of_handles_missing_column_and_missing_key():
+    """Neither a column absent from norm_stats nor a norm_stats dict that
+    predates per-column units (no "unit" key at all -- the reloaded-old-run
+    case) should raise; both just mean 'no unit known'."""
+    stats = compute_norm_stats(pd.DataFrame({"y0 [°C]": [1.0, 2.0]}), norm_type=None)
+    assert unit_of(stats, "not_a_column") is None
+
+    reloaded_old_run = {"y0 [°C]": {"shift": 0.0, "stretch": 1.0}}  # no "unit" key
+    assert unit_of(reloaded_old_run, "y0 [°C]") is None
+
+
+@pytest.mark.parametrize("cols,expected", [
+    (["y0 [°C]", "y1 [°C]"], "Regulated [°C]"),  # every column agrees
+    (["y0 [°C]", "p0 [W]"], "Regulated"),        # units disagree
+    (["u0", "u1"], "Regulated"),                 # no unit known on either
+    ([], "Regulated"),                           # nothing to agree on
+])
+def test_axis_label(cols, expected):
+    stats = compute_norm_stats(pd.DataFrame({
+        "y0 [°C]": [1.0, 2.0], "y1 [°C]": [1.0, 2.0], "p0 [W]": [1.0, 2.0],
+        "u0": [1.0, 2.0], "u1": [1.0, 2.0],
+    }), norm_type=None)
+    assert axis_label(stats, cols, "Regulated") == expected
+
+
+def test_tie_norm_stats_style_override_reaches_the_label():
+    """`tie_norm_stats` is just a hook that mutates norm_stats before it's
+    frozen; overriding "unit" there works exactly like overriding shift or
+    stretch, and axis_label picks up the override with no other change."""
+    stats = compute_norm_stats(pd.DataFrame({"Tank Level": [1.0, 2.0]}), norm_type=None)
+    assert unit_of(stats, "Tank Level") is None  # nothing to parse
+
+    stats["Tank Level"]["unit"] = "m"  # what a tie_norm_stats hook would do
+    assert unit_of(stats, "Tank Level") == "m"
+    assert axis_label(stats, ["Tank Level"], "Level") == "Level [m]"
