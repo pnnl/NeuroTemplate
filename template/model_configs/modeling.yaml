@@ -34,8 +34,10 @@ test_data_path: data/test.csv
 # num_layers: 3
 # Predict the delta from the current state instead of the state itself.
 # residual: true
-# Give each zone from the zone_mapping hook its own sub-model, with its own
-# parameters and hidden state. mlp and gru only; 2r2c is always per-zone.
+# Give each block from the block_mapping hook its own sub-model, with its own
+# parameters and hidden state. mlp and gru only; 2r2c is always per-block.
+# A block that names its own `model` needs no flag — this one is for splitting
+# every block under a single family. (Field name kept for compatibility.)
 # per_zone: false
 
 # ── 2R2C ─────────────────────────────────────────────────────────

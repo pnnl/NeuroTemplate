@@ -4,7 +4,7 @@ A library of generic, time-series, data-driven black-box modeling and control bu
 
 The repo contains two sister subsystems:
 
-- **Modeling** — train a system-identification surrogate `y_{k+1} = f(y_k, u_k, d_k) [+ y_k]` from data, with an optional gradient-sign penalty, post-training physics assertions (equilibrium / step response / reachability / free decay), Optuna search, MLflow tracking. Model families: `mlp`, `nssm`, `lssm`, `gru` (black box) and `2r2c` (grey box — a thermal network with a hidden mass, for buildings whose storage matters). Any of them can be split one-per-zone.
+- **Modeling** — train a system-identification surrogate `y_{k+1} = f(y_k, u_k, d_k) [+ y_k]` from data, with an optional gradient-sign penalty, post-training physics assertions (equilibrium / step response / reachability / free decay), Optuna search, MLflow tracking. Model families: `mlp`, `nssm`, `lssm`, `gru` (black box) and `2r2c` (grey box — a thermal network with a hidden mass, for buildings whose storage matters). Families can be mixed in one graph, one per block of signals.
 - **Control** — train a differentiable predictive control (DPC) policy against a frozen surrogate. Closed-loop rollouts, comfort-band penalties, optional energy, cost and peak-demand objectives, setpoint quantization. Policy families: `mlp`, `linear` (a saturated affine feedback law). Optionally scores a rule-based baseline alongside the learned policy.
 
 Both sides share a thin `common/` layer (YAML/CLI loader, CSV + sliding-window data utilities, per-channel metrics).
@@ -125,9 +125,9 @@ The library finds the hook files automatically: by default it looks for `modelin
 | `sub_plot(df_true, col_name) -> tuple \| None` | must be defined; return `None` for default | per-column subplot guidance |
 | `hyper_args(trial, base_cfg) -> Config` | required only for `nt model optuna` | Optuna trial setup |
 | `tie_norm_stats(nm_mapping, norm_stats, cfg) -> norm_stats` | optional | post-process norm stats before they are frozen (e.g. force two columns onto a shared `shift`/`stretch`) |
-| `zone_mapping(nm_mapping, cfg) -> {zone: {Y: [col], U: [col]}} \| None` | optional | split Y and U into independent per-zone sub-models (see [Zones](#zones)) |
+| `block_mapping(nm_mapping, cfg) -> {block: {Y, U, D, reads, model}} \| None` | optional | split Y into independent sub-models, each with its own family (see [Blocks](#blocks)) |
 
-The library imports each hook by attribute (no defaulting), so every row above except `hyper_args`, `tie_norm_stats` and `zone_mapping` must exist in `modeling_user_defined.py`, even when the body just returns a trivial value. `hyper_args` is only looked up on the code path that needs it; `tie_norm_stats` and `zone_mapping` are `hasattr`-gated and skipped when absent.
+The library imports each hook by attribute (no defaulting), so every row above except `hyper_args`, `tie_norm_stats` and `block_mapping` must exist in `modeling_user_defined.py`, even when the body just returns a trivial value. `hyper_args` is only looked up on the code path that needs it; `tie_norm_stats` and `block_mapping` are `hasattr`-gated and skipped when absent (and `zone_mapping` is still honored as the deprecated name).
 
 ### Control (`control_user_defined.py`)
 
@@ -299,12 +299,14 @@ it does at least pick the prior the data prefers rather than the one we shipped.
 
 Those three are components, not modes. The modes they produce on 5-minute
 data — `tau_fast = 0.60 h`, `tau_slow = 13.40 h` — are what the reportcard
-prints, per zone and per channel:
+prints, per block and per channel — alongside each block's family, which is
+the interesting fact once families are mixed:
 
 ```
-- **fy:** `PerZoneBlock`, params=2,504, in=42, out=2
-  - **zone `north`:** `RCBlock`, params=1,252, in=30, out=1
-    - North Zone Air Temperature [°C]: tau_fast=0.60 h, tau_slow=13.40 h
+- **fy:** `BlockStack`, params=3,493, in=60, out=2
+  - **block `zone` (2r2c):** `RCBlock`, params=1,220, in=48, out=1
+    - Zone Air Temperature [°C]: tau_fast=0.60 h, tau_slow=13.40 h
+  - **block `power` (mlp):** `MLP`, params=2,273, in=36, out=1
 ```
 
 What it gives up: `g` cannot see the state, so it cannot represent a
@@ -314,38 +316,61 @@ monotone response to setpoint with no cut-off — smooth cooling where the
 real plant's is staged. That is the price of the stability guarantee, and it
 is why this is one family among several rather than the only one.
 
-### Zones
+### Blocks
 
-A *zone* is a group of Y channels that gets its own sub-model: its own
-parameters, its own hidden state, and no term reading any other zone's
-state. Declare them with the optional `zone_mapping` hook:
+A *block* is a group of Y channels that gets its own sub-model: its own
+parameters, its own **architecture**, and its own hidden state. Declare them
+with the optional `block_mapping` hook:
 
 ```python
-def zone_mapping(nm_mapping, cfg):
+def block_mapping(nm_mapping, cfg):
     return {
-        "north": {"Y": ["North Zone Air Temperature [°C]"],
-                  "U": ["North Cooling Setpoint [°C]"]},
-        "south": {"Y": ["South Zone Air Temperature [°C]"],
-                  "U": ["South Cooling Setpoint [°C]"]},
+        "zone":  {"Y": ["Zone Air Temperature [°C]"],
+                  "U": ["Cooling Setpoint [°C]"],
+                  "model": "2r2c"},
+        "power": {"Y": ["Total Power [W]"],
+                  "reads": ["Zone Air Temperature [°C]"],
+                  "D": ["Ambient Temperature [°C]"],
+                  "model": "mlp"},
     }
 ```
 
-Each zone owns its own Y and U channels and sees every D channel. **U need
-not partition:** any control no zone claims is shared with all of them,
-which is what you want for one air handler serving several zones. Y must
-partition exactly, and anything else — a state claimed twice, a state left
-out, a column that is not in the mapping — is named before the first epoch
-runs.
+That is the point of the split: **one graph, different families per signal
+group.** Zone air as a grey-box thermal network whose storage you can read
+off the reportcard, power as an MLP that sees the zone it is cooling.
 
-`2r2c` is per-zone whether or not the hook exists: with no hook, each Y
-channel still gets its own RC network, driven by every U channel. Declaring
-zones is how you say *which setpoint drives which zone*. For `mlp` and `gru`
-the split is opt-in with `per_zone: true`, so you can run 2R2C-per-zone and
-MLP-per-zone against each other on the same mapping.
+What a block owns:
 
-Inter-zone conduction is not modeled. Zones are independent by construction,
-and a building whose zones exchange meaningful heat is outside what this
-buys you.
+| | |
+|---|---|
+| `Y` | its own channels, and only its own. **Y must partition exactly** — a state claimed twice, left out, or naming a column not in the mapping is reported before the first epoch. |
+| `U` | its own actuation, plus any U channel **no block claims** — unclaimed controls are shared with every block, which is what you want for one air handler serving several. |
+| `D` | all of it by default, or a named subset. D is exogenous, so it has **no partition rule**: two blocks may claim the same column. |
+| `reads` | other blocks' Y channels this block may also see, as ordinary inputs. |
+| `model` | the family this block builds under. Omit it to fall back to `cfg.model`. |
+
+Cross-block `reads` are safe because every block input comes from the shared
+**history window**, never from another block's same-step output — so there is
+no evaluation-order dependency between blocks and the gather stays a fixed
+permutation. **`2r2c` refuses `reads`**, and that refusal is load-bearing: its
+unconditional-stability guarantee holds only because its learned forcing map
+sees `u` and `d` and never state. (It still reads its own Y, in the fixed
+linear term — what it cannot do is let a *learned* map see state.)
+
+`2r2c` is per-block whether or not the hook exists: with no hook, each Y
+channel still gets its own RC network driven by every U channel. Declaring
+blocks is how you say *which setpoint drives which block*. For `mlp` and `gru`
+a single-family split is opt-in with `per_zone: true` (field name kept for
+compatibility); a block naming its own `model` needs no flag.
+
+Inter-block conduction is not modeled. Blocks are independent by construction
+apart from `reads`, and a plant whose groups exchange meaningful energy
+through their *states* is outside what this buys you.
+
+**Renamed from "zones".** `zone_mapping`, `Zone`, `build_zones`,
+`PerZoneBlock` and a logged `zone_spec.json` all still work as deprecated
+aliases, so an existing application and its saved runs keep loading
+unchanged.
 
 ## Two optional control capabilities
 
@@ -578,9 +603,10 @@ src/neurotemplate/
 │   └── reportcard.py    # _section, write_reportcard (shared by both sides)
 ├── modeling/
 │   ├── config.py        # ModelingConfig
-│   ├── dynamics.py      # SSMGrad, GRUBlock, PerZoneBlock, get_dynamics
+│   ├── dynamics.py      # SSMGrad, GRUBlock, BlockStack, get_dynamics
 │   ├── rc.py            # RCBlock — the 2R2C thermal network
-│   ├── zones.py         # build_zones — the Y/U partition behind per-zone models
+│   ├── blocks.py        # build_blocks — the Y/U/D partition behind per-block models
+│   ├── diagnostics.py   # nt data heads / nt data decay — pre-training advice
 │   ├── windows.py       # positions inside the flattened history window
 │   ├── heads.py         # HeadStack (regression / binary / bounded / ordinal)
 │   ├── loss.py          # build_loss
