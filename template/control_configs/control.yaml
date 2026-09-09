@@ -142,15 +142,16 @@ energy_weight: 0.0
 # Hidden width is 2**log2_policy_hidden. Ignored for the linear policy.
 # log2_policy_hidden: 6
 # policy_layers: 2
-# Snap the policy output to a grid, in physical units (e.g. 0.5 for
-# half-degree thermostat steps). Straight-through, so gradients still flow.
-# 0 disables. Note a grid coarser than band_width_min cannot fit inside the
-# narrowest band and will cost you violations.
-# setpoint_step: 0.5
+# Snap the policy output to a grid, in the plant's physical units (e.g. 0.5
+# for half-degree HVAC thermostat steps). Straight-through, so gradients
+# still flow. 0 disables — the default, since a grid step is one plant's
+# actuator resolution. Note a grid coarser than band_width_min cannot fit
+# inside the narrowest band and will cost you violations.
+# setpoint_step: 0.0
 
 # ── RESIDUAL CONTROL ─────────────────────────────────────────────
-# Half-width of the residual box, in physical units (°C). Unset (null) is a
-# plain policy over the actuation box. Set it and the policy commands
+# Half-width of the residual box, in the plant's physical units. Unset (null)
+# is a plain policy over the actuation box. Set it and the policy commands
 # `reference_control(...) + δ` with |δ| <= residual_delta, which requires the
 # control_user_defined.reference_control hook.
 #

@@ -6,6 +6,8 @@ Almost everything here is one shape: set some fields, then assert that
 two tables rather than two dozen near-identical functions — the table is
 the readable form of "here is every way a control config can be wrong."
 """
+import warnings
+
 import pytest
 
 from neurotemplate.common.config import ConfigError, CONTROL_CONFIG_DIR
@@ -18,6 +20,8 @@ run_dir: none
 train_data_path: train.csv
 dev_data_path:   dev.csv
 test_data_path:  test.csv
+band_lo: 20.0
+band_hi: 26.0
 """
 
 _TARIFF = dict(train_price_path="train_price.csv",
@@ -45,6 +49,10 @@ def _runnable(**fields) -> ControlConfig:
     cfg.train_data_path = "train.csv"
     cfg.dev_data_path = "dev.csv"
     cfg.test_data_path = "test.csv"
+    # band_lo/band_hi have no default, so every case not itself testing that
+    # requirement needs a valid pair to get past it.
+    cfg.band_lo = 20.0
+    cfg.band_hi = 26.0
     for name, value in fields.items():
         setattr(cfg, name, value)
     return cfg
@@ -75,6 +83,10 @@ def test_an_unknown_key_is_rejected(tmp_path):
 @pytest.mark.parametrize("fields,message", [
     # Required fields and ordering.
     ({"sysid_run_id": None}, "sysid_run_id"),
+    # band_lo/band_hi are physical-unit constants with no library default;
+    # missing either one names both fields, not a bare TypeError.
+    ({"band_lo": None, "band_hi": None}, "band_lo and band_hi must both be set"),
+    ({"band_lo": None}, "band_lo and band_hi must both be set"),
     ({"band_lo": 24.0, "band_hi": 20.0}, "band_lo"),
     # Policy options are closed sets.
     ({"policy": "bogus"}, "policy"),
@@ -108,6 +120,8 @@ def test_validate_names_the_problem(fields, message):
 @pytest.mark.parametrize("fields", [
     pytest.param({"policy": "linear", "policy_bound_method": "relu_clamp"},
                  id="linear policy"),
+    # Explicit band_lo/band_hi past the missing-field check works unchanged.
+    pytest.param({"band_lo": 18.0, "band_hi": 24.0}, id="band explicitly set"),
     pytest.param({"setpoint_step": 0.5, "residual_delta": 0.5},
                  id="residual at exactly one grid step"),
     # 0 means "emit the reference exactly" — a floor to train nothing and
@@ -118,3 +132,23 @@ def test_validate_names_the_problem(fields, message):
 ])
 def test_validate_stays_quiet_on_a_legal_config(fields):
     _runnable(**fields).validate()
+
+
+# ── in_steps: advisory, matching ModelingConfig ──────────────────
+
+
+def test_in_steps_above_the_threshold_warns_instead_of_raising():
+    """`in_steps` used to be a hard ValueError ceiling here (`check_max`
+    against the modeling side's `MAX_IN_STEPS` alias) while the same value
+    was merely advisory on ModelingConfig — fatal on one side of the library,
+    fine on the other, for the same number. Now both warn for the same
+    reason (memory per batch; history the model never trained on) and
+    neither raises."""
+    with pytest.warns(UserWarning, match=r"in_steps=13.*above the usual ceiling of 12"):
+        _runnable(in_steps=13).validate()
+
+
+def test_in_steps_at_or_below_the_threshold_is_quiet():
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        _runnable(in_steps=12).validate()  # must not raise or warn

@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
+import warnings
 from dataclasses import asdict, dataclass, field
 from typing import Optional, Union
 
 from neurotemplate.common.config import (  # noqa: F401  re-exported
     _check_paths_field,
-    check_max,
     check_non_negative,
     check_one_of,
     check_positive,
@@ -101,14 +101,19 @@ class ControlConfig:
     # Future-D steps the policy previews (0 = current only).
     d_preview: int = 0
 
-    # ── Comfort band (sampled time-varying signal, °C) ───────────
+    # ── Comfort band (sampled time-varying signal, in the plant's physical
+    #    units) ─────────────────────────────────────────────────────────
     # Per segment, width ~ U[band_width_min, band_width_max] and lower bound
     # ~ U[band_lo, band_hi - width]. `*_band_sub_samples` controls how many
     # equal-ish contiguous segments make up a window: 1 = constant band,
     # k > 1 = (k-1) step-jumps inside the window. test_band_* (lo/hi/widths)
     # default to the train values; set them to override at evaluation time.
-    band_lo: float = 23.0
-    band_hi: float = 27.0
+    #
+    # band_lo/band_hi have no default: they are physical-unit constants
+    # (°C for HVAC, volts for a battery, ...) specific to your plant, and
+    # `validate()` fails fast, naming both fields, if either is unset.
+    band_lo: Optional[float] = None
+    band_hi: Optional[float] = None
     band_width_min: float = 0.5
     band_width_max: float = 2.0
     train_band_sub_samples: int = 1
@@ -150,16 +155,19 @@ class ControlConfig:
     policy_bound_method: str = "sigmoid_scale"
     log2_policy_hidden: int = 6
     policy_layers: int = 2
-    # Snap policy output to a fixed setpoint grid (°C). E.g. 0.5 = half-degree
-    # thermostat steps. Straight-through estimator on backward, so gradients
-    # still flow as if the output were continuous. 0 disables quantization.
-    setpoint_step: float = 0.5
-    # Half-width of the residual box, in physical units (°C). None disables the
-    # residual entirely (a plain policy over the actuation box). Set it and the
-    # policy commands `reference_control(...) + δ` with |δ| <= residual_delta,
-    # which caps how far a surrogate error can move the deployed setpoint.
-    # 0.0 emits the reference rule exactly — a useful floor to train nothing
-    # and score. Requires the control_user_defined.reference_control hook.
+    # Snap policy output to a fixed setpoint grid, in the plant's physical
+    # units (e.g. 0.5 for half-degree HVAC thermostat steps). Straight-through
+    # estimator on backward, so gradients still flow as if the output were
+    # continuous. 0 disables quantization — the default, since a nonzero grid
+    # is one plant's actuator resolution, not a library-wide default.
+    setpoint_step: float = 0.0
+    # Half-width of the residual box, in the plant's physical units. None
+    # disables the residual entirely (a plain policy over the actuation box).
+    # Set it and the policy commands `reference_control(...) + δ` with
+    # |δ| <= residual_delta, which caps how far a surrogate error can move
+    # the deployed setpoint. 0.0 emits the reference rule exactly — a useful
+    # floor to train nothing and score. Requires the
+    # control_user_defined.reference_control hook.
     residual_delta: Optional[float] = None
 
     # ── Training ─────────────────────────────────────────────────
@@ -329,6 +337,13 @@ class ControlConfig:
             raise ValueError(
                 f"band_width_min ({self.band_width_min}) must be <= "
                 f"band_width_max ({self.band_width_max})"
+            )
+        if self.band_lo is None or self.band_hi is None:
+            raise ValueError(
+                "band_lo and band_hi must both be set — the comfort band's "
+                "edges are in the plant's physical units (°C for HVAC, volts "
+                "for a battery, ...), so there is no library-wide default "
+                "for them."
             )
         if self.band_lo > self.band_hi:
             raise ValueError(

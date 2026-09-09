@@ -230,7 +230,9 @@ def test_residual_metrics_reject_a_mismatched_reference():
 
 
 def test_evaluation_reports_the_residual_and_describe_reports_the_box():
-    s = full_setup(residual_delta=1.0)
+    # setpoint_step is explicit: this test also checks describe_policy's
+    # "quantized" flag, and 0.0 (the config default) would report False.
+    s = full_setup(residual_delta=1.0, setpoint_step=0.5)
     cfg, sysid_cfg, nm, ns = s["cfg"], s["sysid_cfg"], s["nm"], s["norm_stats"]
     policy = build_policy(cfg, sysid_cfg, nm, ns)
     cl = build_closed_loop(s["dyn_node"], policy, cfg, sysid_cfg)

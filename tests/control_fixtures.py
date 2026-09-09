@@ -88,6 +88,13 @@ def make_sysid_cfg(in_steps: int = 4, model: str = "mlp") -> Config:
 def make_control_cfg(**overrides) -> ControlConfig:
     cfg = ControlConfig()
     cfg.sysid_run_id = "test-run"
+    # band_lo/band_hi have no library default (they are physical-unit
+    # constants); every test needs a comfort band, so the fixture supplies
+    # one plant's plausible values here rather than in every test. Matches
+    # the library's old built-in default so existing golden output is
+    # unaffected by the fixture picking these rather than that default.
+    cfg.band_lo = 23.0
+    cfg.band_hi = 27.0
     cfg.in_steps = 3
     cfg.train_pred_steps = 6
     # hmax = max(sysid_cfg.in_steps=4, cfg.in_steps=3) = 4; test_window includes warmup.
