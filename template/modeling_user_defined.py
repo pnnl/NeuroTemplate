@@ -8,7 +8,7 @@ without any further knowledge of your data.
 The file must be named `modeling_user_defined.py` and live in the directory
 you run `nt` from, or be pointed at by `user_hooks_path` in your YAML.
 
-Every function here except `hyper_args`, `tie_norm_stats` and `zone_mapping`
+Every function here except `hyper_args`, `tie_norm_stats` and `block_mapping`
 is imported by attribute with no default, so all of them must exist even when
 the body is a trivial return. Fill in `data_mapping` first; the rest have
 working defaults.
@@ -116,6 +116,10 @@ def data_head_config(
     """
     Return a HeadStack with exactly one head per Y column, in Y order.
 
+    Run `nt data heads` first — it reads the data and suggests a head (plus a
+    pasteable snippet) for each Y column from the shape of its distribution,
+    not its name.
+
     All-regression (below) is the right default. Reach for another head only
     when the channel really is discrete or bounded:
 
@@ -178,38 +182,57 @@ def column_norm_config(
 
 
 # ---------------------------------------------------------------------
-# Optional: split the states into independent zones
+# Optional: split the states into independent blocks, each its own family
 # ---------------------------------------------------------------------
 @beartype
-def zone_mapping(
+def block_mapping(
     nm_mapping: dict[str, list[str]],
     cfg: Config,
-) -> Optional[dict[str, dict[str, list[str]]]]:
+) -> Optional[dict[str, dict]]:
     """
-    Group Y channels into zones, each getting its own sub-model. Called only
-    if this function exists; delete it, or return None, for a single zone
-    holding every channel.
+    Group Y channels into blocks, each getting its own sub-model — its own
+    parameters, its own architecture (via `model`), and its own hidden state
+    if the family is stateful. Called only if this function exists; delete
+    it, or return None, for a single block holding every channel.
 
-    A zone owns its own Y channels and its own U channels; every zone sees
-    every D channel, and any U channel no zone claims is shared with all of
-    them — which is what you want for one air handler serving several zones.
-    Y must partition exactly: each state in one zone and no state left out.
+    A block owns its own Y channels and its own U channels; it sees all of D
+    by default, or a named subset; and any U channel no block claims is
+    shared with all of them — which is what you want for one air handler
+    serving several blocks. Y must partition exactly: each state in one
+    block and no state left out. D has no such rule — it is exogenous and
+    shared by nature, so several blocks may each claim the same column, or
+    all of it, with no conflict.
 
         return {
             "north": {"Y": ["North Zone Temperature [degC]"],
-                      "U": ["North Setpoint [degC]"]},
-            "south": {"Y": ["South Zone Temperature [degC]"],
-                      "U": ["South Setpoint [degC]"]},
+                      "U": ["North Setpoint [degC]"],
+                      "model": "2r2c"},
+            "power": {"Y": ["Total Power [W]"],
+                      "reads": ["North Zone Temperature [degC]"],
+                      "D": ["Ambient Temperature [degC]"],
+                      "model": "mlp"},
         }
-        # "AHU Fan Speed [-]" is claimed by neither, so both zones get it.
+        # "AHU Fan Speed [-]" is claimed by neither, so both blocks get it.
 
-    `model: 2r2c` is per-zone whether or not this hook exists — with no hook
-    each Y channel still gets its own RC network, driven by every U channel.
-    Declaring zones is how you say *which setpoint drives which zone*. For
-    `mlp` and `gru` the split only happens with `per_zone: true`.
+    `model` is a family name ("mlp", "gru", "2r2c") or omitted, meaning "use
+    cfg.model" — so a spec that never sets `model` behaves exactly like a
+    plain block split, one family for everyone. `reads` names other blocks'
+    Y channels this block may also see, as an ordinary input (see the
+    `power` block above, reading the zone it measures alongside).
 
-    Zones are independent by construction: no term in one zone's update reads
-    another zone's state. Inter-zone conduction is not modeled.
+    `model: 2r2c` is per-block whether or not this hook exists — with no
+    hook each Y channel still gets its own RC network, driven by every U
+    channel. Declaring blocks is how you say *which setpoint drives which
+    block*. For `mlp` and `gru` the split only happens with `per_zone: true`
+    or by naming `model` explicitly here.
+
+    Blocks are independent by construction: no term in one block's update
+    reads another block's state on the same step. `reads` is safe for every
+    family except `2r2c`, whose stability guarantee requires its forcing map
+    to never see state — a `2r2c` block with `reads` raises.
+
+    `zone_mapping` is a deprecated alias for this hook, honored if
+    `block_mapping` is absent.
     """
     return None
 
@@ -236,6 +259,13 @@ def tie_norm_stats(
         s = norm_stats["Setpoint [degC]"]
         for col in ("Setpoint [degC]", "Zone Temperature [degC]"):
             norm_stats[col].update(shift=s["shift"], stretch=s["stretch"])
+
+    Also the place to fix a column's "unit" (used on plot axis labels):
+    it's parsed from the column's own trailing "[...]" by
+    `common.data_utils.parse_column_unit`, so a name that doesn't follow
+    that convention, or a unit you'd rather display differently, is a
+    one-line override here — `norm_stats[col]["unit"] = "kWh"` — not a
+    reason to add a second mechanism for the same job.
     """
     return norm_stats
 

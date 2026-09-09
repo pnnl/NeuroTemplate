@@ -28,7 +28,7 @@ from neurotemplate.common.data_utils import (
     warn_degenerate_columns,
 )
 from neurotemplate.modeling.experiment import resolve_device, set_seeds
-from neurotemplate.modeling.pipeline import train_and_evaluate
+from neurotemplate.modeling.pipeline import resolve_block_spec, train_and_evaluate
 from neurotemplate.hooks import load_modeling_hooks
 
 
@@ -54,6 +54,9 @@ def main() -> None:
     if cfg.verbose:
         print(f"Device: {cfg.device}")
         print(f"Seed:   {cfg.seed}")
+        if cfg.ensemble_seeds > 1:
+            print(f"Ensemble: {cfg.ensemble_seeds} seeds "
+                  f"({cfg.seed}..{cfg.seed + cfg.ensemble_seeds - 1})")
         if cfg.grad_gain > 0:
             print(f"Gradient penalty: gain={cfg.grad_gain}, "
                   f"samples={cfg.grad_n_samples}")
@@ -68,7 +71,7 @@ def main() -> None:
     # enough since `_validate_split_columns` already enforced cross-file
     # column match.
     nm_mapping = data_mapping(df=train_raws[0], cfg=cfg)
-    zone_spec = hooks.zone_mapping(nm_mapping, cfg) if hasattr(hooks, "zone_mapping") else None
+    block_spec = resolve_block_spec(hooks, nm_mapping, cfg)
 
     norm_overrides = column_norm_config(nm_mapping)
     # Stats pooled across all training files so per-column ranges reflect
@@ -125,7 +128,7 @@ def main() -> None:
         nm_mapping=nm_mapping, norm_stats=norm_stats,
         grad_masks=grad_masks, synth_cfg=synth_cfg,
         freq_s=freq_s, logger=global_logger,
-        head_stack=head_stack, zone_spec=zone_spec,
+        head_stack=head_stack, block_spec=block_spec,
     )
 
     if cfg.verbose and hasattr(global_logger, "run"):

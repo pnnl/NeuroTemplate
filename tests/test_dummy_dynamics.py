@@ -11,7 +11,6 @@ import torch
 
 from neurotemplate.modeling.config import ModelingConfig as Config
 from neurotemplate.modeling.dynamics import get_dummy, get_dynamics, model_catalog
-from neurotemplate.modeling.zones import build_zones
 
 ZONE = "Zone Air Temperature [°C]"
 SETPT = "Zone Cooling Setpoint [°C]"
@@ -40,7 +39,7 @@ def test_registration():
 def test_forward_returns_setpoint_exactly():
     """SSMGrad.forward(y, u, d) must return the setpoint u with the bias at 0."""
     mapping = single_zone_mapping()
-    model = get_dummy(make_cfg(), mapping, build_zones(mapping))
+    model = get_dummy(make_cfg(), mapping)
     y = 24.0 + torch.randn(5, 1)      # zone temp [batch, ny]
     u = 22.0 + torch.randn(5, 1)      # setpoint  [batch, nu]
     d = torch.randn(5, 3)             # disturbances [batch, nd]
@@ -99,4 +98,4 @@ def test_requires_ny_equals_nu():
     bad = {"Y": [ZONE, "Zone 2 Air Temperature [°C]"], "U": [SETPT],
            "D": [OUT], "t": ["sec_elapsed"]}
     with pytest.raises(ValueError, match="one setpoint per zone temp"):
-        get_dummy(make_cfg(), bad, build_zones(bad))
+        get_dummy(make_cfg(), bad)

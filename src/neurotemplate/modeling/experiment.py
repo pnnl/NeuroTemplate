@@ -80,7 +80,7 @@ def build_trainer(
     grad_masks: dict[str, torch.Tensor],
     norm_stats: dict[str, dict[str, float]],
     head_stack: Optional[HeadStack] = None,
-    zone_spec: Optional[dict[str, dict[str, list[str]]]] = None,
+    block_spec: Optional[dict[str, dict]] = None,
     logger: Optional[MLFlowLogger] = None,
 ) -> Trainer:
     """
@@ -98,7 +98,7 @@ def build_trainer(
 
     # SystemPreview with 'yn' feedback loop for autoregressive rollout
     system = get_dynamics(
-        cfg, nm_mapping, head_stack=head_stack, zone_spec=zone_spec,
+        cfg, nm_mapping, head_stack=head_stack, block_spec=block_spec,
     ).to(cfg.device)
 
     # The raw SSMGrad model lives inside the System's Node.
@@ -219,7 +219,7 @@ def train_with_curriculum(
     grad_masks: dict[str, torch.Tensor],
     norm_stats: dict[str, dict[str, float]],
     head_stack: Optional[HeadStack] = None,
-    zone_spec: Optional[dict[str, dict[str, list[str]]]] = None,
+    block_spec: Optional[dict[str, dict]] = None,
     global_logger: Optional[MLFlowLogger] = None,
 ) -> tuple[System, float]:
     """
@@ -235,7 +235,7 @@ def train_with_curriculum(
         grad_masks=grad_masks,
         norm_stats=norm_stats,
         head_stack=head_stack,
-        zone_spec=zone_spec,
+        block_spec=block_spec,
         logger=global_logger,
     )
 

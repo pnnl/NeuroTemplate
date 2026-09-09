@@ -28,7 +28,7 @@ from neurotemplate._typing import beartype
 
 from neurotemplate.modeling.config import ModelingConfig
 from neurotemplate.common.data_utils import get_sw_dict_multi, to_df, unnormalize_df
-from neurotemplate.modeling.experiment import train_with_curriculum
+from neurotemplate.modeling.experiment import set_seeds, train_with_curriculum
 from neurotemplate.modeling.heads import HeadStack
 from neurotemplate.common.metrics import (
     ChannelMetrics,
@@ -55,6 +55,25 @@ from neurotemplate.modeling.scenarios import (
     readouts_to_dict,
     run_scenarios,
 )
+
+
+# ── Block spec resolution ────────────────────────────────────────
+
+
+def resolve_block_spec(hooks, nm_mapping: dict[str, list[str]], cfg: ModelingConfig):
+    """Call the hooks module's `block_mapping`, falling back to the
+    deprecated `zone_mapping`, or None if neither is defined.
+
+    One fallback, not a chain: `block_mapping` wins whenever a hooks module
+    defines both, so an application mid-migration only ever has one spec in
+    effect. Shared by cli/train.py and cli/optuna.py, which both need this
+    exact lookup before building the trainer.
+    """
+    if hasattr(hooks, "block_mapping"):
+        return hooks.block_mapping(nm_mapping, cfg)
+    if hasattr(hooks, "zone_mapping"):
+        return hooks.zone_mapping(nm_mapping, cfg)
+    return None
 
 
 # ── Result type ──────────────────────────────────────────────────
@@ -391,7 +410,7 @@ def train_and_evaluate(
     freq_s: float,
     logger,
     head_stack: Optional[HeadStack] = None,
-    zone_spec: Optional[dict[str, dict[str, list[str]]]] = None,
+    block_spec: Optional[dict[str, dict]] = None,
     extra_metrics: Optional[dict] = None,
 ) -> dict:
     """
@@ -417,7 +436,7 @@ def train_and_evaluate(
         grad_masks=grad_masks,
         norm_stats=norm_stats,
         head_stack=head_stack,
-        zone_spec=zone_spec,
+        block_spec=block_spec,
         global_logger=logger,
     )
     train_time_s = tic() - train_t0
@@ -431,10 +450,10 @@ def train_and_evaluate(
     logger.log_metrics(metrics_to_log)
     logger.log_dict(norm_stats, name="norm_stats.json")
     logger.log_dict(nm_mapping, name="nm_mapping.json")
-    # Persist the zone split so `nt model load` rebuilds the same topology
+    # Persist the block split so `nt model load` rebuilds the same topology
     # even if the hooks file has moved on.
-    if zone_spec:
-        logger.log_dict(zone_spec, name="zone_spec.json")
+    if block_spec:
+        logger.log_dict(block_spec, name="block_spec.json")
     if grad_masks:
         logger.log_dict(grad_masks, name="grad_mask.json")
     # Persist head config so load_model can rebuild the exact head topology

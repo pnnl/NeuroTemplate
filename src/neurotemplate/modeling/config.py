@@ -1,21 +1,25 @@
 from __future__ import annotations
 
+import warnings
 from dataclasses import asdict, dataclass, field
 from typing import Optional, Union
 
 from neurotemplate.common.config import (
     _check_paths_field,
-    check_max,
     check_non_negative,
     check_one_of,
     check_positive,
     default_savedir,
 )
 
-# History-window ceiling, enforced on both ModelingConfig and ControlConfig
-# (the two places `in_steps` appears). Keeps the lookback window bounded
-# across the library rather than per-project.
-MAX_IN_STEPS = 12
+# History-window warning threshold for ModelingConfig.in_steps. Past this
+# many steps, a longer context window costs more memory per batch, and once
+# it exceeds train_pred_steps it hands the model, at rollout time, context
+# it never saw during training. Advisory only — the right window length is
+# dataset-specific, so ModelingConfig.validate() warns rather than rejects
+# (see below). Twelve is a reasonable default for buildings on 5-minute
+# data, not a limit the library can defend for every system.
+IN_STEPS_WARN_THRESHOLD = 12
 
 
 @dataclass
@@ -50,11 +54,12 @@ class ModelingConfig:
     log2_hidden_size: int = 8
     num_layers: int = 3
     residual: bool = True
-    # Give each zone its own sub-model, with its own parameters and hidden
-    # state and no term reading another zone's state. Which channels form a
-    # zone comes from the optional `zone_mapping` hook; without it there is
-    # one zone holding everything, and this flag only costs a wrapper.
-    # `2r2c` is per-zone by construction and rejects this flag.
+    # Give each block its own sub-model, with its own parameters and hidden
+    # state and no term reading another block's state on the same step.
+    # Which channels form a block comes from the optional `block_mapping`
+    # hook (or the deprecated `zone_mapping`); without one there is one
+    # block holding everything, and this flag only costs a wrapper.
+    # `2r2c` is per-block by construction and rejects this flag.
     per_zone: bool = False
     # Timesteps per hour, resolved from the data's sampling frequency by the
     # CLI (like `device` and `seed`) rather than set in YAML. Only `2r2c`
@@ -137,8 +142,12 @@ class ModelingConfig:
     # timestep, and for a reachability bound the horizon is load-bearing.
     synth_hours: float = 4.0
     synth_n_plot: int = 4
-    # Y-axis unit label on the synthetic-scenario figures. Override if your
-    # state channels aren't in Celsius.
+    # Deprecated: units are now per-column, parsed from each state column's
+    # own "[unit]" suffix (see `common.data_utils.parse_column_unit`) and
+    # carried on `norm_stats`. This field only still matters as a fallback
+    # for a state column whose name carries no unit of its own — the
+    # synthetic-scenario y-axis falls back to this label for such a column
+    # rather than going unlabeled. Columns that name their own unit ignore it.
     synth_y_unit: str = "°C"
 
     def validate(self) -> None:
@@ -165,19 +174,33 @@ class ModelingConfig:
         for name in ["rc_tau_ambient_h", "rc_tau_zone_mass_h", "rc_tau_mass_zone_h"]:
             check_positive(self, name)
 
-        check_one_of(self, "model", ["mlp", "nssm", "lssm", "gru", "2r2c", "dummy"])
-        check_one_of(self, "save_config", ["last_step", "all", "None", None])
-        check_max(self, "in_steps", MAX_IN_STEPS)
-
         # Imported here rather than at module scope: dynamics imports this
         # config module, so a top-level import would be circular.
-        from neurotemplate.modeling.dynamics import PER_ZONE_FAMILIES
-        if self.per_zone and self.model not in PER_ZONE_FAMILIES:
-            extra = (" 2r2c is already per-zone and needs no flag."
+        # VALID_MODEL_NAMES is the single whitelist of valid families (the
+        # union of model_catalog and BLOCK_BUILDERS); check_one_of's list and
+        # PER_BLOCK_FAMILIES both used to be hand-maintained copies of it.
+        from neurotemplate.modeling.dynamics import VALID_MODEL_NAMES, PER_BLOCK_FAMILIES
+
+        check_one_of(self, "model", list(VALID_MODEL_NAMES))
+        check_one_of(self, "save_config", ["last_step", "all", "None", None])
+
+        if self.in_steps > IN_STEPS_WARN_THRESHOLD:
+            warnings.warn(
+                f"in_steps={self.in_steps} is above the usual ceiling of "
+                f"{IN_STEPS_WARN_THRESHOLD}. A longer context window costs "
+                "more memory per batch, and once it exceeds train_pred_steps "
+                "it hands the model, at rollout time, history it never saw "
+                "during training. Not rejected outright — the right window "
+                "length is dataset-specific.",
+                stacklevel=2,
+            )
+
+        if self.per_zone and self.model not in PER_BLOCK_FAMILIES:
+            extra = (" 2r2c is already per-block and needs no flag."
                      if self.model == "2r2c" else "")
             raise ValueError(
                 f"per_zone is not supported for model '{self.model}'; "
-                f"available: {list(PER_ZONE_FAMILIES)}.{extra}"
+                f"available: {list(PER_BLOCK_FAMILIES)}.{extra}"
             )
 
         if (self.grad_gain > 0) and (self.grad_path is None):

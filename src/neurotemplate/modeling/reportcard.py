@@ -32,6 +32,8 @@ logging it to MLflow.
 
 from __future__ import annotations
 
+import statistics
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Optional
 
@@ -91,10 +93,11 @@ def _summary_section(
 def _block_lines(name: str, info: Optional[dict], indent: str = "") -> list[str]:
     """One bullet for a block, plus nested bullets for what it reports itself.
 
-    A per-zone block nests one bullet per zone; a 2R2C block adds the time
-    constants it learned. `tau_slow` is the storage number — how long a
-    temperature difference survives — so it is worth reading against what
-    you know about the building.
+    A per-block stack (BlockStack) nests one bullet per block, labelled with
+    its family — the interesting fact once a spec can mix families in one
+    graph. A 2R2C block adds the time constants it learned. `tau_slow` is
+    the storage number — how long a temperature difference survives — so it
+    is worth reading against what you know about the building.
     """
     if info is None:
         return []
@@ -110,8 +113,11 @@ def _block_lines(name: str, info: Optional[dict], indent: str = "") -> list[str]
     for channel, taus in info.get("time_constants_h", {}).items():
         lines.append(f"{indent}  - {channel}: tau_fast={taus['fast']:.2f} h, "
                      f"tau_slow={taus['slow']:.2f} h")
-    for zone_name, sub in info.get("zones", {}).items():
-        lines += _block_lines(f"zone `{zone_name}`", sub, indent + "  ")
+    for block_name, sub in info.get("blocks", {}).items():
+        label = f"block `{block_name}`"
+        if sub is not None and sub.get("model"):
+            label += f" ({sub['model']})"
+        lines += _block_lines(label, sub, indent + "  ")
     return lines
 
 

@@ -45,12 +45,14 @@ from neurotemplate.modeling.config import ModelingConfig
 from neurotemplate._typing import beartype
 
 from neuromancer.system import Node, SystemPreview
-from neuromancer.modules import blocks
+# Aliased: this module's own per-block Block type would otherwise collide
+# with neuromancer's `blocks` module name (MLP/Linear builders).
+from neuromancer.modules import blocks as nm_blocks
 
 from neurotemplate.modeling import windows
 from neurotemplate.modeling.heads import HeadStack
 from neurotemplate.modeling.rc import RCBlock
-from neurotemplate.modeling.zones import Zone, build_zones
+from neurotemplate.modeling.blocks import Block, build_blocks
 
 
 class GRUBlock(nn.Module):
@@ -186,60 +188,66 @@ class GRUBlock(nn.Module):
         return self.output(out[:, -1, :])          # [batch, outsize]
 
 
-class PerZoneBlock(nn.Module):
+class BlockStack(nn.Module):
     """
-    One independent sub-block per zone, over the one window they all share.
+    One independent sub-block per block, over the one window they all share.
 
-    Each sub-block sees only its own zone's Y and U columns plus every D
-    column (see `zones` for what a zone owns), predicts only its own Y
-    channels, and never reads another zone's state. The wrapper does two
-    things and nothing else: gather each zone's slice out of the shared
-    flattened window, and put the per-zone outputs back in Y order.
+    Each sub-block sees its own Y and U columns, its own D subset (all of D
+    by default), and anything it `reads` from another block (see `blocks`
+    for what a block owns), predicts only its own Y channels, and never
+    reads another block's state on the same step. The wrapper does two
+    things and nothing else: gather each block's slice out of the shared
+    flattened window, and put the per-block outputs back in Y order.
 
     Both are fixed permutations of positions, so both are `index_select`
     against a buffer computed at construction — which keeps the whole thing
-    vmap-safe, and so keeps the sampled gradient penalty working.
+    vmap-safe, and so keeps the sampled gradient penalty working. This holds
+    even with `reads`: every input, including a read one, comes from the
+    shared history window rather than another block's same-step output, so
+    there is no evaluation-order dependency between blocks to break it.
 
     Args:
-        zones: the partition, from `zones.build_zones`.
+        blocks: the partition, from `blocks.build_blocks`.
         widths: `(ny, nu, nd)` of the full mapping.
         in_steps: history window length.
-        make_block: `(zone, nd) -> nn.Module` for one zone's sub-block. The
-            zone carries its own `ny`, `nu` and channel names; `nd` is shared.
-            Called once per zone, so every zone gets its own parameters.
+        make_block: `(block) -> nn.Module` for one block's sub-block. The
+            block carries its own shape (`ny`, `nu`, `nd`, `ny_in`) and
+            channel names. Called once per block, so every block gets its
+            own parameters.
     """
 
-    def __init__(self, zones: list[Zone], widths: tuple[int, int, int],
-                 in_steps: int, make_block: Callable[[Zone, int], nn.Module]):
+    def __init__(self, blocks: list[Block], widths: tuple[int, int, int],
+                 in_steps: int, make_block: Callable[[Block], nn.Module]):
         super().__init__()
-        ny, _, nd = widths
-        self.zone_names = [z.name for z in zones]
+        ny = widths[0]
+        self.block_specs = list(blocks)
+        self.block_names = [b.name for b in blocks]
         self.in_features = in_steps * sum(widths)
         self.out_features = ny
 
-        self.blocks = nn.ModuleList([make_block(z, nd) for z in zones])
+        self.blocks = nn.ModuleList([make_block(b) for b in blocks])
 
-        # Every zone's gather indices live in one buffer, so they follow the
+        # Every block's gather indices live in one buffer, so they follow the
         # module onto its device together; `_spans` says which stretch of it
-        # belongs to which zone.
+        # belongs to which block.
         gathers, self._spans, cursor = [], [], 0
-        for zone in zones:
+        for block in blocks:
             indices = windows.gather_columns(
-                widths, in_steps, (zone.y_idx, zone.u_idx, tuple(range(nd))))
+                widths, in_steps, (block.y_in_idx, block.u_idx, block.d_idx))
             gathers += indices
             self._spans.append(slice(cursor, cursor + len(indices)))
             cursor += len(indices)
         self.register_buffer(
             "_gather", torch.tensor(gathers, dtype=torch.long), persistent=False)
 
-        # Sub-block outputs concatenate in zone order; this puts them back in
-        # the order nm_mapping["Y"] lists, which is the order the loss and the
-        # autoregressive feedback both assume.
-        zone_order = [i for zone in zones for i in zone.y_idx]
+        # Sub-block outputs concatenate in block order; this puts them back
+        # in the order nm_mapping["Y"] lists, which is the order the loss and
+        # the autoregressive feedback both assume.
+        block_order = [i for block in blocks for i in block.y_idx]
         self.register_buffer(
             "_to_y_order",
             torch.tensor(
-                [zone_order.index(i) for i in range(ny)], dtype=torch.long
+                [block_order.index(i) for i in range(ny)], dtype=torch.long
             ),
             persistent=False,
         )
@@ -263,6 +271,10 @@ class PerZoneBlock(nn.Module):
             dim=-1,
         )
         return out.index_select(dim, self._to_y_order)
+
+
+#: Deprecated alias — see the module docstring for the rename rationale.
+PerZoneBlock = BlockStack
 
 
 class SSMGrad(nn.Module):
@@ -344,10 +356,12 @@ class SSMGrad(nn.Module):
 
 # ── Model factory functions ──────────────────────────────────────
 #
-# Every factory takes the same (cfg, nm_mapping, zones) so the catalog can
-# dispatch on name alone. `zones` is the Y/U partition (see `zones`); the
-# families that model all outputs jointly ignore it, and `validate()` rejects
-# `per_zone` for those rather than letting it silently do nothing.
+# Every monolithic factory takes the same (cfg, nm_mapping) so model_catalog
+# can dispatch on name alone. These build ONE network over the whole Y
+# vector at once; get_dynamics only calls into model_catalog when no block
+# is asking to be built separately (see _uses_per_block below) — a family
+# that models all outputs jointly has nothing to split, which is exactly
+# why `per_zone` is refused for it in ModelingConfig.validate().
 
 def _widths(nm_mapping: dict[str, list[str]]) -> tuple[int, int, int]:
     """(ny, nu, nd) — the channel counts every factory starts from."""
@@ -355,26 +369,13 @@ def _widths(nm_mapping: dict[str, list[str]]) -> tuple[int, int, int]:
 
 
 @beartype
-def get_mlp(cfg: ModelingConfig, nm_mapping: dict[str, list[str]],
-            zones: list[Zone]) -> SSMGrad:
+def get_mlp(cfg: ModelingConfig, nm_mapping: dict[str, list[str]]) -> SSMGrad:
     ny, nu, nd = _widths(nm_mapping)
-
-    def make_mlp(out: int, insize: int) -> nn.Module:
-        return blocks.MLP(
-            insize=insize, outsize=out, bias=True,
-            linear_map=nn.Linear, nonlin=nn.ReLU,
-            hsizes=cfg.num_layers * [(2**cfg.log2_hidden_size)],
-        )
-
-    if cfg.per_zone:
-        fy = PerZoneBlock(
-            zones, (ny, nu, nd), cfg.in_steps,
-            make_block=lambda zone, z_nd: make_mlp(
-                zone.ny, cfg.in_steps * (zone.ny + zone.nu + z_nd)),
-        )
-    else:
-        fy = make_mlp(ny, cfg.in_steps * (ny + nu + nd))
-
+    fy = nm_blocks.MLP(
+        insize=cfg.in_steps * (ny + nu + nd), outsize=ny, bias=True,
+        linear_map=nn.Linear, nonlin=nn.ReLU,
+        hsizes=cfg.num_layers * [(2**cfg.log2_hidden_size)],
+    )
     return SSMGrad(
         fy, None, None, ny, nu, nd,
         cfg.in_steps, cfg.residual, separable=False,
@@ -382,17 +383,16 @@ def get_mlp(cfg: ModelingConfig, nm_mapping: dict[str, list[str]],
 
 
 @beartype
-def get_nssm(cfg: ModelingConfig, nm_mapping: dict[str, list[str]],
-             zones: list[Zone]) -> SSMGrad:
+def get_nssm(cfg: ModelingConfig, nm_mapping: dict[str, list[str]]) -> SSMGrad:
     ny, nu, nd = _widths(nm_mapping)
     s = cfg.in_steps
 
-    fy = blocks.MLP(s*ny, ny, bias=True, linear_map=nn.Linear,
-                    nonlin=nn.ReLU, hsizes=cfg.num_layers * [(2**cfg.log2_hidden_size)])
-    fu = blocks.MLP(s*nu, ny, bias=True, linear_map=nn.Linear,
-                    nonlin=nn.ReLU, hsizes=cfg.num_layers * [(2**cfg.log2_hidden_size)])
-    fd = blocks.MLP(s*nd, ny, bias=True, linear_map=nn.Linear,
-                    nonlin=nn.ReLU, hsizes=cfg.num_layers * [(2**cfg.log2_hidden_size)])
+    fy = nm_blocks.MLP(s*ny, ny, bias=True, linear_map=nn.Linear,
+                       nonlin=nn.ReLU, hsizes=cfg.num_layers * [(2**cfg.log2_hidden_size)])
+    fu = nm_blocks.MLP(s*nu, ny, bias=True, linear_map=nn.Linear,
+                       nonlin=nn.ReLU, hsizes=cfg.num_layers * [(2**cfg.log2_hidden_size)])
+    fd = nm_blocks.MLP(s*nd, ny, bias=True, linear_map=nn.Linear,
+                       nonlin=nn.ReLU, hsizes=cfg.num_layers * [(2**cfg.log2_hidden_size)])
 
     return SSMGrad(
         fy, fu, fd, ny, nu, nd,
@@ -401,14 +401,13 @@ def get_nssm(cfg: ModelingConfig, nm_mapping: dict[str, list[str]],
 
 
 @beartype
-def get_lssm(cfg: ModelingConfig, nm_mapping: dict[str, list[str]],
-             zones: list[Zone]) -> SSMGrad:
+def get_lssm(cfg: ModelingConfig, nm_mapping: dict[str, list[str]]) -> SSMGrad:
     ny, nu, nd = _widths(nm_mapping)
     s = cfg.in_steps
 
-    fy = blocks.Linear(s*ny, ny, bias=True, linear_map=nn.Linear)
-    fu = blocks.Linear(s*nu, ny, bias=True, linear_map=nn.Linear)
-    fd = blocks.Linear(s*nd, ny, bias=True, linear_map=nn.Linear)
+    fy = nm_blocks.Linear(s*ny, ny, bias=True, linear_map=nn.Linear)
+    fu = nm_blocks.Linear(s*nu, ny, bias=True, linear_map=nn.Linear)
+    fd = nm_blocks.Linear(s*nd, ny, bias=True, linear_map=nn.Linear)
 
     return SSMGrad(
         fy, fu, fd, ny, nu, nd,
@@ -417,72 +416,15 @@ def get_lssm(cfg: ModelingConfig, nm_mapping: dict[str, list[str]],
 
 
 @beartype
-def get_gru(cfg: ModelingConfig, nm_mapping: dict[str, list[str]],
-            zones: list[Zone]) -> SSMGrad:
+def get_gru(cfg: ModelingConfig, nm_mapping: dict[str, list[str]]) -> SSMGrad:
     ny, nu, nd = _widths(nm_mapping)
-
-    def make_gru(z_ny: int, z_nu: int, z_nd: int) -> nn.Module:
-        return GRUBlock(
-            z_ny, z_nu, z_nd, cfg.in_steps, outsize=z_ny,
-            hidden_size=(2**cfg.log2_hidden_size), num_layers=cfg.num_layers,
-        )
-
-    def make_zone_gru(zone: Zone, z_nd: int) -> nn.Module:
-        return make_gru(zone.ny, zone.nu, z_nd)
-
-    # Same in_steps window as every other family. The GRU is additionally
-    # stateful, so its memory outlives the window during a rollout — but the
-    # window is what warms it, so no caller-side priming is needed.
-    fy = (PerZoneBlock(zones, (ny, nu, nd), cfg.in_steps, make_block=make_zone_gru)
-          if cfg.per_zone else make_gru(ny, nu, nd))
+    fy = GRUBlock(
+        ny, nu, nd, cfg.in_steps, outsize=ny,
+        hidden_size=(2**cfg.log2_hidden_size), num_layers=cfg.num_layers,
+    )
     return SSMGrad(
         fy, None, None, ny, nu, nd,
         cfg.in_steps, cfg.residual, separable=False,
-    )
-
-
-@beartype
-def get_2r2c(cfg: ModelingConfig, nm_mapping: dict[str, list[str]],
-             zones: list[Zone]) -> SSMGrad:
-    """Grey-box thermal model: one 2R2C network per zone. See `rc`.
-
-    Always per-zone — an RC network describes *a* zone, and with no
-    `zone_mapping` hook the single default zone still gives each Y channel
-    its own network, just driven by every U channel.
-    """
-    ny, nu, nd = _widths(nm_mapping)
-
-    if not cfg.residual:
-        raise ValueError(
-            "2r2c requires residual=True: the RC block predicts the "
-            "temperature *increment*, which SSMGrad adds to the current "
-            "state. With residual=False the increment would be read as an "
-            "absolute temperature."
-        )
-    if cfg.steps_per_hour is None:
-        raise ValueError(
-            "2r2c needs cfg.steps_per_hour to place its time constants. The "
-            "CLI sets it from the data's sampling frequency; set it by hand "
-            "(steps_per_hour = 3600 / timestep_seconds) if you are building "
-            "a model outside the CLI."
-        )
-
-    fy = PerZoneBlock(
-        zones, (ny, nu, nd), cfg.in_steps,
-        make_block=lambda zone, z_nd: RCBlock(
-            zone.ny, zone.nu, z_nd, cfg.in_steps,
-            steps_per_hour=cfg.steps_per_hour,
-            hidden_size=(2**cfg.log2_hidden_size),
-            num_layers=cfg.num_layers,
-            tau_hours=(cfg.rc_tau_ambient_h, cfg.rc_tau_zone_mass_h,
-                       cfg.rc_tau_mass_zone_h),
-            train_taus=cfg.rc_train_taus,
-            channel_names=zone.y_names,
-        ),
-    )
-    return SSMGrad(
-        fy, None, None, ny, nu, nd,
-        cfg.in_steps, residual=True, separable=False,
     )
 
 
@@ -508,8 +450,7 @@ class _SetpointPassthrough(nn.Module):
 
 
 @beartype
-def get_dummy(cfg: ModelingConfig, nm_mapping: dict[str, list[str]],
-              zones: list[Zone]) -> SSMGrad:
+def get_dummy(cfg: ModelingConfig, nm_mapping: dict[str, list[str]]) -> SSMGrad:
     """Content-free surrogate that predicts zone temp = cooling setpoint.
 
     Used to test whether the DPC policy can be trained against a trivially
@@ -530,18 +471,180 @@ def get_dummy(cfg: ModelingConfig, nm_mapping: dict[str, list[str]],
     )
 
 
+#: Families with a monolithic factory: one network over the whole Y vector.
+#: `2r2c` has no entry here — an RC network describes *a* block, never all
+#: of Y at once (see BLOCK_BUILDERS below and `_uses_per_block`) — so this
+#: dict is NOT the model whitelist; see VALID_MODEL_NAMES for that.
 model_catalog = {
     "mlp": get_mlp,
     "nssm": get_nssm,
     "lssm": get_lssm,
     "gru": get_gru,
-    "2r2c": get_2r2c,
     "dummy": get_dummy,
 }
 
-#: Families whose block topology can be split per zone. `2r2c` is absent
-#: because it is per-zone unconditionally, not because it cannot be.
-PER_ZONE_FAMILIES = ("mlp", "gru")
+
+# ── Per-block builders ────────────────────────────────────────────
+#
+# Each builds ONE block's module — the heterogeneous counterpart of the
+# monolithic factories above. `nssm`/`lssm`/`dummy` model all of Y jointly
+# and have no per-block form, so they are simply absent from this registry;
+# PER_BLOCK_FAMILIES (which gates the `per_zone` flag) is derived from it
+# rather than hand-maintained a second time.
+
+def _mlp_block(cfg: ModelingConfig, block: Block) -> nn.Module:
+    insize = cfg.in_steps * (block.ny_in + block.nu + block.nd)
+    return nm_blocks.MLP(
+        insize=insize, outsize=block.ny, bias=True,
+        linear_map=nn.Linear, nonlin=nn.ReLU,
+        hsizes=cfg.num_layers * [(2**cfg.log2_hidden_size)],
+    )
+
+
+def _gru_block(cfg: ModelingConfig, block: Block) -> nn.Module:
+    return GRUBlock(
+        block.ny_in, block.nu, block.nd, cfg.in_steps, outsize=block.ny,
+        hidden_size=(2**cfg.log2_hidden_size), num_layers=cfg.num_layers,
+    )
+
+
+def _2r2c_block(cfg: ModelingConfig, block: Block) -> nn.Module:
+    """One block's RC network. See `rc` for the physics.
+
+    Refuses `reads`: `RCBlock`'s unconditional-stability guarantee holds
+    only because its learned forcing map `g` reads `u` and `d` and never
+    state — the state matrix is then fixed by three positive rates whatever
+    `g` does (see rc.py's module docstring for the eigenvalue argument). A
+    `reads` entry would let `g` see another block's Y, which is exactly the
+    state-dependence the guarantee forbids, so it is refused here rather
+    than silently building a block that looks stable and is not.
+    """
+    if block.reads:
+        raise ValueError(
+            f"2r2c block {block.name!r} cannot declare `reads`: its "
+            "unconditional-stability guarantee holds only because the "
+            "learned forcing map g reads u and d and never state. A `reads` "
+            "entry would let g see another block's Y — exactly the "
+            "state-dependence the guarantee forbids. Use a different family "
+            "for this block if it needs to see another block's state."
+        )
+    return RCBlock(
+        block.ny, block.nu, block.nd, cfg.in_steps,
+        steps_per_hour=cfg.steps_per_hour,
+        hidden_size=(2**cfg.log2_hidden_size),
+        num_layers=cfg.num_layers,
+        tau_hours=(cfg.rc_tau_ambient_h, cfg.rc_tau_zone_mass_h,
+                   cfg.rc_tau_mass_zone_h),
+        train_taus=cfg.rc_train_taus,
+        channel_names=block.y_names,
+    )
+
+
+BLOCK_BUILDERS: dict[str, Callable[[ModelingConfig, Block], nn.Module]] = {
+    "mlp": _mlp_block,
+    "gru": _gru_block,
+    "2r2c": _2r2c_block,
+}
+
+#: Families that need `per_zone: true` to opt into the per-block split.
+#: `2r2c` is excluded even though BLOCK_BUILDERS has a builder for it: it is
+#: per-block unconditionally, so it needs no flag (and
+#: ModelingConfig.validate() refuses the combination as redundant).
+PER_BLOCK_FAMILIES = tuple(name for name in BLOCK_BUILDERS if name != "2r2c")
+
+#: Deprecated alias.
+PER_ZONE_FAMILIES = PER_BLOCK_FAMILIES
+
+#: Every valid `cfg.model` name: the union of model_catalog (monolithic
+#: factories) and BLOCK_BUILDERS (per-block-only factories — today just
+#: `2r2c`, which has no monolithic form at all). This is the whitelist
+#: ModelingConfig.validate()'s check_one_of and get_dynamics's "unknown
+#: model" check both read, so a new family only means adding it to one of
+#: the two dicts above, never a third hand-maintained list.
+VALID_MODEL_NAMES = tuple(dict.fromkeys([*model_catalog, *BLOCK_BUILDERS]))
+
+
+def _resolve_family(cfg: ModelingConfig, block: Block) -> str:
+    """The model family one block builds under: its own declared `model`,
+    or `cfg.model` when it names none."""
+    return block.model or cfg.model
+
+
+@beartype
+def family_by_channel(
+    cfg: ModelingConfig,
+    nm_mapping: dict[str, list[str]],
+    block_spec: Optional[dict[str, dict]] = None,
+) -> dict[str, str]:
+    """Which model family produces each Y channel: `{column: family}`.
+
+    Built from the same `build_blocks` + `_resolve_family` pair `get_dynamics`
+    uses, so a caller asking "what builds this channel?" can never disagree
+    with what actually gets built. That matters for `nt data heads`, which
+    warns about head/family conflicts per channel: with mixed families,
+    `cfg.model` is the wrong answer for every block that declares its own.
+
+    With no block spec there is one block holding every channel, so every
+    column maps to `cfg.model`.
+    """
+    return {
+        name: _resolve_family(cfg, block)
+        for block in build_blocks(nm_mapping, block_spec)
+        for name in block.y_names
+    }
+
+
+def _build_block(cfg: ModelingConfig, block: Block) -> nn.Module:
+    """Dispatch one block to its family's per-block builder."""
+    family = _resolve_family(cfg, block)
+    builder = BLOCK_BUILDERS.get(family)
+    if builder is None:
+        raise ValueError(
+            f"block {block.name!r} requests model {family!r}, which has no "
+            f"per-block builder; available: {sorted(BLOCK_BUILDERS)}."
+        )
+    return builder(cfg, block)
+
+
+def _build_per_block_model(
+    cfg: ModelingConfig, nm_mapping: dict[str, list[str]],
+    blocks: list[Block], families: list[str],
+) -> SSMGrad:
+    """Heterogeneous dynamics: one sub-module per block, each in whatever
+    family it (or cfg.model, absent a block-level override) declares.
+
+    This is the general form `2r2c` always needed on its own — an RC
+    network describes *a* block, never the whole Y vector at once — so a
+    spec mixing `2r2c` with `mlp` takes exactly the same path, just with
+    more than one family among `blocks`. `2r2c`'s residual/steps_per_hour
+    requirements are checked once here rather than per block, because
+    SSMGrad.residual gates the whole output, not a per-channel one (see
+    SSMGrad.forward).
+    """
+    ny, nu, nd = _widths(nm_mapping)
+
+    if "2r2c" in families:
+        if not cfg.residual:
+            raise ValueError(
+                "2r2c requires residual=True: the RC block predicts the "
+                "temperature *increment*, which SSMGrad adds to the current "
+                "state. With residual=False the increment would be read as "
+                "an absolute temperature."
+            )
+        if cfg.steps_per_hour is None:
+            raise ValueError(
+                "2r2c needs cfg.steps_per_hour to place its time constants. "
+                "The CLI sets it from the data's sampling frequency; set it "
+                "by hand (steps_per_hour = 3600 / timestep_seconds) if you "
+                "are building a model outside the CLI."
+            )
+
+    fy = BlockStack(blocks, (ny, nu, nd), cfg.in_steps,
+                    make_block=lambda block: _build_block(cfg, block))
+    return SSMGrad(
+        fy, None, None, ny, nu, nd,
+        cfg.in_steps, cfg.residual, separable=False,
+    )
 
 
 # ── Model description (for reportcard) ───────────────────────────
@@ -552,7 +655,7 @@ def _count_params(module: Optional[nn.Module]) -> int:
     return sum(p.numel() for p in module.parameters())
 
 
-def _describe_block(block: Optional[nn.Module]) -> Optional[dict]:
+def _describe_block(block: Optional[nn.Module], cfg: ModelingConfig) -> Optional[dict]:
     """Return a small dict describing an SSMGrad sub-block (fy/fu/fd)."""
     if block is None:
         return None
@@ -567,11 +670,14 @@ def _describe_block(block: Optional[nn.Module]) -> Optional[dict]:
         info["in_features"] = block.in_features
     if hasattr(block, "out_features"):
         info["out_features"] = block.out_features
-    if isinstance(block, PerZoneBlock):
-        info["zones"] = {
-            name: _describe_block(sub)
-            for name, sub in zip(block.zone_names, block.blocks)
-        }
+    if isinstance(block, BlockStack):
+        info["blocks"] = {}
+        for spec, sub in zip(block.block_specs, block.blocks):
+            sub_info = _describe_block(sub, cfg)
+            # The family is the interesting fact once blocks can mix —
+            # spec.model is None for a block that just inherits cfg.model.
+            sub_info["model"] = _resolve_family(cfg, spec)
+            info["blocks"][spec.name] = sub_info
     # A block that can say something about itself in its own vocabulary —
     # RCBlock reports the time constants it learned — says it here.
     if hasattr(block, "describe"):
@@ -599,9 +705,9 @@ def describe_dynamics(dyn_sys: SystemPreview, cfg: ModelingConfig) -> dict:
     raw = dyn_sys.nodes[0].callable
 
     blocks_info: dict[str, Optional[dict]] = {
-        "fy": _describe_block(getattr(raw, "fy", None)),
-        "fu": _describe_block(getattr(raw, "fu", None)),
-        "fd": _describe_block(getattr(raw, "fd", None)),
+        "fy": _describe_block(getattr(raw, "fy", None), cfg),
+        "fu": _describe_block(getattr(raw, "fu", None), cfg),
+        "fd": _describe_block(getattr(raw, "fd", None), cfg),
     }
 
     return {
@@ -653,12 +759,49 @@ def make_reset_init(model: SSMGrad):
     return reset_init
 
 
+def _uses_per_block(cfg: ModelingConfig, blocks: list[Block], families: list[str]) -> bool:
+    """Whether get_dynamics should build heterogeneously (BlockStack) rather
+    than through the monolithic model_catalog factories.
+
+    Three independent reasons, any one of which is enough: the spec itself
+    names a per-block family (mixed families in one graph), the run opted in
+    with `cfg.per_zone`, or a resolved family is `2r2c`, which is per-block
+    unconditionally — an RC network describes *a* block, never the whole Y
+    vector at once, so there is no monolithic 2r2c to fall back to.
+    """
+    return (any(b.model is not None for b in blocks)
+            or cfg.per_zone or "2r2c" in families)
+
+
+def _check_2r2c_heads(blocks: list[Block], families: list[str],
+                      head_stack: HeadStack) -> None:
+    """2r2c predicts an increment; only a residual-compatible head restores
+    the state. Scoped to the channels a 2r2c block actually produces, so a
+    mixed-family run's other channels are free to use any head — see
+    _build_per_block_model for the analogous residual/steps_per_hour checks,
+    which are model-wide because SSMGrad's residual flag is not per-channel.
+    """
+    rc_channels = {
+        name for block, family in zip(blocks, families) if family == "2r2c"
+        for name in block.y_names
+    }
+    if not rc_channels:
+        return
+    blind = [name for name, head in zip(head_stack.channel_names, head_stack.heads)
+             if name in rc_channels and not head.residual_compatible]
+    if blind:
+        raise ValueError(
+            f"2r2c predicts increments, so every Y channel it produces needs "
+            f"a residual-compatible head; {blind} are not."
+        )
+
+
 @beartype
 def get_dynamics(
     cfg: ModelingConfig,
     nm_mapping: dict[str, list[str]],
     head_stack: Optional[HeadStack] = None,
-    zone_spec: Optional[dict[str, dict[str, list[str]]]] = None,
+    block_spec: Optional[dict[str, dict]] = None,
 ) -> SystemPreview:
     """
     Wrap a dynamics model in a Neuromancer SystemPreview for autoregressive rollout.
@@ -671,18 +814,24 @@ def get_dynamics(
     step i, the Node receives a window of model.in_steps past values for each
     input, flattened to [batch, model.in_steps*features].
 
-    `zone_spec` is the optional `zone_mapping` hook's result, splitting Y and
-    U across independent zones (see `zones`). None means one zone holding
-    every channel, which is the right answer for a single-zone building.
+    `block_spec` is the optional `block_mapping` hook's result (or the
+    deprecated `zone_mapping`), splitting Y, U and D across independent
+    blocks — see `blocks`. None means one block holding every channel, which
+    is the right answer for a single-block building.
     """
-    if cfg.model not in model_catalog:
+    if cfg.model not in VALID_MODEL_NAMES:
         raise ValueError(
             f"Unknown model '{cfg.model}'. "
-            f"Available: {list(model_catalog.keys())}"
+            f"Available: {list(VALID_MODEL_NAMES)}"
         )
 
-    zones = build_zones(nm_mapping, zone_spec)
-    model = model_catalog[cfg.model](cfg, nm_mapping, zones)
+    blocks = build_blocks(nm_mapping, block_spec)
+    families = [_resolve_family(cfg, b) for b in blocks]
+
+    if _uses_per_block(cfg, blocks, families):
+        model = _build_per_block_model(cfg, nm_mapping, blocks, families)
+    else:
+        model = model_catalog[cfg.model](cfg, nm_mapping)
 
     # Heads are attached post-construction so each factory stays focused
     # on its own block topology. The first-pass model output width is
@@ -694,19 +843,7 @@ def get_dynamics(
                 f"head_stack.raw_width={head_stack.raw_width} does not match "
                 f"model.ny={model.ny}; factories (currently) assume width-1 heads."
             )
-        # 2r2c produces an increment, and only a residual-compatible head
-        # adds the current state back. A head that does not would read the
-        # increment as an absolute temperature — silently, and only wrong
-        # by however much the zone is away from zero.
-        if cfg.model == "2r2c":
-            blind = [name for name, head in zip(head_stack.channel_names,
-                                                head_stack.heads)
-                     if not head.residual_compatible]
-            if blind:
-                raise ValueError(
-                    f"2r2c predicts increments, so every Y channel needs a "
-                    f"residual-compatible head; {blind} are not."
-                )
+        _check_2r2c_heads(blocks, families, head_stack)
         model.head_stack = head_stack
 
     # Temporal windowing: the gathered window must be exactly as wide as the

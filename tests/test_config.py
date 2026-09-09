@@ -7,6 +7,8 @@ declared type true. These tests are that coercion, plus the split-path
 fields, which accept one path or many.
 """
 
+import warnings
+
 import pytest
 
 from neurotemplate.common.config import (
@@ -99,3 +101,20 @@ def test_set_parses_a_json_list():
     cfg = dict_to_dataclass(merged, Config)
     cfg.validate()
     assert cfg.train_data_path == ["a.csv", "b.csv"]
+
+
+# ── in_steps: an advisory warning, not a hard ceiling ─────────────
+
+def test_in_steps_above_the_threshold_warns_instead_of_raising():
+    """MAX_IN_STEPS used to be a hard ValueError ceiling (check_max); it is
+    now advisory, since the real risks — memory, a window longer than the
+    training horizon — don't justify refusing a value the user set on
+    purpose. `validate()` must not raise, and training can proceed."""
+    with pytest.warns(UserWarning, match=r"in_steps=13.*above the usual ceiling of 12"):
+        _filled(in_steps=13).validate()
+
+
+def test_in_steps_at_or_below_the_threshold_is_quiet():
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        _filled(in_steps=12).validate()  # must not raise or warn

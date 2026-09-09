@@ -16,7 +16,7 @@ from neurotemplate.common.config import (  # noqa: F401  re-exported
     paths_as_list,
     CONTROL_CONFIG_DIR,
 )
-from neurotemplate.modeling.config import MAX_IN_STEPS
+from neurotemplate.modeling.config import IN_STEPS_WARN_THRESHOLD
 
 from neurotemplate._typing import beartype
 
@@ -203,7 +203,23 @@ class ControlConfig:
         check_one_of(self, "policy", list(policy_catalog))
         check_one_of(self, "policy_nonlin", list(POLICY_NONLIN))
         check_one_of(self, "policy_bound_method", POLICY_BOUND_METHODS)
-        check_max(self, "in_steps", MAX_IN_STEPS)
+
+        # Advisory, not fatal — same threshold and reasoning as
+        # ModelingConfig.in_steps: this used to be a hard ValueError ceiling,
+        # which made the same value fatal here and merely advisory on the
+        # modeling side for no good reason. The real risks (memory, a window
+        # longer than the training horizon) don't justify refusing a value
+        # the user set on purpose; the right window length is dataset-specific.
+        if self.in_steps > IN_STEPS_WARN_THRESHOLD:
+            warnings.warn(
+                f"in_steps={self.in_steps} is above the usual ceiling of "
+                f"{IN_STEPS_WARN_THRESHOLD}. A longer context window costs "
+                "more memory per batch, and once it exceeds train_pred_steps "
+                "it hands the model, at rollout time, history it never saw "
+                "during training. Not rejected outright — the right window "
+                "length is dataset-specific.",
+                stacklevel=2,
+            )
 
         for name in ("train_data_path", "dev_data_path", "test_data_path"):
             _check_paths_field(name, getattr(self, name))

@@ -1,5 +1,5 @@
 """
-Tests for the 2R2C grey-box family and the per-zone split it rides on.
+Tests for the 2R2C grey-box family and the per-block split it rides on.
 
 The family's whole claim is that it asserts things the black-box families
 only hope for, so the tests are that list of claims:
@@ -12,11 +12,14 @@ only hope for, so the tests are that list of claims:
   - the hidden mass remembers past `in_steps`, which is the point;
   - the time constants are a frozen prior unless asked otherwise, so the
     number on the reportcard is the number you set;
-  - each zone is genuinely independent of the others.
+  - each block is genuinely independent of the others, except for an
+    explicit `reads` declaration — and `2r2c` refuses that declaration,
+    because its stability guarantee depends on never reading state.
 
 Anything that would silently produce a wrong model instead fails loudly:
-2r2c without residual, without a timestep, or under a head that will not
-add the state back.
+2r2c without residual, without a timestep, under a head that will not add
+the state back, with `reads`, or a block naming a family with no per-block
+builder.
 """
 import math
 
@@ -24,10 +27,10 @@ import pytest
 import torch
 
 from neurotemplate.modeling.config import ModelingConfig as Config
-from neurotemplate.modeling.dynamics import PerZoneBlock, get_dynamics
+from neurotemplate.modeling.dynamics import BlockStack, get_dynamics
 from neurotemplate.modeling.heads import BinaryHead, HeadStack, RegressionHead
 from neurotemplate.modeling.rc import MIN_TAU_STEPS, RCBlock, mode_taus
-from neurotemplate.modeling.zones import build_zones
+from neurotemplate.modeling.blocks import build_blocks
 
 SPH = 12.0            # 5-minute data
 IN_STEPS = 6
@@ -41,6 +44,19 @@ MAPPING = {
 SPLIT = {
     "north": {"Y": ["north T"], "U": ["north sp"]},
     "south": {"Y": ["south T"], "U": ["south sp"]},
+}
+
+# A second mapping with a mixed family: one thermal state (2r2c) and one
+# readout (mlp) that reads the state it measures alongside.
+MIXED_MAPPING = {
+    "Y": ["north T", "power"],
+    "U": ["north sp"],
+    "D": ["oat"],
+    "t": ["sec_elapsed"],
+}
+MIXED_SPLIT = {
+    "north": {"Y": ["north T"], "U": ["north sp"], "model": "2r2c"},
+    "power": {"Y": ["power"], "reads": ["north T"], "model": "mlp"},
 }
 
 
@@ -209,6 +225,21 @@ def test_the_gradient_penalty_can_still_differentiate_the_block():
     assert jac[0].shape == (4, 2, IN_STEPS * 2)
 
 
+def test_the_gradient_penalty_still_works_on_a_mixed_family_block():
+    """The same vmap/jacrev path, but fy now holds an RCBlock and an MLP
+    side by side — the gather/scatter permutations that make this vmap-safe
+    don't care how many families are mixed in."""
+    cfg = make_cfg(model="mlp")  # default family for blocks that don't override
+    system = get_dynamics(cfg, MIXED_MAPPING, block_spec=MIXED_SPLIT)
+    raw = system.nodes[0].callable
+    # widths: ny=2, nu=1, nd=1
+    x = torch.randn(4, IN_STEPS * 4)
+    jac = torch.vmap(torch.func.jacrev(raw.compute_output, argnums=(0, 1, 2)))(
+        x[:, :IN_STEPS * 2], x[:, IN_STEPS * 2:IN_STEPS * 3], x[:, IN_STEPS * 3:])
+    assert all(torch.isfinite(j).all() for j in jac)
+    assert jac[0].shape == (4, 2, IN_STEPS * 2)
+
+
 # ── The prior stays put unless asked ─────────────────────────────
 
 def test_the_time_constants_are_frozen_by_default():
@@ -231,11 +262,11 @@ def test_the_forcing_starts_at_zero():
     assert torch.equal(block.gain(torch.randn(4, 2)), torch.zeros(4, 1))
 
 
-# ── Zones are independent ────────────────────────────────────────
+# ── Blocks are independent, except for an explicit `reads` ───────
 
-def test_one_zones_input_cannot_move_another_zones_state():
+def test_one_blocks_input_cannot_move_another_blocks_state():
     torch.manual_seed(0)
-    system = get_dynamics(make_cfg(), MAPPING, zone_spec=SPLIT)
+    system = get_dynamics(make_cfg(), MAPPING, block_spec=SPLIT)
     fy = system.nodes[0].callable.fy
     with torch.no_grad():
         for block in fy.blocks:
@@ -253,28 +284,28 @@ def test_one_zones_input_cannot_move_another_zones_state():
 
 
 def test_outputs_come_back_in_the_mappings_channel_order():
-    """Zones may be declared in any order and hold their states in any
+    """Blocks may be declared in any order and hold their states in any
     order; the loss and the feedback loop both assume nm_mapping's."""
     reordered = {"south": {"Y": ["south T"], "U": ["south sp"]},
                  "north": {"Y": ["north T"], "U": ["north sp"]}}
-    system = get_dynamics(make_cfg(), MAPPING, zone_spec=reordered)
+    system = get_dynamics(make_cfg(), MAPPING, block_spec=reordered)
     fy = system.nodes[0].callable.fy
     assert fy._to_y_order.tolist() == [1, 0]
     assert fy(torch.randn(2, IN_STEPS * 7)).shape == (2, 2)
 
 
-def test_each_zone_holds_its_own_parameters_and_its_own_names():
-    system = get_dynamics(make_cfg(), MAPPING, zone_spec=SPLIT)
+def test_each_block_holds_its_own_parameters_and_its_own_names():
+    system = get_dynamics(make_cfg(), MAPPING, block_spec=SPLIT)
     fy = system.nodes[0].callable.fy
-    assert fy.zone_names == ["north", "south"]
+    assert fy.block_names == ["north", "south"]
     assert [b.channel_names for b in fy.blocks] == [("north T",), ("south T",)]
     north, south = (dict(b.named_parameters()) for b in fy.blocks)
     assert not torch.equal(north["gain.linear.0.weight"],
                            south["gain.linear.0.weight"])
 
 
-def test_reset_reaches_every_zone():
-    system = get_dynamics(make_cfg(), MAPPING, zone_spec=SPLIT)
+def test_reset_reaches_every_block():
+    system = get_dynamics(make_cfg(), MAPPING, block_spec=SPLIT)
     fy = system.nodes[0].callable.fy
     fy(torch.randn(2, IN_STEPS * 7))
     assert all(b._mass is not None for b in fy.blocks)
@@ -285,10 +316,92 @@ def test_reset_reaches_every_zone():
 def test_per_zone_wraps_any_family_the_flag_allows():
     """`per_zone` is a split, not a family: an MLP gets the same treatment."""
     system = get_dynamics(make_cfg(model="mlp", per_zone=True), MAPPING,
-                          zone_spec=SPLIT)
+                          block_spec=SPLIT)
     fy = system.nodes[0].callable.fy
-    assert isinstance(fy, PerZoneBlock)
+    assert isinstance(fy, BlockStack)
     assert fy(torch.randn(2, IN_STEPS * 7)).shape == (2, 2)
+
+
+def test_a_mixed_family_model_scatters_both_kinds_back_in_y_order():
+    """One block is `2r2c`, the other `mlp`, in a single graph. The scatter
+    must still land in nm_mapping["Y"] order, and reset() must reach only
+    the stateful (2r2c) child."""
+    cfg = make_cfg(model="mlp")   # blocks that don't override use "mlp"
+    system = get_dynamics(cfg, MIXED_MAPPING, block_spec=MIXED_SPLIT)
+    fy = system.nodes[0].callable.fy
+
+    assert fy.block_names == ["north", "power"]
+    assert type(fy.blocks[0]).__name__ == "RCBlock"
+    assert type(fy.blocks[1]).__name__ == "MLP"
+    assert not hasattr(fy.blocks[1], "reset")     # the mlp block is stateless
+
+    out = fy(torch.randn(2, IN_STEPS * 4))
+    assert out.shape == (2, 2)                    # nm_mapping["Y"] order, ny=2
+
+    fy(torch.randn(2, IN_STEPS * 4))
+    assert fy.blocks[0]._mass is not None          # the RC block warmed up
+    fy.reset()
+    assert fy.blocks[0]._mass is None              # reset reaches it...
+    # ...and the mlp block, having no reset(), is simply untouched by it.
+
+
+def test_reads_changes_the_reading_blocks_output_and_not_the_read_blocks():
+    """`power` reads `north`'s state; perturbing north's history must move
+    power's prediction but never the other way around."""
+    cfg = make_cfg(model="mlp")
+    torch.manual_seed(0)
+    system = get_dynamics(cfg, MIXED_MAPPING, block_spec=MIXED_SPLIT)
+    fy = system.nodes[0].callable.fy
+    with torch.no_grad():
+        for p in fy.blocks[0].gain.parameters():
+            p.normal_(0, 1.0)
+        for p in fy.blocks[1].parameters():
+            p.normal_(0, 1.0)
+
+    x = torch.randn(2, IN_STEPS * 4)                # widths (2, 1, 1)
+    fy.reset()
+    before = fy(x.clone())
+
+    # Y is key-major and, within that key, time-major: two columns per
+    # step (north T, power), for IN_STEPS steps, at the front of the window.
+    north_cols = [2 * t for t in range(IN_STEPS)]
+    power_cols = [2 * t + 1 for t in range(IN_STEPS)]
+
+    # Perturb "north T" — the read channel — across its whole history.
+    nudged_north = x.clone()
+    nudged_north[:, north_cols] += 5.0
+    fy.reset()
+    moved_from_north = (fy(nudged_north) - before).abs().max(0).values
+    assert moved_from_north[0] > 0.0                 # north's own state moved
+    assert moved_from_north[1] > 0.0                 # ...and power, which reads it
+
+    # Perturb "power" — power's own state, which north does not read.
+    nudged_power = x.clone()
+    nudged_power[:, power_cols] += 5.0
+    fy.reset()
+    moved_from_power = (fy(nudged_power) - before).abs().max(0).values
+    assert moved_from_power[0] == 0.0                # north is unaffected
+    assert moved_from_power[1] > 0.0
+
+
+def test_a_per_block_d_subset_narrows_only_that_blocks_input_width():
+    """A block naming a D subset must see only those columns — checked on
+    its built module's declared input width, not just the spec's index list."""
+    mapping = {
+        "Y": ["a", "b"],
+        "U": [],
+        "D": ["oat", "ghi"],
+        "t": ["sec_elapsed"],
+    }
+    spec = {
+        "one": {"Y": ["a"], "D": ["oat"], "model": "mlp"},   # named subset
+        "two": {"Y": ["b"], "model": "mlp"},                  # absent -> all D
+    }
+    system = get_dynamics(make_cfg(model="mlp"), mapping, block_spec=spec)
+    fy = system.nodes[0].callable.fy
+    # widths: ny_in=1, nu=0 for both; nd=1 for "one", nd=2 for "two"
+    assert fy.blocks[0].in_features == IN_STEPS * (1 + 0 + 1)
+    assert fy.blocks[1].in_features == IN_STEPS * (1 + 0 + 2)
 
 
 # ── The ways a wrong model is refused ────────────────────────────
@@ -310,8 +423,18 @@ def test_a_head_that_will_not_add_the_state_back_is_refused():
         get_dynamics(make_cfg(), MAPPING, head_stack=stack)
 
 
+def test_a_non_2r2c_channel_is_free_to_use_any_head_in_a_mixed_model():
+    """The residual-compatible requirement is scoped to the channels a 2r2c
+    block actually produces — a mixed-family run's other channels (here,
+    `power`, produced by an `mlp` block) must not be swept into it."""
+    stack = HeadStack([RegressionHead(), BinaryHead()], MIXED_MAPPING["Y"])
+    cfg = make_cfg(model="mlp")
+    # Must not raise: BinaryHead is on "power" (mlp-produced), not "north T".
+    get_dynamics(cfg, MIXED_MAPPING, block_spec=MIXED_SPLIT, head_stack=stack)
+
+
 def test_per_zone_is_refused_where_it_would_do_nothing():
-    with pytest.raises(ValueError, match="already per-zone"):
+    with pytest.raises(ValueError, match="already per-block"):
         make_cfg(per_zone=True, train_data_path="x.csv", dev_data_path="x.csv",
                  test_data_path="x.csv").validate()
 
@@ -324,3 +447,39 @@ def test_a_coarse_timestep_cannot_ask_for_an_impossible_prior():
     taus = hourly.describe()["time_constants_h"]["y0"]
     assert math.isfinite(taus["fast"]) and math.isfinite(taus["slow"])
     assert 0 < taus["fast"] < taus["slow"]
+
+
+def test_2r2c_with_reads_is_refused():
+    """The single most important refusal in the block split: 2r2c's
+    unconditional-stability guarantee holds only because its forcing map
+    never reads state, and `reads` would let it."""
+    spec = {
+        "north": {"Y": ["north T"], "U": ["north sp"], "model": "2r2c",
+                  "reads": ["power"]},
+        "power": {"Y": ["power"], "model": "mlp"},
+    }
+    with pytest.raises(ValueError, match="cannot declare `reads`"):
+        get_dynamics(make_cfg(model="mlp"), MIXED_MAPPING, block_spec=spec)
+
+
+def test_an_unbuildable_model_name_is_refused():
+    """`nssm` has no per-block builder (it models all of Y jointly), so a
+    block naming it explicitly is a spec error, not a silent no-op."""
+    spec = {
+        "north": {"Y": ["north T"], "U": ["north sp"], "model": "nssm"},
+        "power": {"Y": ["power"], "model": "mlp"},
+    }
+    with pytest.raises(ValueError, match="no per-block builder"):
+        get_dynamics(make_cfg(model="mlp"), MIXED_MAPPING, block_spec=spec)
+
+
+# ── Backward compatibility ────────────────────────────────────────
+
+def test_an_old_style_zone_mapping_hook_still_builds_the_same_blocks():
+    """`build_blocks` doesn't care what the spec was called by the caller —
+    this pins that a spec obtained via the deprecated `zone_mapping` name
+    (see pipeline.resolve_block_spec) builds identically to one obtained via
+    `block_mapping`."""
+    system = get_dynamics(make_cfg(), MAPPING, block_spec=SPLIT)
+    fy = system.nodes[0].callable.fy
+    assert fy.block_names == ["north", "south"]
