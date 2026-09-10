@@ -31,7 +31,7 @@ from neurotemplate.common.data_utils import (
 )
 from neurotemplate.modeling.experiment import resolve_device, set_seeds
 from neurotemplate.modeling.pipeline import (
-    resolve_block_spec, run_summary_metrics, train_and_evaluate,
+    build_head_stack, resolve_block_spec, run_summary_metrics, train_and_evaluate,
 )
 from neurotemplate.hooks import load_modeling_hooks
 
@@ -51,7 +51,6 @@ def main() -> None:
 
     hooks = load_modeling_hooks(cfg)
     data_mapping = hooks.data_mapping
-    data_head_config = hooks.data_head_config
     column_norm_config = hooks.column_norm_config
     build_synth_cfg = hooks.synth_cfg
 
@@ -96,7 +95,7 @@ def main() -> None:
 
     grad_masks = get_grad_masks(grad_path=cfg.grad_path, nm_mapping=nm_mapping)
     synth_cfg = build_synth_cfg(nm_mapping, norm_stats)
-    head_stack = data_head_config(nm_mapping, norm_stats)
+    head_stack = build_head_stack(hooks, cfg, nm_mapping, norm_stats, train_dfs)
 
     # ── Run name & MLflow logger ─────────────────────────────────
     cfg.run = cfg.model.upper() + " " + cfg.run

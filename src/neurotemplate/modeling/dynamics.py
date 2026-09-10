@@ -37,6 +37,8 @@ Because cfg.in_steps is also the sliding-window stride
 makes two models trained at the same in_steps see the same training set.
 """
 
+import copy
+
 import torch
 import torch.nn as nn
 from typing import Callable, Optional
@@ -844,7 +846,10 @@ def get_dynamics(
                 f"model.ny={model.ny}; factories (currently) assume width-1 heads."
             )
         _check_2r2c_heads(blocks, families, head_stack)
-        model.head_stack = head_stack
+        # The System owns its own copy: post-training calibration writes the
+        # decision thresholds into the stack it trained with, and a caller
+        # reusing one stack across seeds or trials must not inherit them.
+        model.head_stack = copy.deepcopy(head_stack)
 
     # Temporal windowing: the gathered window must be exactly as wide as the
     # block's declared input width, and model.in_steps is that width. Only the

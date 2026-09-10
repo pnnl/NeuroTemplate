@@ -668,7 +668,8 @@ class HeadStack(nn.Module):
         self.raw_width = cursor
         self.n_channels = len(heads)
 
-    def _z_for(self, z_raw: torch.Tensor, i: int) -> torch.Tensor:
+    def z_for(self, z_raw: torch.Tensor, i: int) -> torch.Tensor:
+        """Channel i's slice of the raw model output."""
         lo, hi = self._slices[i]
         return z_raw[..., lo:hi]
 
@@ -691,7 +692,7 @@ class HeadStack(nn.Module):
         """
         outs = []
         for i in range(self.n_channels):
-            z = self._z_for(z_raw, i)
+            z = self.z_for(z_raw, i)
             head = self.heads[i]
             y_soft = head.activate(z)
             if head.use_ste:

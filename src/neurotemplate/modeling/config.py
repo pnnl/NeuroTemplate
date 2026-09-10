@@ -110,6 +110,21 @@ class ModelingConfig:
     sgn_gain: float = 0.0
     sgn_steepness: float = 2.0
 
+    # ---- STAGED CHANNELS -----------------------------------------------------
+    # A binary / ordinal channel is usually a rare-event channel (a furnace
+    # that fires 2% of the time), and neither MSE nor a midpoint snap values
+    # the rare level. Both settings come from the data, not the optimiser —
+    # see modeling/calibration.py — and neither touches a regression head.
+    #
+    # Weight each levelled head's loss by the inverse training frequency of
+    # its levels, so a rare level counts as much as the common one. Off, every
+    # sample weighs the same (the pre-existing behaviour).
+    balance_levels: bool = True
+    # After training, move each ordinal head's decision thresholds to the
+    # balanced-accuracy optimum on dev rollouts. Off, decode snaps at the
+    # level midpoints — a p=0.5 rule the data does not justify.
+    calibrate_thresholds: bool = True
+
     # ---- RUNTIME -------------------------------------------------------------
     seed: int = -1
     device: Optional[str] = None

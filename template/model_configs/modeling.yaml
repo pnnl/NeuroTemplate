@@ -93,6 +93,15 @@ test_data_path: data/test.csv
 # sgn_gain: 0.0
 # sgn_steepness: 2.0
 
+# ── STAGED CHANNELS (binary / ordinal heads) ─────────────────────
+# A staged channel is usually a rare-event channel, and neither MSE nor a
+# midpoint snap values the rare level. Both settings are read off the data.
+# Weight each levelled head's loss by inverse training frequency of its levels.
+# balance_levels: true
+# After training, move each ordinal head's decision thresholds to the
+# balanced-accuracy optimum on dev rollouts (reported on the reportcard).
+# calibrate_thresholds: true
+
 # ── RUNTIME ──────────────────────────────────────────────────────
 # -1 draws a random seed and records it with the run.
 # seed: -1

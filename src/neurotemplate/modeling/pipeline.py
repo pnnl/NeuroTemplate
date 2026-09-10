@@ -34,6 +34,10 @@ from neurotemplate._typing import beartype
 
 from neurotemplate.modeling.config import ModelingConfig
 from neurotemplate.common.data_utils import get_sw_dict_multi, pool_dfs, to_df, unnormalize_df
+from neurotemplate.modeling.calibration import (
+    balance_level_weights,
+    calibrate_decision_thresholds,
+)
 from neurotemplate.modeling.experiment import set_seeds, train_with_curriculum
 from neurotemplate.modeling.heads import HeadStack
 from neurotemplate.common.metrics import (
@@ -87,6 +91,38 @@ def resolve_block_spec(hooks, nm_mapping: dict[str, list[str]], cfg: ModelingCon
     if hasattr(hooks, "zone_mapping"):
         return hooks.zone_mapping(nm_mapping, cfg)
     return None
+
+
+def build_head_stack(
+    hooks, cfg: ModelingConfig, nm_mapping: dict[str, list[str]],
+    norm_stats: dict, train_dfs: list[DataFrame],
+) -> HeadStack:
+    """The hook's head stack, with level weights balanced from the training
+    data when `cfg.balance_levels`. Shared by cli/train.py and cli/optuna.py
+    so a search trial trains against the same loss as the final retrain."""
+    head_stack = hooks.data_head_config(nm_mapping, norm_stats)
+    if cfg.balance_levels:
+        balance_level_weights(head_stack, train_dfs)
+    return head_stack
+
+
+def _train(cfg, *, train_dfs, dev_dfs, nm_mapping, grad_masks, norm_stats,
+           head_stack, block_spec, logger):
+    """train_with_curriculum, then the post-training threshold calibration
+    when `cfg.calibrate_thresholds` — one step, so the primary and every
+    ensemble member get the same treatment."""
+    dyn_sys, best_dev_loss = train_with_curriculum(
+        cfg=cfg, train_dfs=train_dfs, dev_dfs=dev_dfs,
+        nm_mapping=nm_mapping, grad_masks=grad_masks, norm_stats=norm_stats,
+        head_stack=head_stack, block_spec=block_spec, global_logger=logger,
+    )
+    if cfg.calibrate_thresholds:
+        calibrated = calibrate_decision_thresholds(dyn_sys, cfg, dev_dfs, nm_mapping)
+        if cfg.verbose and calibrated:
+            for name, thresholds in calibrated.items():
+                print(f"Calibrated decision thresholds for {name!r} (head-space): "
+                      + ", ".join(f"{t:.4f}" for t in thresholds))
+    return dyn_sys, best_dev_loss
 
 
 # ── Result type ──────────────────────────────────────────────────
@@ -602,12 +638,11 @@ def _run_ensemble_members(
             print(f"Training ensemble member {i + 1}/{cfg.ensemble_seeds} "
                   f"(seed={cfg.seed + i})...")
         set_seeds(cfg.seed + i)
-        dyn_sys, _ = train_with_curriculum(
-            cfg=quiet_cfg,
+        dyn_sys, _ = _train(
+            quiet_cfg,
             train_dfs=train_dfs, dev_dfs=dev_dfs,
             nm_mapping=nm_mapping, grad_masks=grad_masks, norm_stats=norm_stats,
-            head_stack=head_stack, block_spec=block_spec,
-            global_logger=None,
+            head_stack=head_stack, block_spec=block_spec, logger=None,
         )
         test_results = evaluate_and_plot(
             cfg=quiet_cfg, dyn_sys=dyn_sys, test_dfs=test_dfs,
@@ -674,16 +709,11 @@ def train_and_evaluate(
     # and the primary (i = 0) needs the same explicit contract rather than
     # an implicit "whatever the caller last seeded".
     set_seeds(cfg.seed)
-    dyn_sys, best_dev_loss = train_with_curriculum(
-        cfg=cfg,
-        train_dfs=train_dfs,
-        dev_dfs=dev_dfs,
-        nm_mapping=nm_mapping,
-        grad_masks=grad_masks,
-        norm_stats=norm_stats,
-        head_stack=head_stack,
-        block_spec=block_spec,
-        global_logger=logger,
+    dyn_sys, best_dev_loss = _train(
+        cfg,
+        train_dfs=train_dfs, dev_dfs=dev_dfs,
+        nm_mapping=nm_mapping, grad_masks=grad_masks, norm_stats=norm_stats,
+        head_stack=head_stack, block_spec=block_spec, logger=logger,
     )
     train_time_s = tic() - train_t0
 
@@ -703,9 +733,12 @@ def train_and_evaluate(
     if grad_masks:
         logger.log_dict(grad_masks, name="grad_mask.json")
     # Persist head config so load_model can rebuild the exact head topology
-    # used at training time, independent of user_defined.py drift.
-    if head_stack is not None:
-        logger.log_dict(head_stack.to_config(), name="head_config.json")
+    # used at training time, independent of user_defined.py drift. Read off
+    # the System's own stack: that is the one carrying the calibrated
+    # decision thresholds, which are not in the saved weights.
+    trained_stack = dyn_sys.nodes[0].callable.head_stack
+    if trained_stack is not None:
+        logger.log_dict(trained_stack.to_config(), name="head_config.json")
 
     plot_run_dir = Path(cfg.savedir) / "plots"
     test_results = evaluate_and_plot(
@@ -735,7 +768,7 @@ def train_and_evaluate(
     md = render_reportcard(
         cfg=cfg, dyn_sys=dyn_sys, test_results=test_results,
         norm_stats=norm_stats, nm_mapping=nm_mapping,
-        head_stack=head_stack,
+        head_stack=trained_stack,
         test_dfs=test_dfs,
         run_name=cfg.run,
         best_dev_loss=best_dev_loss,

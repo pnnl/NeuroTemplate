@@ -95,11 +95,16 @@ def _plot_ordinal(head, axes, name):
         ax_act.axhline(v, color="green", linestyle=":", alpha=0.4)
     for t in thr.tolist():
         ax_act.axvline(t, color="red", linestyle="--", alpha=0.4)
+    # Where decode actually snaps — after calibration these sit away from
+    # the activation thresholds, usually toward the common level.
+    for t in head.decision_thresholds.tolist():
+        ax_act.axvline(t, color="purple", linestyle="-.", alpha=0.6)
     levels_s = ", ".join(f"{v:g}" for v in head.level_values.tolist())
     thr_s = ", ".join(f"{t:.3f}" for t in thr.tolist())
+    dec_s = ", ".join(f"{t:.3f}" for t in head.decision_thresholds.tolist())
     ax_act.set_title(
         f"{name}\nordinal K={head.n_levels} β={head.beta:g}\n"
-        f"levels=[{levels_s}]\nthresholds=[{thr_s}]",
+        f"levels=[{levels_s}]\nthresholds=[{thr_s}]  decide at=[{dec_s}]",
         fontsize=8,
     )
     ax_act.set_xlabel("z (head-space)")
@@ -154,7 +159,8 @@ def _print_summary(head_stack):
         if head.kind == "regression":
             details = "identity"
         elif head.kind == "binary":
-            details = "sigmoid"
+            w_s = ", ".join(f"{w:.2f}" for w in head.level_weights.tolist())
+            details = f"sigmoid level_weights=[{w_s}]"
         elif head.kind == "bounded":
             details = f"lo={head.lo:g} hi={head.hi:g} β={head.beta:g}"
         elif head.kind == "ordinal":
@@ -162,9 +168,12 @@ def _print_summary(head_stack):
             gaps = [thr[i + 1] - thr[i] for i in range(len(thr) - 1)]
             gap_s = f"min_gap={min(gaps):.3f}" if gaps else "single-threshold"
             thr_s = ", ".join(f"{t:.3f}" for t in thr)
+            dec_s = ", ".join(f"{t:.3f}" for t in head.decision_thresholds.tolist())
+            w_s = ", ".join(f"{w:.2f}" for w in head.level_weights.tolist())
             details = (
                 f"K={head.n_levels} β={head.beta:g} "
-                f"thresholds=[{thr_s}] {gap_s}"
+                f"thresholds=[{thr_s}] {gap_s} "
+                f"decide_at=[{dec_s}] level_weights=[{w_s}]"
             )
         else:
             details = "?"
