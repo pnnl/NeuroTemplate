@@ -12,6 +12,11 @@ something quietly wrong.
 Plus the two HeadStack invariants: an all-regression stack reproduces blanket
 MSE to floating-point precision, and `apply_residual` touches only the
 channels that declared themselves residual-compatible.
+
+The rare-level section pins the two knobs a staged channel has: class
+weights must leave the loss untouched at their default and count a rare
+level more otherwise, and the decision thresholds must move the snap
+without moving the activation.
 """
 
 import math
@@ -27,6 +32,7 @@ from neurotemplate.modeling.heads import (
     OrdinalHead,
     RegressionHead,
     bounds_from_norm,
+    inverse_frequency_weights,
     project_physical_to_norm,
 )
 
@@ -157,17 +163,36 @@ def test_residual_reaches_only_the_channels_that_accept_one():
 def test_a_mixed_stack_survives_a_config_round_trip():
     levels = torch.tensor([0.0, 0.5, 1.5])
     original = HeadStack(
-        [RegressionHead(), BinaryHead(), BoundedHead(lo=-1.0, hi=2.0, beta=3.0),
+        [RegressionHead(), BinaryHead(level_weights=torch.tensor([1.0, 9.0])),
+         BoundedHead(lo=-1.0, hi=2.0, beta=3.0),
          BoundedHead(lo=0.0, hi=INF),
-         OrdinalHead(n_levels=3, level_values=levels, beta=10.0)],
+         OrdinalHead(n_levels=3, level_values=levels, beta=10.0,
+                     decision_thresholds=torch.tensor([0.1, 0.9]),
+                     level_weights=torch.tensor([0.5, 1.0, 3.0]))],
         ["a", "b", "c", "d", "e"],
     )
     rebuilt = HeadStack.from_config(original.to_config(), original.channel_names)
     assert [h.kind for h in rebuilt.heads] == [h.kind for h in original.heads]
+    assert torch.equal(rebuilt.heads[1].level_weights, torch.tensor([1.0, 9.0]))
     assert (rebuilt.heads[2].lo, rebuilt.heads[2].hi, rebuilt.heads[2].beta) == (-1.0, 2.0, 3.0)
     assert rebuilt.heads[3].hi == INF                 # infinity is not a string
     assert rebuilt.heads[4].n_levels == 3
     assert torch.equal(rebuilt.heads[4].level_values, levels)
+    # The calibrated decision rule and the class weights are part of the
+    # topology: a reloaded run must decide the way it was evaluated.
+    assert torch.equal(rebuilt.heads[4].decision_thresholds, torch.tensor([0.1, 0.9]))
+    assert torch.equal(rebuilt.heads[4].level_weights, torch.tensor([0.5, 1.0, 3.0]))
+
+
+def test_calibrated_thresholds_survive_load_state_dict():
+    """Weights are saved before the thresholds are calibrated, so restoring
+    the state_dict must not drag the decision rule back to the midpoints."""
+    trained = HeadStack([OrdinalHead(n_levels=2)], ["a"])
+    saved = trained.state_dict()
+    rebuilt = HeadStack.from_config(
+        {"a": {"kind": "ordinal", "n_levels": 2, "decision_thresholds": [0.3]}}, ["a"])
+    rebuilt.load_state_dict(saved)
+    assert rebuilt.heads[0].decision_thresholds.item() == pytest.approx(0.3)
 
 
 def test_a_half_bounded_head_is_still_half_bounded_after_a_reload():
@@ -199,6 +224,14 @@ def test_channels_the_config_does_not_mention_default_to_regression():
     pytest.param(lambda: OrdinalHead(n_levels=4,
                                      init_thresholds=torch.tensor([0.5, 1.5])),
                  r"init_thresholds must have shape \(3,\)", id="wrong threshold count"),
+    pytest.param(lambda: OrdinalHead(n_levels=3,
+                                     decision_thresholds=torch.tensor([1.5, 0.5])),
+                 "decision_thresholds must be strictly increasing",
+                 id="unordered decision thresholds"),
+    pytest.param(lambda: OrdinalHead(n_levels=2, level_weights=torch.tensor([1.0, 0.0])),
+                 "level_weights must be positive", id="zero level weight"),
+    pytest.param(lambda: BinaryHead(level_weights=torch.tensor([1.0, 2.0, 3.0])),
+                 r"level_weights must have shape \(2,\)", id="binary weight count"),
     pytest.param(lambda: HeadStack([RegressionHead()] * 2, ["a", "a"]),
                  "must be unique", id="duplicate channel names"),
     pytest.param(lambda: HeadStack.from_config({"x": {"kind": "not_a_thing"}}, ["x"]),
@@ -209,6 +242,81 @@ def test_channels_the_config_does_not_mention_default_to_regression():
 def test_a_malformed_head_refuses_to_be_built(build, message):
     with pytest.raises(ValueError, match=message):
         build()
+
+
+# ── Rare levels: class weights and the decision rule ─────────────
+
+@pytest.mark.parametrize("head,target", [
+    pytest.param(OrdinalHead(n_levels=2), torch.tensor([0.0] * 30 + [1.0] * 2),
+                 id="ordinal"),
+    pytest.param(BinaryHead(), torch.tensor([0.0] * 30 + [1.0] * 2), id="binary"),
+])
+def test_default_level_weights_leave_the_loss_unchanged(head, target):
+    """All-ones weights must reproduce the unweighted mean exactly, or every
+    existing run's loss quietly changed meaning."""
+    torch.manual_seed(0)
+    y = torch.sigmoid(torch.randn(32))
+    if head.kind == "ordinal":
+        expected = ((y - target) ** 2).mean()
+    else:
+        expected = torch.nn.functional.binary_cross_entropy(y, target)
+    assert torch.allclose(head.loss(y, target), expected, atol=1e-7)
+
+
+def test_inverse_frequency_weights_make_a_rare_level_count():
+    """A level that occurs on 1/16 of samples gets 15x the weight of the
+    common one, and the weights average to one so the loss scale holds."""
+    y = torch.tensor([0.0] * 30 + [1.0] * 2)
+    w = inverse_frequency_weights(y, torch.tensor([0.0, 1.0]))
+    assert w[1] / w[0] == pytest.approx(15.0)
+    assert w.mean().item() == pytest.approx(1.0)
+    # A level the data never visits counts as one sample, not as infinity.
+    w = inverse_frequency_weights(torch.zeros(10), torch.tensor([0.0, 1.0]))
+    assert torch.isfinite(w).all() and w[1] > w[0]
+
+
+def test_weighted_loss_pulls_harder_on_the_rare_level():
+    head = OrdinalHead(n_levels=2, level_weights=torch.tensor([1.0, 15.0]))
+    target = torch.tensor([0.0] * 30 + [1.0] * 2)
+    # Same error on every sample; the weighted loss is the plain MSE only
+    # when the weights are uniform, and here the rare misses dominate.
+    y = torch.where(target == 1, torch.zeros(32), torch.zeros(32) + 0.1)
+    unweighted = ((y - target) ** 2).mean()
+    assert head.loss(y, target) > unweighted
+
+
+def test_decision_thresholds_move_the_snap_but_not_the_activation():
+    """A calibrated decision rule changes what decode emits at a given z;
+    the smooth activation (and so the gradient) is untouched."""
+    mid = OrdinalHead(n_levels=2)
+    low = OrdinalHead(n_levels=2, decision_thresholds=torch.tensor([0.3]))
+    z = torch.tensor([[0.4]])
+    assert mid.decode(z).item() == 0.0
+    assert low.decode(z).item() == 1.0
+    assert torch.equal(mid.activate(z), low.activate(z))
+    assert torch.equal(low.thresholds, mid.thresholds)
+
+
+def test_level_index_is_the_nearest_level_for_every_levelled_head():
+    ordinal = OrdinalHead(n_levels=3, level_values=torch.tensor([0.0, 1.0, 5.0]))
+    assert ordinal.level_index(torch.tensor([0.0, 1.2, 4.0, 5.0])).tolist() == [0, 1, 2, 2]
+    binary = BinaryHead()
+    assert binary.level_index(torch.tensor([0.1, 0.49, 0.51, 1.0])).tolist() == [0, 0, 1, 1]
+    assert RegressionHead().levels() is None
+    assert BoundedHead(0.0, 1.0).levels() is None
+
+
+def test_a_forward_hook_on_the_stack_sees_the_pre_activation_z():
+    """Threshold calibration reads z off the stack this way, so the
+    dynamics model must reach the stack through __call__, not activate."""
+    stack = HeadStack([OrdinalHead(n_levels=2)], ["a"])
+    seen = []
+    handle = stack.register_forward_hook(lambda m, inp, out: seen.append(inp[0]))
+    z = torch.tensor([[0.7], [0.2]])
+    y = stack(z)
+    handle.remove()
+    assert torch.equal(seen[0], z)
+    assert y.squeeze(-1).tolist() == [1.0, 0.0]
 
 
 # ── Projection helpers ───────────────────────────────────────────

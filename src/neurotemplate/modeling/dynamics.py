@@ -351,7 +351,7 @@ class SSMGrad(nn.Module):
         # whose head opts in) BEFORE activation, then the stack activates.
         if self.residual:
             out = self.head_stack.apply_residual(out, self._last_y(y))
-        return self.head_stack.activate(out)
+        return self.head_stack(out)
 
 
 # ── Model factory functions ──────────────────────────────────────

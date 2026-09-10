@@ -56,11 +56,12 @@ saturated activation kills training before the optimiser sees a signal.
 
   binary
     Sigmoid for state feedback. Loss is BCE on the activated probability
-    σ(z). The BCE-with-logits form would be marginally more stable at
-    extreme |z|, but we keep the loss interface uniform (all losses
-    operate on activated state) so the dynamics System can expose one
-    output tensor — clarity wins over the small stability margin until
-    a real run shows the difference.
+    σ(z), optionally class-weighted (see "Rare levels" below). The
+    BCE-with-logits form would be marginally more stable at extreme
+    |z|, but we keep the loss interface uniform (all losses operate on
+    activated state) so the dynamics System can expose one output
+    tensor — clarity wins over the small stability margin until a real
+    run shows the difference.
 
   bounded
     Three activation modes selected by which side is finite. All three
@@ -97,12 +98,49 @@ saturated activation kills training before the optimiser sees a signal.
     picks `level_values`, so the midpoint placement is optimal by
     construction. Learnable thresholds would just give the model a
     redundant degree of freedom and threshold drift breaks the
-    predict-then-snap semantics. Loss is MSE on ŷ vs the target level.
-    `decode` snaps to the exact level corresponding to the count of
-    thresholds exceeded.
+    predict-then-snap semantics. Loss is MSE on ŷ vs the target level,
+    optionally class-weighted. `decode` snaps to the exact level
+    corresponding to the count of *decision* thresholds exceeded — a
+    separate set from the activation thresholds, see "Rare levels".
     Tradeoff: gradient w.r.t. z vanishes when z drifts far from every
     threshold, and the vanishing region grows with β. If saturation
     becomes a problem, lower β or swap MSE for cumulative-link NLL.
+
+Rare levels: class weights and the decision rule
+================================================
+
+Staged equipment is usually a rare-event channel — a furnace that fires
+on 2% of samples, a fan that reaches its top stage on 5%. Two things in
+a plain MSE/BCE head are indifferent to that by construction, and both
+are fixed inside the head with no change to the System's output:
+
+  level_weights
+    Per-level loss weights, indexed by the *target's* level. The loss is
+    Σ w·err / Σ w, so all-ones (the default) reproduces the unweighted
+    mean exactly and the loss scale does not move with the weights.
+    Inverse training frequency (`inverse_frequency_weights`) makes each
+    level count equally regardless of how often it occurs; the pipeline
+    sets that by default (`cfg.balance_levels`). Measured on a
+    2.5%-positive compressor channel, this is the difference between a
+    coin flip (ROC-AUC 0.74 ± 0.27 across seeds) and a model (0.94 ±
+    0.01) — MSE alone does not reliably train on such a channel.
+
+  decision_thresholds (ordinal only)
+    Where `decode` snaps. Defaults to the same midpoints the activation
+    uses, which is a p = 0.5 boundary — a balanced prior the data does
+    not have. On a rare level the ranking z produces is usually fine and
+    the snap point is what is wrong: moving the threshold to maximise
+    balanced accuracy recovered +0.11 on training data alone, +0.17
+    calibrated on dev, with no retraining. The pipeline calibrates these
+    on the dev split after training (`cfg.calibrate_thresholds`), and
+    they round-trip through `config()` so a reloaded run decides the
+    same way it was evaluated. The activation thresholds stay at the
+    midpoints: learning them under the training loss buys nothing.
+
+Both were tested one-step-ahead with true history; neither has been
+verified to repair the autoregressive collapse of a rare channel, which
+is where the surrogate actually fails. Treat the classification metrics
+on the reportcard as the check.
 
 Residual prediction (y_{k+1} = f(...) + y_k) is only meaningful for
 heads whose pre-activation `z` lives in the same space as `y_k`. That's
@@ -193,6 +231,23 @@ class Head(nn.Module, ABC):
         activate(z), making the STE combine a no-op for this head."""
         return self.activate(z)
 
+    def levels(self) -> Optional[torch.Tensor]:
+        """The discrete values this head's output stands for, ascending, or
+        None for a continuous head. Non-None heads are scored as classifiers
+        (balanced accuracy, per-level recall) on top of the regression
+        metrics, and their loss can be class-weighted via `level_weights`."""
+        return None
+
+    def level_index(self, y: torch.Tensor) -> torch.Tensor:
+        """Index into `levels()` of the level nearest each value of `y`.
+        Works for both the truth (exactly on a level) and an emitted value
+        (snapped for ordinal, a probability for binary — nearest of {0, 1}
+        is the p = 0.5 rule)."""
+        levels = self.levels()
+        if levels is None:
+            raise TypeError(f"{type(self).__name__} has no levels to index")
+        return (y.unsqueeze(-1) - levels).abs().argmin(dim=-1)
+
     def config(self) -> dict:
         """JSON-safe kwargs needed to reconstruct this head. Default: none."""
         return {}
@@ -216,17 +271,38 @@ class RegressionHead(Head):
 
 
 class BinaryHead(Head):
-    """Sigmoid activation, BCE on activated probability. Target must be 0/1."""
+    """Sigmoid activation, BCE on activated probability. Target must be 0/1.
+
+    `level_weights` (shape (2,), default ones) weights each sample's BCE by
+    its target class; see the module docstring. The emitted value is a
+    probability, not a decision, so there is no decision threshold here —
+    the classification metrics read it at p = 0.5.
+    """
 
     kind = "binary"
     width = 1
     residual_compatible = False
 
+    def __init__(self, level_weights: Optional[torch.Tensor] = None):
+        super().__init__()
+        self.register_buffer("_levels", torch.tensor([0.0, 1.0]), persistent=False)
+        self.register_buffer(
+            "level_weights", _checked_level_weights(level_weights, 2), persistent=False,
+        )
+
     def activate(self, z: torch.Tensor) -> torch.Tensor:
         return torch.sigmoid(z.squeeze(-1))
 
+    def levels(self) -> torch.Tensor:
+        return self._levels
+
     def loss(self, y_state: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-        return F.binary_cross_entropy(y_state, target)
+        w = self.level_weights[self.level_index(target)]
+        bce = F.binary_cross_entropy(y_state, target, reduction="none")
+        return (w * bce).sum() / w.sum()
+
+    def config(self) -> dict:
+        return {"level_weights": self.level_weights.tolist()}
 
 
 class BoundedHead(Head):
@@ -357,9 +433,17 @@ class OrdinalHead(Head):
          additive residual depends on threshold spacing, which the
          model does not own. Non-residual sidesteps the muddle.
 
-    `level_values` and `init_thresholds` live in head-space. Callers
-    constructing the head from physical units should project them
-    through `project_physical_to_norm` first.
+    `decision_thresholds` (K-1, default: the same midpoints) is where
+    `decode` snaps; `level_weights` (K, default ones) weights the loss by
+    the target's level. Both exist because a rare level is invisible to
+    an unweighted MSE and to a midpoint snap — see the module docstring.
+    Neither is a trained parameter: they are constructor arguments that
+    round-trip through `config()`, and the pipeline sets them after
+    training from the data rather than the optimiser.
+
+    `level_values`, `init_thresholds` and `decision_thresholds` live in
+    head-space. Callers constructing the head from physical units should
+    project them through `project_physical_to_norm` first.
     """
 
     kind = "ordinal"
@@ -373,6 +457,8 @@ class OrdinalHead(Head):
         level_values: Optional[torch.Tensor] = None,
         beta: float = 15.0,
         use_ste: bool = True,
+        decision_thresholds: Optional[torch.Tensor] = None,
+        level_weights: Optional[torch.Tensor] = None,
     ):
         super().__init__()
         if n_levels < 2:
@@ -403,24 +489,26 @@ class OrdinalHead(Head):
         # Cached Δv_k = v_k − v_{k-1} for the gap-scaled sigmoid. Shape (K-1,).
         self.register_buffer("level_gaps", level_values[1:] - level_values[:-1])
 
-        # Thresholds: fixed at init time. Default is the midpoints between
-        # consecutive level_values. Registered as a buffer so it moves
-        # with .to(device) and round-trips through state_dict.
-        if init_thresholds is None:
-            thresholds = 0.5 * (level_values[:-1] + level_values[1:])
-        else:
-            thresholds = init_thresholds.to(torch.float32)
-            if thresholds.shape != (n_levels - 1,):
-                raise ValueError(
-                    f"init_thresholds must have shape ({n_levels - 1},), "
-                    f"got {tuple(thresholds.shape)}"
-                )
-            if (thresholds[1:] <= thresholds[:-1]).any():
-                raise ValueError(
-                    f"init_thresholds must be strictly increasing, "
-                    f"got {thresholds.tolist()}"
-                )
-        self.register_buffer("thresholds", thresholds)
+        # Activation thresholds: fixed at init time. Default is the
+        # midpoints between consecutive level_values. Registered as a
+        # buffer so it moves with .to(device) and round-trips through
+        # state_dict.
+        midpoints = 0.5 * (level_values[:-1] + level_values[1:])
+        self.register_buffer(
+            "thresholds", _checked_thresholds(init_thresholds, midpoints, "init_thresholds"),
+        )
+        # Decision thresholds: where decode snaps. Not in state_dict — the
+        # pipeline calibrates them after the weights are saved, so config()
+        # is their single source of truth (load_state_dict must not undo it).
+        self.register_buffer(
+            "decision_thresholds",
+            _checked_thresholds(decision_thresholds, midpoints, "decision_thresholds"),
+            persistent=False,
+        )
+        self.register_buffer(
+            "level_weights", _checked_level_weights(level_weights, n_levels),
+            persistent=False,
+        )
 
     def activate(self, z: torch.Tensor) -> torch.Tensor:
         z = z.squeeze(-1)
@@ -436,13 +524,17 @@ class OrdinalHead(Head):
 
     def decode(self, z: torch.Tensor) -> torch.Tensor:
         """Exact level value: snap to the k-th level corresponding to the
-        count of thresholds exceeded. Returns one of self.level_values."""
+        count of decision thresholds exceeded. Returns one of self.level_values."""
         z = z.squeeze(-1)
-        idx = (z.unsqueeze(-1) > self.thresholds).sum(dim=-1)
+        idx = (z.unsqueeze(-1) > self.decision_thresholds).sum(dim=-1)
         return self.level_values[idx]
 
+    def levels(self) -> torch.Tensor:
+        return self.level_values
+
     def loss(self, y_state: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-        return F.mse_loss(y_state, target)
+        w = self.level_weights[self.level_index(target)]
+        return (w * (y_state - target) ** 2).sum() / w.sum()
 
     def config(self) -> dict:
         return {
@@ -450,7 +542,53 @@ class OrdinalHead(Head):
             "beta": self.beta,
             "level_values": self.level_values.tolist(),
             "use_ste": self.use_ste,
+            "decision_thresholds": self.decision_thresholds.tolist(),
+            "level_weights": self.level_weights.tolist(),
         }
+
+
+def _checked_thresholds(
+    given: Optional[torch.Tensor], default: torch.Tensor, name: str,
+) -> torch.Tensor:
+    """`given` as float32 with the shape of `default` and strictly increasing,
+    or `default` when not given."""
+    if given is None:
+        return default.clone()
+    thresholds = given.to(torch.float32)
+    if thresholds.shape != default.shape:
+        raise ValueError(
+            f"{name} must have shape {tuple(default.shape)}, "
+            f"got {tuple(thresholds.shape)}"
+        )
+    if (thresholds[1:] <= thresholds[:-1]).any():
+        raise ValueError(
+            f"{name} must be strictly increasing, got {thresholds.tolist()}"
+        )
+    return thresholds
+
+
+def _checked_level_weights(given: Optional[torch.Tensor], n_levels: int) -> torch.Tensor:
+    """`given` as a positive float32 (n_levels,) tensor, or ones when not given."""
+    if given is None:
+        return torch.ones(n_levels)
+    weights = given.to(torch.float32)
+    if weights.shape != (n_levels,):
+        raise ValueError(
+            f"level_weights must have shape ({n_levels},), got {tuple(weights.shape)}"
+        )
+    if (weights <= 0).any():
+        raise ValueError(f"level_weights must be positive, got {weights.tolist()}")
+    return weights
+
+
+def inverse_frequency_weights(y: torch.Tensor, levels: torch.Tensor) -> torch.Tensor:
+    """Per-level weights ∝ 1 / (share of `y` nearest each level), scaled so
+    they average 1. A level `y` never visits gets the weight of a single
+    sample, so it is neither infinite nor silently dropped."""
+    idx = (y.reshape(-1, 1) - levels).abs().argmin(dim=-1)
+    counts = torch.bincount(idx, minlength=len(levels)).clamp(min=1).to(torch.float32)
+    weights = 1.0 / counts
+    return weights * len(levels) / weights.sum()
 
 
 # ── Helpers exposed to users building heads from physical units ──
@@ -533,6 +671,12 @@ class HeadStack(nn.Module):
     def _z_for(self, z_raw: torch.Tensor, i: int) -> torch.Tensor:
         lo, hi = self._slices[i]
         return z_raw[..., lo:hi]
+
+    def forward(self, z_raw: torch.Tensor) -> torch.Tensor:
+        """`activate`, reachable through nn.Module.__call__ so a forward hook
+        can observe the pre-activation z — the dynamics model calls the
+        stack this way, and threshold calibration relies on it."""
+        return self.activate(z_raw)
 
     def activate(self, z_raw: torch.Tensor) -> torch.Tensor:
         """[..., raw_width] -> [..., n_channels] activated state.
@@ -646,9 +790,8 @@ class HeadStack(nn.Module):
                 kwargs["lo"] = _json_to_float(kwargs["lo"])
             if "hi" in kwargs:
                 kwargs["hi"] = _json_to_float(kwargs["hi"])
-            if "level_values" in kwargs:
-                kwargs["level_values"] = torch.tensor(
-                    kwargs["level_values"], dtype=torch.float32
-                )
+            for key in ("level_values", "decision_thresholds", "level_weights"):
+                if key in kwargs:
+                    kwargs[key] = torch.tensor(kwargs[key], dtype=torch.float32)
             heads.append(_KIND_TO_CLASS[kind](**kwargs))
         return cls(heads, channel_names)
