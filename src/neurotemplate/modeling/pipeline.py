@@ -22,7 +22,7 @@ so it is the DRY home for turning several draws into a reported spread. See
 ModelingConfig.ensemble_seeds and reportcard.EnsembleSpread.
 """
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from time import perf_counter as tic
 from typing import Optional
@@ -38,8 +38,11 @@ from neurotemplate.modeling.experiment import set_seeds, train_with_curriculum
 from neurotemplate.modeling.heads import HeadStack
 from neurotemplate.common.metrics import (
     ChannelMetrics,
+    LevelMetrics,
     RolloutStability,
     _safe_metric_key,
+    level_metrics,
+    level_metrics_to_dict,
     metrics_to_dict,
     per_channel_metrics,
     rollout_stability,
@@ -104,6 +107,15 @@ class TestResults:
     # Order statistics for the Y channels that are not thermal states. These
     # carry no verdict — see scenarios.ReadoutSummary.
     readouts: Optional[list[ReadoutSummary]] = None
+    # Classification view of the binary / ordinal channels: NRMSE cannot tell
+    # a head that works from one that never fires, these can. Empty when the
+    # stack has no levelled head.
+    levels: list[LevelMetrics] = field(default_factory=list)
+    # The same metrics for persistence — hold the last seeded state for the
+    # whole window — as the bar a surrogate has to clear. A regression head on
+    # a staged channel learns exactly this and then collapses in the rollout.
+    persistence: list[ChannelMetrics] = field(default_factory=list)
+    persistence_levels: list[LevelMetrics] = field(default_factory=list)
 
 
 # ── Test eval + plotting (one operation) ────────────────────────
@@ -151,16 +163,24 @@ def evaluate_and_plot(
 
     # System output prepends the initial condition; slice past the in_steps
     # history when comparing to ground truth.
-    un_pred = _unnormalize_y(
-        test_out["yn"][:, cfg.in_steps:-1, :], nm_mapping, norm_stats
-    )
-    un_true = _unnormalize_y(
-        test_out["Y"][:, cfg.in_steps:, :], nm_mapping, norm_stats
-    )
+    pred_norm = test_out["yn"][:, cfg.in_steps:-1, :]
+    true_norm = test_out["Y"][:, cfg.in_steps:, :]
+    un_pred = _unnormalize_y(pred_norm, nm_mapping, norm_stats)
+    un_true = _unnormalize_y(true_norm, nm_mapping, norm_stats)
     metrics = per_channel_metrics(un_pred, un_true, nm_mapping["Y"])
     # RMSE alone cannot see a model that has stopped responding to its inputs
     # and is emitting a ramp; compare the rollout's shape to the truth's too.
     stability = rollout_stability(un_pred, un_true, nm_mapping["Y"])
+
+    # Persistence sees exactly what the rollout sees at its start — the
+    # seeded history — and holds the last of it. Same span, same units.
+    persist_norm = test_out["Y"][:, cfg.in_steps - 1:cfg.in_steps, :].expand_as(true_norm)
+    persistence = per_channel_metrics(
+        _unnormalize_y(persist_norm, nm_mapping, norm_stats), un_true, nm_mapping["Y"],
+    )
+    head_stack = dyn_sys.nodes[0].callable.head_stack
+    levels = _level_metrics(head_stack, pred_norm, true_norm, norm_stats)
+    persistence_levels = _level_metrics(head_stack, persist_norm, true_norm, norm_stats)
 
     # Legacy aggregate (averaged across channels in normalized space). Kept
     # for back-compat with the pre-refactor `test_rmse` MLflow key.
@@ -191,7 +211,37 @@ def evaluate_and_plot(
         physics=None if outcome is None else outcome.verdicts,
         physics_steps=None if outcome is None else synth_steps(cfg, freq_s),
         readouts=None if outcome is None else outcome.readouts,
+        levels=levels,
+        persistence=persistence,
+        persistence_levels=persistence_levels,
     )
+
+
+def _level_metrics(
+    head_stack: Optional[HeadStack],
+    y_pred: torch.Tensor,
+    y_true: torch.Tensor,
+    norm_stats: dict,
+) -> list[LevelMetrics]:
+    """Classification metrics for every levelled channel of the stack.
+
+    Indices are taken in head-space — that is where the head's levels live —
+    and only the row labels are projected to physical units.
+    """
+    if head_stack is None:
+        return []
+    out = []
+    for i, (name, head) in enumerate(zip(head_stack.channel_names, head_stack.heads)):
+        head_levels = head.levels()
+        if head_levels is None:
+            continue
+        stats = norm_stats[name]
+        physical = (head_levels * stats["stretch"] + stats["shift"]).tolist()
+        out.append(level_metrics(
+            head.level_index(y_pred[..., i]), head.level_index(y_true[..., i]),
+            physical, name,
+        ))
+    return out
 
 
 def _plot_predictions(
@@ -322,6 +372,9 @@ def render_reportcard(
         physics=test_results.physics,
         physics_steps=test_results.physics_steps,
         readouts=test_results.readouts,
+        levels=test_results.levels,
+        persistence=test_results.persistence,
+        persistence_levels=test_results.persistence_levels,
         ensemble=ensemble,
         nm_mapping=nm_mapping,
         head_stack=head_stack,
@@ -368,6 +421,14 @@ def log_test_results(
         safe = _safe_metric_key(st.name)
         flat[f"test_{safe}_rise_excess"] = st.rise_excess
         flat[f"test_{safe}_drift_ratio"] = st.drift_ratio
+    # Balanced accuracy is the number to sort a staged channel by — NRMSE
+    # ranks a head that never fires above one that does.
+    for lm in test_results.levels:
+        flat[f"test_{_safe_metric_key(lm.name)}_balanced_acc"] = lm.balanced_accuracy
+    for m in test_results.persistence:
+        flat[f"persistence_{_safe_metric_key(m.name)}_rmse"] = m.rmse
+    for lm in test_results.persistence_levels:
+        flat[f"persistence_{_safe_metric_key(lm.name)}_balanced_acc"] = lm.balanced_accuracy
     if test_results.physics is not None:
         # One gate number to sort a leaderboard by, plus per-(scenario, channel)
         # detail — so a channel someone does not care about can be excluded from
@@ -389,6 +450,17 @@ def log_test_results(
         stability_to_dict(test_results.stability),
         name="rollout_stability.json",
     )
+    logger.log_dict(
+        metrics_to_dict(test_results.persistence), name="persistence_metrics.json"
+    )
+    if test_results.levels:
+        logger.log_dict(
+            {
+                "model": level_metrics_to_dict(test_results.levels),
+                "persistence": level_metrics_to_dict(test_results.persistence_levels),
+            },
+            name="level_metrics.json",
+        )
     if test_results.physics is not None:
         logger.log_dict(
             checks_to_dict(test_results.physics),
@@ -407,12 +479,18 @@ def run_summary_metrics(test_results: TestResults) -> dict[str, float]:
 
     `worst_channel_r2` is the min of the per-channel R² that
     `log_test_results` already logs, so it is the weakest channel rather
-    than an average that can hide one.
+    than an average that can hide one. `worst_level_balanced_acc` is the
+    same idea for the staged channels, present only when there are any.
     """
-    return {
+    out = {
         "test_rmse": test_results.aggregate_rmse,
         "worst_channel_r2": min(m.r2 for m in test_results.metrics),
     }
+    if test_results.levels:
+        out["worst_level_balanced_acc"] = min(
+            lm.balanced_accuracy for lm in test_results.levels
+        )
+    return out
 
 
 # ── Seed ensemble ─────────────────────────────────────────────────
@@ -452,6 +530,7 @@ def _build_ensemble_spread(
     per_seed_metrics: list[list[ChannelMetrics]],
     per_seed_physics: list[Optional[list[ScenarioResult]]],
     per_seed_tau_slow: list[dict[str, float]],
+    per_seed_levels: list[list[LevelMetrics]],
 ) -> EnsembleSpread:
     """Group each metric's per-seed values under its channel/key and reduce
     with `spread_stats`. Every list argument has one entry per seed, in the
@@ -460,6 +539,11 @@ def _build_ensemble_spread(
     for metrics in per_seed_metrics:
         for m in metrics:
             rmse.setdefault(m.name, []).append(m.rmse)
+
+    balanced_acc: dict[str, list[float]] = {}
+    for levels in per_seed_levels:
+        for lm in levels:
+            balanced_acc.setdefault(lm.name, []).append(lm.balanced_accuracy)
 
     physics: dict[str, list[float]] = {}
     for results in per_seed_physics:
@@ -476,6 +560,7 @@ def _build_ensemble_spread(
         rmse={k: spread_stats(v) for k, v in rmse.items()},
         physics={k: spread_stats(v) for k, v in physics.items()},
         tau_slow={k: spread_stats(v) for k, v in tau_slow.items()},
+        balanced_acc={k: spread_stats(v) for k, v in balanced_acc.items()},
     )
 
 
@@ -510,6 +595,7 @@ def _run_ensemble_members(
     per_seed_metrics = [primary_test_results.metrics]
     per_seed_physics = [primary_test_results.physics]
     per_seed_tau_slow = [_tau_slow_by_channel(describe_dynamics(primary_dyn_sys, cfg))]
+    per_seed_levels = [primary_test_results.levels]
 
     for i in range(1, cfg.ensemble_seeds):
         if cfg.verbose:
@@ -532,9 +618,11 @@ def _run_ensemble_members(
         per_seed_metrics.append(test_results.metrics)
         per_seed_physics.append(test_results.physics)
         per_seed_tau_slow.append(_tau_slow_by_channel(describe_dynamics(dyn_sys, cfg)))
+        per_seed_levels.append(test_results.levels)
 
     return _build_ensemble_spread(
         cfg.ensemble_seeds, per_seed_metrics, per_seed_physics, per_seed_tau_slow,
+        per_seed_levels,
     )
 
 

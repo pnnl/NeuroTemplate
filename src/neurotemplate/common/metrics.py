@@ -13,11 +13,20 @@ values in this evaluation set. This is the most common convention in
 system-ID literature and gives a bounded interpretation: 0.1 ≈ 10% of
 channel range. If a channel is constant (max == min), NRMSE is set to
 NaN to signal it's undefined.
+
+None of those can see a rare event. A staged channel that is off 97% of
+the time is scored *better* by NRMSE when the model never turns it on —
+the best-NRMSE furnace surrogate in the head bake-off never fired once.
+`level_metrics` is the classification view for such channels: per-level
+recall and balanced accuracy (mean recall, so a constant predictor scores
+1/K whatever the imbalance), plus the predicted-vs-true share of each
+level, which is what distinguishes a working head from a constant.
 """
 
 import math
 import re
 from dataclasses import dataclass
+from typing import Optional
 
 import torch
 
@@ -41,6 +50,31 @@ class ChannelMetrics:
     r2: float
     nrmse: float  # NaN if channel is constant
     n_samples: int
+
+
+@dataclass
+class LevelMetrics:
+    """Classification view of one levelled (binary / ordinal) Y channel.
+
+    Every list is indexed by level, ascending, with `levels` in the channel's
+    physical units. `recall[k]` is NaN when the truth never visits level k in
+    this evaluation set — there is nothing to recall — and such levels are
+    left out of the balanced accuracy rather than counted as zero.
+    """
+    name: str
+    levels: list[float]
+    true_share: list[float]
+    pred_share: list[float]
+    recall: list[float]
+    n_samples: int
+
+    @property
+    def balanced_accuracy(self) -> float:
+        """Mean recall over the levels the truth visits. A constant predictor
+        scores 1/K (0.5 for binary) regardless of imbalance — that is the
+        floor to read gains against, not 0."""
+        present = [r for r in self.recall if not math.isnan(r)]
+        return sum(present) / len(present) if present else float("nan")
 
 
 @dataclass
@@ -183,6 +217,39 @@ def per_channel_metrics(
 
 
 @beartype
+def level_metrics(
+    pred_idx: torch.Tensor,
+    true_idx: torch.Tensor,
+    levels: list[float],
+    name: str,
+) -> LevelMetrics:
+    """Per-level recall and occupancy from level *indices* (any shape, same
+    shape both sides) — see `Head.level_index` for how a value becomes one.
+    `levels` only labels the rows, in physical units."""
+    if pred_idx.shape != true_idx.shape:
+        raise ValueError(
+            f"pred_idx shape {tuple(pred_idx.shape)} != true_idx shape "
+            f"{tuple(true_idx.shape)}"
+        )
+    pred = pred_idx.detach().cpu().reshape(-1)
+    true = true_idx.detach().cpu().reshape(-1)
+    n = pred.numel()
+    true_share, pred_share, recall = [], [], []
+    for k in range(len(levels)):
+        at_k = true == k
+        n_true = int(at_k.sum())
+        true_share.append(n_true / n)
+        pred_share.append(int((pred == k).sum()) / n)
+        recall.append(
+            int((pred[at_k] == k).sum()) / n_true if n_true else float("nan")
+        )
+    return LevelMetrics(
+        name=name, levels=list(levels), true_share=true_share,
+        pred_share=pred_share, recall=recall, n_samples=n,
+    )
+
+
+@beartype
 def rollout_stability(
     y_pred: torch.Tensor,
     y_true: torch.Tensor,
@@ -289,6 +356,54 @@ def metrics_to_dict(metrics: list[ChannelMetrics]) -> dict:
         }
         for m in metrics
     }
+
+
+@beartype
+def level_metrics_to_dict(metrics: list[LevelMetrics]) -> dict:
+    """JSON-serializable level metrics (for MLflow / disk)."""
+    return {
+        m.name: {
+            "levels": m.levels,
+            "true_share": m.true_share,
+            "pred_share": m.pred_share,
+            "recall": m.recall,
+            "balanced_accuracy": m.balanced_accuracy,
+            "n_samples": m.n_samples,
+        }
+        for m in metrics
+    }
+
+
+def _fmt_recall(r: float) -> str:
+    return "n/a" if math.isnan(r) else f"{r:.3f}"
+
+
+@beartype
+def level_metrics_to_markdown(
+    metrics: list[LevelMetrics],
+    reference: Optional[list[LevelMetrics]] = None,
+) -> str:
+    """Two tables: balanced accuracy per channel (beside `reference`'s, when
+    given — persistence, on the reportcard), then one row per level."""
+    ref_by_name = {m.name: m for m in (reference or [])}
+    summary = ["| Channel | Balanced acc" + (" | Persistence |" if reference else " |"),
+               "|---|---:" + ("|---:|" if reference else "|")]
+    for m in metrics:
+        row = f"| {m.name} | {_fmt_recall(m.balanced_accuracy)} |"
+        if reference:
+            ref = ref_by_name.get(m.name)
+            row += f" {_fmt_recall(ref.balanced_accuracy) if ref else 'n/a'} |"
+        summary.append(row)
+
+    detail = ["| Channel | Level | True share | Pred share | Recall |",
+              "|---|---:|---:|---:|---:|"]
+    for m in metrics:
+        for level, t, p, r in zip(m.levels, m.true_share, m.pred_share, m.recall):
+            detail.append(
+                f"| {m.name} | {level:g} | {t * 100:.1f}% | {p * 100:.1f}% | "
+                f"{_fmt_recall(r)} |"
+            )
+    return "\n".join(summary) + "\n\n" + "\n".join(detail)
 
 
 @beartype

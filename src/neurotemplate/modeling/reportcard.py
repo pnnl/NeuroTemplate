@@ -9,7 +9,13 @@ logged to MLflow. Sections (in order):
   3. Data                   — split sizes, Y/U/D classification,
                               per-column normalization, head kinds, and any
                               column left in raw units because it was constant
-  4. Test metrics           — per-channel RMSE/MAE/R²/NRMSE in physical units
+  4. Test metrics           — per-channel RMSE/MAE/R²/NRMSE in physical units,
+                              with persistence (hold the last seeded state)
+                              as the reference row beneath
+  4b. Level metrics         — balanced accuracy, per-level recall and
+                              predicted-vs-true level share for every binary /
+                              ordinal channel, beside persistence's; NRMSE
+                              cannot tell a working head from a constant
   5. Rollout stability      — per-channel rise fraction and drift vs. the
                               truth's own, flagging models that have stopped
                               responding to their inputs and are ramping
@@ -38,7 +44,7 @@ logging it to MLflow.
 from __future__ import annotations
 
 import statistics
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Optional
 
@@ -46,10 +52,12 @@ import pandas as pd
 
 from neurotemplate.common.data_utils import degenerate_mapped_columns
 from neurotemplate.modeling.config import ModelingConfig
-from neurotemplate.modeling.heads import BoundedHead, HeadStack
+from neurotemplate.modeling.heads import BoundedHead, HeadStack, OrdinalHead
 from neurotemplate.common.metrics import (
     ChannelMetrics,
+    LevelMetrics,
     RolloutStability,
+    level_metrics_to_markdown,
     metrics_to_markdown,
     stability_to_markdown,
 )
@@ -107,6 +115,9 @@ class EnsembleSpread:
     rmse: dict[str, SeedSpread]        # channel -> spread
     physics: dict[str, SeedSpread]     # "scenario | channel" -> spread
     tau_slow: dict[str, SeedSpread]    # channel -> spread (2r2c models only)
+    # channel -> spread, levelled (binary / ordinal) channels only. Rare-level
+    # heads vary far more across seeds than their RMSE lets on.
+    balanced_acc: dict[str, SeedSpread] = field(default_factory=dict)
 
 
 def _spread_table(rows: list[tuple[str, SeedSpread]]) -> list[str]:
@@ -142,6 +153,11 @@ def _ensemble_section(ensemble: Optional[EnsembleSpread]) -> Optional[str]:
     if ensemble.tau_slow:
         body.append("**`tau_slow` (hours):**\n")
         body += _spread_table(sorted(ensemble.tau_slow.items()))
+        body.append("")
+
+    if ensemble.balanced_acc:
+        body.append("**Test balanced accuracy (staged channels):**\n")
+        body += _spread_table(sorted(ensemble.balanced_acc.items()))
         body.append("")
 
     if ensemble.physics:
@@ -374,7 +390,10 @@ def _bounded_coverage_section(
     return _section("Bounded channel coverage", "\n".join(body_lines))
 
 
-def _metrics_section(metrics: list[ChannelMetrics]) -> str:
+def _metrics_section(
+    metrics: list[ChannelMetrics],
+    persistence: Optional[list[ChannelMetrics]] = None,
+) -> str:
     if not metrics:
         return _section("Test Metrics (per channel)", "*(no metrics computed)*")
     body = (
@@ -382,7 +401,53 @@ def _metrics_section(metrics: list[ChannelMetrics]) -> str:
         "NRMSE is normalized by the channel range (max − min) of the test set.\n\n"
         + metrics_to_markdown(metrics)
     )
+    if persistence:
+        body += (
+            "\n\n**Persistence reference** — hold the last seeded state for the "
+            "whole window. Same information the rollout starts from, so this "
+            "is the bar to clear: a surrogate at or below it has learned "
+            "nothing a copy-forward does not already know.\n\n"
+            + metrics_to_markdown(persistence)
+        )
     return _section("Test Metrics (per channel)", body)
+
+
+def _levels_section(
+    levels: list[LevelMetrics],
+    persistence_levels: list[LevelMetrics],
+    head_stack: Optional[HeadStack],
+    norm_stats: Optional[dict],
+) -> Optional[str]:
+    """Classification view of the binary / ordinal channels.
+
+    The regression metrics above are anti-correlated with event detection on
+    a rare-event channel — a model that never fires the furnace posts the best
+    NRMSE on the page — so a staged channel has to be read here. Balanced
+    accuracy is mean per-level recall: a constant predictor scores 1/K, and
+    that is the floor, not 0.
+    """
+    if not levels:
+        return None
+    body = [
+        "Balanced accuracy is the mean of per-level recall — a constant "
+        "predictor scores 1/K (0.5 for two levels), so read gains against that "
+        "floor. Predicted share beside true share says whether the head emits "
+        "a level at all; NRMSE above cannot.\n",
+        level_metrics_to_markdown(levels, persistence_levels or None),
+    ]
+    if head_stack is not None and norm_stats is not None:
+        rules = []
+        for name, head in zip(head_stack.channel_names, head_stack.heads):
+            if isinstance(head, OrdinalHead):
+                s = norm_stats[name]
+                phys = (head.decision_thresholds * s["stretch"] + s["shift"]).tolist()
+                rules.append(f"`{name}`: " + ", ".join(f"{t:.4g}" for t in phys))
+        if rules:
+            body.append(
+                "\nDecision thresholds (physical units, where the ordinal snap "
+                "happens): " + "; ".join(rules) + "."
+            )
+    return _section("Level metrics (staged channels)", "\n".join(body))
 
 
 def _stability_section(
@@ -537,6 +602,9 @@ def render_reportcard(
     physics: Optional[list[ScenarioResult]] = None,
     physics_steps: Optional[int] = None,
     readouts: Optional[list[ReadoutSummary]] = None,
+    levels: Optional[list[LevelMetrics]] = None,
+    persistence: Optional[list[ChannelMetrics]] = None,
+    persistence_levels: Optional[list[LevelMetrics]] = None,
     ensemble: Optional[EnsembleSpread] = None,
     head_stack: Optional[HeadStack] = None,
     norm_stats: Optional[dict] = None,
@@ -558,6 +626,10 @@ def render_reportcard(
         stability:     Output of metrics.rollout_stability(...). Omitted for
                        callers that only have per-channel metrics; the section
                        is then skipped.
+        levels:        Classification metrics for the binary / ordinal
+                       channels; `persistence` / `persistence_levels` are the
+                       copy-forward reference for both tables. All optional —
+                       absent, the page reads as it did before they existed.
         nm_mapping:    {"Y": [...], "U": [...], "D": [...]} from data_mapping.
         ensemble:      Optional EnsembleSpread from cfg.ensemble_seeds > 1
                        independently-trained models. None (the default)
@@ -587,8 +659,11 @@ def render_reportcard(
         _summary_section(name, ts, best_dev_loss, train_time_s, test_time_s),
         _architecture_section(arch),
         _data_section(nm_mapping, split_sizes, head_stack, norm_stats),
-        _metrics_section(test_metrics),
+        _metrics_section(test_metrics, persistence),
     ]
+    levels_md = _levels_section(levels or [], persistence_levels or [], head_stack, norm_stats)
+    if levels_md is not None:
+        parts.append(levels_md)
     if stability is not None:
         parts.append(_stability_section(stability, cfg.test_window))
     if physics is not None:

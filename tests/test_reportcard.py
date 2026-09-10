@@ -14,7 +14,8 @@ import pytest
 
 from neurotemplate.modeling.config import ModelingConfig as Config
 from neurotemplate.common.config import dict_to_dataclass
-from neurotemplate.common.metrics import per_channel_metrics
+from neurotemplate.common.metrics import level_metrics, per_channel_metrics
+from neurotemplate.modeling.heads import HeadStack, OrdinalHead, RegressionHead
 from neurotemplate.modeling.reportcard import (
     EnsembleSpread,
     SeedSpread,
@@ -328,3 +329,65 @@ def test_ensemble_section_skips_empty_metric_families():
     assert "## Seed ensemble spread" in md
     assert "tau_slow" not in md
     assert "Physics-check values" not in md
+
+
+# ── Level metrics and the persistence reference ───────────────────
+
+def _make_levels(pred, true):
+    return [level_metrics(torch.tensor(pred), torch.tensor(true), [0.0, 61728.4],
+                          "furnace [W]")]
+
+
+def test_a_staged_channel_is_read_as_a_classifier_beside_persistence():
+    """A head that never fires has to be visible as one: balanced accuracy
+    at the floor, predicted share 0% at the rare level, and the persistence
+    row beside it so 'ties copy-forward' is a fact on the page."""
+    true = [0] * 9 + [1]
+    stack = HeadStack([OrdinalHead(n_levels=2, decision_thresholds=torch.tensor([0.3])),
+                       RegressionHead()], ["furnace [W]", "zone_a [°C]"])
+    norm_stats = {
+        "furnace [W]": {"shift": 0.0, "stretch": 61728.4, "min": 0.0, "max": 61728.4,
+                        "norm_type": "min_max"},
+        "zone_a [°C]": {"shift": 0.0, "stretch": 1.0, "min": 0.0, "max": 10.0,
+                        "norm_type": "min_max"},
+    }
+    md = render_reportcard(
+        cfg=_make_cfg(), arch=_make_arch(), test_metrics=_make_metrics(),
+        nm_mapping={"Y": ["furnace [W]", "zone_a [°C]"], "U": [], "D": []},
+        levels=_make_levels([0] * 10, true),
+        persistence=_make_metrics(),
+        persistence_levels=_make_levels([0] * 9 + [1], true),
+        head_stack=stack, norm_stats=norm_stats,
+        run_name="x", timestamp="2026-01-01T00:00:00",
+    )
+    assert "## Level metrics (staged channels)" in md
+    assert "| furnace [W] | 0.500 | 1.000 |" in md
+    assert "| furnace [W] | 61728.4 | 10.0% | 0.0% | 0.000 |" in md
+    assert "**Persistence reference**" in md
+    # The decision rule is reported in physical units: 0.3 * 61728.4.
+    assert "`furnace [W]`: 1.852e+04" in md
+
+
+def test_a_run_without_levelled_heads_has_no_level_section():
+    md = render_reportcard(
+        cfg=_make_cfg(), arch=_make_arch(), test_metrics=_make_metrics(),
+        nm_mapping={"Y": ["zone_a [°C]", "zone_b [°C]"], "U": [], "D": []},
+        levels=[], persistence=_make_metrics(), persistence_levels=[],
+        run_name="x", timestamp="2026-01-01T00:00:00",
+    )
+    assert "Level metrics" not in md
+    assert "**Persistence reference**" in md
+
+
+def test_ensemble_section_reports_balanced_accuracy_for_staged_channels():
+    ensemble = EnsembleSpread(
+        n_seeds=3, rmse={}, physics={}, tau_slow={},
+        balanced_acc={"dx [W]": SeedSpread(min=0.5, median=0.73, max=0.85)},
+    )
+    md = render_reportcard(
+        cfg=_make_cfg(), arch=_make_arch(), test_metrics=_make_metrics(),
+        nm_mapping={"Y": ["zone_a [°C]", "zone_b [°C]"], "U": [], "D": []},
+        ensemble=ensemble, run_name="x", timestamp="2026-01-01T00:00:00",
+    )
+    assert "Test balanced accuracy (staged channels)" in md
+    assert "| dx [W] | 0.5 | 0.73 | 0.85 |" in md

@@ -167,3 +167,61 @@ def test_the_plot_path_writes_figures_and_their_data(tmp_path):
     csvs = sorted((synth_dir / "synth_data").glob("*.csv"))
     assert len(pdfs) == 4 * cfg.synth_n_plot      # four scenarios
     assert [p.stem for p in pdfs] == [c.stem for c in csvs]
+
+
+# ── Staged channels: classification metrics and the persistence bar ──
+
+def test_a_staged_channel_is_scored_as_a_classifier_and_against_persistence(tmp_path):
+    """With an ordinal head on the stage channel the rollout is also read as
+    a classifier — balanced accuracy, level shares — and persistence gets
+    the same treatment so the reportcard can say whether the surrogate
+    clears copy-forward. Both must reach the page and MLflow."""
+    from neurotemplate.modeling.dynamics import get_dynamics
+    from neurotemplate.modeling.heads import HeadStack, OrdinalHead, RegressionHead
+    from control_fixtures import STAGE
+
+    nm = make_nm_mapping()
+    raw = make_raw_df(n_rows=120)
+    norm_stats = make_norm_stats(raw)
+    cfg = make_sysid_cfg()
+    cfg.test_window, cfg.test_stride = 24, 24
+    cfg.plot, cfg.verbose = False, False
+
+    stats = norm_stats[STAGE]
+    levels = torch.tensor([(v - stats["shift"]) / stats["stretch"] for v in (0.0, 1.0, 2.0)])
+    heads = [OrdinalHead(n_levels=3, level_values=levels) if col == STAGE
+             else RegressionHead() for col in nm["Y"]]
+    dyn_sys = get_dynamics(cfg, nm, head_stack=HeadStack(heads, nm["Y"]))
+    dyn_sys.eval()
+
+    results = evaluate_and_plot(
+        cfg=cfg, dyn_sys=dyn_sys, test_dfs=[normalize_df(raw, norm_stats)],
+        nm_mapping=nm, norm_stats=norm_stats, synth_cfg=None,
+        freq_s=300.0, plot_run_dir=Path(tmp_path),
+    )
+    assert [lm.name for lm in results.levels] == [STAGE]
+    assert results.levels[0].levels == pytest.approx([0.0, 1.0, 2.0], abs=1e-4)
+    assert [m.name for m in results.persistence] == nm["Y"]
+    assert [lm.name for lm in results.persistence_levels] == [STAGE]
+    # Persistence never leaves the seeded level within a window, so its
+    # predicted shares are whatever the seeds were — but it is a real number.
+    assert 0.0 <= results.persistence_levels[0].balanced_accuracy <= 1.0
+
+    logger = _FakeLogger()
+    log_test_results(logger, results, nm)
+    assert "level_metrics.json" in logger.dicts
+    assert "persistence_metrics.json" in logger.dicts
+    key = [k for k in logger.metrics if k.endswith("_balanced_acc") and k.startswith("test_")]
+    assert len(key) == 1
+
+    md = render_reportcard(
+        cfg=cfg, arch=describe_dynamics(dyn_sys, cfg),
+        test_metrics=results.metrics, nm_mapping=nm,
+        levels=results.levels, persistence=results.persistence,
+        persistence_levels=results.persistence_levels,
+        head_stack=dyn_sys.nodes[0].callable.head_stack, norm_stats=norm_stats,
+        run_name="x", timestamp="2026-01-01T00:00:00",
+    )
+    assert "## Level metrics (staged channels)" in md
+    assert "**Persistence reference**" in md
+    assert "Decision thresholds" in md
