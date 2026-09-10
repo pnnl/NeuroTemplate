@@ -371,6 +371,12 @@ def main() -> None:
     print("\nPer-channel metrics (physical units):")
     for m in test_results.metrics:
         print(f"  {m.name}: RMSE={m.rmse:.4f} R²={m.r2:.4f} NRMSE={m.nrmse:.4f}")
+    if test_results.levels:
+        persistence = {lm.name: lm for lm in test_results.persistence_levels}
+        print("\nStaged channels (balanced accuracy, model vs persistence):")
+        for lm in test_results.levels:
+            print(f"  {lm.name}: {lm.balanced_accuracy:.3f} vs "
+                  f"{persistence[lm.name].balanced_accuracy:.3f}")
 
     if grad_masks:
         grad_penalty = _eval_grad_penalty(dyn_sys, cfg, grad_masks)
