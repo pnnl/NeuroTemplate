@@ -132,6 +132,15 @@ def data_head_config(
       OrdinalHead(n_levels=K, level_values=t)
                                         K ordered levels at given values
 
+    A binary / ordinal channel is usually a rare-event channel (`nt data
+    heads` flags a level under 5%), and the pipeline handles that for you:
+    each levelled head's loss is weighted by inverse training frequency
+    (`cfg.balance_levels`) and, after training, each ordinal head's decision
+    thresholds are calibrated on dev (`cfg.calibrate_thresholds`). Judge such
+    a channel by the reportcard's level metrics, not its NRMSE. To pin either
+    by hand instead, pass `level_weights=` / `decision_thresholds=` here and
+    switch the corresponding flag off.
+
     Bounds and level values live in head-space, i.e. AFTER normalization.
     Write them in physical units and project:
 

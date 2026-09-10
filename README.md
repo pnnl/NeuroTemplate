@@ -19,7 +19,7 @@ Restructured from a flat script collection into an installable library. Phase A 
 - ✅ YAML + CLI override machinery, multi-path data fields (`Union[str, list[str]]`)
 - ✅ Hook discovery via `neurotemplate.hooks` (CWD + `cfg.user_hooks_path` override)
 - ✅ Single `nt <group> <verb>` dispatcher (replaces the five flat console scripts)
-- ✅ 596 / 596 tests passing
+- ✅ 635 / 635 tests passing
 - ✅ Control-side parity with sysid: policy family registry (`mlp` / `linear`), comfort + energy metrics, sectioned reportcard with a golden test, MLflow metric logging, optional rule-based baseline comparison
 - ☐ Phase B (scrub remaining HVAC vocabulary from library code; relocate runtime artifacts off CWD)
   - ⚠️ **Breaking hook change:** `plot_closed_loop` no longer greps D columns for `"outdoor"`/`"dry-bulb"` and no longer reaches into a private `_power_channel_indices`. Apps must add `power_channels` and `plot_context_channels` to `control_user_defined.py`; `has_power_channels` is removed (it is now the truthiness of `power_channels`).
@@ -530,6 +530,25 @@ reportcard and in MLflow.
   scenario-dependent. But a readout emitting 4000 W at equilibrium feeds back
   into the state predictions that *are* asserted on, so the spread is worth
   seeing.
+- **Level metrics** — every binary / ordinal channel scored as a classifier:
+  balanced accuracy, per-level recall, and predicted-vs-true share of each
+  level. Staged equipment is usually a rare-event channel, and NRMSE is
+  anti-correlated with catching the event — the best-NRMSE furnace surrogate
+  in the head bake-off never fired once. A constant scores 1/K here, not
+  near the top.
+- **Persistence reference** — the same regression and level metrics for
+  "hold the last seeded state for the whole window", beneath the model's.
+  A regression head on a staged channel learns exactly that and then
+  collapses in the rollout; this row is what makes the collapse readable.
+
+Two things are set from the data for staged channels rather than left to
+the optimiser, both on by default (`balance_levels`, `calibrate_thresholds`):
+each levelled head's loss is weighted by inverse training frequency, and after
+training each ordinal head's decision thresholds are moved to the
+balanced-accuracy optimum on dev rollouts. The calibrated thresholds are
+printed with the level metrics and saved in `head_config.json`, so `nt model
+load` decides the way the run was evaluated. `nt data heads` reports where a
+channel's mass sits and flags a level under 5%.
 
 **Before `nt control train` trains anything:**
 
@@ -603,7 +622,7 @@ src/neurotemplate/
 ├── common/
 │   ├── config.py        # YAML, --set, dict_to_dataclass, CLI parser
 │   ├── data_utils.py    # CSV load, sliding windows, norm/denorm
-│   ├── metrics.py       # ChannelMetrics, per_channel_metrics
+│   ├── metrics.py       # ChannelMetrics / LevelMetrics, per_channel_metrics, level_metrics
 │   └── reportcard.py    # _section, write_reportcard (shared by both sides)
 ├── modeling/
 │   ├── config.py        # ModelingConfig
@@ -613,6 +632,7 @@ src/neurotemplate/
 │   ├── diagnostics.py   # nt data heads / nt data decay — pre-training advice
 │   ├── windows.py       # positions inside the flattened history window
 │   ├── heads.py         # HeadStack (regression / binary / bounded / ordinal)
+│   ├── calibration.py   # balanced level weights, calibrated decision thresholds
 │   ├── loss.py          # build_loss
 │   ├── gradient_sampling.py  # SampledGradientPenalty
 │   ├── scenarios.py     # SynthSpec + physics checks
@@ -655,6 +675,6 @@ If you find yourself shadowing a Neuromancer class, prefer the import.
 uv run pytest tests/
 ```
 
-All 596 pass today, against the current local Neuromancer checkout. The suite covers config, data utilities, metrics, heads, the model families (including 2R2C's stability and storage claims), zones, reportcards (both sides, golden-file pinned), hook contracts, and the Neuromancer-touching dynamics/loss/closed-loop paths.
+All 635 pass today, against the current local Neuromancer checkout. The suite covers config, data utilities, metrics, heads, the model families (including 2R2C's stability and storage claims), zones, reportcards (both sides, golden-file pinned), hook contracts, and the Neuromancer-touching dynamics/loss/closed-loop paths.
 
 Cases that differ only in their input live in `pytest.mark.parametrize` tables rather than in one function each — "here is every way a control config can be wrong" is one table of eighteen rows, not eighteen near-identical functions. That is where to add a case.
