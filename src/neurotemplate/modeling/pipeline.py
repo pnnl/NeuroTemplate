@@ -119,9 +119,10 @@ def _train(cfg, *, train_dfs, dev_dfs, nm_mapping, grad_masks, norm_stats,
     if cfg.calibrate_thresholds:
         calibrated = calibrate_decision_thresholds(dyn_sys, cfg, dev_dfs, nm_mapping)
         if cfg.verbose and calibrated:
-            for name, thresholds in calibrated.items():
+            for name, c in calibrated.items():
                 print(f"Calibrated decision thresholds for {name!r} (head-space): "
-                      + ", ".join(f"{t:.4f}" for t in thresholds))
+                      + ", ".join(f"{t:.4f}" for t in c.thresholds)
+                      + f"  dev balanced acc {c.dev_before:.3f} -> {c.dev_after:.3f}")
     return dyn_sys, best_dev_loss
 
 

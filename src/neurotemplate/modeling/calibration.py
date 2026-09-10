@@ -23,10 +23,12 @@ The z that is calibrated against comes from the *rollout* on dev at
 `dev_pred_steps`, the same regime the dev loss is measured in, not from
 teacher-forced one-step prediction. That is deliberate: the surrogate's
 job is the rollout, and a threshold tuned on true-history z is applied
-across a distribution shift when the model eats its own output. It is
-still one shot — thresholds are tuned on z produced under the midpoint
-rule, and the calibrated rule changes what is fed back afterwards — so
-read the reportcard's level metrics as the check, not this module.
+across a distribution shift when the model eats its own output. The
+calibrated rule changes what is fed back afterwards, so the tuned
+thresholds are checked with a second dev rollout: a channel whose
+realized balanced accuracy did not improve keeps its old thresholds and
+says so. That is the one guard; the reportcard's level metrics on the
+test split remain the real check.
 
 A level the dev split never visits cannot be calibrated for (no recall
 to maximise), so such a channel keeps its current thresholds and says
@@ -36,6 +38,7 @@ so in a warning rather than quietly optimising the other levels.
 from __future__ import annotations
 
 import warnings
+from dataclasses import dataclass
 
 import torch
 from pandas import DataFrame
@@ -52,6 +55,17 @@ from neurotemplate.modeling.heads import HeadStack, OrdinalHead, inverse_frequen
 # sample, so the search is exact once candidates outnumber the rare level's
 # occurrences, and 201 already does on any dev split worth calibrating on.
 N_CANDIDATES = 201
+
+
+@dataclass(frozen=True)
+class Calibration:
+    """What calibration did to one ordinal channel: the thresholds it ended
+    on and the dev balanced accuracy realized in a rollout before and after.
+    `after == before` with unchanged thresholds means the tuned rule was
+    tried and did not hold up in the rollout."""
+    thresholds: list[float]
+    dev_before: float
+    dev_after: float
 
 
 @beartype
@@ -126,22 +140,7 @@ def tune_thresholds(z: torch.Tensor, true_idx: torch.Tensor,
     return thresholds
 
 
-@beartype
-def calibrate_decision_thresholds(
-    dyn_sys,
-    cfg: ModelingConfig,
-    dev_dfs: list[DataFrame],
-    nm_mapping: dict[str, list[str]],
-) -> dict[str, list[float]]:
-    """Move every ordinal head's `decision_thresholds` to the balanced-
-    accuracy optimum on dev rollouts at `cfg.dev_pred_steps`, in place on
-    the System's own head stack. Returns {channel: new thresholds} for the
-    channels it changed; a channel with a level dev never visits is skipped
-    with a warning. No-op (empty dict) without ordinal heads."""
-    head_stack = dyn_sys.nodes[0].callable.head_stack
-    if head_stack is None or not any(isinstance(h, OrdinalHead) for h in head_stack.heads):
-        return {}
-
+def _rollout_z(dyn_sys, cfg, dev_dfs, nm_mapping):
     data = get_sw_dict_multi(
         dfs=dev_dfs, cfg=cfg, nm_mapping=nm_mapping,
         steps=cfg.in_steps + cfg.dev_pred_steps,
@@ -151,15 +150,44 @@ def calibrate_decision_thresholds(
     dyn_sys.eval()
     z_all, y_true = collect_rollout_z(dyn_sys, data, cfg.in_steps)
     dyn_sys.train(was_training)
+    return z_all, y_true
 
-    calibrated: dict[str, list[float]] = {}
-    for i, (name, head) in enumerate(zip(head_stack.channel_names, head_stack.heads)):
-        if not isinstance(head, OrdinalHead):
-            continue
+
+@beartype
+def calibrate_decision_thresholds(
+    dyn_sys,
+    cfg: ModelingConfig,
+    dev_dfs: list[DataFrame],
+    nm_mapping: dict[str, list[str]],
+) -> dict[str, Calibration]:
+    """Move every ordinal head's `decision_thresholds` to the balanced-
+    accuracy optimum on dev rollouts at `cfg.dev_pred_steps`, in place on
+    the System's own head stack, then confirm with a second rollout that the
+    new rule really scores better once it is the one being fed back —
+    reverting any channel where it does not. Returns {channel: Calibration}
+    for every ordinal channel that could be calibrated; a channel with a
+    level dev never visits is skipped with a warning. Empty without ordinal
+    heads."""
+    head_stack = dyn_sys.nodes[0].callable.head_stack
+    if head_stack is None or not any(isinstance(h, OrdinalHead) for h in head_stack.heads):
+        return {}
+
+    ordinal = [(i, name, head)
+               for i, (name, head) in enumerate(zip(head_stack.channel_names, head_stack.heads))
+               if isinstance(head, OrdinalHead)]
+
+    def realized(z_all, y_true, i, head):
+        """Dev balanced accuracy of the head's current rule on this rollout."""
         z = head_stack.z_for(z_all, i).reshape(-1)
         true_idx = head.level_index(y_true[..., i]).reshape(-1)
-        missing = [k for k in range(head.n_levels)
-                   if not (true_idx == k).any()]
+        return _balanced_accuracy(z, head.decision_thresholds, true_idx, head.n_levels)
+
+    z_all, y_true = _rollout_z(dyn_sys, cfg, dev_dfs, nm_mapping)
+    tuned: dict[str, tuple[torch.Tensor, float]] = {}   # name -> (old thresholds, before)
+    for i, name, head in ordinal:
+        z = head_stack.z_for(z_all, i).reshape(-1)
+        true_idx = head.level_index(y_true[..., i]).reshape(-1)
+        missing = [k for k in range(head.n_levels) if not (true_idx == k).any()]
         if missing:
             warnings.warn(
                 f"{name!r}: dev split never visits level(s) {missing} of "
@@ -169,8 +197,33 @@ def calibrate_decision_thresholds(
                 stacklevel=2,
             )
             continue
-        head.decision_thresholds.copy_(
-            tune_thresholds(z, true_idx, head.decision_thresholds)
-        )
-        calibrated[name] = head.decision_thresholds.tolist()
-    return calibrated
+        old = head.decision_thresholds.clone()
+        before = _balanced_accuracy(z, old, true_idx, head.n_levels)
+        head.decision_thresholds.copy_(tune_thresholds(z, true_idx, old))
+        tuned[name] = (old, before)
+
+    if not tuned:
+        return {}
+
+    # The tuned rule now shapes the fed-back state; score it as it will run.
+    z_all, y_true = _rollout_z(dyn_sys, cfg, dev_dfs, nm_mapping)
+    out: dict[str, Calibration] = {}
+    for i, name, head in ordinal:
+        if name not in tuned:
+            continue
+        old, before = tuned[name]
+        after = realized(z_all, y_true, i, head)
+        if after < before:
+            warnings.warn(
+                f"{name!r}: the calibrated decision thresholds "
+                f"{head.decision_thresholds.tolist()} scored {after:.3f} balanced "
+                f"accuracy on dev rollouts against {before:.3f} at "
+                f"{old.tolist()} once fed back, so they were reverted. The z "
+                "distribution shifts when the model eats its own output; this "
+                "channel's decision rule was not recoverable that way.",
+                stacklevel=2,
+            )
+            head.decision_thresholds.copy_(old)
+            after = before
+        out[name] = Calibration(head.decision_thresholds.tolist(), before, after)
+    return out

@@ -143,7 +143,8 @@ def test_calibration_updates_the_ordinal_head_in_place_and_reports_it():
         dyn_sys, cfg, [normalize_df(raw, norm_stats)], nm)
 
     assert list(calibrated) == [STAGE]
-    assert calibrated[STAGE] == head.decision_thresholds.tolist()
+    assert calibrated[STAGE].thresholds == head.decision_thresholds.tolist()
+    assert calibrated[STAGE].dev_after >= calibrated[STAGE].dev_before
     assert head.decision_thresholds[0] < head.decision_thresholds[1]
     # The activation thresholds are not the knob and must not move.
     assert torch.equal(head.thresholds, 0.5 * (head.level_values[:-1] + head.level_values[1:]))
@@ -170,6 +171,39 @@ def test_a_level_dev_never_visits_leaves_the_thresholds_alone_with_a_warning():
 
     assert calibrated == {}
     assert torch.equal(head.decision_thresholds, before)
+
+
+def test_a_tuned_rule_that_does_not_hold_up_once_fed_back_is_reverted(monkeypatch):
+    """The rule is tuned on z produced under the old rule and then changes
+    what is fed back. If the realized dev score is worse, keep the old
+    rule and say so — quietly shipping a worse decision rule is the failure
+    mode the bake-off warned about."""
+    import neurotemplate.modeling.calibration as calibration
+
+    nm = make_nm_mapping()
+    raw = make_raw_df(n_rows=120)
+    norm_stats = make_norm_stats(raw)
+    cfg = make_sysid_cfg()
+    cfg.dev_pred_steps = 8
+    dyn_sys, _ = _staged_system(cfg, nm, norm_stats)
+    head = dyn_sys.nodes[0].callable.head_stack.heads[nm["Y"].index(STAGE)]
+    before = head.decision_thresholds.clone()
+
+    # Rig the search to move the rule, and the score to prefer the old one:
+    # an untrained model scores the floor either way, so the verdict has to
+    # be forced to exercise the revert path deterministically.
+    moved = before - 0.1
+    monkeypatch.setattr(calibration, "tune_thresholds", lambda z, true_idx, init: moved)
+    monkeypatch.setattr(
+        calibration, "_balanced_accuracy",
+        lambda z, thresholds, true_idx, n: 0.9 if torch.equal(thresholds, before) else 0.1,
+    )
+    with pytest.warns(UserWarning, match="were reverted"):
+        calibrated = calibrate_decision_thresholds(
+            dyn_sys, cfg, [normalize_df(raw, norm_stats)], nm)
+
+    assert torch.equal(head.decision_thresholds, before)
+    assert calibrated[STAGE].dev_after == calibrated[STAGE].dev_before == 0.9
 
 
 def test_a_stack_without_ordinal_heads_is_a_no_op():
