@@ -56,6 +56,12 @@ HIGH_VARIANCE_EXPLAINED = 0.90
 # unoccupied space between modes -- the "staged, not smeared" signature.
 LOW_GAP_OCCUPANCY = 0.05
 
+# A mode holding less than this share of the samples is a rare event. Every
+# default in the training stack -- MSE, a midpoint snap, NRMSE -- is
+# indifferent to a level this rare by construction, so the recommendation
+# says so rather than handing over a head whose rare level will be ignored.
+RARE_MODE_FRAC = 0.05
+
 # A column with at least this share of samples sitting at one end of its
 # observed range has a real floor/ceiling (a clipped valve, a solar
 # irradiance that floors at 0 overnight), not just its natural min/max.
@@ -75,6 +81,7 @@ class LevelFit:
     centers: tuple[float, ...]      # physical units, sorted ascending
     variance_explained: float       # share of total variance explained by cluster means
     gap_occupancy: float            # share of samples NOT close to a center
+    mode_shares: tuple[float, ...]  # share of samples nearest each center
 
 
 @dataclass(frozen=True)
@@ -129,7 +136,10 @@ def fit_levels(x: np.ndarray, k_max: int = K_MAX_DEFAULT) -> tuple[LevelFit, ...
         if k > n_unique:
             break
         centers = _kmeans_1d(x, k)
-        nearest_dist = np.abs(x[:, None] - centers[None, :]).min(axis=1)
+        distances = np.abs(x[:, None] - centers[None, :])
+        nearest_dist = distances.min(axis=1)
+        nearest = distances.argmin(axis=1)
+        mode_shares = tuple(float(np.mean(nearest == i)) for i in range(k))
 
         # Share of variance explained by "which cluster this sample is in":
         # 1 minus the leftover (within-cluster) mean squared distance over
@@ -149,6 +159,7 @@ def fit_levels(x: np.ndarray, k_max: int = K_MAX_DEFAULT) -> tuple[LevelFit, ...
             centers=tuple(centers.tolist()),
             variance_explained=variance_explained,
             gap_occupancy=gap_occupancy,
+            mode_shares=mode_shares,
         ))
     return tuple(fits)
 
@@ -174,6 +185,23 @@ def _k_sweep_line(fits: tuple[LevelFit, ...], elbow: Optional[int] = None) -> st
     if elbow is not None:
         line += f"  (elbow at {elbow})"
     return line
+
+
+def _occupancy_lines(centers: list[float], shares: list[float]) -> list[str]:
+    """Where the mass sits, and a warning when a mode is a rare event."""
+    lines = ["mode shares: " + ", ".join(
+        f"{c:g} -> {s * 100:.1f}%" for c, s in zip(centers, shares))]
+    rare = [(c, s) for c, s in zip(centers, shares) if s < RARE_MODE_FRAC]
+    if rare:
+        lines.append(
+            "RARE LEVEL: " + ", ".join(f"{c:g} holds {s * 100:.1f}%" for c, s in rare)
+            + f" of samples (under {RARE_MODE_FRAC * 100:.0f}%). This is a "
+            "rare-event channel: an unweighted loss and a midpoint snap "
+            "will learn to never emit it, and NRMSE will reward that. Keep "
+            "balance_levels and calibrate_thresholds on, and judge the head "
+            "by the reportcard's level metrics, not its NRMSE."
+        )
+    return lines
 
 
 def _scope_note(column: str) -> str:
@@ -258,9 +286,11 @@ def recommend_head(
         return HeadRecommendation(column, "regression", evidence, fits, "RegressionHead()")
 
     if len(uniques) == 2 and set(uniques.tolist()) == {0.0, 1.0}:
-        evidence = (f"exactly two values observed: 0, 1 (0/1 flag)\n"
-                    f"{_k_sweep_line(fits)}\n{_scope_note(column)}")
-        return HeadRecommendation(column, "binary", evidence, fits, "BinaryHead()")
+        share_one = float(np.mean(x == 1.0))
+        lines = ["exactly two values observed: 0, 1 (0/1 flag)",
+                 *_occupancy_lines([0.0, 1.0], [1.0 - share_one, share_one]),
+                 _k_sweep_line(fits), _scope_note(column)]
+        return HeadRecommendation(column, "binary", "\n".join(lines), fits, "BinaryHead()")
 
     best = _best_fit(fits)
     if best is not None:
@@ -269,6 +299,7 @@ def recommend_head(
             f"{best.n_levels} modes at " + ", ".join(f"{c:g}" for c in centers),
             f"{(1 - best.gap_occupancy) * 100:.1f}% of samples close to a mode; "
             f"gaps hold {best.gap_occupancy * 100:.1f}%",
+            *_occupancy_lines(centers, list(best.mode_shares)),
             _k_sweep_line(fits, elbow=best.n_levels),
         ]
         if family == "2r2c":

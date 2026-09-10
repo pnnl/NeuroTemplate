@@ -103,6 +103,33 @@ def test_binary_snippet_is_plain():
     assert rec.snippet == "BinaryHead()"
 
 
+def test_the_recommendation_says_where_the_mass_sits():
+    """A 2.3%-positive furnace was recommended an ordinal head with no hint
+    that every default would ignore the level it exists to predict. The
+    evidence has to carry the mode shares and flag the rare one."""
+    rng = np.random.default_rng(0)
+    fires = rng.uniform(size=4000) < 0.023
+    x = np.where(fires, 61728.4, 0.0)
+    rec = recommend_head(x, "Furnace Gas Power [W]")
+    assert rec.kind == "ordinal"
+    assert "mode shares: 0 -> 97." in rec.evidence
+    assert "RARE LEVEL: 61728.4 holds 2." in rec.evidence
+    assert "level metrics" in rec.evidence
+
+
+def test_a_balanced_staged_signal_is_not_flagged_as_rare():
+    rec = recommend_head(_staged(), "Total DX Power [W]")
+    assert "mode shares:" in rec.evidence
+    assert "RARE LEVEL" not in rec.evidence
+
+
+def test_a_rare_binary_flag_is_flagged_too():
+    x = np.array([0.0] * 990 + [1.0] * 10)
+    rec = recommend_head(x, "Compressor On/Off")
+    assert rec.kind == "binary"
+    assert "RARE LEVEL: 1 holds 1.0%" in rec.evidence
+
+
 def test_bounded_head_bounds_only_the_pinned_side():
     rec = recommend_head(_floor_pinned(), "Solar Irradiance [W/m2]")
     assert rec.kind == "bounded"
