@@ -15,6 +15,7 @@ channel range. If a channel is constant (max == min), NRMSE is set to
 NaN to signal it's undefined.
 """
 
+import math
 import re
 from dataclasses import dataclass
 
@@ -297,7 +298,7 @@ def metrics_to_markdown(metrics: list[ChannelMetrics]) -> str:
     sep = "|---|---:|---:|---:|---:|"
     rows = [header, sep]
     for m in metrics:
-        nrmse_str = f"{m.nrmse:.4f}" if m.nrmse == m.nrmse else "n/a"  # NaN check
+        nrmse_str = "n/a" if math.isnan(m.nrmse) else f"{m.nrmse:.4f}"
         rows.append(
             f"| {m.name} | {m.rmse:.4f} | {m.mae:.4f} | "
             f"{m.r2:.4f} | {nrmse_str} |"

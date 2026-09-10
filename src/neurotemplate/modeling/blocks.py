@@ -68,6 +68,7 @@ exactly the speculative extension point the rules warn against.
 
 from __future__ import annotations
 
+from collections import Counter
 from dataclasses import dataclass
 from typing import Optional
 
@@ -214,7 +215,8 @@ def build_blocks(
         claimed_u += u_idx
         per_block.append((name, y_idx, u_idx, d_idx, reads_idx, model))
 
-    duplicated = sorted({y_cols[i] for i in claimed_y if claimed_y.count(i) > 1})
+    counts = Counter(claimed_y)
+    duplicated = sorted({y_cols[i] for i, n in counts.items() if n > 1})
     if duplicated:
         raise ValueError(
             f"block_mapping: Y column(s) {duplicated} are claimed by more than "

@@ -63,20 +63,12 @@ def plot_predictions(
     sub_plot = load_modeling_hooks(cfg).sub_plot
 
     def log_artifact(path: str, artifact_path: Optional[str] = None) -> None:
-        if logger is None:
+        if logger is None or not hasattr(logger, "_mlflow"):
             return
-        mlflow_mod = getattr(logger, "_mlflow", None)
-        if mlflow_mod is not None:
-            if artifact_path is None:
-                mlflow_mod.log_artifact(path)
-            else:
-                mlflow_mod.log_artifact(path, artifact_path=artifact_path)
-            return
-        if hasattr(logger, "log_artifact"):
-            if artifact_path is None:
-                logger.log_artifact(path)
-            else:
-                logger.log_artifact(path, artifact_path=artifact_path)
+        if artifact_path is None:
+            logger._mlflow.log_artifact(path)
+        else:
+            logger._mlflow.log_artifact(path, artifact_path=artifact_path)
 
     if not run_dir:
         raise ValueError("run_dir must be provided for plot outputs.")

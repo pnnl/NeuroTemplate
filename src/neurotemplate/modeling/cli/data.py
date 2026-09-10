@@ -30,7 +30,7 @@ import pandas as pd
 from neurotemplate._typing import beartype
 
 from neurotemplate.common.config import load_config_from_cli, MODEL_CONFIG_DIR
-from neurotemplate.common.data_utils import compute_norm_stats, get_data_splits
+from neurotemplate.common.data_utils import compute_norm_stats, get_data_splits, pool_dfs
 from neurotemplate.hooks import load_modeling_hooks
 from neurotemplate.modeling.config import ModelingConfig
 from neurotemplate.modeling.dynamics import family_by_channel
@@ -72,7 +72,7 @@ def heads_main() -> None:
     hooks = load_modeling_hooks(cfg)
     train_raws, _dev_raws, _test_raws, _freq_s = get_data_splits(cfg)
     nm_mapping = hooks.data_mapping(df=train_raws[0], cfg=cfg)
-    train_pool = train_raws[0] if len(train_raws) == 1 else pd.concat(train_raws)
+    train_pool = pool_dfs(train_raws)
 
     # Which family builds which channel, resolved exactly the way the trainer
     # resolves it, so a head/family conflict is reported per channel rather
@@ -130,7 +130,7 @@ def decay_main() -> None:
         if col not in known_columns:
             raise SystemExit(f"--state/--ref column {col!r} is not in the data mapping.")
 
-    train_pool = train_raws[0] if len(train_raws) == 1 else pd.concat(train_raws)
+    train_pool = pool_dfs(train_raws)
     norm_overrides = hooks.column_norm_config(nm_mapping)
     norm_stats = compute_norm_stats(
         df=train_pool, norm_type=cfg.norm_type, column_overrides=norm_overrides,

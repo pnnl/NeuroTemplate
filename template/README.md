@@ -38,7 +38,7 @@ section of the [framework README](../README.md) — and `nt` lands on your PATH.
    `nt model train --config model_configs/debug.yaml` for a 2-epoch smoke run.
 3. **`nt model train`** for real. Note the `Finished run: <run_id>` line — that
    id is how the control side finds the surrogate.
-4. **`control_user_defined.py` → `CONTROLLED_COLUMNS`**, and
+4. **`control_user_defined.py` → `REGULATED_COLUMNS`**, and
    **`control_configs/control.yaml` → the four `band_*` fields**, which are in
    the physical units of the controlled channel.
 5. **`nt control train --set sysid_run_id=<run_id>`.**

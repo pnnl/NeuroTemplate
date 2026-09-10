@@ -33,7 +33,7 @@ from pandas import DataFrame
 from neurotemplate._typing import beartype
 
 from neurotemplate.modeling.config import ModelingConfig
-from neurotemplate.common.data_utils import get_sw_dict_multi, to_df, unnormalize_df
+from neurotemplate.common.data_utils import get_sw_dict_multi, pool_dfs, to_df, unnormalize_df
 from neurotemplate.modeling.experiment import set_seeds, train_with_curriculum
 from neurotemplate.modeling.heads import HeadStack
 from neurotemplate.common.metrics import (
@@ -313,13 +313,7 @@ def render_reportcard(
     train_and_evaluate); None renders no extra section.
     """
     arch = describe_dynamics(dyn_sys, cfg)
-    if test_dfs is None:
-        test_df_for_coverage = None
-    elif len(test_dfs) == 1:
-        test_df_for_coverage = test_dfs[0]
-    else:
-        import pandas as _pd
-        test_df_for_coverage = _pd.concat(test_dfs)
+    test_df_for_coverage = None if test_dfs is None else pool_dfs(test_dfs)
     return _render_reportcard(
         cfg=cfg,
         arch=arch,
@@ -388,24 +382,23 @@ def log_test_results(
             flat[f"physics_{key}_passed"] = float(r.passed)
 
     logger.log_metrics(flat)
-    if hasattr(logger, "log_dict"):
+    logger.log_dict(
+        metrics_to_dict(test_results.metrics), name="test_metrics.json"
+    )
+    logger.log_dict(
+        stability_to_dict(test_results.stability),
+        name="rollout_stability.json",
+    )
+    if test_results.physics is not None:
         logger.log_dict(
-            metrics_to_dict(test_results.metrics), name="test_metrics.json"
+            checks_to_dict(test_results.physics),
+            name="physics_checks.json",
         )
+    if test_results.readouts:
         logger.log_dict(
-            stability_to_dict(test_results.stability),
-            name="rollout_stability.json",
+            readouts_to_dict(test_results.readouts),
+            name="readout_channels.json",
         )
-        if test_results.physics is not None:
-            logger.log_dict(
-                checks_to_dict(test_results.physics),
-                name="physics_checks.json",
-            )
-        if test_results.readouts:
-            logger.log_dict(
-                readouts_to_dict(test_results.readouts),
-                name="readout_channels.json",
-            )
 
 
 @beartype

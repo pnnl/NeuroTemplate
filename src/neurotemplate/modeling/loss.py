@@ -98,12 +98,15 @@ def build_loss(
 
     objectives = [ref_loss]
 
+    # Finite differences over the prediction span only — y/yhat already have
+    # the seeded history sliced off. Symbolic Variable expressions, so this is
+    # cheap to build even when neither cfg.vel_gain nor cfg.sgn_gain is set;
+    # both the velocity and sign-agreement terms below read from it.
+    v = y[:, 1:, :] - y[:, :-1, :]
+    vhat = yhat[:, 1:, :] - yhat[:, :-1, :]
+
     # Velocity tracking: R2 style on finite differences
     if cfg.vel_gain > 0:
-        # Finite differences over the prediction span only — y/yhat already
-        # have the seeded history sliced off.
-        v = y[:, 1:, :] - y[:, :-1, :]
-        vhat = yhat[:, 1:, :] - yhat[:, :-1, :]
         vel_sum_res = torch.mean((vhat - v) ** 2)
         # vel_sum_tot = torch.sum((v - torch.mean(v)) ** 2)
         vel_loss = cfg.vel_gain * vel_sum_res == 0

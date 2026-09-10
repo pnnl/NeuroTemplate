@@ -26,6 +26,7 @@ from neurotemplate.common.data_utils import (
     compute_norm_stats,
     get_data_splits,
     get_grad_masks,
+    pool_dfs,
     warn_degenerate_columns,
 )
 from neurotemplate.modeling.experiment import resolve_device, set_seeds
@@ -80,8 +81,7 @@ def main() -> None:
     # Stats pooled across all training files so per-column ranges reflect
     # the union of training data. The concatenated frame is built once and
     # never used for windowing — windowing stays per-file.
-    import pandas as _pd
-    train_pool = train_raws[0] if len(train_raws) == 1 else _pd.concat(train_raws)
+    train_pool = pool_dfs(train_raws)
     norm_stats = compute_norm_stats(
         df=train_pool, norm_type=cfg.norm_type, column_overrides=norm_overrides,
     )
@@ -140,7 +140,7 @@ def main() -> None:
         mapping=nm_mapping,
     )
 
-    if cfg.verbose and hasattr(global_logger, "run"):
+    if cfg.verbose:
         r_id = global_logger.run.info.run_id
         print(f"Finished run: {r_id}, "
               f"test_rmse: {result['test_results'].aggregate_rmse:.3f}")

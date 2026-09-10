@@ -244,8 +244,6 @@ def get_grad_masks(
     for key_i, deps in key_mapping.items():
         if key_i not in Y_names:
             continue
-            # raise ValueError(f"Trying to constrain {key_i}, \
-            #     which is not a predicted value (not in Y).")
 
         i = Y_names.index(key_i)
 
@@ -490,8 +488,15 @@ def to_df(
 
     if unnorm:
         return unnormalize_df(df, norm_stats)
-    else: 
+    else:
         return df
+
+
+# Concatenate a list of per-file DataFrames into one, skipping pd.concat's
+# copy when there's only one file (the common case).
+@beartype
+def pool_dfs(dfs: list) -> pd.DataFrame:
+    return dfs[0] if len(dfs) == 1 else pd.concat(dfs)
 
 
 # Trailing bracketed token on a column name, e.g. the "[°C]" in
@@ -645,16 +650,6 @@ def compute_norm_stats(
             shift, stretch = col_mean, pos(col_std)
         else:
             raise AssertionError(f"unhandled norm_type: {nt}")  # guarded above
-
-        # return {
-        #     "shift": 0.0,
-        #     "stretch": 1.0,
-        #     "min": col_min,
-        #     "max": col_max,
-        #     "mean": col_mean,
-        #     "stddev": col_std,
-        #     "median": col_median,
-        # }
 
         return {
             "norm_type": nt if nt is not None else "none",
