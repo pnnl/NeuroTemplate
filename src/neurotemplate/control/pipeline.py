@@ -286,8 +286,7 @@ def log_control_results(
         )
 
     logger.log_metrics(flat)
-    if hasattr(logger, "log_dict"):
-        logger.log_dict(payload, name="control_metrics.json")
+    logger.log_dict(payload, name="control_metrics.json")
 
 
 def _flat_control_metrics(results: ControlResults, prefix: str) -> dict:

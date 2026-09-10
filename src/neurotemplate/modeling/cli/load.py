@@ -1,6 +1,6 @@
 """
-Load a trained model from an MLflow run, evaluate it on chosen splits,
-and optionally plot. Wrapper over pipeline.evaluate_and_plot.
+Load a trained model from an MLflow run, evaluate it on a dataset the caller
+points at, and optionally plot. Wrapper over pipeline.evaluate_and_plot.
 """
 
 import sys
@@ -303,16 +303,10 @@ def get_cli_args(argv) -> argparse.Namespace:
                         help="Optional override for the artifacts directory.")
     parser.add_argument("--weights", type=str, default=None,
                         help="Optional explicit path to weights.")
-    parser.add_argument("--id_data", type=str,
-                        default="",
+    parser.add_argument("--data", type=str,
                         required=True,
-                        help="In-distribution test CSV(s). Single path, "
-                             "comma-separated list, or JSON array.")
-    parser.add_argument("--ood_data", type=str,
-                        default="",
-                        required=True,
-                        help="Out-of-distribution test CSV(s). Single path, "
-                             "comma-separated list, or JSON array.")
+                        help="Test CSV(s) to evaluate the model on. Single "
+                             "path, comma-separated list, or JSON array.")
     parser.add_argument("--grad_path", type=str, default=None,
                         help="Override grad_path for gradient penalty evaluation.")
     parser.add_argument("--plot_dir", type=str, default=None,
@@ -325,9 +319,6 @@ def get_cli_args(argv) -> argparse.Namespace:
 @beartype
 def main() -> None:
     args = get_cli_args(sys.argv[1:])
-
-    if args.id_data=="" and args.ood_data=="":
-        raise ValueError("Must specify at least one of ID or OOD data.")
 
     if args.weights is None and args.run_dir is None:
         print("Loading dynamics & weights from MLflow run...")
@@ -364,30 +355,21 @@ def main() -> None:
     if cfg.verbose:
         print("Evaluating...")
 
-    id_paths = _parse_data_arg(args.id_data)
-    ood_paths = _parse_data_arg(args.ood_data)
+    data_paths = _parse_data_arg(args.data)
 
     eval_t0 = tic()
-    id_results, id_raws, id_freq_s = _eval_one_split(
-        cfg, dyn_sys, id_paths, norm_stats, nm_mapping,
-        synth_cfg, plot_run_dir / "id",
-    )
-    ood_results, ood_raws, _ = _eval_one_split(
-        cfg, dyn_sys, ood_paths, norm_stats, nm_mapping,
-        synth_cfg, plot_run_dir / "ood",
+    test_results, raw_dfs, _freq_s = _eval_one_split(
+        cfg, dyn_sys, data_paths, norm_stats, nm_mapping,
+        synth_cfg, plot_run_dir,
     )
     eval_time_s = tic() - eval_t0
 
-    print(f"ID  aggregate RMSE: {id_results.aggregate_rmse:.4f} (normalized space)")
-    print(f"OOD aggregate RMSE: {ood_results.aggregate_rmse:.4f} (normalized space)")
+    print(f"Aggregate RMSE: {test_results.aggregate_rmse:.4f} (normalized space)")
     if cfg.verbose:
         print(f"Evaluation time: {eval_time_s:.2f} sec")
 
-    print("\nID per-channel metrics (physical units):")
-    for m in id_results.metrics:
-        print(f"  {m.name}: RMSE={m.rmse:.4f} R²={m.r2:.4f} NRMSE={m.nrmse:.4f}")
-    print("\nOOD per-channel metrics (physical units):")
-    for m in ood_results.metrics:
+    print("\nPer-channel metrics (physical units):")
+    for m in test_results.metrics:
         print(f"  {m.name}: RMSE={m.rmse:.4f} R²={m.r2:.4f} NRMSE={m.nrmse:.4f}")
 
     if grad_masks:
@@ -398,26 +380,20 @@ def main() -> None:
         print("\nGrad Penalty (raw): N/A (no grad_path)")
 
     with open(plot_run_dir / "stats.dat", "w") as f:
-        f.write(f"id_rmse  {id_results.aggregate_rmse:.6f}\n")
-        f.write(f"ood_rmse {ood_results.aggregate_rmse:.6f}\n")
+        f.write(f"rmse {test_results.aggregate_rmse:.6f}\n")
         if grad_penalty is not None:
             f.write(f"grad_penalty_raw {grad_penalty:.6f}\n")
 
-    # Reportcards (one per split)
-    for split_name, results, raws in [
-        ("id", id_results, id_raws),
-        ("ood", ood_results, ood_raws),
-    ]:
-        md = render_reportcard(
-            cfg=cfg, dyn_sys=dyn_sys, test_results=results,
-            norm_stats=norm_stats, nm_mapping=nm_mapping,
-            head_stack=dyn_sys.nodes[0].callable.head_stack,
-            run_name=f"{args.run_id} [{split_name}]",
-            split_sizes={split_name: {
-                "rows": sum(len(d) for d in raws), "files": len(raws),
-            }},
-        )
-        write_reportcard(md, plot_run_dir / split_name)
+    md = render_reportcard(
+        cfg=cfg, dyn_sys=dyn_sys, test_results=test_results,
+        norm_stats=norm_stats, nm_mapping=nm_mapping,
+        head_stack=dyn_sys.nodes[0].callable.head_stack,
+        run_name=args.run_id,
+        split_sizes={"test": {
+            "rows": sum(len(d) for d in raw_dfs), "files": len(raw_dfs),
+        }},
+    )
+    write_reportcard(md, plot_run_dir)
 
 
 if __name__ == "__main__":

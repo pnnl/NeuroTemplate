@@ -19,7 +19,7 @@ Restructured from a flat script collection into an installable library. Phase A 
 - ✅ YAML + CLI override machinery, multi-path data fields (`Union[str, list[str]]`)
 - ✅ Hook discovery via `neurotemplate.hooks` (CWD + `cfg.user_hooks_path` override)
 - ✅ Single `nt <group> <verb>` dispatcher (replaces the five flat console scripts)
-- ✅ 465 / 465 tests passing
+- ✅ 596 / 596 tests passing
 - ✅ Control-side parity with sysid: policy family registry (`mlp` / `linear`), comfort + energy metrics, sectioned reportcard with a golden test, MLflow metric logging, optional rule-based baseline comparison
 - ☐ Phase B (scrub remaining HVAC vocabulary from library code; relocate runtime artifacts off CWD)
   - ⚠️ **Breaking hook change:** `plot_closed_loop` no longer greps D columns for `"outdoor"`/`"dry-bulb"` and no longer reaches into a private `_power_channel_indices`. Apps must add `power_channels` and `plot_context_channels` to `control_user_defined.py`; `has_power_channels` is removed (it is now the truthiness of `power_channels`).
@@ -79,6 +79,8 @@ Then `uv sync` and a single `nt` console script is on your `PATH`. It dispatches
 | `nt model optuna` | Optuna hyperparameter search + retrain |
 | `nt model load` | Re-evaluate a saved MLflow run on new data |
 | `nt model debug-heads` | Diagnostic for output-head behaviour |
+| `nt data heads` | Which head does this Y column want? (pre-training advice) |
+| `nt data decay` | What is this column's envelope time constant? (pre-training advice) |
 | `nt control train` | Train a DPC policy against a frozen surrogate |
 
 `nt` with no arguments (or `nt -h`) prints the command list. Each command takes
@@ -133,7 +135,7 @@ The library imports each hook by attribute (no defaulting), so every row above e
 
 | Function | Required | Used by |
 |---|---|---|
-| `controlled_channels(nm_mapping) -> ([col], [idx])` | yes | comfort objective |
+| `regulated(nm_mapping) -> ([col], [idx])` | yes | comfort objective |
 | `comfort_band_signal(nm_mapping, norm_stats, n_samples, nsteps, band, generator) -> (ymin, ymax)` | yes | scenarios |
 | `actuation_bounds(nm_mapping, norm_stats) -> (umin, umax)` | yes | policy bounds |
 | `power_channels(nm_mapping) -> [col]` | must be defined; return `[]` when nothing is metered | closed-loop plot power row + energy metrics |
@@ -142,6 +144,8 @@ The library imports each hook by attribute (no defaulting), so every row above e
 | `reference_control(yn_now, ymin_now, ymax_now, d_now, nm_mapping, norm_stats) -> Tensor` | optional | rule-based baseline **and** the residual policy's anchor |
 | `build_baseline_policy(cfg, sysid_cfg, nm_mapping, norm_stats) -> Node \| None` | optional; mutually exclusive with `reference_control` | escape hatch for a baseline a memoryless rule cannot express |
 | `preview_config(nm_mapping) -> {signal: n_steps}` | optional | per-column disturbance and comfort-band preview widths (the tariff preview is `price_preview` in the config) |
+
+`controlled_channels` is still honored as the deprecated name for `regulated`.
 
 The energy tariff is config, not a hook: `train_price_path` / `dev_price_path` / `test_price_path` (one CSV per split) + `price_scale` + `price_preview` in `control.yaml`, required together only when `cost_weight > 0`.
 
@@ -186,7 +190,7 @@ nt control train --config control_configs/control.yaml \
     --set sysid_run_id=<run_id>
 
 # 3. Re-evaluate the surrogate on different data later.
-nt model load --run_id <run_id> --id_data path/to/test.csv
+nt model load --run_id <run_id> --data path/to/test.csv
 
 # Hyperparameter search instead of a single train:
 nt model optuna --config model_configs/modeling.yaml \
@@ -651,6 +655,6 @@ If you find yourself shadowing a Neuromancer class, prefer the import.
 uv run pytest tests/
 ```
 
-All 465 pass today, against the current local Neuromancer checkout. The suite covers config, data utilities, metrics, heads, the model families (including 2R2C's stability and storage claims), zones, reportcards (both sides, golden-file pinned), hook contracts, and the Neuromancer-touching dynamics/loss/closed-loop paths.
+All 596 pass today, against the current local Neuromancer checkout. The suite covers config, data utilities, metrics, heads, the model families (including 2R2C's stability and storage claims), zones, reportcards (both sides, golden-file pinned), hook contracts, and the Neuromancer-touching dynamics/loss/closed-loop paths.
 
 Cases that differ only in their input live in `pytest.mark.parametrize` tables rather than in one function each — "here is every way a control config can be wrong" is one table of eighteen rows, not eighteen near-identical functions. That is where to add a case.

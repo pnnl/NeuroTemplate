@@ -200,9 +200,8 @@ def main() -> None:
     )
     write_reportcard(md, Path(cfg.savedir), logger=logger)
     log_control_results(logger, results, baseline=baseline)
-    if hasattr(logger, "log_dict"):
-        logger.log_dict(objective_to_dict(balance, shapes, power_diag, notes),
-                        name="objective_diagnostics.json")
+    logger.log_dict(objective_to_dict(balance, shapes, power_diag, notes),
+                     name="objective_diagnostics.json")
 
     write_run_summary(
         logger, stage="control", config_path=cli.config, cfg=cfg,
@@ -213,15 +212,13 @@ def main() -> None:
     print(f"Comfort violation rate: "
           f"{results.comfort_violation_rate * 100:.2f}%")
     print(f"Mean |Δsetpoint|: {results.mean_abs_du:.4g}")
-    if hasattr(logger, "run"):
-        rid = logger.run.info.run_id
-        print(f"Finished DPC run: {rid}")
-        with open("latest_control_run_id.dat", "w") as f:
-            f.write(rid)
+    rid = logger.run.info.run_id
+    print(f"Finished DPC run: {rid}")
+    with open("latest_control_run_id.dat", "w") as f:
+        f.write(rid)
 
     # Push savedir (plots + reportcard) to MLflow before clean_up rmtrees it.
-    if hasattr(logger, "log_artifacts"):
-        logger.log_artifacts({})
+    logger.log_artifacts({})
     logger.clean_up()
 
 

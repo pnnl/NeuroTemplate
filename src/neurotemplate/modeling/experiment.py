@@ -272,6 +272,11 @@ def train_with_curriculum(
                 name="train",
                 steps=cfg.in_steps + pred_steps,
             )
+            # Reset LitTrainer's early-stopping/epoch bookkeeping so the next
+            # curriculum step gets its own full patience window instead of
+            # inheriting badcount/best_devloss from the step just finished.
+            # These are Neuromancer internals, not a public reset API; if
+            # LitTrainer's field names change, this silently stops resetting.
             trainer.badcount = 0
             trainer.best_devloss = torch.inf
             trainer.current_epoch = 0

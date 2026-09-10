@@ -220,8 +220,7 @@ def apply_overrides(config_dict: dict, overrides: list[str]) -> dict:
             raise ConfigError(f"Override key is empty in '{override}'")
         if key not in config_dict:
             raise ConfigError(f"Override target does not exist: {key}")
-        else:
-            config_dict[key] = _parse_value(raw_value)
+        config_dict[key] = _parse_value(raw_value)
 
     return config_dict
 
