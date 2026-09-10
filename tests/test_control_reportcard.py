@@ -46,6 +46,7 @@ def _make_arch():
         "h_ctrl": 12,
         "ny": 1,
         "d_preview": 0,
+        "d_preview_by_column": {"outdoor [°C]": 0},
         "band_preview": 0,
         "price_preview": 0,
         "reads_price": False,
@@ -197,6 +198,27 @@ def test_policy_section_states_full_observation():
     md = _render()
     assert ("Policy observes all 1 Y channels — no measurement restriction."
            in md)
+
+
+def test_per_column_d_preview_is_rendered_when_columns_differ():
+    """The input-width line can only carry the shared window width, so two
+    columns at 2 and 0 steps look there exactly like two at 2 and 2. Since
+    `preview_config` started honoring per-column depths those are different
+    policies, and the card has to be able to tell them apart."""
+    arch = _make_arch()
+    arch["d_preview"] = 2
+    arch["d_preview_by_column"] = {"outdoor [°C]": 2, "irradiance [W/m²]": 0}
+    md = _render(arch=arch)
+    assert "D window=2" in md
+    assert "**D preview (per column):**" in md
+    assert "- `outdoor [°C]`: 2" in md
+    assert "- `irradiance [W/m²]`: 0" in md
+
+
+def test_per_column_d_preview_is_omitted_when_no_column_declares_one():
+    """Nothing to disambiguate, so no rows -- the breakdown is there to
+    resolve an ambiguity, not to restate a zero for every D column."""
+    assert "D preview (per column)" not in _render()
 
 
 def test_linear_policy_renders_without_hidden_sizes():

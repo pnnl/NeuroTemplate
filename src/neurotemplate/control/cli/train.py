@@ -19,6 +19,7 @@ from neurotemplate._typing import beartype
 from neuromancer.loggers import MLFlowLogger
 
 from neurotemplate.common.data_utils import get_data_splits, normalize_df
+from neurotemplate.common.run_summary import write_run_summary
 from neurotemplate.modeling.experiment import resolve_device, set_seeds
 
 from neurotemplate.control.config import ControlConfig, load_config_from_cli, CONTROL_CONFIG_DIR
@@ -57,7 +58,7 @@ from neurotemplate.hooks import load_control_hooks
 
 @beartype
 def main() -> None:
-    cfg, _cli = load_config_from_cli(
+    cfg, cli = load_config_from_cli(
         sys.argv[1:],
         cls=ControlConfig,
         config_dir=CONTROL_CONFIG_DIR,
@@ -202,6 +203,12 @@ def main() -> None:
     if hasattr(logger, "log_dict"):
         logger.log_dict(objective_to_dict(balance, shapes, power_diag, notes),
                         name="objective_diagnostics.json")
+
+    write_run_summary(
+        logger, stage="control", config_path=cli.config, cfg=cfg,
+        metrics={"control_violation_rate": results.comfort_violation_rate,
+                 "control_mean_abs_du": results.mean_abs_du},
+    )
 
     print(f"Comfort violation rate: "
           f"{results.comfort_violation_rate * 100:.2f}%")

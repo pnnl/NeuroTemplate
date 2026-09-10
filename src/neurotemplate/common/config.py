@@ -308,6 +308,10 @@ def load_config_from_cli(
         raise SystemExit(0)
 
     config_path = resolve_config_path(cli_args.config, default_config_path, config_dir)
+    # Write the resolved path back, so callers reporting which config ran
+    # name the file that was loaded rather than the bare name (or None) the
+    # user typed.
+    cli_args.config = str(config_path)
     cfg = dict_to_dataclass(load_yaml(config_path), cls)
 
     if cli_args.set:

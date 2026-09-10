@@ -408,6 +408,20 @@ def log_test_results(
             )
 
 
+@beartype
+def run_summary_metrics(test_results: TestResults) -> dict[str, float]:
+    """The two headline numbers a submission audit checks, for run_summary.json.
+
+    `worst_channel_r2` is the min of the per-channel R² that
+    `log_test_results` already logs, so it is the weakest channel rather
+    than an average that can hide one.
+    """
+    return {
+        "test_rmse": test_results.aggregate_rmse,
+        "worst_channel_r2": min(m.r2 for m in test_results.metrics),
+    }
+
+
 # ── Seed ensemble ─────────────────────────────────────────────────
 #
 # `cfg.ensemble_seeds > 1` reruns train + evaluate at cfg.seed + 1 ..

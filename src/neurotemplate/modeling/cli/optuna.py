@@ -25,6 +25,7 @@ from neurotemplate._typing import beartype
 
 from neurotemplate.modeling.config import ModelingConfig
 from neurotemplate.common.config import load_config_from_cli, MODEL_CONFIG_DIR
+from neurotemplate.common.run_summary import write_run_summary
 from neuromancer.loggers import MLFlowLogger
 
 from neurotemplate.common.data_utils import (
@@ -36,7 +37,9 @@ from neurotemplate.common.data_utils import (
 )
 from neurotemplate.modeling.experiment import resolve_device, set_seeds, train_with_curriculum
 from neurotemplate.modeling.heads import HeadStack
-from neurotemplate.modeling.pipeline import resolve_block_spec, train_and_evaluate
+from neurotemplate.modeling.pipeline import (
+    resolve_block_spec, run_summary_metrics, train_and_evaluate,
+)
 from neurotemplate.modeling.reportcard import spread_stats
 from neurotemplate.hooks import load_modeling_hooks
 
@@ -100,7 +103,7 @@ def objective(
 
 @beartype
 def main() -> None:
-    cfg, _cli = load_config_from_cli(
+    cfg, cli = load_config_from_cli(
         sys.argv[1:],
         cls=ModelingConfig,
         config_dir=MODEL_CONFIG_DIR,
@@ -233,6 +236,12 @@ def main() -> None:
         freq_s=freq_s, logger=global_logger,
         head_stack=head_stack, block_spec=block_spec,
         extra_metrics={"search_time": search_time_s},
+    )
+
+    write_run_summary(
+        global_logger, stage="model", config_path=cli.config, cfg=cfg,
+        metrics=run_summary_metrics(result["test_results"]),
+        mapping=nm_mapping,
     )
 
     if hasattr(global_logger, "run"):

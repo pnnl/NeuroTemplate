@@ -205,6 +205,31 @@ def test_estimate_decay_skips_a_run_that_is_not_decaying():
     assert windows == ()
 
 
+def test_estimate_decay_rejects_a_tau_the_window_could_not_resolve():
+    """The `data/spring` failure: a 5-hour window fitting a 127-hour
+    constant. The fit is excellent -- over a span that short an exponential
+    IS a straight line -- so r² cannot catch it, and the span has to."""
+    steps_per_hour = 12.0
+    t_hours = np.arange(60) / steps_per_hour        # 5 hours
+    ref = np.zeros(60)
+    state = 6.0 * np.exp(-t_hours / 127.0)
+    off = np.ones(60, dtype=bool)
+    assert estimate_decay(t_hours, state, ref, off, min_run_steps=48) == ()
+
+
+def test_estimate_decay_accepts_a_tau_the_same_window_can_resolve():
+    """Same window, same shape, a tau inside what 5 hours resolves. It is
+    the ratio that rejects, not the window being short."""
+    steps_per_hour = 12.0
+    t_hours = np.arange(60) / steps_per_hour
+    ref = np.zeros(60)
+    state = 6.0 * np.exp(-t_hours / 1.5)
+    off = np.ones(60, dtype=bool)
+    windows = estimate_decay(t_hours, state, ref, off, min_run_steps=48)
+    assert len(windows) == 1
+    assert windows[0].tau_h == pytest.approx(1.5, rel=1e-6)
+
+
 # ── Small pure helpers used to build the decay windows ───────────
 
 @pytest.mark.parametrize("mask,min_len,expected", [

@@ -17,6 +17,7 @@ from pathlib import Path
 from neurotemplate._typing import beartype
 
 from neurotemplate.common.config import load_config_from_cli, MODEL_CONFIG_DIR
+from neurotemplate.common.run_summary import write_run_summary
 from neurotemplate.modeling.config import ModelingConfig
 from neuromancer.loggers import MLFlowLogger
 
@@ -28,14 +29,16 @@ from neurotemplate.common.data_utils import (
     warn_degenerate_columns,
 )
 from neurotemplate.modeling.experiment import resolve_device, set_seeds
-from neurotemplate.modeling.pipeline import resolve_block_spec, train_and_evaluate
+from neurotemplate.modeling.pipeline import (
+    resolve_block_spec, run_summary_metrics, train_and_evaluate,
+)
 from neurotemplate.hooks import load_modeling_hooks
 
 
 @beartype
 def main() -> None:
 
-    cfg, _cli = load_config_from_cli(
+    cfg, cli = load_config_from_cli(
         sys.argv[1:],
         cls=ModelingConfig,
         config_dir=MODEL_CONFIG_DIR,
@@ -129,6 +132,12 @@ def main() -> None:
         grad_masks=grad_masks, synth_cfg=synth_cfg,
         freq_s=freq_s, logger=global_logger,
         head_stack=head_stack, block_spec=block_spec,
+    )
+
+    write_run_summary(
+        global_logger, stage="model", config_path=cli.config, cfg=cfg,
+        metrics=run_summary_metrics(result["test_results"]),
+        mapping=nm_mapping,
     )
 
     if cfg.verbose and hasattr(global_logger, "run"):

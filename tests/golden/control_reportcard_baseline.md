@@ -16,7 +16,7 @@
 - **Bound method:** `sigmoid_scale`
 - **Hidden sizes:** [64, 64]
 - **Trainable params:** 6,017
-- **Input width:** 27 (H_ctrl=12, D preview=0, band preview=0)
+- **Input width:** 27 (H_ctrl=12, D window=0, band preview=0)
 - **Output width:** 1
 - **Observation:** Policy observes all 1 Y channels — no measurement restriction.
 - **Setpoint quantization:** 0.5 (straight-through)

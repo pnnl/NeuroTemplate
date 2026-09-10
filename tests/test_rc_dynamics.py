@@ -29,7 +29,9 @@ import torch
 from neurotemplate.modeling.config import ModelingConfig as Config
 from neurotemplate.modeling.dynamics import BlockStack, get_dynamics
 from neurotemplate.modeling.heads import BinaryHead, HeadStack, RegressionHead
-from neurotemplate.modeling.rc import MIN_TAU_STEPS, RCBlock, mode_taus
+from neurotemplate.modeling.rc import (
+    MIN_TAU_STEPS, RCBlock, _init_theta, mode_taus,
+)
 from neurotemplate.modeling.blocks import build_blocks
 
 SPH = 12.0            # 5-minute data
@@ -447,6 +449,34 @@ def test_a_coarse_timestep_cannot_ask_for_an_impossible_prior():
     taus = hourly.describe()["time_constants_h"]["y0"]
     assert math.isfinite(taus["fast"]) and math.isfinite(taus["slow"])
     assert 0 < taus["fast"] < taus["slow"]
+
+
+def test_a_long_time_constant_builds_instead_of_overflowing():
+    """The far end of the same clamp. The exact inverse `log(expm1(x))`
+    overflows float64 past x ~ 709.78, which used to make any prior above
+    (709.78 + MIN_TAU_STEPS) / steps_per_hour raise a bare OverflowError --
+    59 h on 5-minute data, 11.9 h on 1-minute data, below the tau_slow the
+    shipped defaults themselves produce."""
+    block = make_block(tau_hours=(200.0, 1.0, 4.0))
+    taus = block.describe()["time_constants_h"]["y0"]
+    assert math.isfinite(taus["fast"]) and math.isfinite(taus["slow"])
+    assert 0 < taus["fast"] < taus["slow"]
+
+
+@pytest.mark.parametrize("tau_hours", [0.5, 2.0, 13.4, 59.0, 200.0])
+def test_init_theta_inverts_the_forward_map_on_both_branches(tau_hours):
+    """Whichever branch it takes, `_init_theta` is the inverse of
+    `tau = MIN_TAU_STEPS + softplus(theta)` -- so the overflow guard is
+    arithmetic, not a different parameterization above the threshold.
+
+    Round-tripped through the same `nn.functional.softplus` `rates()` calls,
+    in float64 where `_init_theta` computes -- the block stores theta in
+    float32, so a rollout sees this to float32 precision. The 1e-9 is torch's
+    own doing: its softplus switches to the identity at 20, a little before
+    the inverse here does."""
+    theta = torch.tensor(_init_theta(tau_hours, SPH), dtype=torch.float64)
+    tau_steps = MIN_TAU_STEPS + torch.nn.functional.softplus(theta)
+    assert (tau_steps / SPH).item() == pytest.approx(tau_hours, rel=1e-9)
 
 
 def test_2r2c_with_reads_is_refused():

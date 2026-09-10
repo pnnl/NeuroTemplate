@@ -127,6 +127,13 @@ DEFAULT_TAU_AMBIENT_H = 2.0
 DEFAULT_TAU_ZONE_MASS_H = 1.0
 DEFAULT_TAU_MASS_ZONE_H = 4.0
 
+#: Where `softplus(theta)` becomes `theta` to double precision. The exact
+#: inverse `log(expm1(x))` differs from `x` by `log1p(-exp(-x))`, which at
+#: x = 36 is ~2e-16 — far below the ~7e-15 gap between adjacent float64s of
+#: that size — so past this point the two return the same float. Purely a
+#: numerical threshold; nothing about the model changes at it.
+_SOFTPLUS_LINEAR = 36.0
+
 
 def _init_theta(tau_hours: float, steps_per_hour: float) -> float:
     """Raw parameter whose `rates()` reading is `tau_hours`.
@@ -136,9 +143,29 @@ def _init_theta(tau_hours: float, steps_per_hour: float) -> float:
     1 h zone<->mass default is below the two-step floor — so the request is
     clamped rather than allowed to produce a NaN. The reportcard prints what
     the clamp settled on.
+
+    The far end is only an arithmetic hazard. `softplus` saturates to the
+    identity, so the exact inverse converges to its own argument — but
+    `math.expm1` overflows float64 past ~709.78 on the way there, which made
+    every `tau_hours` above `(709.78 + MIN_TAU_STEPS) / steps_per_hour` raise
+    a bare `OverflowError`. That ceiling tightens as the data gets finer:
+    59 h at 5-minute samples, 11.9 h at 1-minute — below the `tau_slow` the
+    shipped defaults themselves produce, so ordinary priors hit it. Past
+    `_SOFTPLUS_LINEAR` the identity *is* the exact inverse in float64, so it
+    is returned instead.
+
+    Nothing else changes at that switch, and nothing needs to: softplus
+    saturating to the identity means its derivative is 1, which is the
+    best-conditioned corner of this parameterization rather than a degenerate
+    one. A long time constant that comes back out of `rates()` is exactly the
+    one that went in; whether it is a *good* prior is what the reportcard's
+    `tau_slow` is for.
     """
     tau_steps = max(tau_hours * steps_per_hour, MIN_TAU_STEPS + 1.0)
-    return math.log(math.expm1(tau_steps - MIN_TAU_STEPS))
+    excess = tau_steps - MIN_TAU_STEPS
+    if excess > _SOFTPLUS_LINEAR:
+        return excess
+    return math.log(math.expm1(excess))
 
 
 def mode_taus(a_ambient, a_zone_mass, a_mass_zone):

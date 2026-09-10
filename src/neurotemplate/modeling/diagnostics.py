@@ -325,6 +325,13 @@ MIN_RUN_HOURS_DEFAULT = 4.0
 # equilibrium.
 OFF_TOLERANCE_FRAC = 0.02
 
+# A time constant longer than this multiple of the window it was fitted in is
+# extrapolated, not measured: over a span well short of tau the decay is
+# indistinguishable from a straight line, so the slope -- and tau with it --
+# is set by noise rather than by the plant. Rejecting those windows is
+# arithmetic about what the span can resolve, not a judgment about buildings.
+MAX_TAU_PER_SPAN = 3.0
+
 
 @dataclass(frozen=True)
 class DecayWindow:
@@ -375,19 +382,30 @@ def find_runs(mask: np.ndarray, min_len: int) -> list[tuple[int, int]]:
 
 def _fit_log_decay(t_hours: np.ndarray, gap: np.ndarray) -> Optional[tuple[float, float]]:
     """OLS slope of log|gap| against t_hours. Returns (tau_h, r_squared), or
-    None when the window is not a decay: the slope must be negative (the gap
-    shrinking), and the gap must never cross zero (log undefined)."""
+    None when the window cannot support a fit:
+
+      - the slope must be negative (the gap shrinking),
+      - the gap must never cross zero (log undefined),
+      - and the fitted tau must be short enough that this window could have
+        resolved it (`MAX_TAU_PER_SPAN`).
+
+    The last one is what separates a measurement from an extrapolation, and
+    r_squared does not catch it: a 5-hour window fits a 127-hour constant
+    happily, because over a span that short the exponential *is* a line."""
     if np.any(gap == 0):
         return None
     log_abs_gap = np.log(np.abs(gap))
     slope, intercept = np.polyfit(t_hours, log_abs_gap, 1)
     if slope >= 0:
         return None
+    tau_h = -1.0 / slope
+    span_h = float(t_hours[-1] - t_hours[0])
+    if tau_h > MAX_TAU_PER_SPAN * span_h:
+        return None
     predicted = slope * t_hours + intercept
     ss_res = float(np.sum((log_abs_gap - predicted) ** 2))
     ss_tot = float(np.sum((log_abs_gap - log_abs_gap.mean()) ** 2))
     r_squared = 1.0 - ss_res / ss_tot if ss_tot > 0 else 1.0
-    tau_h = -1.0 / slope
     return tau_h, r_squared
 
 
@@ -403,8 +421,9 @@ def estimate_decay(
     `off` is a boolean mask (see `actuator_off_mask`), True where the plant
     is uncoupled. Within each run of at least `min_run_steps` consecutive
     True samples, regress log|state - ref| on elapsed time; a run that is
-    not an exponential decay toward `ref` (flat, growing, or crossing it)
-    contributes no window rather than a bogus tau.
+    not an exponential decay toward `ref` (flat, growing, crossing it, or
+    too short to resolve the tau it fits) contributes no window rather than
+    a bogus tau -- see `_fit_log_decay` for the three rejections.
 
     Returns one `DecayWindow` per run that fits cleanly, in time order.
     Empty means no qualifying window was found in this data -- see

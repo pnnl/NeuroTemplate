@@ -80,6 +80,23 @@ def _summary_section(
     return _section("Summary", "\n".join(rows))
 
 
+def _d_preview_rows(depths: dict[str, int]) -> list[str]:
+    """Per-column D preview depths, or nothing when no column declares one.
+
+    The input-width line can only carry the shared window width, which is the
+    max across columns -- so a run declaring 2 steps on outdoor temperature
+    and none on irradiance reads there exactly like one declaring 2 on both.
+    Since `preview_config` started honoring per-column depths those are
+    different policies, and this is the line that tells them apart.
+    """
+    if not any(depths.values()):
+        return []
+    return [
+        "- **D preview (per column):**",
+        *(f"  - `{col}`: {depth}" for col, depth in depths.items()),
+    ]
+
+
 def _policy_section(arch: dict) -> str:
     hsizes = arch["hsizes"] if arch["hsizes"] else "*(none — single affine map)*"
     bounds = "\n".join(
@@ -99,11 +116,12 @@ def _policy_section(arch: dict) -> str:
         f"- **Hidden sizes:** {hsizes}",
         f"- **Trainable params:** {arch['param_count']:,}",
         f"- **Input width:** {arch['insize']} "
-        f"(H_ctrl={arch['h_ctrl']}, D preview={arch['d_preview']}, "
+        f"(H_ctrl={arch['h_ctrl']}, D window={arch['d_preview']}, "
         f"band preview={arch['band_preview']}"
         + (f", price preview={arch['price_preview']}" if arch["reads_price"]
            else "")
         + ")",
+        *_d_preview_rows(arch["d_preview_by_column"]),
         f"- **Output width:** {arch['outsize']}",
         f"- **Observation:** Policy observes all {arch['ny']} Y channels — "
         "no measurement restriction.",
