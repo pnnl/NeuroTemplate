@@ -13,6 +13,8 @@ from typing import Optional
 from urllib.parse import urlparse
 import argparse
 
+from dataclasses import fields
+
 import mlflow
 import numpy as np
 import torch
@@ -38,6 +40,38 @@ from neurotemplate._typing import beartype
 def _load_run_params(run_id: str) -> dict[str, object]:
     run = mlflow.get_run(run_id)
     return {k: _parse_value(v) for k, v in run.data.params.items()}
+
+
+def _config_from_run_params(run_id: str) -> ModelingConfig:
+    """This run's params as a ModelingConfig, tolerating fields since removed.
+
+    `dict_to_dataclass` is strict on purpose: an unknown key in a config a
+    human just wrote is a typo, and failing loudly is right. Replaying a
+    *finished* run is the opposite case. Its params were logged by whichever
+    library version trained it, so a field this version has dropped is a fact
+    about history, not a mistake anyone can still fix -- and rejecting it makes
+    every model trained before that removal permanently unloadable.
+
+    So unknown keys are dropped here and named in a warning. They are inert by
+    construction: a field this version no longer defines is one nothing in this
+    version reads, and the architecture is rebuilt from the fields that survive
+    plus the saved artifacts. What is lost is provenance, which is why the
+    warning lists them rather than passing over them silently.
+    """
+    params = _load_run_params(run_id)
+    known = {f.name for f in fields(ModelingConfig)}
+    stale = sorted(set(params) - known)
+    if stale:
+        warnings.warn(
+            f"Run {run_id} logged {len(stale)} param(s) this version of "
+            f"neurotemplate no longer defines: {', '.join(stale)}. They were "
+            "ignored while rebuilding the config. The run was trained by an "
+            "older version, so its settings for those fields are not recorded "
+            "in the loaded config.",
+            stacklevel=2,
+        )
+        params = {k: v for k, v in params.items() if k in known}
+    return dict_to_dataclass(params, ModelingConfig)
 
 
 @beartype
@@ -170,7 +204,7 @@ def load_trained_dynamics(
     cfg.device is resolved here so the returned system is on a valid device.
     """
     artifacts_dir = _resolve_artifacts_dir(run_dir, run_id)
-    cfg = dict_to_dataclass(_load_run_params(run_id), ModelingConfig)
+    cfg = _config_from_run_params(run_id)
     
     cfg.validate()
     cfg.device = resolve_device(cfg.device)
