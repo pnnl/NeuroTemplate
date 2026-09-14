@@ -32,7 +32,7 @@ from neurotemplate.modeling.heads import (
     OrdinalHead,
     RegressionHead,
     bounds_from_norm,
-    inverse_frequency_weights,
+    inverse_sqrt_frequency_weights,
     project_physical_to_norm,
 )
 
@@ -263,15 +263,16 @@ def test_default_level_weights_leave_the_loss_unchanged(head, target):
     assert torch.allclose(head.loss(y, target), expected, atol=1e-7)
 
 
-def test_inverse_frequency_weights_make_a_rare_level_count():
-    """A level that occurs on 1/16 of samples gets 15x the weight of the
-    common one, and the weights average to one so the loss scale holds."""
+def test_inverse_sqrt_frequency_weights_make_a_rare_level_count():
+    """A level that occurs on 1/16 of samples gets sqrt(15)x the weight of
+    the common one — more, but not 15x — and the weights average to one so
+    the loss scale holds."""
     y = torch.tensor([0.0] * 30 + [1.0] * 2)
-    w = inverse_frequency_weights(y, torch.tensor([0.0, 1.0]))
-    assert w[1] / w[0] == pytest.approx(15.0)
+    w = inverse_sqrt_frequency_weights(y, torch.tensor([0.0, 1.0]))
+    assert w[1] / w[0] == pytest.approx(math.sqrt(15.0))
     assert w.mean().item() == pytest.approx(1.0)
     # A level the data never visits counts as one sample, not as infinity.
-    w = inverse_frequency_weights(torch.zeros(10), torch.tensor([0.0, 1.0]))
+    w = inverse_sqrt_frequency_weights(torch.zeros(10), torch.tensor([0.0, 1.0]))
     assert torch.isfinite(w).all() and w[1] > w[0]
 
 

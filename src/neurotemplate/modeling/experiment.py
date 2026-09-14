@@ -103,8 +103,11 @@ def build_trainer(
 
     # The raw SSMGrad model lives inside the System's Node.
     # Physics losses need direct access to it for Jacobians and
-    # training-mode checks.
+    # training-mode checks. The loss must read the head stack the model
+    # owns (get_dynamics attaches its own copy), not the caller's — one
+    # stack, so nothing calibrated on it can go stale in the loss.
     raw_model = system.nodes[0].callable
+    head_stack = raw_model.head_stack
 
     if cfg.verbose:
         print("Building loss (tracking + physics)...")

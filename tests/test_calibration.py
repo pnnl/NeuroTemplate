@@ -83,7 +83,7 @@ def test_balance_level_weights_reads_each_levelled_channel_from_the_data():
     df = pd.DataFrame({"stage": [0.0] * 90 + [1.0] * 10, "temp": range(100)})
     balance_level_weights(stack, [df])
     w = stack.heads[0].level_weights
-    assert w[1] / w[0] == pytest.approx(9.0)
+    assert w[1] / w[0] == pytest.approx(3.0)   # sqrt of the 9:1 ratio
     assert w.mean().item() == pytest.approx(1.0)
 
 
@@ -311,3 +311,49 @@ def test_the_ensemble_spread_carries_balanced_accuracy(tmp_path):
     result, _, _ = _staged_run(tmp_path, ensemble_seeds=2)
     assert "stage" in result["ensemble"].balanced_acc
     assert "Test balanced accuracy (staged channels)" in (tmp_path / "reportcard.md").read_text()
+
+
+def test_a_head_that_never_snaps_is_not_calibrated():
+    """use_ste=False feeds the smooth activation back, so decode — and its
+    thresholds — never runs. Tuning them would report a rule the model
+    does not apply."""
+    nm = make_nm_mapping()
+    raw = make_raw_df(n_rows=120)
+    norm_stats = make_norm_stats(raw)
+    cfg = make_sysid_cfg()
+    cfg.dev_pred_steps = 8
+    stats = norm_stats[STAGE]
+    levels = torch.tensor([(v - stats["shift"]) / stats["stretch"] for v in (0.0, 1.0, 2.0)])
+    heads = [OrdinalHead(n_levels=3, level_values=levels, use_ste=False) if col == STAGE
+             else RegressionHead() for col in nm["Y"]]
+    dyn_sys = get_dynamics(cfg, nm, head_stack=HeadStack(heads, nm["Y"]))
+    head = dyn_sys.nodes[0].callable.head_stack.heads[nm["Y"].index(STAGE)]
+    before = head.decision_thresholds.clone()
+    with pytest.warns(UserWarning, match="use_ste=False"):
+        assert calibrate_decision_thresholds(
+            dyn_sys, cfg, [normalize_df(raw, norm_stats)], nm) == {}
+    assert torch.equal(head.decision_thresholds, before)
+
+
+def test_the_loss_reads_the_stack_the_model_owns():
+    """get_dynamics attaches its own copy of the stack; the loss has to be
+    built on that copy, or anything set on the model's stack is invisible
+    to training."""
+    from neurotemplate.modeling.experiment import build_trainer
+    from neurotemplate.modeling.heads import HeadStack as _HeadStack
+    nm = make_nm_mapping()
+    raw = make_raw_df(n_rows=120)
+    norm_stats = make_norm_stats(raw)
+    cfg = make_sysid_cfg()
+    cfg.train_pred_steps = cfg.dev_pred_steps = 4
+    cfg.batch_size, cfg.verbose = 8, False
+    _, stack = _staged_system(cfg, nm, norm_stats)
+    dfs = [normalize_df(raw, norm_stats)]
+    trainer = build_trainer(cfg, dfs, dfs, nm, {}, norm_stats, head_stack=stack)
+    # Problem -> [System] -> Node -> SSMGrad
+    owned = trainer.model.nodes[0].nodes[0].callable.head_stack
+    assert owned is not stack
+    ref_loss = next(o for o in trainer.model.loss.objectives if o.name == "ref_loss")
+    stacks_in_loss = [c.cell_contents for c in ref_loss.loss.__closure__
+                      if isinstance(c.cell_contents, _HeadStack)]
+    assert stacks_in_loss == [owned]

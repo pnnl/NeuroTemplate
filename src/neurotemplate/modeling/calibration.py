@@ -3,7 +3,7 @@ Two data-driven settings for staged (binary / ordinal) channels that the
 optimiser cannot be trusted with, set from the data instead:
 
   balance_level_weights        — before training: each levelled head's
-                                 loss weights := inverse training frequency
+                                 loss weights := inverse sqrt training frequency
                                  of its levels (`cfg.balance_levels`).
   calibrate_decision_thresholds — after training: each ordinal head's
                                  decision thresholds := the balanced-
@@ -47,7 +47,7 @@ from neurotemplate._typing import beartype
 from neurotemplate.common.data_utils import get_sw_dict_multi, pool_dfs
 from neurotemplate.common.metrics import level_metrics
 from neurotemplate.modeling.config import ModelingConfig
-from neurotemplate.modeling.heads import HeadStack, OrdinalHead, inverse_frequency_weights
+from neurotemplate.modeling.heads import HeadStack, OrdinalHead, inverse_sqrt_frequency_weights
 
 
 # Thresholds are searched over this many quantiles of the dev z. Balanced
@@ -70,7 +70,7 @@ class Calibration:
 
 @beartype
 def balance_level_weights(head_stack: HeadStack, train_dfs: list[DataFrame]) -> None:
-    """Set every levelled head's `level_weights` to the inverse frequency of
+    """Set every levelled head's `level_weights` to the inverse square-root frequency of
     its levels in the (normalized) training data. Heads without levels are
     left alone."""
     pool = pool_dfs(train_dfs)
@@ -79,7 +79,7 @@ def balance_level_weights(head_stack: HeadStack, train_dfs: list[DataFrame]) -> 
         if levels is None:
             continue
         y = torch.tensor(pool[name].to_numpy(), dtype=torch.float32, device=levels.device)
-        head.level_weights.copy_(inverse_frequency_weights(y, levels))
+        head.level_weights.copy_(inverse_sqrt_frequency_weights(y, levels))
 
 
 def collect_rollout_z(dyn_sys, data: dict, in_steps: int) -> tuple[torch.Tensor, torch.Tensor]:
@@ -166,15 +166,29 @@ def calibrate_decision_thresholds(
     new rule really scores better once it is the one being fed back —
     reverting any channel where it does not. Returns {channel: Calibration}
     for every ordinal channel that could be calibrated; a channel with a
-    level dev never visits is skipped with a warning. Empty without ordinal
-    heads."""
+    level dev never visits, or with `use_ste=False` (its snap never runs),
+    is skipped with a warning. Empty without ordinal heads."""
     head_stack = dyn_sys.nodes[0].callable.head_stack
     if head_stack is None or not any(isinstance(h, OrdinalHead) for h in head_stack.heads):
         return {}
 
-    ordinal = [(i, name, head)
-               for i, (name, head) in enumerate(zip(head_stack.channel_names, head_stack.heads))
-               if isinstance(head, OrdinalHead)]
+    ordinal = []
+    for i, (name, head) in enumerate(zip(head_stack.channel_names, head_stack.heads)):
+        if not isinstance(head, OrdinalHead):
+            continue
+        if not head.use_ste:
+            # The loop feeds back the smooth activation, so decode — and any
+            # threshold it snaps at — never runs. Nothing to calibrate.
+            warnings.warn(
+                f"{name!r}: OrdinalHead(use_ste=False) feeds back its smooth "
+                "activation and never snaps, so its decision thresholds have "
+                "no effect and are not calibrated.",
+                stacklevel=2,
+            )
+            continue
+        ordinal.append((i, name, head))
+    if not ordinal:
+        return {}
 
     def realized(z_all, y_true, i, head):
         """Dev balanced accuracy of the head's current rule on this rollout."""

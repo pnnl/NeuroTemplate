@@ -438,7 +438,9 @@ def _levels_section(
     if head_stack is not None and norm_stats is not None:
         rules = []
         for name, head in zip(head_stack.channel_names, head_stack.heads):
-            if isinstance(head, OrdinalHead):
+            # With use_ste=False the smooth activation is fed back and the
+            # snap never runs, so there is no decision rule to report.
+            if isinstance(head, OrdinalHead) and head.use_ste:
                 s = norm_stats[name]
                 phys = (head.decision_thresholds * s["stretch"] + s["shift"]).tolist()
                 rules.append(f"`{name}`: " + ", ".join(f"{t:.4g}" for t in phys))

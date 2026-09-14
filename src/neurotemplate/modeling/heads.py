@@ -118,12 +118,17 @@ are fixed inside the head with no change to the System's output:
     Per-level loss weights, indexed by the *target's* level. The loss is
     Σ w·err / Σ w, so all-ones (the default) reproduces the unweighted
     mean exactly and the loss scale does not move with the weights.
-    Inverse training frequency (`inverse_frequency_weights`) makes each
-    level count equally regardless of how often it occurs; the pipeline
-    sets that by default (`cfg.balance_levels`). Measured on a
-    2.5%-positive compressor channel, this is the difference between a
-    coin flip (ROC-AUC 0.74 ± 0.27 across seeds) and a model (0.94 ±
-    0.01) — MSE alone does not reliably train on such a channel.
+    The pipeline sets them to inverse *square-root* training frequency
+    by default (`inverse_sqrt_frequency_weights`, `cfg.balance_levels`):
+    a 2% level is weighted ~7x the common one rather than the ~49x full
+    inverse frequency would give. Full inverse frequency is the
+    balanced-accuracy operating point baked into the loss, and it made a
+    2.5%-positive compressor go from a coin flip (ROC-AUC 0.74 ± 0.27
+    across seeds) to a model (0.94 ± 0.01) — but it also multiplies the
+    per-sample gradient of the rarest events, which under STE are exactly
+    the samples whose surrogate gradient is least trustworthy, and it
+    over-fires the rare level several times its base rate. The square
+    root keeps most of the training benefit with a bounded push.
 
   decision_thresholds (ordinal only)
     Where `decode` snaps. Defaults to the same midpoints the activation
@@ -581,13 +586,14 @@ def _checked_level_weights(given: Optional[torch.Tensor], n_levels: int) -> torc
     return weights
 
 
-def inverse_frequency_weights(y: torch.Tensor, levels: torch.Tensor) -> torch.Tensor:
-    """Per-level weights ∝ 1 / (share of `y` nearest each level), scaled so
-    they average 1. A level `y` never visits gets the weight of a single
-    sample, so it is neither infinite nor silently dropped."""
+def inverse_sqrt_frequency_weights(y: torch.Tensor, levels: torch.Tensor) -> torch.Tensor:
+    """Per-level weights ∝ 1 / sqrt(share of `y` nearest each level), scaled
+    so they average 1. The square root tempers the push on a very rare level
+    (a 1% level gets 10x, not 100x). A level `y` never visits gets the weight
+    of a single sample, so it is neither infinite nor silently dropped."""
     idx = (y.reshape(-1, 1) - levels).abs().argmin(dim=-1)
     counts = torch.bincount(idx, minlength=len(levels)).clamp(min=1).to(torch.float32)
-    weights = 1.0 / counts
+    weights = counts.rsqrt()
     return weights * len(levels) / weights.sum()
 
 
