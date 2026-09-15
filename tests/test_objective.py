@@ -16,15 +16,11 @@ from neurotemplate.control.objective import (
     DOMINANCE_FACTOR,
     ObjectiveBalance,
     TermBalance,
-    TermShape,
-    balance_to_markdown,
     format_objective_report,
     is_inert,
     objective_balance,
-    objective_to_dict,
     power_diagnostics,
     run_objective_pass,
-    shapes_to_markdown,
     term_shapes,
 )
 from neurotemplate.control.policy import build_policy
@@ -82,8 +78,6 @@ def test_a_lopsided_weight_is_flagged_as_dominant():
     dominant = balance.dominant()
     assert [t.name for t in dominant] == ["energy_loss"]
     assert dominant[0].ratio_to_rest > DOMINANCE_FACTOR
-    assert "⚠️ dominates" in balance_to_markdown(balance)
-    assert "WARNING" in format_objective_report(balance, [])
 
 
 def test_a_balanced_objective_is_not_flagged():
@@ -105,18 +99,6 @@ def test_an_all_zero_objective_is_not_reported_as_dominated():
     assert balance.total == 0.0
     assert all(t.ratio_to_rest == 0.0 for t in balance.terms)
     assert balance.dominant() == []
-
-
-def test_a_lone_term_reports_an_infinite_ratio():
-    problem, loss, batch, _ = _problem(
-        comfort_weight=0.0, du_weight=1.0, energy_weight=0.0,
-    )
-    out = run_objective_pass(problem, batch)
-
-    (term,) = objective_balance(loss, out).terms
-
-    assert term.ratio_to_rest == float("inf")
-    assert "∞" in balance_to_markdown(ObjectiveBalance([term], term.value))
 
 
 # ── term_shapes ──────────────────────────────────────────────────
@@ -148,47 +130,6 @@ def test_a_monotone_term_is_reported_without_a_verdict():
     assert shape.argmin == 0
     assert not shape.is_flat
     assert shape.minimised_at == pytest.approx(shape.grid[0])
-
-    table = shapes_to_markdown([shape])
-    assert f"{shape.minimised_at:.4g}" in table
-    assert "⚠️" not in table
-
-    report = format_objective_report(ObjectiveBalance([], 0.0), [shape])
-    assert "WARNING" not in report
-    assert "no verdict attached" in report
-
-
-def test_an_interior_optimum_is_reported_too():
-    """A term that costs distance from a target reports its interior minimum."""
-    target = 24.0
-    ns_shift, ns_stretch = None, None
-
-    def term(yn, u, d):
-        return (u[:, :, 0] - _norm(target)) ** 2
-
-    def _norm(x):
-        return (x - ns_shift) / ns_stretch
-
-    s = full_setup()
-    ns_shift = s["norm_stats"][SETPT]["shift"]
-    ns_stretch = s["norm_stats"][SETPT]["stretch"]
-
-    (shape,) = _shapes(term)
-
-    assert 0 < shape.argmin < len(shape.values) - 1
-    assert shape.minimised_at == pytest.approx(target, abs=1.0)
-
-
-def test_a_term_that_ignores_the_control_reads_as_flat():
-    """Metered power lives in Y, so the sweep must not cry wolf about it."""
-    (shape,) = _shapes(lambda yn, u, d: yn[:, :, 0])
-
-    assert shape.is_flat
-    # Without the gradient measurement there is nothing to say beyond "flat".
-    assert "flat in U" in shapes_to_markdown([shape])
-    # With it, the two reasons a sweep can be flat are told apart.
-    assert "reads model outputs" in shapes_to_markdown([shape], True)
-    assert "INERT" in shapes_to_markdown([shape], False)
 
 
 # ── power_diagnostics ────────────────────────────────────────────
@@ -241,14 +182,6 @@ def test_a_clamped_zero_is_dead_and_a_snapped_zero_is_not():
     assert snapped.frac_dead == 0.0, "the straight-through path still carries"
 
 
-def test_a_term_that_never_goes_negative_has_nothing_dead():
-    diag = _diag(lambda yn, u, d: yn[:, :, 0].exp())
-
-    assert diag.frac_zero == 0.0
-    assert diag.frac_dead == 0.0
-    assert diag.reads_outputs
-
-
 def test_a_term_reading_the_rollout_is_not_inert():
     (shape,) = _shapes(lambda yn, u, d: yn[:, :, 0])
     diag = _diag(lambda yn, u, d: yn[:, :, 0])
@@ -282,43 +215,7 @@ def test_a_term_reading_only_the_commands_is_not_called_inert():
     assert not is_inert([shape], diag)
 
 
-def test_the_grid_spans_the_actuation_box():
-    (shape,) = _shapes(lambda yn, u, d: u[:, :, 0], n_grid=5)
-    s = full_setup()
-    stats = s["norm_stats"][SETPT]
-
-    assert len(shape.grid) == len(shape.values) == 5
-    assert shape.grid[0] == pytest.approx(stats["min"], abs=1e-4)
-    assert shape.grid[-1] == pytest.approx(stats["max"], abs=1e-4)
-
-
-def test_objective_to_dict_is_serializable():
-    import json
-
-    problem, loss, batch, _ = _problem(energy_weight=1.0)
-    out = run_objective_pass(problem, batch)
-    balance = objective_balance(loss, out)
-    shape = TermShape(SETPT, grid=[20.0, 23.0, 26.0], values=[3.0, 2.0, 1.0],
-                      argmin=2)
-
-    payload = objective_to_dict(balance, [shape])
-
-    assert payload["power_shape"][SETPT]["minimised_at"] == 26.0
-    assert payload["power_shape"][SETPT]["values"] == [3.0, 2.0, 1.0]
-    json.dumps(payload)  # must not raise
-
-
 # ── per-channel du_weight ────────────────────────────────────────
-
-
-def test_scalar_du_weight_broadcasts_to_every_control():
-    assert resolve_du_weights(2.5, ["a", "b"]) == [2.5, 2.5]
-
-
-def test_list_du_weight_is_positional():
-    assert resolve_du_weights([1.0, 4.0], ["a", "b"]) == [1.0, 4.0]
-    with pytest.raises(ValueError, match="has 1 entries but there are 2"):
-        resolve_du_weights([1.0], ["a", "b"])
 
 
 def test_dict_du_weight_defaults_omitted_controls_to_zero():

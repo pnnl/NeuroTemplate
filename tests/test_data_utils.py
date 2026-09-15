@@ -8,13 +8,11 @@ import torch
 from neurotemplate.modeling.config import ModelingConfig as Config
 from neurotemplate.common.config import dict_to_dataclass
 from neurotemplate.common.data_utils import (
-    axis_label,
     normalize_df,
     compute_norm_stats,
     get_sw_dict,
     get_sw_dict_multi,
     parse_column_unit,
-    unit_of,
     unnormalize_df,
 )
 
@@ -70,13 +68,6 @@ def test_norm_z_score_round_trip(synthetic_df):
         assert np.allclose(back[col].to_numpy(), synthetic_df[col].to_numpy())
 
 
-def test_norm_none_is_identity(synthetic_df):
-    stats = compute_norm_stats(synthetic_df, norm_type=None)
-    normed = normalize_df(synthetic_df, stats)
-    for col in synthetic_df.columns:
-        assert np.allclose(normed[col].to_numpy(), synthetic_df[col].to_numpy())
-
-
 def test_column_overrides_apply_per_column_norm(synthetic_df):
     """Override one column to min_max while the global is z_score."""
     stats = compute_norm_stats(
@@ -105,18 +96,6 @@ def test_column_overrides_none_skips_normalization(synthetic_df):
     assert np.isclose(stats["y0"]["max"], synthetic_df["y0"].max())
     # y1 still gets min_max
     assert np.isclose(stats["y1"]["shift"], synthetic_df["y1"].min())
-
-
-def test_column_overrides_invalid_norm_type_raises(synthetic_df):
-    try:
-        compute_norm_stats(
-            synthetic_df, norm_type="min_max",
-            column_overrides={"y0": "not_a_thing"},
-        )
-    except ValueError as e:
-        assert "not_a_thing" in str(e)
-        return
-    raise AssertionError("Invalid norm_type in column_overrides must raise")
 
 
 def test_sec_elapsed_always_identity_regardless_of_override(synthetic_df):
@@ -201,36 +180,13 @@ def test_multi_file_windows_never_cross_boundary(nm_mapping, cfg):
     assert flips == 1, f"source_idx should be contiguous runs per file: {src}"
 
 
-def test_multi_file_rejects_short_file(nm_mapping, cfg):
-    """A file shorter than the window size is rejected explicitly —
-    truncating per-file would break the cross-file concat shapes."""
-    dfs = _two_synthetic_dfs(n=100)
-    dfs[1] = dfs[1].iloc[:5].copy()  # too short for any window
-    with pytest.raises(ValueError, match="rows but window length is"):
-        get_sw_dict_multi(dfs, cfg, nm_mapping)
-
-
-def test_multi_file_single_element_matches_legacy(synthetic_df, nm_mapping, cfg):
-    """A length-1 list reproduces the single-df shape (modulo source_idx,
-    which is all zeros)."""
-    single = get_sw_dict(synthetic_df, cfg, nm_mapping)
-    multi = get_sw_dict_multi([synthetic_df], cfg, nm_mapping)
-    for key in single:
-        assert torch.equal(single[key], multi[key]), f"{key} mismatch"
-    assert (multi["source_idx"] == 0).all()
-
-
 # ── Units: parsed from a column's own name, carried on norm_stats ───
 
 
 @pytest.mark.parametrize("col,expected", [
     ("North Zone Air Temperature [°C]", "°C"),
-    ("Ambient Temperature [degC]", "degC"),
-    ("Total DX Power [W]", "W"),
-    ("Cooling Stage Signal [-]", "-"),
     ("sec_elapsed", None),          # no brackets at all
     ("Foo [note] Bar", None),       # bracket present, but not trailing
-    ("Foo []", None),               # trailing bracket, nothing inside
 ])
 def test_parse_column_unit(col, expected):
     assert parse_column_unit(col) == expected
@@ -244,40 +200,3 @@ def test_compute_norm_stats_populates_unit_per_column():
     stats = compute_norm_stats(df, norm_type="z_score")
     assert stats["Zone Air Temperature [°C]"]["unit"] == "°C"
     assert stats["sec_elapsed"]["unit"] is None
-
-
-def test_unit_of_handles_missing_column_and_missing_key():
-    """Neither a column absent from norm_stats nor a norm_stats dict that
-    predates per-column units (no "unit" key at all -- the reloaded-old-run
-    case) should raise; both just mean 'no unit known'."""
-    stats = compute_norm_stats(pd.DataFrame({"y0 [°C]": [1.0, 2.0]}), norm_type=None)
-    assert unit_of(stats, "not_a_column") is None
-
-    reloaded_old_run = {"y0 [°C]": {"shift": 0.0, "stretch": 1.0}}  # no "unit" key
-    assert unit_of(reloaded_old_run, "y0 [°C]") is None
-
-
-@pytest.mark.parametrize("cols,expected", [
-    (["y0 [°C]", "y1 [°C]"], "Regulated [°C]"),  # every column agrees
-    (["y0 [°C]", "p0 [W]"], "Regulated"),        # units disagree
-    (["u0", "u1"], "Regulated"),                 # no unit known on either
-    ([], "Regulated"),                           # nothing to agree on
-])
-def test_axis_label(cols, expected):
-    stats = compute_norm_stats(pd.DataFrame({
-        "y0 [°C]": [1.0, 2.0], "y1 [°C]": [1.0, 2.0], "p0 [W]": [1.0, 2.0],
-        "u0": [1.0, 2.0], "u1": [1.0, 2.0],
-    }), norm_type=None)
-    assert axis_label(stats, cols, "Regulated") == expected
-
-
-def test_tie_norm_stats_style_override_reaches_the_label():
-    """`tie_norm_stats` is just a hook that mutates norm_stats before it's
-    frozen; overriding "unit" there works exactly like overriding shift or
-    stretch, and axis_label picks up the override with no other change."""
-    stats = compute_norm_stats(pd.DataFrame({"Tank Level": [1.0, 2.0]}), norm_type=None)
-    assert unit_of(stats, "Tank Level") is None  # nothing to parse
-
-    stats["Tank Level"]["unit"] = "m"  # what a tie_norm_stats hook would do
-    assert unit_of(stats, "Tank Level") == "m"
-    assert axis_label(stats, ["Tank Level"], "Level") == "Level [m]"

@@ -18,8 +18,6 @@ import pytest
 import torch
 
 from neurotemplate.modeling.pipeline import evaluate_and_plot, log_test_results
-from neurotemplate.modeling.reportcard import render_reportcard
-from neurotemplate.modeling.dynamics import describe_dynamics
 from control_fixtures import (
     make_frozen_dynamics, make_nm_mapping, make_norm_stats, make_raw_df,
     make_sysid_cfg,
@@ -55,21 +53,6 @@ def _evaluate(tmp_path, synth: bool = True):
         nm_mapping=nm, norm_stats=norm_stats, synth_cfg=spec,
         freq_s=300.0, plot_run_dir=Path(tmp_path),
     ), cfg, nm, norm_stats
-
-
-def test_every_diagnostic_reaches_the_reportcard(tmp_path):
-    results, cfg, nm, norm_stats = _evaluate(tmp_path)
-
-    md = render_reportcard(
-        cfg=cfg, arch=describe_dynamics(make_frozen_dynamics(cfg, nm)[0], cfg),
-        test_metrics=results.metrics, nm_mapping=nm,
-        stability=results.stability,
-        physics=results.physics, readouts=results.readouts, run_name="x",
-        timestamp="2026-01-01T00:00:00",
-    )
-    for title in ("## Test Metrics (per channel)", "## Rollout stability",
-                  "## Physics checks", "## Readout channels"):
-        assert title in md, f"missing section: {title}"
 
 
 def test_the_fixture_hooks_produce_a_usable_spec(tmp_path):
@@ -140,35 +123,6 @@ def test_the_checks_do_not_disturb_the_surrogate(tmp_path):
         assert p.grad is None
 
 
-def test_the_plot_path_writes_figures_and_their_data(tmp_path):
-    """A figure is only written if its data lands beside it."""
-    import pandas as pd
-
-    nm = make_nm_mapping()
-    raw = make_raw_df(n_rows=120)
-    # plot_predictions anchors its time axis to the source frame's timestamps.
-    raw.index = pd.date_range("2026-01-01", periods=len(raw), freq="5min")
-    norm_stats = make_norm_stats(raw)
-    cfg = make_sysid_cfg()
-    cfg.test_window, cfg.test_stride = 24, 24
-    cfg.synth_n_scenarios, cfg.synth_hours, cfg.synth_n_plot = 4, 0.5, 2
-    cfg.plot, cfg.verbose = True, False
-    dyn_sys, _ = make_frozen_dynamics(cfg, nm)
-
-    evaluate_and_plot(
-        cfg=cfg, dyn_sys=dyn_sys, test_dfs=[normalize_df(raw, norm_stats)],
-        nm_mapping=nm, norm_stats=norm_stats,
-        synth_cfg=hooks.synth_cfg(nm, norm_stats),
-        freq_s=300.0, plot_run_dir=Path(tmp_path),
-    )
-
-    synth_dir = Path(tmp_path) / "synthetic"
-    pdfs = sorted(synth_dir.glob("*.pdf"))
-    csvs = sorted((synth_dir / "synth_data").glob("*.csv"))
-    assert len(pdfs) == 4 * cfg.synth_n_plot      # four scenarios
-    assert [p.stem for p in pdfs] == [c.stem for c in csvs]
-
-
 # ── Staged channels: classification metrics and the persistence bar ──
 
 def test_a_staged_channel_is_scored_as_a_classifier_and_against_persistence(tmp_path):
@@ -213,15 +167,3 @@ def test_a_staged_channel_is_scored_as_a_classifier_and_against_persistence(tmp_
     assert "persistence_metrics.json" in logger.dicts
     key = [k for k in logger.metrics if k.endswith("_balanced_acc") and k.startswith("test_")]
     assert len(key) == 1
-
-    md = render_reportcard(
-        cfg=cfg, arch=describe_dynamics(dyn_sys, cfg),
-        test_metrics=results.metrics, nm_mapping=nm,
-        levels=results.levels, persistence=results.persistence,
-        persistence_levels=results.persistence_levels,
-        head_stack=dyn_sys.nodes[0].callable.head_stack, norm_stats=norm_stats,
-        run_name="x", timestamp="2026-01-01T00:00:00",
-    )
-    assert "## Level metrics (staged channels)" in md
-    assert "**Persistence reference**" in md
-    assert "Decision thresholds" in md

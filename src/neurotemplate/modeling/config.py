@@ -57,10 +57,10 @@ class ModelingConfig:
     # Give each block its own sub-model, with its own parameters and hidden
     # state and no term reading another block's state on the same step.
     # Which channels form a block comes from the optional `block_mapping`
-    # hook (or the deprecated `zone_mapping`); without one there is one
-    # block holding everything, and this flag only costs a wrapper.
-    # `2r2c` is per-block by construction and rejects this flag.
-    per_zone: bool = False
+    # hook; without one there is one block holding everything, and this
+    # flag only costs a wrapper. `2r2c` is per-block by construction and
+    # rejects this flag.
+    per_block: bool = False
     # Timesteps per hour, resolved from the data's sampling frequency by the
     # CLI (like `device` and `seed`) rather than set in YAML. Only `2r2c`
     # reads it, to place its time constants in real hours.
@@ -217,11 +217,11 @@ class ModelingConfig:
                 stacklevel=2,
             )
 
-        if self.per_zone and self.model not in PER_BLOCK_FAMILIES:
+        if self.per_block and self.model not in PER_BLOCK_FAMILIES:
             extra = (" 2r2c is already per-block and needs no flag."
                      if self.model == "2r2c" else "")
             raise ValueError(
-                f"per_zone is not supported for model '{self.model}'; "
+                f"per_block is not supported for model '{self.model}'; "
                 f"available: {list(PER_BLOCK_FAMILIES)}.{extra}"
             )
 

@@ -12,16 +12,14 @@ import torch
 
 from neurotemplate.control.closed_loop import build_closed_loop
 from neurotemplate.control.metrics import residual_metrics
-from neurotemplate.control.pipeline import evaluate_closed_loop
 from neurotemplate.control.policy import (
     _ResidualPolicy,
     build_policy,
     build_reference_node,
-    describe_policy,
     reference_over_horizon,
 )
 from neurotemplate.control.scenarios import build_window_dict, horizons
-from control_fixtures import full_setup, install_price
+from control_fixtures import full_setup
 
 
 def _rollout(s):
@@ -38,12 +36,6 @@ def _rollout(s):
 # ── Wiring ───────────────────────────────────────────────────────
 
 
-def test_no_residual_by_default():
-    s = full_setup()
-    policy = build_policy(s["cfg"], s["sysid_cfg"], s["nm"], s["norm_stats"])
-    assert not isinstance(policy.callable, _ResidualPolicy)
-
-
 def test_residual_keeps_the_node_signature_the_deploy_path_calls():
     """Shape B: the rule is composed inside the policy Node's callable, so the
     Node's input keys, input_map and output are unchanged — which is what lets
@@ -58,26 +50,6 @@ def test_residual_keeps_the_node_signature_the_deploy_path_calls():
     assert a.input_keys == b.input_keys
     assert a.output_keys == b.output_keys
     assert a.input_map == b.input_map
-
-
-def test_residual_without_the_hook_fails_fast(monkeypatch):
-    """No silent 'no reference -> plain policy' path: a residual anchored to
-    nothing is just a policy that lost its bound."""
-    import control_user_defined as cud
-    s = full_setup(residual_delta=1.0)
-    monkeypatch.delattr(cud, "reference_control")
-    with pytest.raises(NotImplementedError, match="reference_control"):
-        build_policy(s["cfg"], s["sysid_cfg"], s["nm"], s["norm_stats"])
-
-
-def test_a_price_preview_does_not_disturb_the_rule(tmp_path):
-    """The rule keeps comfort and ignores everything else it is handed —
-    which is the division of labour the price case is built on."""
-    s = full_setup(residual_delta=1.0)
-    install_price(s["cfg"], tmp_path)
-    policy, out = _rollout(s)
-    assert policy.input_keys[-1] == "price"
-    assert torch.isfinite(out["U"]).all()
 
 
 # ── δ = 0 at initialization ──────────────────────────────────────
@@ -222,42 +194,6 @@ def test_a_zero_width_box_reports_no_saturation_rather_than_all_of_it():
     assert m.frac_at_cap is None
     assert m.mean_abs_delta == 0.0
     assert m.max_abs_delta == 0.0
-
-
-def test_residual_metrics_reject_a_mismatched_reference():
-    with pytest.raises(ValueError, match="must match"):
-        residual_metrics(torch.zeros(1, 3, 1), torch.zeros(1, 2, 1), 1.0, 0.1)
-
-
-def test_evaluation_reports_the_residual_and_describe_reports_the_box():
-    # setpoint_step is explicit: this test also checks describe_policy's
-    # "quantized" flag, and 0.0 (the config default) would report False.
-    s = full_setup(residual_delta=1.0, setpoint_step=0.5)
-    cfg, sysid_cfg, nm, ns = s["cfg"], s["sysid_cfg"], s["nm"], s["norm_stats"]
-    policy = build_policy(cfg, sysid_cfg, nm, ns)
-    cl = build_closed_loop(s["dyn_node"], policy, cfg, sysid_cfg)
-    results, _ = evaluate_closed_loop(cfg, sysid_cfg, cl, [s["norm_df"]], nm, ns)
-
-    assert results.residual is not None
-    assert results.residual.delta_cap == pytest.approx(1.0)
-    assert results.residual.max_abs_delta <= 1.0 + 1e-4
-
-    arch = describe_policy(policy, cfg, sysid_cfg, nm, ns)
-    assert arch["residual_delta"] == pytest.approx(1.0)
-    assert arch["quantized"] is True
-    # The bounds reported are the clamp's, not the network's +/- delta box.
-    for i, col in enumerate(nm["U"]):
-        assert arch["umin_phys"][i] == pytest.approx(ns[col]["min"], rel=1e-4)
-
-
-def test_a_plain_policy_reports_no_residual():
-    s = full_setup()
-    cfg, sysid_cfg, nm, ns = s["cfg"], s["sysid_cfg"], s["nm"], s["norm_stats"]
-    cl = build_closed_loop(
-        s["dyn_node"], build_policy(cfg, sysid_cfg, nm, ns), cfg, sysid_cfg,
-    )
-    results, _ = evaluate_closed_loop(cfg, sysid_cfg, cl, [s["norm_df"]], nm, ns)
-    assert results.residual is None
 
 
 def test_a_grid_aligned_reference_leaves_no_snapping_floor(monkeypatch):

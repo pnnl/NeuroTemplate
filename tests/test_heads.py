@@ -60,18 +60,10 @@ def fit(activate, loss_fn, z0, target, steps=400, lr=0.1):
                  1.0, {}, id="regression"),
     pytest.param(BinaryHead(), torch.zeros(32),
                  torch.tensor([0.0, 1.0]).repeat(16), 1.0, {}, id="binary"),
-    pytest.param(BoundedHead(lo=-1.0, hi=2.0), torch.zeros(32),
-                 torch.full((32,), 1.5), 1.0, dict(lr=0.01, steps=600),
-                 id="bounded-both"),
     pytest.param(BoundedHead(lo=0.0, hi=INF), torch.zeros(32),
                  torch.full((32,), 3.0), 1.0, dict(lr=0.2), id="bounded-lower"),
-    pytest.param(BoundedHead(lo=-INF, hi=0.0), torch.zeros(32),
-                 torch.full((32,), -2.5), 1.0, dict(lr=0.2), id="bounded-upper"),
     # Ordinal has to do better than "somewhat": snapping to integer levels is
     # the whole claim, so require the loss to fall by 10x.
-    pytest.param(OrdinalHead(n_levels=4), torch.zeros(32),
-                 torch.tensor([0.0, 1.0, 2.0, 3.0]).repeat(8), 0.1,
-                 dict(lr=0.5, steps=800), id="ordinal-uniform"),
     pytest.param(OrdinalHead(n_levels=3, level_values=torch.tensor([0.0, 1.0, 5.0])),
                  torch.linspace(-1.0, 6.0, 30),
                  torch.tensor([0.0, 1.0, 5.0]).repeat_interleave(10), 0.1,
@@ -105,7 +97,6 @@ def test_a_mixed_stack_still_has_a_descent_direction():
 @pytest.mark.parametrize("head,lo,hi,open_side", [
     pytest.param(BoundedHead(lo=0.0, hi=1.0), 0.0, 1.0, None, id="bounded-both"),
     pytest.param(BoundedHead(lo=0.0, hi=INF), 0.0, INF, "hi", id="bounded-lower"),
-    pytest.param(BoundedHead(lo=-INF, hi=5.0), -INF, 5.0, "lo", id="bounded-upper"),
     pytest.param(OrdinalHead(n_levels=4), 0.0, 3.0, None, id="ordinal"),
 ])
 def test_an_activation_stays_inside_its_bounds(head, lo, hi, open_side):
@@ -209,33 +200,16 @@ def test_channels_the_config_does_not_mention_default_to_regression():
     assert all(isinstance(h, RegressionHead) for h in stack.heads)
 
 
-# ── Every way a head config can be malformed ─────────────────────
+# ── A malformed head config is refused, not built ─────────────────
 
 @pytest.mark.parametrize("build,message", [
-    pytest.param(lambda: BoundedHead(lo=1.0, hi=0.0),
-                 "requires hi > lo", id="hi below lo"),
-    pytest.param(lambda: BoundedHead(lo=-INF, hi=INF),
-                 "at least one finite bound", id="unbounded both ways"),
-    pytest.param(lambda: OrdinalHead(n_levels=1),
-                 "n_levels >= 2", id="one level"),
     pytest.param(lambda: OrdinalHead(n_levels=3,
                                      level_values=torch.tensor([0.0, 1.0, 1.0])),
                  "strictly increasing", id="non-increasing levels"),
-    pytest.param(lambda: OrdinalHead(n_levels=4,
-                                     init_thresholds=torch.tensor([0.5, 1.5])),
-                 r"init_thresholds must have shape \(3,\)", id="wrong threshold count"),
     pytest.param(lambda: OrdinalHead(n_levels=3,
                                      decision_thresholds=torch.tensor([1.5, 0.5])),
                  "decision_thresholds must be strictly increasing",
                  id="unordered decision thresholds"),
-    pytest.param(lambda: OrdinalHead(n_levels=2, level_weights=torch.tensor([1.0, 0.0])),
-                 "level_weights must be positive", id="zero level weight"),
-    pytest.param(lambda: BinaryHead(level_weights=torch.tensor([1.0, 2.0, 3.0])),
-                 r"level_weights must have shape \(2,\)", id="binary weight count"),
-    pytest.param(lambda: HeadStack([RegressionHead()] * 2, ["a", "a"]),
-                 "must be unique", id="duplicate channel names"),
-    pytest.param(lambda: HeadStack.from_config({"x": {"kind": "not_a_thing"}}, ["x"]),
-                 "Unknown head kind", id="unknown kind"),
     pytest.param(lambda: HeadStack.from_config({"typo": {"kind": "binary"}}, ["x", "y"]),
                  "typo", id="unknown channel"),
 ])

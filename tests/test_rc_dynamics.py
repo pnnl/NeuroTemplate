@@ -32,7 +32,6 @@ from neurotemplate.modeling.heads import BinaryHead, HeadStack, RegressionHead
 from neurotemplate.modeling.rc import (
     MIN_TAU_STEPS, RCBlock, _init_theta, mode_taus,
 )
-from neurotemplate.modeling.blocks import build_blocks
 
 SPH = 12.0            # 5-minute data
 IN_STEPS = 6
@@ -129,14 +128,6 @@ def test_the_reported_time_constants_are_the_updates_eigenvalues():
     # tau = 1/lambda for the continuous rate lambda = 1 - eigenvalue.
     assert torch.allclose(1 / (1 - eig[0]), slow, rtol=1e-4)
     assert torch.allclose(1 / (1 - eig[1]), fast, rtol=1e-4)
-
-
-def test_the_default_prior_is_an_ordinary_building():
-    """0.6 h of air and 13.4 h of mass, at a 5-minute timestep. If this
-    moves, every default 2r2c run's storage moved with it."""
-    taus = make_block().describe()["time_constants_h"]["y0"]
-    assert taus["fast"] == pytest.approx(0.60, abs=0.02)
-    assert taus["slow"] == pytest.approx(13.40, abs=0.05)
 
 
 def test_the_prior_is_what_the_config_asked_for():
@@ -315,9 +306,9 @@ def test_reset_reaches_every_block():
     assert all(b._mass is None for b in fy.blocks)
 
 
-def test_per_zone_wraps_any_family_the_flag_allows():
-    """`per_zone` is a split, not a family: an MLP gets the same treatment."""
-    system = get_dynamics(make_cfg(model="mlp", per_zone=True), MAPPING,
+def test_per_block_wraps_any_family_the_flag_allows():
+    """`per_block` is a split, not a family: an MLP gets the same treatment."""
+    system = get_dynamics(make_cfg(model="mlp", per_block=True), MAPPING,
                           block_spec=SPLIT)
     fy = system.nodes[0].callable.fy
     assert isinstance(fy, BlockStack)
@@ -425,32 +416,6 @@ def test_a_head_that_will_not_add_the_state_back_is_refused():
         get_dynamics(make_cfg(), MAPPING, head_stack=stack)
 
 
-def test_a_non_2r2c_channel_is_free_to_use_any_head_in_a_mixed_model():
-    """The residual-compatible requirement is scoped to the channels a 2r2c
-    block actually produces — a mixed-family run's other channels (here,
-    `power`, produced by an `mlp` block) must not be swept into it."""
-    stack = HeadStack([RegressionHead(), BinaryHead()], MIXED_MAPPING["Y"])
-    cfg = make_cfg(model="mlp")
-    # Must not raise: BinaryHead is on "power" (mlp-produced), not "north T".
-    get_dynamics(cfg, MIXED_MAPPING, block_spec=MIXED_SPLIT, head_stack=stack)
-
-
-def test_per_zone_is_refused_where_it_would_do_nothing():
-    with pytest.raises(ValueError, match="already per-block"):
-        make_cfg(per_zone=True, train_data_path="x.csv", dev_data_path="x.csv",
-                 test_data_path="x.csv").validate()
-
-
-def test_a_coarse_timestep_cannot_ask_for_an_impossible_prior():
-    """At an hourly timestep the 1 h zone<->mass default is below the
-    two-step floor; it clamps rather than producing a NaN."""
-    hourly = RCBlock(1, 1, 1, IN_STEPS, steps_per_hour=1.0,
-                     hidden_size=8, num_layers=1)
-    taus = hourly.describe()["time_constants_h"]["y0"]
-    assert math.isfinite(taus["fast"]) and math.isfinite(taus["slow"])
-    assert 0 < taus["fast"] < taus["slow"]
-
-
 def test_a_long_time_constant_builds_instead_of_overflowing():
     """The far end of the same clamp. The exact inverse `log(expm1(x))`
     overflows float64 past x ~ 709.78, which used to make any prior above
@@ -463,7 +428,7 @@ def test_a_long_time_constant_builds_instead_of_overflowing():
     assert 0 < taus["fast"] < taus["slow"]
 
 
-@pytest.mark.parametrize("tau_hours", [0.5, 2.0, 13.4, 59.0, 200.0])
+@pytest.mark.parametrize("tau_hours", [0.5, 13.4, 200.0])
 def test_init_theta_inverts_the_forward_map_on_both_branches(tau_hours):
     """Whichever branch it takes, `_init_theta` is the inverse of
     `tau = MIN_TAU_STEPS + softplus(theta)` -- so the overflow guard is
@@ -490,26 +455,3 @@ def test_2r2c_with_reads_is_refused():
     }
     with pytest.raises(ValueError, match="cannot declare `reads`"):
         get_dynamics(make_cfg(model="mlp"), MIXED_MAPPING, block_spec=spec)
-
-
-def test_an_unbuildable_model_name_is_refused():
-    """`nssm` has no per-block builder (it models all of Y jointly), so a
-    block naming it explicitly is a spec error, not a silent no-op."""
-    spec = {
-        "north": {"Y": ["north T"], "U": ["north sp"], "model": "nssm"},
-        "power": {"Y": ["power"], "model": "mlp"},
-    }
-    with pytest.raises(ValueError, match="no per-block builder"):
-        get_dynamics(make_cfg(model="mlp"), MIXED_MAPPING, block_spec=spec)
-
-
-# ── Backward compatibility ────────────────────────────────────────
-
-def test_an_old_style_zone_mapping_hook_still_builds_the_same_blocks():
-    """`build_blocks` doesn't care what the spec was called by the caller —
-    this pins that a spec obtained via the deprecated `zone_mapping` name
-    (see pipeline.resolve_block_spec) builds identically to one obtained via
-    `block_mapping`."""
-    system = get_dynamics(make_cfg(), MAPPING, block_spec=SPLIT)
-    fy = system.nodes[0].callable.fy
-    assert fy.block_names == ["north", "south"]

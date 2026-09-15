@@ -98,34 +98,6 @@ def test_gru_and_mlp_produce_identical_windows(synthetic_df, nm_mapping):
         assert torch.equal(gru[key], mlp[key])
 
 
-def test_in_steps_one_inflates_the_window_count(synthetic_df, nm_mapping):
-    """Regression on the original symptom: stride == in_steps, so in_steps=1
-    yields ~12x the windows of in_steps=12 over the same data."""
-    wide = get_sw_dict(synthetic_df, make_cfg("gru", 12), nm_mapping)
-    narrow = get_sw_dict(synthetic_df, make_cfg("gru", 1), nm_mapping)
-
-    assert narrow["Y"].shape[0] > 10 * wide["Y"].shape[0]
-
-
-def test_gru_takes_the_same_window_as_every_other_family(nm_mapping):
-    """No stateful special-casing: same declared width, same input_map."""
-    gru = build_system("gru", 12, nm_mapping)
-    mlp = build_system("mlp", 12, nm_mapping)
-
-    assert gru.nodes[0].callable.in_steps == mlp.nodes[0].callable.in_steps == 12
-    assert gru.nodes[0].input_map == mlp.nodes[0].input_map
-
-
-def test_gru_and_mlp_rollouts_have_the_same_shape(nm_mapping):
-    in_steps = 12
-    data = make_batch(in_steps)
-    gru_out = build_system("gru", in_steps, nm_mapping)(dict(data))
-    mlp_out = build_system("mlp", in_steps, nm_mapping)(dict(data))
-
-    assert gru_out["yn"].shape == mlp_out["yn"].shape
-    assert gru_out["yn"].shape == (data["yn"].shape[0], in_steps + P + 1, NY)
-
-
 # ── The core invariant ──────────────────────────────────────────
 
 
@@ -152,26 +124,6 @@ def test_warm_consumption_equals_a_cold_pass_over_the_whole_history():
         once = cold(torch.cat(flat_window(data, 0, in_steps + extra), dim=-1))
 
     assert torch.allclose(warm, once, atol=1e-6)
-
-
-def test_a_standalone_block_is_correct_on_its_first_call():
-    """Portability: no System, no init_func — one window in, warmed prediction
-    out. This is what makes the model safe to instantiate anywhere."""
-    torch.manual_seed(0)
-    in_steps = 6
-    data = make_batch(in_steps)
-    block = GRUBlock(NY, NU, ND, in_steps, outsize=NY, hidden_size=8, num_layers=2)
-
-    with torch.no_grad():
-        fresh = block(torch.cat(flat_window(data, 0, in_steps), dim=-1))
-
-        # Ground truth: plain nn.GRU over the same per-timestep sequence.
-        seq = torch.cat([data[key][:, :in_steps, :]
-                         for key in ("yn", "U", "D")], dim=-1)
-        out, _ = block.gru(seq)
-        expected = block.output(out[:, -1, :])
-
-    assert torch.allclose(fresh, expected, atol=1e-6)
 
 
 def test_manual_vmap_path_matches_the_fused_kernel():

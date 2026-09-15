@@ -38,7 +38,7 @@ test_data_path: data/test.csv
 # parameters and hidden state. mlp and gru only; 2r2c is always per-block.
 # A block that names its own `model` needs no flag — this one is for splitting
 # every block under a single family. (Field name kept for compatibility.)
-# per_zone: false
+# per_block: false
 
 # ── 2R2C ─────────────────────────────────────────────────────────
 # Only read when model: 2r2c. The RC network's three component time constants

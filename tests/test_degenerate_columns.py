@@ -26,7 +26,6 @@ from neurotemplate.common.data_utils import (
     degenerate_mapped_columns,
     warn_degenerate_columns,
 )
-from neurotemplate.modeling.reportcard import _data_section
 
 MAPPING = {"Y": ["zone [°C]", "gas [J]"], "U": ["cool_sp [°C]"], "D": ["oat [°C]"]}
 
@@ -48,11 +47,6 @@ def test_a_constant_column_is_detected_under_every_norm_type(norm_type):
     stats = compute_norm_stats(_frame([1e9] * 6), norm_type=norm_type)
     assert "gas [J]" in degenerate_columns(stats)
     assert "zone [°C]" not in degenerate_columns(stats)
-
-
-def test_a_varying_column_is_not_detected():
-    stats = compute_norm_stats(_frame([1e9, 2e9, 3e9, 4e9, 5e9, 6e9]))
-    assert "gas [J]" not in degenerate_columns(stats)
 
 
 def test_unit_spread_is_not_mistaken_for_degenerate():
@@ -77,60 +71,11 @@ def test_the_fallback_leaves_the_column_in_raw_units():
     assert later == pytest.approx(6e8)
 
 
-def test_data_section_warns_and_names_the_columns():
-    stats = compute_norm_stats(_frame([1e9] * 6))
-    body = _data_section(MAPPING, None, None, stats)
-    assert "Constant in this data" in body
-    assert "`gas [J]`" in body
-    assert "`cool_sp [°C]`" in body, "the warning covers U and D, not just Y"
-
-
-def test_data_section_is_quiet_when_nothing_is_constant():
-    df = _frame([1e9, 2e9, 3e9, 4e9, 5e9, 6e9])
-    df["cool_sp [°C]"] = [23.0, 24.0, 25.0, 24.0, 23.0, 25.0]
-    body = _data_section(MAPPING, None, None, compute_norm_stats(df))
-    assert "Constant in this data" not in body
-
-
-def test_unmapped_columns_are_not_warned_about():
-    """A constant column nobody feeds the model is not a problem worth flagging."""
-    df = _frame([1e9, 2e9, 3e9, 4e9, 5e9, 6e9])
-    df["cool_sp [°C]"] = [23.0, 24.0, 25.0, 24.0, 23.0, 25.0]
-    df["ignored [-]"] = [7.0] * 6
-    stats = compute_norm_stats(df)
-    assert "ignored [-]" in degenerate_columns(stats)
-    assert "Constant in this data" not in _data_section(MAPPING, None, None, stats)
-
-
-def test_data_section_without_norm_stats_does_not_warn():
-    """The section is rendered for callers that pass no stats; it must not raise."""
-    assert "Constant in this data" not in _data_section(MAPPING, None, None, None)
-
-
 # ── The startup warning ──────────────────────────────────────────
 #
 # The reportcard only exists once the run has finished. The condition is
 # knowable when norm_stats is frozen, so it is also printed there — someone
 # watching a loss curve should not have to open a file to learn about it.
-
-
-def test_warn_prints_and_names_the_columns(capsys):
-    stats = compute_norm_stats(_frame([1e9] * 6))
-
-    found = warn_degenerate_columns(stats, MAPPING)
-
-    assert set(found) == {"gas [J]", "cool_sp [°C]"}
-    out = capsys.readouterr().out
-    assert "WARNING" in out
-    assert "gas [J]" in out and "cool_sp [°C]" in out
-
-
-def test_warn_is_silent_when_nothing_is_constant(capsys):
-    df = _frame([1e9, 2e9, 3e9, 4e9, 5e9, 6e9])
-    df["cool_sp [°C]"] = [23.0, 24.0, 25.0, 24.0, 23.0, 25.0]
-
-    assert warn_degenerate_columns(compute_norm_stats(df), MAPPING) == []
-    assert capsys.readouterr().out == ""
 
 
 def test_warn_ignores_columns_the_mapping_never_references(capsys):

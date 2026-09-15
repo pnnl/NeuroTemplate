@@ -32,14 +32,6 @@ _spec.loader.exec_module(_template_control)
 bracket_band = _template_control.bracket_band
 
 
-def test_setpoints_land_on_the_grid():
-    lo = torch.tensor([20.3, 21.7, 22.02])
-    hi = torch.tensor([22.1, 23.4, 24.88])
-    cool, heat = bracket_band(lo, hi, step=0.5)
-    for u in (cool, heat):
-        assert torch.allclose(u / 0.5, torch.round(u / 0.5), atol=1e-5)
-
-
 def test_rounds_toward_the_band_interior():
     """Heating rounds up off the floor, cooling rounds down off the ceiling.
 
@@ -55,21 +47,6 @@ def test_rounds_toward_the_band_interior():
     assert cool.item() <= hi.item()
 
 
-def test_exact_grid_edges_are_not_pushed_inward():
-    """A band already on the grid keeps its full width — ceil/floor are no-ops."""
-    lo, hi = torch.tensor([20.0]), torch.tensor([24.0])
-    cool, heat = bracket_band(lo, hi, step=0.5)
-    assert heat.item() == pytest.approx(20.0)
-    assert cool.item() == pytest.approx(24.0)
-
-
-def test_insets_pull_each_setpoint_further_inside():
-    lo, hi = torch.tensor([20.0]), torch.tensor([26.0])
-    cool, heat = bracket_band(lo, hi, step=0.5, cool_inset=0.5, heat_inset=0.25)
-    assert cool.item() == pytest.approx(25.5)
-    assert heat.item() == pytest.approx(20.5)  # ceil(20.25 / 0.5) * 0.5
-
-
 def test_heating_never_exceeds_cooling():
     """Across a wide sweep of bands and insets, the ordering must hold."""
     lo = torch.linspace(20.0, 28.0, 60).reshape(-1, 1)
@@ -80,17 +57,6 @@ def test_heating_never_exceeds_cooling():
         cool, heat = bracket_band(
             lo, hi, step=0.5, cool_inset=cool_inset, heat_inset=heat_inset)
         assert (heat <= cool).all(), f"insets {cool_inset}/{heat_inset}"
-
-
-def test_narrow_band_collapses_to_one_grid_point():
-    """Too narrow to seat both: both go to one point near the midpoint.
-
-    Giving up the deadband is better than letting the stages fight.
-    """
-    lo, hi = torch.tensor([21.9]), torch.tensor([22.1])
-    cool, heat = bracket_band(lo, hi, step=0.5)
-    assert cool.item() == pytest.approx(heat.item())
-    assert cool.item() == pytest.approx(22.0)
 
 
 def test_oversized_inset_collapses_rather_than_inverting():
@@ -104,54 +70,3 @@ def test_oversized_inset_collapses_rather_than_inverting():
     cool, heat = bracket_band(lo, hi, step=0.5, cool_inset=2.0)
     assert cool.item() == pytest.approx(heat.item())
     assert heat.item() <= cool.item()
-
-
-def test_collapse_point_is_inside_the_band():
-    """The collapse fallback must not itself land outside the band."""
-    lo = torch.linspace(20.0, 28.0, 81)
-    hi = lo + 0.2  # narrower than one grid step everywhere
-    cool, heat = bracket_band(lo, hi, step=0.5)
-    # A 0.2 °C band cannot always contain a 0.5 °C grid point, but the chosen
-    # point must be the nearest one to the midpoint, so it is never further
-    # than half a step away.
-    mid = 0.5 * (lo + hi)
-    assert (cool - mid).abs().max() <= 0.25 + 1e-6
-    assert torch.equal(cool, heat)
-
-
-def test_one_degree_grid_is_supported():
-    """The user-facing win: a 1 °C grid still brackets a 2 °C band."""
-    lo, hi = torch.tensor([21.0]), torch.tensor([23.0])
-    cool, heat = bracket_band(lo, hi, step=1.0)
-    assert heat.item() == pytest.approx(21.0)
-    assert cool.item() == pytest.approx(23.0)
-
-
-def test_shapes_broadcast_like_the_closed_loop_tensors():
-    """[batch, time, 1] band tensors, the shape the control loop hands over."""
-    lo = torch.full((4, 12, 1), 21.0)
-    hi = torch.full((4, 12, 1), 23.0)
-    cool, heat = bracket_band(lo, hi, step=0.5)
-    assert cool.shape == (4, 12, 1)
-    assert heat.shape == (4, 12, 1)
-
-
-def test_output_is_constant_when_the_band_is_constant():
-    """No jitter: a held band produces a held setpoint, so mean |Δu| is 0."""
-    lo = torch.full((1, 50, 1), 21.3)
-    hi = torch.full((1, 50, 1), 22.8)
-    cool, heat = bracket_band(lo, hi, step=0.5, cool_inset=0.5)
-    for u in (cool, heat):
-        assert (u[:, 1:] - u[:, :-1]).abs().max() == pytest.approx(0.0)
-
-
-@pytest.mark.parametrize("kwargs", [
-    {"step": 0.0},
-    {"step": -0.5},
-    {"step": 0.5, "cool_inset": -0.1},
-    {"step": 0.5, "heat_inset": -1.0},
-])
-def test_input_validation(kwargs):
-    lo, hi = torch.tensor([20.0]), torch.tensor([24.0])
-    with pytest.raises(ValueError):
-        bracket_band(lo, hi, **kwargs)

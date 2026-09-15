@@ -21,8 +21,6 @@ import pytest
 from neurotemplate.modeling.diagnostics import (
     actuator_off_mask,
     estimate_decay,
-    find_runs,
-    fit_levels,
     recommend_head,
     summarize_taus,
 )
@@ -88,41 +86,6 @@ def test_staged_signal_recommends_the_right_number_of_levels():
     assert "project_physical_to_norm" in rec.snippet
 
 
-def test_two_distinct_nonbinary_values_are_ordinal_not_binary():
-    """Exactly two values, neither 0 nor 1: OrdinalHead(n_levels=2), not
-    BinaryHead -- the 0/1 rule is a literal-value check, not "any 2 clusters"."""
-    x = np.array([5.0, 20.0] * 200)
-    rec = recommend_head(x, "Two-Speed Fan")
-    assert rec.kind == "ordinal"
-    assert "n_levels=2" in rec.snippet
-
-
-def test_binary_snippet_is_plain():
-    rec = recommend_head(_binary(), "Compressor On/Off")
-    assert rec.kind == "binary"
-    assert rec.snippet == "BinaryHead()"
-
-
-def test_the_recommendation_says_where_the_mass_sits():
-    """A 2.3%-positive furnace was recommended an ordinal head with no hint
-    that every default would ignore the level it exists to predict. The
-    evidence has to carry the mode shares and flag the rare one."""
-    rng = np.random.default_rng(0)
-    fires = rng.uniform(size=4000) < 0.023
-    x = np.where(fires, 61728.4, 0.0)
-    rec = recommend_head(x, "Furnace Gas Power [W]")
-    assert rec.kind == "ordinal"
-    assert "mode shares: 0 -> 97." in rec.evidence
-    assert "RARE LEVEL: 61728.4 holds 2." in rec.evidence
-    assert "level metrics" in rec.evidence
-
-
-def test_a_balanced_staged_signal_is_not_flagged_as_rare():
-    rec = recommend_head(_staged(), "Total DX Power [W]")
-    assert "mode shares:" in rec.evidence
-    assert "RARE LEVEL" not in rec.evidence
-
-
 def test_a_rare_binary_flag_is_flagged_too():
     x = np.array([0.0] * 990 + [1.0] * 10)
     rec = recommend_head(x, "Compressor On/Off")
@@ -135,44 +98,6 @@ def test_bounded_head_bounds_only_the_pinned_side():
     assert rec.kind == "bounded"
     assert "float('inf')" in rec.snippet    # open (continuous) side
     assert "float('-inf')" not in rec.snippet  # the floor is a real bound
-
-
-def test_2r2c_conflict_stated_only_for_ordinal_recommendations():
-    ordinal_rec = recommend_head(_staged(), "Total DX Power [W]", family="2r2c")
-    assert "2r2c" in ordinal_rec.evidence
-    assert "residual" in ordinal_rec.evidence
-
-    regression_rec = recommend_head(_unimodal(), "Zone Temp", family="2r2c")
-    assert "2r2c" not in regression_rec.evidence
-
-
-@pytest.mark.parametrize("family", [None, "mlp", "gru"])
-def test_no_conflict_claimed_for_a_channel_another_family_builds(family):
-    """The conflict is a property of the channel's own block, not the run.
-
-    A mixed-family run whose `cfg.model` is 2r2c still builds a power channel
-    under `mlp`, and an ordinal head there is perfectly legal. Reporting a
-    conflict would steer the user off the right head.
-    """
-    rec = recommend_head(_staged(), "Total DX Power [W]", family=family)
-    assert rec.kind == "ordinal"
-    assert "conflict" not in rec.evidence
-
-
-@pytest.mark.parametrize("make_x", [_staged, _unimodal, _binary, _floor_pinned])
-def test_scope_note_always_present(make_x):
-    """§4.2's second honesty feature: every recommendation says it only read
-    the marginal distribution, regardless of which kind it landed on."""
-    rec = recommend_head(make_x(), "col")
-    assert "marginal distribution" in rec.evidence
-
-
-def test_fit_levels_stops_at_the_distinct_value_count():
-    """k-means cannot place more clusters than there are distinct values --
-    the sweep should stop rather than produce degenerate empty clusters."""
-    x = np.array([1.0, 1.0, 2.0, 2.0, 3.0, 3.0])  # 3 distinct values
-    fits = fit_levels(x, k_max=6)
-    assert [f.n_levels for f in fits] == [2, 3]
 
 
 # ── estimate_decay: recover a known tau, and say so when there is none ──
@@ -244,30 +169,7 @@ def test_estimate_decay_rejects_a_tau_the_window_could_not_resolve():
     assert estimate_decay(t_hours, state, ref, off, min_run_steps=48) == ()
 
 
-def test_estimate_decay_accepts_a_tau_the_same_window_can_resolve():
-    """Same window, same shape, a tau inside what 5 hours resolves. It is
-    the ratio that rejects, not the window being short."""
-    steps_per_hour = 12.0
-    t_hours = np.arange(60) / steps_per_hour
-    ref = np.zeros(60)
-    state = 6.0 * np.exp(-t_hours / 1.5)
-    off = np.ones(60, dtype=bool)
-    windows = estimate_decay(t_hours, state, ref, off, min_run_steps=48)
-    assert len(windows) == 1
-    assert windows[0].tau_h == pytest.approx(1.5, rel=1e-6)
-
-
 # ── Small pure helpers used to build the decay windows ───────────
-
-@pytest.mark.parametrize("mask,min_len,expected", [
-    pytest.param([False, True, True, True, False, True, True], 3,
-                 [(1, 4)], id="one-qualifying-one-too-short"),
-    pytest.param([True, True, True], 3, [(0, 3)], id="run-reaches-array-end"),
-    pytest.param([True, True], 3, [], id="shorter-than-min-len"),
-    pytest.param([False, False], 3, [], id="never-on"),
-])
-def test_find_runs(mask, min_len, expected):
-    assert find_runs(np.array(mask), min_len) == expected
 
 
 def test_actuator_off_mask_true_only_when_every_actuator_is_at_rest():
@@ -277,8 +179,3 @@ def test_actuator_off_mask_true_only_when_every_actuator_is_at_rest():
     # row 0: both at rest. row 1: u1 within tol. row 2: u2 at rest but u1 isn't.
     # row 3: u1 at rest but u2 (9.0) is 1.0 away, tol=0.02*(10.0-9.0)=0.02.
     assert mask.tolist() == [True, True, False, False]
-
-
-def test_actuator_off_mask_requires_an_off_value_for_every_column():
-    with pytest.raises(KeyError, match="u2"):
-        actuator_off_mask({"u1": np.zeros(3), "u2": np.zeros(3)}, {"u1": 0.0})

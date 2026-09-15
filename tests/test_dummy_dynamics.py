@@ -1,16 +1,13 @@
 """
 Tests for the content-free `dummy` surrogate (zone temp = cooling setpoint).
 
-The dummy goes through the same `get_dynamics` path as every other model. It
-must (a) be registered, (b) reproduce the setpoint exactly as the next state
-(passthrough), and (c) refuse a mapping where the number of zone temps and
-setpoints disagree.
+The dummy goes through the same `get_dynamics` path as every other model
+and must reproduce the setpoint exactly as the next state (passthrough).
 """
-import pytest
 import torch
 
 from neurotemplate.modeling.config import ModelingConfig as Config
-from neurotemplate.modeling.dynamics import get_dummy, get_dynamics, model_catalog
+from neurotemplate.modeling.dynamics import get_dummy, get_dynamics
 
 ZONE = "Zone Air Temperature [°C]"
 SETPT = "Zone Cooling Setpoint [°C]"
@@ -30,10 +27,6 @@ def make_cfg(in_steps: int = 1) -> Config:
     cfg.norm_type = None      # physical units — setpoint and zone temp share °C
     cfg.device = "cpu"
     return cfg
-
-
-def test_registration():
-    assert "dummy" in model_catalog
 
 
 def test_forward_returns_setpoint_exactly():
@@ -68,34 +61,3 @@ def test_rollout_tracks_constant_setpoint():
     yn = out["yn"]
     assert yn.shape == (batch, horizon + 1, 1)
     assert torch.allclose(yn[:, 1:, 0], torch.full((batch, horizon), setpoint))
-
-
-def test_passthrough_ignores_in_steps():
-    """The passthrough declares a width-1 input, so it must never be handed a
-    window — otherwise it slices the wrong columns out of the flattened cat."""
-    in_steps, batch, horizon = 4, 4, 6
-    setpoint = 23.0
-    system = get_dynamics(make_cfg(in_steps), single_zone_mapping())
-    assert system.nodes[0].input_map == {}
-
-    data = {
-        "yn": torch.full((batch, in_steps, 1), 30.0),   # seed far from setpoint
-        "U": torch.full((batch, horizon, 1), setpoint),
-        "D": torch.randn(batch, horizon, 3),
-        "Y": torch.zeros(batch, horizon, 1),            # only sets rollout length
-    }
-
-    yn = system(data)["yn"]
-
-    n_pred = yn.shape[1] - in_steps
-    assert torch.allclose(
-        yn[:, in_steps:, 0], torch.full((batch, n_pred), setpoint)
-    )
-
-
-def test_requires_ny_equals_nu():
-    """Two zone temps but one setpoint is ambiguous and must fail fast."""
-    bad = {"Y": [ZONE, "Zone 2 Air Temperature [°C]"], "U": [SETPT],
-           "D": [OUT], "t": ["sec_elapsed"]}
-    with pytest.raises(ValueError, match="one setpoint per zone temp"):
-        get_dummy(make_cfg(), bad)

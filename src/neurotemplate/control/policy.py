@@ -56,18 +56,12 @@ _D_ARG_INDEX = 3
 def regulated_channels(hooks, nm_mapping: dict[str, list[str]]
                        ) -> tuple[list[str], list[int]]:
     """The OCP regulated output: (names, Y-indices) of the Y channels the
-    objective bands and the reportcard scores.
-
-    Prefers the use case's `regulated` hook; falls back to the older
-    `controlled_channels` name so a hooks file written before the rename
-    keeps working. One fallback, defined once here rather than at each of
-    this function's call sites.
+    objective bands and the reportcard scores, from the `regulated` hook.
     """
-    fn = getattr(hooks, "regulated", None) or getattr(hooks, "controlled_channels", None)
+    fn = getattr(hooks, "regulated", None)
     if fn is None:
         raise AttributeError(
-            "control_user_defined must define `regulated(nm_mapping)` "
-            "(the older name `controlled_channels` also still works)."
+            "control_user_defined must define `regulated(nm_mapping)`."
         )
     return fn(nm_mapping)
 
@@ -135,7 +129,7 @@ class _PreviewGather(nn.Module):
 
     A fixed permutation computed once at construction, applied with
     `index_select` against a registered buffer — same discipline as
-    `PerZoneBlock` (modeling/dynamics.py): no data-dependent control flow.
+    `BlockStack` (modeling/dynamics.py): no data-dependent control flow.
     """
 
     def __init__(self, base: nn.Module, gather: torch.Tensor, d_index: int):
@@ -282,14 +276,6 @@ def _validated_preview_spec(hooks, nm_mapping: dict[str, list[str]]
     spec = preview(nm_mapping)
     allowed = set(nm_mapping["D"]) | {"band"}
     for key, steps in spec.items():
-        if key == "price":
-            raise ValueError(
-                "preview_config no longer takes a 'price' key — the tariff "
-                "preview moved to the `price_preview` config field, so it can "
-                "vary per run without every config sharing this hook file "
-                f"needing price paths. Set `price_preview: {steps}` in the "
-                "control config and drop the key here."
-            )
         if key not in allowed:
             raise ValueError(
                 f"preview_config key '{key}' is not a D column or 'band'. "
@@ -365,7 +351,7 @@ def _d_preview_gather(nd: int, h_ctrl: int, d_future: int,
     current step) only the columns whose declared depth is >= k.
 
     Reuses `windows.key_blocks`/`per_step` for the per-timestep offsets — the
-    same position arithmetic `PerZoneBlock` uses — rather than re-deriving
+    same position arithmetic `BlockStack` uses — rather than re-deriving
     `t * nd + j` here.
     """
     if all(depth == d_future for depth in d_depths):

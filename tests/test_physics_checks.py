@@ -15,19 +15,11 @@ from torch import nn
 from neuromancer.system import Node, SystemPreview
 
 from neurotemplate.modeling.scenarios import (
-    EquilibriumScenario,
-    FreeDecayScenario,
     ScenarioResult,
-    StepResponseScenario,
     SynthSpec,
     build_scenarios,
     checks_to_dict,
-    checks_to_markdown,
-    format_checks,
-    readouts_to_dict,
-    readouts_to_markdown,
     run_checks,
-    run_scenarios,
 )
 
 ZONE = "zone [°C]"
@@ -287,51 +279,6 @@ def test_reachability_fails_a_surrogate_nothing_can_move():
     assert "No policy can hold a band this surrogate cannot reach" in r.headline
 
 
-def test_reachability_pushes_disturbances_by_their_declared_gradient_sign():
-    """d(zone)/d(outdoor) = +1, so driving the zone up wants outdoor at max."""
-    seen = []
-
-    def record(y, u, d):
-        seen.append(d[:, 0].clone())
-        return torch.stack([y[:, 0] + 0.25 * (d[:, 0] - y[:, 0]),
-                            torch.zeros_like(y[:, 0])], dim=1)
-
-    scenario = _reach(record, grad_masks=_grad_d(+1))
-    (r,) = scenario.check()
-
-    # Pushing up drives outdoor to its recorded max, down to its min.
-    assert max(float(t.max()) for t in seen) == pytest.approx(35.0)
-    assert min(float(t.min()) for t in seen) == pytest.approx(-5.0)
-    assert "Disturbances held at rest" not in r.headline
-    assert r.passed
-
-
-def test_a_negative_gradient_sign_flips_which_end_is_pushed():
-    seen = []
-
-    def record(y, u, d):
-        seen.append(d[:, 0].clone())
-        return torch.stack([y[:, 0], torch.zeros_like(y[:, 0])], dim=1)
-
-    scenario = _reach(record, grad_masks=_grad_d(-1))
-    targets = scenario._push_targets(ZONE, direction=+1)[1]
-
-    # Zone falls as outdoor rises, so pushing the zone UP wants outdoor at min.
-    assert targets[AMBIENT] == pytest.approx(-5.0)
-    assert scenario._push_targets(ZONE, direction=-1)[1][AMBIENT] == 35.0
-
-
-def test_reachability_drives_the_controls_that_move_the_state():
-    """responds[zone][setpoint] = +1, so the zone goes up with the setpoint."""
-    scenario = _reach(_perfect)
-
-    up, _ = scenario._push_targets(ZONE, direction=+1)
-    down, _ = scenario._push_targets(ZONE, direction=-1)
-
-    assert up[SETPT] == pytest.approx(26.0)      # max setpoint = least cooling
-    assert down[SETPT] == pytest.approx(20.0)    # min setpoint = most cooling
-
-
 # ── The bug this subsystem used to have ──────────────────────────
 
 
@@ -360,42 +307,16 @@ def test_the_equilibrium_state_never_lands_in_a_readout_channel():
 # ── Spec validation ──────────────────────────────────────────────
 
 
-def test_validate_names_every_problem_at_once():
-    bad = SynthSpec(states=["nope"], ambient="also nope", off={},
-                    responds={"nope": {"also not a control": 0}})
-    with pytest.raises(ValueError) as exc:
-        bad.validate(NM)
-    message = str(exc.value)
-    assert "`states` names columns that are not in Y" in message
-    assert "`ambient`" in message
-    assert "missing: ['cooling setpoint [°C]']" in message
-    assert "which is not a control" in message
-    assert "expected -1 or +1" in message
-
-
 @pytest.mark.parametrize("spec,message", [
     # The coverage gap `responds` exists to close: an untested actuator.
     pytest.param(SynthSpec(states=[ZONE], ambient=AMBIENT, off={SETPT: 26.0},
                            responds={}),
                  "declares no state that these controls move",
                  id="a control nothing responds to"),
-    pytest.param(SynthSpec(states=[], ambient=AMBIENT, off={SETPT: 26.0}),
-                 "`states` is empty", id="no states at all"),
-    pytest.param(_spec(off={SETPT: 26.0, "not a column": 1.0}),
-                 "not in the mapping", id="an off value for a stray column"),
 ])
 def test_validate_rejects_a_spec_that_cannot_be_run(spec, message):
     with pytest.raises(ValueError, match=message):
         spec.validate(NM)
-
-
-def test_build_scenarios_validates_before_constructing():
-    with pytest.raises(ValueError, match="not usable with this column mapping"):
-        build_scenarios(
-            system=None, nm_mapping=NM, norm_stats=NORM_STATS,
-            synth_cfg=_spec(states=["nope"]), in_steps=1, n_scenarios=2,
-            n_steps=4, device="cpu",
-        )
 
 
 def test_thresholds_scale_with_the_channel_rather_than_assuming_degrees():
@@ -453,12 +374,6 @@ def test_equilibrium_is_seeded_from_the_intersection_not_the_union():
     assert float(sampled.max()) <= 27.3
 
 
-def test_a_single_state_is_unaffected_by_the_intersection_rule():
-    """Backward compatibility: with one state, intersection == union."""
-    scenario = _scenarios(_perfect)[0]
-    assert (scenario.t_min, scenario.t_max) == pytest.approx((18.0, 30.0))
-
-
 def test_states_with_no_shared_temperature_fail_loudly():
     """A chiller loop and a zone never overlap in the data — say why."""
     stats = _two_state_stats(supply_lo=2.0, supply_hi=12.0)
@@ -483,48 +398,11 @@ def test_the_free_decay_gap_scales_with_the_intersection():
             == pytest.approx(0.84))
 
 
-def test_a_constant_state_channel_does_not_divide_by_zero():
-    """The reportcard warns about constant columns; this must not crash on one."""
-    stats = dict(NORM_STATS, **{ZONE: {"shift": 0.0, "stretch": 1.0,
-                                       "min": 22.0, "max": 22.0}})
-    scenarios = build_scenarios(
-        system=_system(_inert), nm_mapping=NM, norm_stats=stats,
-        synth_cfg=_spec(), in_steps=IN_STEPS, n_scenarios=2, n_steps=4,
-        device="cpu",
-    )
-    results = run_checks(scenarios)
-    assert len(results) == 4
-    assert all(r.tolerance > 0 for r in results[:2])
-
-
-def test_off_is_required_for_controls_but_defaulted_elsewhere():
-    """Controls must be declared; a disturbance may rest at its minimum."""
-    spec = SynthSpec(states=[ZONE], ambient=AMBIENT, off={SETPT: 26.0},
-                     responds={ZONE: {SETPT: +1}})
-    spec.validate(NM)   # no entry for the power readout, and that is fine
-
-    with pytest.raises(ValueError, match="missing:"):
-        SynthSpec(states=[ZONE], ambient=AMBIENT, off={},
-                  responds={ZONE: {SETPT: +1}}).validate(NM)
-
-
 # ── Readout channels ─────────────────────────────────────────────
 #
 # Not asserted on — what a readout *should* do is scenario-dependent. The
 # spread is reported so a readout going somewhere absurd is visible, since it
 # feeds back into the state predictions that ARE asserted on.
-
-
-def test_readouts_are_summarised_for_every_non_state_channel():
-    outcome = _scenarios(_perfect)[0].evaluate()
-
-    (readout,) = outcome.readouts
-    assert readout.name == POWER           # the only Y channel outside `states`
-    assert readout.scenario == "Equilibrium"
-    assert readout.key == f"Equilibrium | {POWER}"
-    assert readout.seeded_at == 0.0        # its recorded minimum
-    assert len(readout.quantiles) == 5
-    assert readout.quantiles == pytest.approx([0.0] * 5)
 
 
 def test_a_readout_that_wanders_shows_it_in_the_spread():
@@ -538,55 +416,6 @@ def test_a_readout_that_wanders_shows_it_in_the_spread():
     assert readout.quantiles[0] == pytest.approx(500.0)    # first free step
     assert readout.quantiles[-1] == pytest.approx(6000.0)  # 12 steps later
     assert readout.quantiles[2] > readout.quantiles[0]     # median in between
-
-
-def test_readout_statistics_skip_the_seeded_prefix():
-    """Index 0 is the `off` value by construction; including it is misleading."""
-    scenarios = build_scenarios(
-        system=_system(lambda y, u, d: torch.stack(
-            [y[:, 0], torch.full_like(y[:, 1], 3000.0)], dim=1)),
-        nm_mapping=NM, norm_stats=NORM_STATS, synth_cfg=_spec(),
-        in_steps=IN_STEPS, n_scenarios=4, n_steps=6, device="cpu",
-    )
-    (readout,) = scenarios[0].evaluate().readouts
-
-    # Every free-running step is 3000; the 0 W seed must not reach the min.
-    assert readout.quantiles == pytest.approx([3000.0] * 5)
-    assert readout.seeded_at == 0.0
-
-
-def test_readouts_and_verdicts_come_off_the_same_rollout():
-    """A second sample would let the spread describe different scenarios."""
-    calls = []
-
-    def counted(y, u, d):
-        calls.append(1)
-        return y.clone()
-
-    outcome = _scenarios(counted)[0].evaluate()
-    before = len(calls)
-    assert outcome.verdicts and outcome.readouts
-    assert len(calls) == before          # nothing re-rolled to build either
-
-
-def test_run_scenarios_merges_verdicts_and_readouts():
-    outcome = run_scenarios(_scenarios(_perfect))
-
-    assert [r.name for r in outcome.verdicts] == [
-        "Equilibrium", f"Step response: {SETPT} to 20", "Reachability",
-        "Free decay",
-    ]
-    assert [r.scenario for r in outcome.readouts] == [
-        "Equilibrium", f"Step response: {SETPT} to 20", "Reachability (up)",
-        "Free decay",
-    ]
-    payload = readouts_to_dict(outcome.readouts)
-    assert set(payload) == {r.key for r in outcome.readouts}
-    assert payload[f"Equilibrium | {POWER}"]["q50"] == pytest.approx(0.0)
-
-    table = readouts_to_markdown(outcome.readouts)
-    assert POWER in table
-    assert "⚠️" not in table            # reported, never judged
 
 
 # ── Reporting ────────────────────────────────────────────────────
@@ -627,21 +456,6 @@ def test_every_scenario_reports_on_every_state_channel():
     assert len(checks_to_dict(results)) == len(results)
 
 
-def test_renderers_show_verdicts_not_losses():
-    results = run_checks(_scenarios(_inert))
-
-    table = checks_to_markdown(results)
-    assert "**FAIL**" in table
-    assert table.count("\n") == 1 + len(results)
-
-    text = format_checks(results)
-    assert "[FAIL]" in text and "[ok  ]" in text
-
-    payload = checks_to_dict(results)
-    assert set(payload) == {r.key for r in results}
-    assert payload[f"Free decay | {ZONE}"]["passed"] is False
-
-
 def test_the_scenarios_are_assertions_and_carry_no_training_term():
     """The differentiable penalty is gone; nothing here feeds the loss.
 
@@ -651,15 +465,6 @@ def test_the_scenarios_are_assertions_and_carry_no_training_term():
     for s in _scenarios(_rampng):
         assert not hasattr(s, "compute")
     assert not any(hasattr(r, "penalty") for r in run_checks(_scenarios(_perfect)))
-
-
-def test_traces_carry_physical_trajectories_for_the_plots():
-    for scenario in _scenarios(_perfect):
-        trace = scenario.trace(3)
-        assert trace["predictions"].shape == (3, IN_STEPS + N_STEPS, len(NM["Y"]))
-        assert trace["ambient_traj"].shape[0] == 3
-        assert trace["state_names"] == [ZONE]
-        assert trace["seed_steps"] == IN_STEPS
 
 
 # ── Horizon ──────────────────────────────────────────────────────

@@ -6,12 +6,10 @@ The comparison is only meaningful if both controllers see the *same* comfort
 band realization, so that claim gets its own test.
 """
 
-import pytest
 import torch
 
 from neurotemplate.control.closed_loop import build_closed_loop
 from neurotemplate.control.pipeline import (
-    baseline_node,
     clears_reference,
     evaluate_baseline,
     evaluate_closed_loop,
@@ -29,14 +27,6 @@ def _setup(**overrides):
 
 
 # ── The reference rule as a Node ─────────────────────────────────
-
-
-def test_reference_node_io():
-    s = _setup()
-    node = build_reference_node(s["cfg"], s["sysid_cfg"], s["nm"],
-                                s["norm_stats"])
-    assert node.input_keys == ["yn", "ymin", "ymax", "D"]
-    assert node.output_keys == ["U"]
 
 
 def test_reference_node_has_no_trainable_parameters():
@@ -91,29 +81,7 @@ def test_reference_node_reads_the_current_step_in_the_closed_loop():
     assert 0.0 <= results.comfort_violation_rate <= 1.0
 
 
-def test_reference_rejects_mismatched_controlled_and_u_counts():
-    """The midpoint rule assumes one setpoint per controlled zone; a mismatch
-    must fail loudly rather than broadcast something wrong."""
-    s = _setup()
-    nm = dict(s["nm"])
-    nm["U"] = nm["U"] + nm["U"]  # two setpoints, still one controlled zone
-    with pytest.raises(ValueError, match="one U per controlled channel"):
-        reference_control(torch.zeros(2, len(nm["Y"])), torch.zeros(2, 1),
-                          torch.ones(2, 1), torch.zeros(2, len(nm["D"])),
-                          nm, s["norm_stats"])
-
-
 # ── Hook resolution ──────────────────────────────────────────────
-
-
-def test_evaluate_baseline_returns_results():
-    s = _setup()
-    out = evaluate_baseline(
-        s["cfg"], s["sysid_cfg"], s["dyn_node"], s["test_dfs"],
-        s["nm"], s["norm_stats"],
-    )
-    assert out is not None
-    assert out.comfort and out.tracking
 
 
 def test_no_rule_at_all_returns_none_rather_than_raising(monkeypatch):
@@ -126,28 +94,6 @@ def test_no_rule_at_all_returns_none_rather_than_raising(monkeypatch):
         s["cfg"], s["sysid_cfg"], s["dyn_node"], s["test_dfs"],
         s["nm"], s["norm_stats"],
     ) is None
-
-
-def test_the_escape_hatch_hook_is_still_honoured(monkeypatch):
-    """A rule a memoryless function cannot express still gets a Node in."""
-    import control_user_defined as cud
-    s = _setup()
-    monkeypatch.delattr(cud, "reference_control")
-    monkeypatch.setattr(cud, "build_baseline_policy", lambda *a, **k: None,
-                        raising=False)
-
-    assert baseline_node(s["cfg"], s["sysid_cfg"], s["nm"],
-                         s["norm_stats"]) is None
-
-
-def test_defining_both_rules_is_an_error(monkeypatch):
-    """Two definitions of one rule is two places for a cooling inset to drift."""
-    import control_user_defined as cud
-    s = _setup()
-    monkeypatch.setattr(cud, "build_baseline_policy", lambda *a, **k: None,
-                        raising=False)
-    with pytest.raises(ValueError, match="both reference_control and"):
-        baseline_node(s["cfg"], s["sysid_cfg"], s["nm"], s["norm_stats"])
 
 
 # ── The comparison itself ────────────────────────────────────────

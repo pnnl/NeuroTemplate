@@ -136,18 +136,13 @@ def _resolve_head_stack(
 
 
 def _resolve_block_spec_artifact(artifacts_dir: Path) -> Optional[dict]:
-    """Prefer the current `block_spec.json` artifact; fall back to the old
-    `zone_spec.json` name so a run trained before the zones->blocks rename
-    still loads. Same shape either way — only the file name changed.
+    """The run's `block_spec.json` artifact, or None.
 
     Absent entirely for the single-block runs that are the common case; a
     per-block run always writes one, so absence is an answer rather than a gap.
     """
     block_spec_path = artifacts_dir / "block_spec.json"
-    if block_spec_path.exists():
-        return _load_json(block_spec_path)
-    zone_spec_path = artifacts_dir / "zone_spec.json"
-    return _load_json(zone_spec_path) if zone_spec_path.exists() else None
+    return _load_json(block_spec_path) if block_spec_path.exists() else None
 
 
 def _load_dyn_sys(cfg, nm_mapping, head_stack, block_spec, weights_path: Path):

@@ -35,7 +35,7 @@ else:
 # Required: which Y channels are comfort-controlled
 # ---------------------------------------------------------------------
 @beartype
-def controlled_channels(
+def regulated(
     nm_mapping: dict[str, list[str]],
 ) -> tuple[list[str], list[int]]:
     """
@@ -88,7 +88,7 @@ def comfort_band_signal(
             f"band.sub_samples ({k}) cannot exceed nsteps ({nsteps})"
         )
 
-    controlled, _ = controlled_channels(nm_mapping)
+    controlled, _ = regulated(nm_mapping)
     n_ctrl = len(controlled)
 
     # One (width, low) per (sample, segment); channels share the band.
@@ -183,7 +183,7 @@ def reference_control(
     Memoryless, current step only, normalized in and normalized U out — the
     same space the learned policy emits.
     """
-    controlled, _ = controlled_channels(nm_mapping)
+    controlled, _ = regulated(nm_mapping)
     nu = len(nm_mapping["U"])
     if len(controlled) != nu:
         # One setpoint per comfort-controlled zone is the assumption this

@@ -25,8 +25,8 @@ What a block owns
          input — see the `Block.y_in_idx` docstring for why this is safe.
   model  the family this block builds under (e.g. "mlp", "2r2c"). None
          defers to `cfg.model`, so a spec that never sets `model` behaves
-         exactly like the old zone split: one family for everyone, just
-         partitioned by block.
+         like a plain split: one family for everyone, just partitioned
+         by block.
 
 Where the split comes from
 ===========================
@@ -50,10 +50,6 @@ RC network per Y channel, since that family is per-channel internally. The
 hook is what restricts *which setpoint drives which block* (and, now,
 which block reads which other block's state); you only need it when that
 restriction matters.
-
-`zone_mapping` is kept as a deprecated alias for this hook: a hooks module
-that still defines `zone_mapping` and not `block_mapping` is honored
-exactly as before (see pipeline.resolve_block_spec).
 
 What this module does NOT do
 =============================
@@ -243,12 +239,3 @@ def build_blocks(
         for name, y_idx, u_idx, d_idx, reads_idx, model in per_block
     ]
 
-
-# ── Deprecated aliases ────────────────────────────────────────────
-#
-# "Zone" was the original name; "block" is the correct one — a block is a
-# sub-model over a group of signals, and "zone" implied HVAC where none is
-# meant. Kept so code and saved specs written against the old name still
-# work.
-Zone = Block
-build_zones = build_blocks

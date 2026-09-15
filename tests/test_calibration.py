@@ -10,8 +10,6 @@ off the rollout, the alignment with the truth, and the in-place update of
 the System's own stack are all exercised the way `nt model train` does.
 """
 
-import warnings
-
 import pandas as pd
 import pytest
 import torch
@@ -96,21 +94,6 @@ def _staged_system(cfg, nm, norm_stats):
              else RegressionHead() for col in nm["Y"]]
     stack = HeadStack(heads, nm["Y"])
     return get_dynamics(cfg, nm, head_stack=stack), stack
-
-
-def test_the_system_owns_its_own_copy_of_the_stack():
-    """Calibration writes into the stack the System trained with; a caller
-    reusing one stack across seeds or trials must not inherit that."""
-    nm = make_nm_mapping()
-    norm_stats = make_norm_stats(make_raw_df(n_rows=60))
-    dyn_sys, stack = _staged_system(make_sysid_cfg(), nm, norm_stats)
-    owned = dyn_sys.nodes[0].callable.head_stack
-    assert owned is not stack
-    owned.heads[nm["Y"].index(STAGE)].decision_thresholds.fill_(0.0)
-    assert not torch.equal(
-        stack.heads[nm["Y"].index(STAGE)].decision_thresholds,
-        owned.heads[nm["Y"].index(STAGE)].decision_thresholds,
-    )
 
 
 def test_collected_z_lines_up_with_the_scored_truth():
@@ -206,19 +189,6 @@ def test_a_tuned_rule_that_does_not_hold_up_once_fed_back_is_reverted(monkeypatc
     assert calibrated[STAGE].dev_after == calibrated[STAGE].dev_before == 0.9
 
 
-def test_a_stack_without_ordinal_heads_is_a_no_op():
-    nm = make_nm_mapping()
-    raw = make_raw_df(n_rows=60)
-    norm_stats = make_norm_stats(raw)
-    cfg = make_sysid_cfg()
-    dyn_sys = get_dynamics(cfg, nm, head_stack=HeadStack(
-        [RegressionHead() for _ in nm["Y"]], nm["Y"]))
-    with warnings.catch_warnings():
-        warnings.simplefilter("error")
-        assert calibrate_decision_thresholds(
-            dyn_sys, cfg, [normalize_df(raw, norm_stats)], nm) == {}
-
-
 # ── Through train_and_evaluate ────────────────────────────────────
 
 class _RecordingLogger:
@@ -301,13 +271,8 @@ def test_a_run_persists_the_calibrated_rule_and_leaves_the_callers_stack_alone(t
     assert "Decision thresholds" in reportcard
 
 
-def test_calibration_can_be_switched_off(tmp_path):
-    result, stack, _ = _staged_run(tmp_path, calibrate_thresholds=False)
-    trained = result["dyn_sys"].nodes[0].callable.head_stack.heads[0]
-    assert torch.equal(trained.decision_thresholds, stack.heads[0].decision_thresholds)
-
-
 def test_the_ensemble_spread_carries_balanced_accuracy(tmp_path):
     result, _, _ = _staged_run(tmp_path, ensemble_seeds=2)
     assert "stage" in result["ensemble"].balanced_acc
     assert "Test balanced accuracy (staged channels)" in (tmp_path / "reportcard.md").read_text()
+

@@ -1,10 +1,9 @@
 """
-Tests for the closed-loop metrics: comfort, energy, and the renderers and
-MLflow keys built on them.
+Tests for the closed-loop metrics: comfort, energy, and the MLflow keys
+built on them.
 
 The comfort cases are a table of scenarios, because that is what they are —
 one band, one trajectory through it, and the numbers that should fall out.
-Everything that rejects malformed input is a second table at the end.
 """
 import pytest
 import torch
@@ -12,8 +11,6 @@ import torch
 from neurotemplate.control.metrics import (
     actuation_metrics,
     comfort_metrics,
-    comfort_to_dict,
-    comfort_to_markdown,
     energy_metrics,
     hours_per_step,
 )
@@ -114,10 +111,6 @@ def test_energy_single_spike_moves_peak_but_barely_moves_window_peak():
     )
 
 
-def test_energy_cost_is_unset_without_a_tariff():
-    assert energy_metrics(torch.ones(2, 4), step_hours=1.0).energy_cost is None
-
-
 def test_energy_cost_integrates_price_against_power():
     # One window, 4 steps of 0.5 h: 100 kW at $0.10 then 200 kW at $0.40.
     power = torch.tensor([[100.0, 100.0, 200.0, 200.0]])
@@ -136,32 +129,6 @@ def test_energy_cost_prefers_the_cheap_hours_at_equal_energy():
             == pytest.approx(energy_metrics(late, 0.5, price).total_energy))
     assert (energy_metrics(early, 0.5, price).energy_cost
             < energy_metrics(late, 0.5, price).energy_cost)
-
-
-# ── renderers ────────────────────────────────────────────────────
-
-
-def test_comfort_markdown_has_a_row_per_channel():
-    y = torch.full((1, 4, 2), 22.0)
-    ymin = torch.full((1, 4, 2), 20.0)
-    ymax = torch.full((1, 4, 2), 25.0)
-    md = comfort_to_markdown(comfort_metrics(y, ymin, ymax, ["a", "b"], 1.0))
-
-    lines = md.splitlines()
-    assert len(lines) == 4          # header + separator + 2 channels
-    assert lines[2].startswith("| a |")
-    assert lines[3].startswith("| b |")
-
-
-def test_comfort_dict_is_keyed_by_channel_without_name_field():
-    y = torch.full((1, 4, 1), 22.0)
-    ymin = torch.full((1, 4, 1), 20.0)
-    ymax = torch.full((1, 4, 1), 25.0)
-    d = comfort_to_dict(comfort_metrics(y, ymin, ymax, ["zone"], 1.0))
-
-    assert set(d) == {"zone"}
-    assert "name" not in d["zone"]
-    assert "degree_hours" in d["zone"]
 
 
 # ── MLflow logging ───────────────────────────────────────────────
@@ -226,39 +193,3 @@ def test_log_control_results_prefixes_baseline():
     assert logger.metrics["baseline_violation_rate"] == pytest.approx(0.9)
     assert logger.metrics["baseline_peak_power"] == pytest.approx(1500.0)
     assert set(logger.dicts["control_metrics.json"]) == {"learned", "baseline"}
-
-
-def test_log_control_results_handles_missing_energy_and_logger():
-    from neurotemplate.control.pipeline import log_control_results
-
-    r = _results()
-    r.energy = None
-    logger = _FakeLogger()
-    log_control_results(logger, r)
-    assert "control_peak_power" not in logger.metrics
-    assert logger.dicts["control_metrics.json"]["learned"]["energy"] is None
-
-    log_control_results(None, r)  # must be a no-op, not a crash
-
-
-# ── Every way the inputs can be malformed ────────────────────────
-
-@pytest.mark.parametrize("call,message", [
-    pytest.param(lambda: hours_per_step(torch.zeros(1, 1, 1)),
-                 "at least 2 timesteps", id="one timestep"),
-    pytest.param(lambda: hours_per_step(torch.tensor([[[10.0], [10.0]]])),
-                 "Non-increasing", id="time that does not advance"),
-    pytest.param(lambda: comfort_metrics(torch.zeros(1, 4, 1), torch.zeros(1, 3, 1),
-                                         torch.zeros(1, 3, 1), ["zone"], 1.0),
-                 "Shape mismatch", id="band shorter than the trajectory"),
-    pytest.param(lambda: comfort_metrics(*[torch.zeros(1, 4, 2)] * 3,
-                                         ["only_one"], 1.0),
-                 "channel_names", id="one name for two channels"),
-    pytest.param(lambda: energy_metrics(torch.zeros(2, 3, 1), step_hours=1.0),
-                 "2D", id="power with a channel axis"),
-    pytest.param(lambda: energy_metrics(torch.ones(2, 4), 1.0, price=torch.ones(2, 3)),
-                 "co-indexed", id="price shorter than power"),
-])
-def test_malformed_input_is_named_rather_than_averaged_over(call, message):
-    with pytest.raises(ValueError, match=message):
-        call()

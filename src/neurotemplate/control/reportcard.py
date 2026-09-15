@@ -501,8 +501,7 @@ def render_control_reportcard(
 
     Args:
         arch:        Output of control.policy.describe_policy(...).
-        controlled:  Regulated channel names (the `regulated` hook, or the
-                     older `controlled_channels` name it falls back to).
+        controlled:  Regulated channel names (the `regulated` hook).
         results:     ControlResults for the learned policy.
         eval_band_seed: The fixed seed the evaluation band was drawn with.
         baseline:    Optional ControlResults for the rule-based controller.

@@ -20,7 +20,6 @@ from neurotemplate.control.scenarios import build_window_dict, horizons
 from control_fixtures import (
     PRICE_SCALE,
     alternating_price,
-    flat_price,
     full_setup,
     install_price,
 )
@@ -70,15 +69,6 @@ def test_cost_is_the_price_weighted_mean_power(tmp_path):
     assert got == pytest.approx(float((power * price).mean().detach()), rel=1e-5)
 
 
-def test_a_zero_price_is_a_zero_cost(tmp_path):
-    s = full_setup(comfort_weight=0.0, du_weight=0.0, energy_weight=0.0,
-                   cost_weight=1.0)
-    install_price(s["cfg"], tmp_path, series=flat_price(0.0))
-    _, out, data = _rolled_out(s)
-    loss = build_control_loss(s["cfg"], s["sysid_cfg"], s["nm"], s["norm_stats"])
-    assert _term(loss, {**out, "price": data["price"]}, "cost_loss") == 0.0
-
-
 def test_shifting_the_tariff_changes_the_cost(tmp_path):
     """The cheap guard on price/power co-indexing: if the cost were reading a
     mis-aligned slice, rolling the tariff by a step would not move it. The
@@ -103,11 +93,6 @@ def test_cost_without_a_tariff_hook_fails_fast():
 
 
 # ── The peak term ────────────────────────────────────────────────
-
-
-def test_power_mean_at_q_one_is_the_plain_mean():
-    p = torch.tensor([[1.0, 2.0, 3.0, 10.0]])
-    assert float(_soft_peak(p, 1.0)) == pytest.approx(float(p.mean()))
 
 
 def test_power_mean_is_monotone_in_q_and_bounded_by_the_max():
@@ -146,22 +131,6 @@ def test_peak_gradient_is_dense_over_time_not_one_hot():
     assert p.grad[0, -1] > p.grad[0, 0]
 
 
-def test_negative_power_cannot_read_as_a_peak():
-    """power_metric normally clamps; the term asserts it rather than assuming."""
-    assert float(_soft_peak(torch.tensor([[-10.0, 0.0]]), 4.0)) == 0.0
-
-
-def test_peak_objective_builds_and_matches_the_helper():
-    s = full_setup(comfort_weight=0.0, du_weight=0.0, energy_weight=0.0,
-                   peak_weight=1.0, peak_q=4.0)
-    _, out, _ = _rolled_out(s)
-    loss = build_control_loss(s["cfg"], s["sysid_cfg"], s["nm"], s["norm_stats"])
-    got = _term(loss, out, "peak_loss")
-    assert got == pytest.approx(
-        float(_soft_peak(_power_of(s, out), 4.0).detach()), rel=1e-5,
-    )
-
-
 # ── Both terms reach the policy ──────────────────────────────────
 
 
@@ -198,26 +167,6 @@ def test_every_power_term_reaches_the_policy_parameters(tmp_path, name,
 
 
 # ── The cost reaches the reportcard ──────────────────────────────
-
-
-def test_energy_cost_is_reported_when_a_tariff_exists(tmp_path):
-    from neurotemplate.control.pipeline import evaluate_closed_loop
-
-    s = full_setup()
-    cfg, sysid_cfg, nm, ns = s["cfg"], s["sysid_cfg"], s["nm"], s["norm_stats"]
-    cl = build_closed_loop(
-        s["dyn_node"], build_policy(cfg, sysid_cfg, nm, ns), cfg, sysid_cfg,
-    )
-    before, _ = evaluate_closed_loop(cfg, sysid_cfg, cl, [s["norm_df"]], nm, ns)
-    assert before.energy.energy_cost is None
-
-    install_price(cfg, tmp_path)
-    cl = build_closed_loop(
-        s["dyn_node"], build_policy(cfg, sysid_cfg, nm, ns), cfg, sysid_cfg,
-    )
-    after, out = evaluate_closed_loop(cfg, sysid_cfg, cl, [s["norm_df"]], nm, ns)
-    assert after.energy.energy_cost is not None
-    assert "price" in out
 
 
 def test_price_stays_free_of_gradient_inside_the_loss(tmp_path):

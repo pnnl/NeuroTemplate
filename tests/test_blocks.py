@@ -7,19 +7,10 @@ U may be left unclaimed (and is then shared), D has no partition
 requirement at all, `reads` may name another block's Y channel but not the
 block's own, and anything else is an error the user sees before a single
 epoch runs.
-
-`build_zones`/`Zone`/`zone_mapping` are the deprecated names this module
-used to have; a handful of tests here pin that the aliases still work,
-since nothing outside this library is supposed to notice the rename.
 """
-import json
-import types
-
 import pytest
 
 from neurotemplate.modeling.blocks import Block, build_blocks
-from neurotemplate.modeling.cli.load import _resolve_block_spec_artifact
-from neurotemplate.modeling.pipeline import resolve_block_spec
 
 MAPPING = {
     "Y": ["north T", "south T"],
@@ -140,20 +131,10 @@ def test_model_is_recorded_per_block():
 # ── Validation: named before the first epoch ─────────────────────
 
 @pytest.mark.parametrize("spec,message", [
-    ({}, "empty mapping"),
     ({"a": {"Y": ["north T"], "U": []}}, "not claimed by any block"),
     ({"a": {"Y": ["north T"]}, "b": {"Y": ["north T", "south T"]}},
      "claimed by more than one block"),
-    ({"a": {"Y": ["north T"], "U": ["north sp"]},
-      "b": {"Y": ["south T"], "U": ["north sp"]}}, "claimed by more than one"),
     ({"a": {"Y": ["typo T", "south T"]}}, "not in nm_mapping"),
-    ({"a": {"Y": ["north T", "south T"], "U": ["typo sp"]}}, "not in nm_mapping"),
-    ({"a": {"Y": [], "U": ["north sp"]}, "b": {"Y": MAPPING["Y"]}},
-     "claims no Y channels"),
-    # D and reads: unknown columns are named the same way as Y/U.
-    ({"a": {"Y": MAPPING["Y"], "D": ["typo d"]}}, "not in nm_mapping"),
-    ({"a": {"Y": ["north T"]}, "b": {"Y": ["south T"], "reads": ["typo T"]}},
-     "not in nm_mapping"),
     # A block reading a channel it already owns — automatic, so a spec error.
     ({"a": {"Y": ["north T"], "reads": ["north T"]},
       "b": {"Y": ["south T"]}}, "already owns them as Y output"),
@@ -161,63 +142,6 @@ def test_model_is_recorded_per_block():
 def test_a_broken_split_is_named_before_training_starts(spec, message):
     with pytest.raises(ValueError, match=message):
         build_blocks(MAPPING, spec)
-
-
-# ── Backward compatibility ────────────────────────────────────────
-
-def test_zone_and_build_zones_are_the_same_object_as_block_and_build_blocks():
-    from neurotemplate.modeling.zones import Zone, build_zones
-    from neurotemplate.modeling.blocks import Block, build_blocks
-    assert Zone is Block
-    assert build_zones is build_blocks
-
-
-def test_per_zone_block_is_the_same_object_as_block_stack():
-    from neurotemplate.modeling.dynamics import PerZoneBlock, BlockStack
-    assert PerZoneBlock is BlockStack
-
-
-@pytest.mark.parametrize("hooks_kwargs,expected_name", [
-    ({"zone_mapping": lambda nm, cfg: {"z": {"Y": ["north T"], "U": []}}}, "z"),
-    ({"block_mapping": lambda nm, cfg: {"b": {"Y": ["north T"], "U": []}}}, "b"),
-])
-def test_resolve_block_spec_honors_either_hook_name(hooks_kwargs, expected_name):
-    hooks = types.SimpleNamespace(**hooks_kwargs)
-    spec = resolve_block_spec(hooks, MAPPING, cfg=None)
-    assert list(spec) == [expected_name]
-
-
-def test_resolve_block_spec_prefers_block_mapping_when_both_exist():
-    """One fallback, not a chain: block_mapping wins so a hooks module
-    mid-migration has exactly one spec in effect."""
-    hooks = types.SimpleNamespace(
-        zone_mapping=lambda nm, cfg: {"old": {"Y": ["north T"], "U": []}},
-        block_mapping=lambda nm, cfg: {"new": {"Y": ["north T"], "U": []}},
-    )
-    spec = resolve_block_spec(hooks, MAPPING, cfg=None)
-    assert list(spec) == ["new"]
-
-
-def test_resolve_block_spec_is_none_with_neither_hook():
-    hooks = types.SimpleNamespace()
-    assert resolve_block_spec(hooks, MAPPING, cfg=None) is None
-
-
-def test_an_old_zone_spec_json_still_loads(tmp_path):
-    """A run trained before the zones->blocks rename logged its spec as
-    zone_spec.json; `nt model load` must still find it."""
-    (tmp_path / "zone_spec.json").write_text(json.dumps(SPLIT))
-    assert _resolve_block_spec_artifact(tmp_path) == SPLIT
-
-
-def test_block_spec_json_is_preferred_over_the_old_name(tmp_path):
-    (tmp_path / "zone_spec.json").write_text(json.dumps({"old": SPLIT["north"]}))
-    (tmp_path / "block_spec.json").write_text(json.dumps(SPLIT))
-    assert _resolve_block_spec_artifact(tmp_path) == SPLIT
-
-
-def test_no_spec_artifact_at_all_is_none(tmp_path):
-    assert _resolve_block_spec_artifact(tmp_path) is None
 
 
 # ── family_by_channel: which family builds which channel ──────────

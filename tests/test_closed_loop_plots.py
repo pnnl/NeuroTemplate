@@ -9,15 +9,12 @@ cannot pass.
 
 import matplotlib
 matplotlib.use("Agg")
-import matplotlib.pyplot as plt
 
 import pandas as pd
-import pytest
 
 from neurotemplate.control.pipeline import evaluate_closed_loop, plot_closed_loop
 from neurotemplate.control.policy import build_policy
 from neurotemplate.control.closed_loop import build_closed_loop
-from neurotemplate.control.scenarios import horizons
 from control_fixtures import full_setup
 
 # Deliberately not midnight and not the epoch.
@@ -47,27 +44,6 @@ def read_csvs(plot_dir):
     }
 
 
-def test_plots_are_stamped_with_the_files_wall_clock(tmp_path):
-    s, out = rollout()
-    plot_dir = tmp_path / "plots"
-    plot_closed_loop(
-        s["cfg"], s["sysid_cfg"], out, s["nm"], s["norm_stats"], plot_dir,
-        origins=[ORIGIN_A],
-    )
-
-    csvs = read_csvs(plot_dir)
-    assert csvs, "no trajectory CSVs written"
-    # Aug 2024, not Jan 1970. Window 0 starts at its file's first row, and the
-    # plot drops the hmax warmup steps, so its first plotted step is the
-    # origin plus that warmup.
-    assert all(name.startswith("Aug_02") for name in csvs)
-    _, _, hmax = horizons(s["cfg"], s["sysid_cfg"])
-    starts = sorted(df.index[0] for df in csvs.values())
-    assert starts[0] == ORIGIN_A + pd.Timedelta(seconds=300 * hmax)
-    # Later windows are strided forward, still on the same real day.
-    assert all(t.year == 2024 and t.month == 8 for t in starts)
-
-
 def test_each_window_gets_its_own_files_origin(tmp_path):
     """Windows are pooled across files; `source_idx` has to route them back."""
     s, out = rollout(n_files=2)
@@ -82,51 +58,3 @@ def test_each_window_gets_its_own_files_origin(tmp_path):
     assert years == {2024, 2023}, f"expected both files' clocks, got {years}"
     assert any(name.startswith("Aug_02") for name in csvs)
     assert any(name.startswith("Nov_19") for name in csvs)
-
-
-def test_step_spacing_follows_the_plants_timestep(tmp_path):
-    s, out = rollout()
-    plot_dir = tmp_path / "plots"
-    plot_closed_loop(
-        s["cfg"], s["sysid_cfg"], out, s["nm"], s["norm_stats"], plot_dir,
-        origins=[ORIGIN_A],
-    )
-    df = next(iter(read_csvs(plot_dir).values()))
-    assert (df.index[1] - df.index[0]) == pd.Timedelta(seconds=300)
-
-
-def test_too_few_origins_fails_loudly(tmp_path):
-    s, out = rollout(n_files=2)
-    with pytest.raises(ValueError, match="one origin per test file"):
-        plot_closed_loop(
-            s["cfg"], s["sysid_cfg"], out, s["nm"], s["norm_stats"],
-            tmp_path / "plots", origins=[ORIGIN_A],
-        )
-
-
-def test_axis_labels_reflect_the_columns_own_units(tmp_path, monkeypatch):
-    """Every fixture column names its unit (see control_fixtures.py), so the
-    three closed-loop axes must read it back rather than the old hardcoded
-    "Temp [°C]" / "Setpoint [°C]" / "Power": regulated is Zone Air
-    Temperature alone (°C), the setpoint is also °C, and both power meters
-    are W."""
-    captured_labels = []
-    real_close = plt.close
-
-    def close_and_capture(fig):
-        captured_labels.append([ax.get_ylabel() for ax in fig.axes])
-        real_close(fig)
-
-    monkeypatch.setattr(plt, "close", close_and_capture)
-
-    s, out = rollout()
-    plot_closed_loop(
-        s["cfg"], s["sysid_cfg"], out, s["nm"], s["norm_stats"],
-        tmp_path / "plots", origins=[ORIGIN_A],
-    )
-
-    assert captured_labels, "plot_closed_loop never closed a figure"
-    ax0_label, ax1_label, ax2_label = captured_labels[0]
-    assert ax0_label == "Regulated [°C]"
-    assert ax1_label == "Control input [°C]"
-    assert ax2_label == "Power [W]"

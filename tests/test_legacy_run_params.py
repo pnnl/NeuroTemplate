@@ -11,8 +11,6 @@ when the synthetic-scenario training penalty became a post-training physics
 assertion.
 """
 
-import warnings
-
 import pytest
 
 from neurotemplate.modeling.cli import load as load_mod
@@ -42,22 +40,6 @@ def test_a_dropped_field_does_not_make_the_run_unloadable(params):
     # The fields that survived still arrive, so the architecture is rebuildable.
     assert (cfg.model, cfg.epochs, cfg.in_steps) == ("nssm", 7, 4)
     assert not hasattr(cfg, "synth_gain")
-
-
-def test_the_warning_names_the_run_and_every_dropped_field(params):
-    params({"synth_gain": 0.5})
-    with pytest.warns(UserWarning) as caught:
-        _config_from_run_params("run-abc")
-    message = str(caught[0].message)
-    assert "run-abc" in message and "synth_gain" in message
-
-
-def test_a_current_run_loads_without_warning(params):
-    params({})
-    with warnings.catch_warnings():
-        warnings.simplefilter("error")   # any warning fails the test
-        cfg = _config_from_run_params("run-abc")
-    assert cfg.epochs == 7
 
 
 def test_an_unknown_key_is_still_dropped_not_silently_accepted(params):

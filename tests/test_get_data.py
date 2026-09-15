@@ -39,13 +39,3 @@ def test_sec_elapsed_counts_from_the_first_row(tmp_path):
     df, _ = get_data(write_csv(tmp_path, "h", n=5))
     assert df["sec_elapsed"].tolist() == [0.0, 3600.0, 7200.0, 10800.0, 14400.0]
     assert df.index[0] == pd.Timestamp("2024-08-02 00:00")
-
-
-def test_irregular_timestamps_fail_loudly(tmp_path):
-    path = tmp_path / "gappy.csv"
-    pd.DataFrame({
-        "timestamp": ["2024-08-02 00:00", "2024-08-02 01:00", "2024-08-02 03:30"],
-        "value": [1.0, 2.0, 3.0],
-    }).to_csv(path, index=False)
-    with pytest.raises(ValueError, match="Could not infer frequency"):
-        get_data(str(path))

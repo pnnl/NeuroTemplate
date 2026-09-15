@@ -232,16 +232,13 @@ def block_mapping(
     `model: 2r2c` is per-block whether or not this hook exists — with no
     hook each Y channel still gets its own RC network, driven by every U
     channel. Declaring blocks is how you say *which setpoint drives which
-    block*. For `mlp` and `gru` the split only happens with `per_zone: true`
+    block*. For `mlp` and `gru` the split only happens with `per_block: true`
     or by naming `model` explicitly here.
 
     Blocks are independent by construction: no term in one block's update
     reads another block's state on the same step. `reads` is safe for every
     family except `2r2c`, whose stability guarantee requires its forcing map
     to never see state — a `2r2c` block with `reads` raises.
-
-    `zone_mapping` is a deprecated alias for this hook, honored if
-    `block_mapping` is absent.
     """
     return None
 

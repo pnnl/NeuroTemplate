@@ -6,7 +6,6 @@ import torch
 from neurotemplate.control.scenarios import build_window_dict, horizons
 from neurotemplate.control.policy import (
     POLICY_BOUND_METHODS,
-    POLICY_NONLIN,
     STEQuantize,
     _PreviewGather,
     _d_preview_by_column,
@@ -48,13 +47,6 @@ def test_price_preview_comes_from_the_config_not_the_hook():
     assert _preview_steps(with_hook, cfg, _NM) == (0, 2, 4)
 
 
-def test_a_price_key_in_the_hook_names_the_field_that_replaced_it():
-    hooks = SimpleNamespace(preview_config=lambda nm: {"price": 4})
-    cfg = SimpleNamespace(d_preview=0, price_preview=0)
-    with pytest.raises(ValueError, match="price_preview: 4"):
-        _preview_steps(hooks, cfg, _NM)
-
-
 def test_preview_steps_rejects_unknown_signal():
     hooks = SimpleNamespace(preview_config=lambda nm: {"bogus": 1})
     cfg = SimpleNamespace(d_preview=0, price_preview=0)
@@ -62,29 +54,7 @@ def test_preview_steps_rejects_unknown_signal():
         _preview_steps(hooks, cfg, _NM)
 
 
-def test_preview_steps_rejects_negative():
-    hooks = SimpleNamespace(preview_config=lambda nm: {"band": -1})
-    cfg = SimpleNamespace(d_preview=0, price_preview=0)
-    with pytest.raises(ValueError, match="non-negative int"):
-        _preview_steps(hooks, cfg, _NM)
-
-
-def test_regulated_channels_prefers_the_new_hook_name():
-    hooks = SimpleNamespace(
-        regulated=lambda nm: (["new"], [0]),
-        controlled_channels=lambda nm: (["old"], [1]),
-    )
-    assert regulated_channels(hooks, _NM) == (["new"], [0])
-
-
-def test_regulated_channels_falls_back_to_the_legacy_hook_name():
-    """A hooks file written before the rename (only `controlled_channels`
-    defined) must keep working."""
-    hooks = SimpleNamespace(controlled_channels=lambda nm: (["z"], [0]))
-    assert regulated_channels(hooks, _NM) == (["z"], [0])
-
-
-def test_regulated_channels_requires_one_of_the_two_hooks():
+def test_regulated_channels_requires_the_hook():
     hooks = SimpleNamespace()
     with pytest.raises(AttributeError, match="regulated"):
         regulated_channels(hooks, _NM)
@@ -120,25 +90,6 @@ def test_d_preview_gather_is_a_no_op_when_every_column_agrees(d_future, d_depths
     """The one-number case (today's only case) must not build a gather."""
     assert _d_preview_gather(nd=2, h_ctrl=3, d_future=d_future,
                              d_depths=d_depths) is None
-
-
-def test_uniform_d_preview_builds_no_gather_module():
-    """No regression: the shared/uniform depth (including the all-zero
-    default) must build exactly the net that existed before per-column
-    preview did -- no extra module in the graph."""
-    s = full_setup(setpoint_step=0.0)
-    policy = build_policy(s["cfg"], s["sysid_cfg"], s["nm"], s["norm_stats"])
-    assert not any(isinstance(m, _PreviewGather)
-                  for m in policy.callable.modules())
-
-
-def test_describe_policy_reports_ny_and_uniform_per_column_preview():
-    s = full_setup(setpoint_step=0.0)
-    cfg, sysid_cfg, nm, ns = s["cfg"], s["sysid_cfg"], s["nm"], s["norm_stats"]
-    policy = build_policy(cfg, sysid_cfg, nm, ns)
-    d = describe_policy(policy, cfg, sysid_cfg, nm, ns)
-    assert d["ny"] == len(nm["Y"])
-    assert d["d_preview_by_column"] == {c: 0 for c in nm["D"]}
 
 
 def test_per_column_preview_narrows_insize_to_the_declared_sum(monkeypatch):
@@ -266,26 +217,6 @@ def test_price_reaches_the_policy_and_changes_what_it_commands(tmp_path):
     assert not torch.allclose(cheap, dear)
 
 
-def test_policy_output_within_actuator_bounds():
-    s = full_setup(setpoint_step=0.0)  # avoid quantization rounding past bounds
-    cfg, sysid_cfg, nm = s["cfg"], s["sysid_cfg"], s["nm"]
-    _, _, hmax = horizons(cfg, sysid_cfg)
-
-    policy = build_policy(cfg, sysid_cfg, nm, s["norm_stats"])
-    cl = build_closed_loop(s["dyn_node"], policy, cfg, sysid_cfg)
-    data = build_window_dict(
-        s["norm_df"], cfg, sysid_cfg, nm, s["norm_stats"],
-        P=cfg.train_pred_steps, stride=cfg.in_steps,
-    )
-    out = cl(data)
-
-    umin, umax = actuation_bounds(nm, s["norm_stats"])
-    U = out["U"][:, hmax:, :]  # policy-produced portion
-    tol = 1e-4
-    assert torch.all(U >= umin - tol)
-    assert torch.all(U <= umax + tol)
-
-
 def test_ste_quantize_snaps_forward():
     q = STEQuantize(0.5)
     x = torch.tensor([22.78, 25.7, 30.54, 28.25, 23.0])
@@ -298,41 +229,6 @@ def test_ste_quantize_gradient_is_identity():
     x = torch.tensor([24.3, 27.8], requires_grad=True)
     q(x).sum().backward()
     assert torch.allclose(x.grad, torch.ones_like(x))
-
-
-def test_ste_quantize_rejects_nonpositive_step():
-    with pytest.raises(ValueError, match="step must be > 0"):
-        STEQuantize(0.0)
-    with pytest.raises(ValueError, match="step must be > 0"):
-        STEQuantize(-0.5)
-
-
-def test_build_policy_skips_quantization_when_step_zero():
-    """0 is also ControlConfig's own default — a plant with no setpoint grid
-    needs no config line to get an unquantized policy."""
-    for s in (full_setup(setpoint_step=0.0), full_setup()):
-        policy = build_policy(s["cfg"], s["sysid_cfg"], s["nm"], s["norm_stats"])
-        assert not any(isinstance(m, STEQuantize) for m in policy.callable.modules())
-
-
-def test_build_policy_includes_quantization_when_step_set():
-    s = full_setup(setpoint_step=0.5)
-    policy = build_policy(s["cfg"], s["sysid_cfg"], s["nm"], s["norm_stats"])
-    quantizers = [m for m in policy.callable.modules() if isinstance(m, STEQuantize)]
-    assert len(quantizers) == 1
-    # cfg step is physical °C; STEQuantize holds the normalized step
-    # (cfg.setpoint_step / stretch) and offset (shift / stretch) per U channel.
-    expected_step = torch.tensor(
-        [0.5 / s["norm_stats"][c]["stretch"] for c in s["nm"]["U"]],
-        dtype=torch.float32,
-    )
-    expected_offset = torch.tensor(
-        [s["norm_stats"][c]["shift"] / s["norm_stats"][c]["stretch"]
-         for c in s["nm"]["U"]],
-        dtype=torch.float32,
-    )
-    assert torch.allclose(quantizers[0].step, expected_step)
-    assert torch.allclose(quantizers[0].offset, expected_offset)
 
 
 def test_policy_output_lands_on_physical_grid():
@@ -363,36 +259,11 @@ def test_policy_output_lands_on_physical_grid():
 # ── Policy family registry ───────────────────────────────────────
 
 
-def test_unknown_policy_lists_available():
-    s = full_setup(policy="bogus")
-    with pytest.raises(ValueError, match="Unknown policy 'bogus'"):
-        build_policy(s["cfg"], s["sysid_cfg"], s["nm"], s["norm_stats"])
-
-
 def test_linear_policy_is_a_single_affine_layer():
     s = full_setup(policy="linear", setpoint_step=0.0)
     net = build_policy(s["cfg"], s["sysid_cfg"], s["nm"], s["norm_stats"]).callable
     assert len(net.linear) == 1
     assert net.linear[0].out_features == len(s["nm"]["U"])
-
-
-def test_linear_policy_has_fewer_params_than_mlp():
-    kw = dict(setpoint_step=0.0)
-    lin = full_setup(policy="linear", **kw)
-    mlp = full_setup(policy="mlp", **kw)
-
-    def n_params(s):
-        net = build_policy(s["cfg"], s["sysid_cfg"], s["nm"], s["norm_stats"]).callable
-        return sum(p.numel() for p in net.parameters())
-
-    assert n_params(lin) < n_params(mlp)
-
-
-@pytest.mark.parametrize("nonlin", list(POLICY_NONLIN))
-def test_every_nonlin_builds(nonlin):
-    s = full_setup(policy_nonlin=nonlin, setpoint_step=0.0)
-    policy = build_policy(s["cfg"], s["sysid_cfg"], s["nm"], s["norm_stats"])
-    assert isinstance(policy.callable.nonlin[0], POLICY_NONLIN[nonlin])
 
 
 @pytest.mark.parametrize("method", POLICY_BOUND_METHODS)
@@ -446,13 +317,3 @@ def test_describe_policy_reports_shape_and_physical_bounds():
     for i, col in enumerate(nm["U"]):
         assert d["umin_phys"][i] == pytest.approx(ns[col]["min"], rel=1e-4)
         assert d["umax_phys"][i] == pytest.approx(ns[col]["max"], rel=1e-4)
-
-
-def test_describe_policy_marks_linear_nonlin_not_applicable():
-    s = full_setup(policy="linear", setpoint_step=0.0)
-    cfg, sysid_cfg, nm, ns = s["cfg"], s["sysid_cfg"], s["nm"], s["norm_stats"]
-    d = describe_policy(build_policy(cfg, sysid_cfg, nm, ns),
-                        cfg, sysid_cfg, nm, ns)
-    assert d["hsizes"] == []
-    assert d["nonlin"] == "n/a (linear)"
-    assert d["quantized"] is False

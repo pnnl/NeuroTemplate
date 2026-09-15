@@ -275,9 +275,6 @@ class BlockStack(nn.Module):
         return out.index_select(dim, self._to_y_order)
 
 
-#: Deprecated alias — see the module docstring for the rename rationale.
-PerZoneBlock = BlockStack
-
 
 class SSMGrad(nn.Module):
     """
@@ -363,7 +360,7 @@ class SSMGrad(nn.Module):
 # vector at once; get_dynamics only calls into model_catalog when no block
 # is asking to be built separately (see _uses_per_block below) — a family
 # that models all outputs jointly has nothing to split, which is exactly
-# why `per_zone` is refused for it in ModelingConfig.validate().
+# why `per_block` is refused for it in ModelingConfig.validate().
 
 def _widths(nm_mapping: dict[str, list[str]]) -> tuple[int, int, int]:
     """(ny, nu, nd) — the channel counts every factory starts from."""
@@ -491,7 +488,7 @@ model_catalog = {
 # Each builds ONE block's module — the heterogeneous counterpart of the
 # monolithic factories above. `nssm`/`lssm`/`dummy` model all of Y jointly
 # and have no per-block form, so they are simply absent from this registry;
-# PER_BLOCK_FAMILIES (which gates the `per_zone` flag) is derived from it
+# PER_BLOCK_FAMILIES (which gates the `per_block` flag) is derived from it
 # rather than hand-maintained a second time.
 
 def _mlp_block(cfg: ModelingConfig, block: Block) -> nn.Module:
@@ -548,7 +545,7 @@ BLOCK_BUILDERS: dict[str, Callable[[ModelingConfig, Block], nn.Module]] = {
     "2r2c": _2r2c_block,
 }
 
-#: Families that need `per_zone: true` to opt into the per-block split.
+#: Families that need `per_block: true` to opt into the per-block split.
 #: `2r2c` is excluded even though BLOCK_BUILDERS has a builder for it: it is
 #: per-block unconditionally, so it needs no flag (and
 #: ModelingConfig.validate() refuses the combination as redundant).
@@ -767,12 +764,12 @@ def _uses_per_block(cfg: ModelingConfig, blocks: list[Block], families: list[str
 
     Three independent reasons, any one of which is enough: the spec itself
     names a per-block family (mixed families in one graph), the run opted in
-    with `cfg.per_zone`, or a resolved family is `2r2c`, which is per-block
+    with `cfg.per_block`, or a resolved family is `2r2c`, which is per-block
     unconditionally — an RC network describes *a* block, never the whole Y
     vector at once, so there is no monolithic 2r2c to fall back to.
     """
     return (any(b.model is not None for b in blocks)
-            or cfg.per_zone or "2r2c" in families)
+            or cfg.per_block or "2r2c" in families)
 
 
 def _check_2r2c_heads(blocks: list[Block], families: list[str],
@@ -817,7 +814,7 @@ def get_dynamics(
     input, flattened to [batch, model.in_steps*features].
 
     `block_spec` is the optional `block_mapping` hook's result (or the
-    deprecated `zone_mapping`), splitting Y, U and D across independent
+    splitting Y, U and D across independent
     blocks — see `blocks`. None means one block holding every channel, which
     is the right answer for a single-block building.
     """

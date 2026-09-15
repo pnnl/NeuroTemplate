@@ -19,8 +19,8 @@ Restructured from a flat script collection into an installable library. Phase A 
 - ✅ YAML + CLI override machinery, multi-path data fields (`Union[str, list[str]]`)
 - ✅ Hook discovery via `neurotemplate.hooks` (CWD + `cfg.user_hooks_path` override)
 - ✅ Single `nt <group> <verb>` dispatcher (replaces the five flat console scripts)
-- ✅ 635 / 635 tests passing
-- ✅ Control-side parity with sysid: policy family registry (`mlp` / `linear`), comfort + energy metrics, sectioned reportcard with a golden test, MLflow metric logging, optional rule-based baseline comparison
+- ✅ 327 / 327 tests passing
+- ✅ Control-side parity with sysid: policy family registry (`mlp` / `linear`), comfort + energy metrics, sectioned reportcard, MLflow metric logging, optional rule-based baseline comparison
 - ☐ Phase B (scrub remaining HVAC vocabulary from library code; relocate runtime artifacts off CWD)
   - ⚠️ **Breaking hook change:** `plot_closed_loop` no longer greps D columns for `"outdoor"`/`"dry-bulb"` and no longer reaches into a private `_power_channel_indices`. Apps must add `power_channels` and `plot_context_channels` to `control_user_defined.py`; `has_power_channels` is removed (it is now the truthiness of `power_channels`).
 - ☐ Phase C (ship an in-repo `examples/rtu_mall/`, README templates, end-to-end smoke test)
@@ -129,7 +129,7 @@ The library finds the hook files automatically: by default it looks for `modelin
 | `tie_norm_stats(nm_mapping, norm_stats, cfg) -> norm_stats` | optional | post-process norm stats before they are frozen (e.g. force two columns onto a shared `shift`/`stretch`) |
 | `block_mapping(nm_mapping, cfg) -> {block: {Y, U, D, reads, model}} \| None` | optional | split Y into independent sub-models, each with its own family (see [Blocks](#blocks)) |
 
-The library imports each hook by attribute (no defaulting), so every row above except `hyper_args`, `tie_norm_stats` and `block_mapping` must exist in `modeling_user_defined.py`, even when the body just returns a trivial value. `hyper_args` is only looked up on the code path that needs it; `tie_norm_stats` and `block_mapping` are `hasattr`-gated and skipped when absent (and `zone_mapping` is still honored as the deprecated name).
+The library imports each hook by attribute (no defaulting), so every row above except `hyper_args`, `tie_norm_stats` and `block_mapping` must exist in `modeling_user_defined.py`, even when the body just returns a trivial value. `hyper_args` is only looked up on the code path that needs it; `tie_norm_stats` and `block_mapping` are `hasattr`-gated and skipped when absent.
 
 ### Control (`control_user_defined.py`)
 
@@ -144,8 +144,6 @@ The library imports each hook by attribute (no defaulting), so every row above e
 | `reference_control(yn_now, ymin_now, ymax_now, d_now, nm_mapping, norm_stats) -> Tensor` | optional | rule-based baseline **and** the residual policy's anchor |
 | `build_baseline_policy(cfg, sysid_cfg, nm_mapping, norm_stats) -> Node \| None` | optional; mutually exclusive with `reference_control` | escape hatch for a baseline a memoryless rule cannot express |
 | `preview_config(nm_mapping) -> {signal: n_steps}` | optional | per-column disturbance and comfort-band preview widths (the tariff preview is `price_preview` in the config) |
-
-`controlled_channels` is still honored as the deprecated name for `regulated`.
 
 The energy tariff is config, not a hook: `train_price_path` / `dev_price_path` / `test_price_path` (one CSV per split) + `price_scale` + `price_preview` in `control.yaml`, required together only when `cost_weight > 0`.
 
@@ -364,17 +362,12 @@ linear term — what it cannot do is let a *learned* map see state.)
 `2r2c` is per-block whether or not the hook exists: with no hook, each Y
 channel still gets its own RC network driven by every U channel. Declaring
 blocks is how you say *which setpoint drives which block*. For `mlp` and `gru`
-a single-family split is opt-in with `per_zone: true` (field name kept for
-compatibility); a block naming its own `model` needs no flag.
+a single-family split is opt-in with `per_block: true`; a block naming its
+own `model` needs no flag.
 
 Inter-block conduction is not modeled. Blocks are independent by construction
 apart from `reads`, and a plant whose groups exchange meaningful energy
 through their *states* is outside what this buys you.
-
-**Renamed from "zones".** `zone_mapping`, `Zone`, `build_zones`,
-`PerZoneBlock` and a logged `zone_spec.json` all still work as deprecated
-aliases, so an existing application and its saved runs keep loading
-unchanged.
 
 ## Two optional control capabilities
 
@@ -675,6 +668,6 @@ If you find yourself shadowing a Neuromancer class, prefer the import.
 uv run pytest tests/
 ```
 
-All 635 pass today, against the current local Neuromancer checkout. The suite covers config, data utilities, metrics, heads, the model families (including 2R2C's stability and storage claims), zones, reportcards (both sides, golden-file pinned), hook contracts, and the Neuromancer-touching dynamics/loss/closed-loop paths.
+All 327 pass today, against the current local Neuromancer checkout. The suite is deliberately small. It keeps the tests whose failure would mean a run silently trains on wrong numbers — normalization and windowing, the RC and GRU updates, loss alignment, gradient plumbing (what the optimizer can and cannot reach), head round-trips, calibration — plus the physics/objective/stability diagnostics that a reader acts on, and one end-to-end wiring pass per CLI sequence. It does not test report rendering (nothing downstream consumes a particular format yet), validation error messages beyond the checks that would otherwise let a run train silently on the wrong objective, or plots.
 
-Cases that differ only in their input live in `pytest.mark.parametrize` tables rather than in one function each — "here is every way a control config can be wrong" is one table of eighteen rows, not eighteen near-identical functions. That is where to add a case.
+Cases that differ only in their input live in `pytest.mark.parametrize` tables rather than in one function each. Before adding a test, ask what silently goes wrong if the logic it covers breaks; if the answer is "a worse error message" or "a differently-worded report", leave it out.

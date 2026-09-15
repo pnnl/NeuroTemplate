@@ -78,18 +78,13 @@ from neurotemplate.modeling.scenarios import (
 
 
 def resolve_block_spec(hooks, nm_mapping: dict[str, list[str]], cfg: ModelingConfig):
-    """Call the hooks module's `block_mapping`, falling back to the
-    deprecated `zone_mapping`, or None if neither is defined.
+    """Call the hooks module's `block_mapping`, or None if it has none.
 
-    One fallback, not a chain: `block_mapping` wins whenever a hooks module
-    defines both, so an application mid-migration only ever has one spec in
-    effect. Shared by cli/train.py and cli/optuna.py, which both need this
-    exact lookup before building the trainer.
+    Shared by cli/train.py and cli/optuna.py, which both need this exact
+    lookup before building the trainer.
     """
     if hasattr(hooks, "block_mapping"):
         return hooks.block_mapping(nm_mapping, cfg)
-    if hasattr(hooks, "zone_mapping"):
-        return hooks.zone_mapping(nm_mapping, cfg)
     return None
 
 
