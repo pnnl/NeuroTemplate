@@ -536,12 +536,14 @@ reportcard and in MLflow.
 
 Two things are set from the data for staged channels rather than left to
 the optimiser, both on by default (`balance_levels`, `calibrate_thresholds`):
-each levelled head's loss is weighted by inverse square-root training frequency, and after
-training each ordinal head's decision thresholds are moved to the
-balanced-accuracy optimum on dev rollouts. The calibrated thresholds are
-printed with the level metrics and saved in `head_config.json`, so `nt model
-load` decides the way the run was evaluated. `nt data heads` reports where a
-channel's mass sits and flags a level under 5%.
+each levelled head's loss is weighted by inverse square-root training
+frequency, and after training each ordinal head's decision thresholds are
+share-matched — moved, over a handful of dev rollouts, to where the
+predicted level shares equal the true ones. The reportcard's "Threshold
+calibration" section shows the full search, not just where it landed; the
+kept thresholds are saved in `head_config.json`, so `nt model load` decides
+the way the run was evaluated. `nt data heads` reports where a channel's
+mass sits and flags a level under 5%.
 
 **Before `nt control train` trains anything:**
 

@@ -35,6 +35,7 @@ from neurotemplate._typing import beartype
 from neurotemplate.modeling.config import ModelingConfig
 from neurotemplate.common.data_utils import get_sw_dict_multi, pool_dfs, to_df, unnormalize_df
 from neurotemplate.modeling.calibration import (
+    Calibration,
     balance_level_weights,
     calibrate_decision_thresholds,
 )
@@ -105,20 +106,23 @@ def _train(cfg, *, train_dfs, dev_dfs, nm_mapping, grad_masks, norm_stats,
            head_stack, block_spec, logger):
     """train_with_curriculum, then the post-training threshold calibration
     when `cfg.calibrate_thresholds` — one step, so the primary and every
-    ensemble member get the same treatment."""
+    ensemble member get the same treatment. Returns (dyn_sys, best_dev_loss,
+    calibration); calibration is {} without ordinal heads or with the flag
+    off."""
     dyn_sys, best_dev_loss = train_with_curriculum(
         cfg=cfg, train_dfs=train_dfs, dev_dfs=dev_dfs,
         nm_mapping=nm_mapping, grad_masks=grad_masks, norm_stats=norm_stats,
         head_stack=head_stack, block_spec=block_spec, global_logger=logger,
     )
+    calibration: dict[str, Calibration] = {}
     if cfg.calibrate_thresholds:
-        calibrated = calibrate_decision_thresholds(dyn_sys, cfg, dev_dfs, nm_mapping)
-        if cfg.verbose and calibrated:
-            for name, c in calibrated.items():
+        calibration = calibrate_decision_thresholds(dyn_sys, cfg, dev_dfs, nm_mapping)
+        if cfg.verbose and calibration:
+            for name, c in calibration.items():
                 print(f"Calibrated decision thresholds for {name!r} (head-space): "
                       + ", ".join(f"{t:.4f}" for t in c.thresholds)
-                      + f"  dev balanced acc {c.dev_before:.3f} -> {c.dev_after:.3f}")
-    return dyn_sys, best_dev_loss
+                      + f"  ({len(c.trace)} pass(es), kept #{c.kept + 1})")
+    return dyn_sys, best_dev_loss, calibration
 
 
 # ── Result type ──────────────────────────────────────────────────
@@ -380,6 +384,7 @@ def render_reportcard(
     best_dev_loss: Optional[float] = None,
     train_time_s: Optional[float] = None,
     split_sizes: Optional[dict[str, object]] = None,
+    calibration: Optional[dict[str, Calibration]] = None,
     ensemble: Optional[EnsembleSpread] = None,
 ) -> str:
     """
@@ -417,6 +422,7 @@ def render_reportcard(
         train_time_s=train_time_s,
         test_time_s=test_results.test_time_s,
         split_sizes=split_sizes,
+        calibration=calibration,
     )
 
 
@@ -634,7 +640,7 @@ def _run_ensemble_members(
             print(f"Training ensemble member {i + 1}/{cfg.ensemble_seeds} "
                   f"(seed={cfg.seed + i})...")
         set_seeds(cfg.seed + i)
-        dyn_sys, _ = _train(
+        dyn_sys, _, _ = _train(
             quiet_cfg,
             train_dfs=train_dfs, dev_dfs=dev_dfs,
             nm_mapping=nm_mapping, grad_masks=grad_masks, norm_stats=norm_stats,
@@ -705,7 +711,7 @@ def train_and_evaluate(
     # and the primary (i = 0) needs the same explicit contract rather than
     # an implicit "whatever the caller last seeded".
     set_seeds(cfg.seed)
-    dyn_sys, best_dev_loss = _train(
+    dyn_sys, best_dev_loss, calibration = _train(
         cfg,
         train_dfs=train_dfs, dev_dfs=dev_dfs,
         nm_mapping=nm_mapping, grad_masks=grad_masks, norm_stats=norm_stats,
@@ -773,6 +779,7 @@ def train_and_evaluate(
             name: {"rows": sum(len(d) for d in dfs), "files": len(dfs)}
             for name, dfs in (("train", train_dfs), ("dev", dev_dfs), ("test", test_dfs))
         },
+        calibration=calibration,
         ensemble=ensemble,
     )
     write_reportcard(md, Path(cfg.savedir), logger=logger)

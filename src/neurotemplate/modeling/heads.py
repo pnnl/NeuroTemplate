@@ -134,18 +134,17 @@ are fixed inside the head with no change to the System's output:
     Where `decode` snaps. Defaults to the same midpoints the activation
     uses, which is a p = 0.5 boundary — a balanced prior the data does
     not have. On a rare level the ranking z produces is usually fine and
-    the snap point is what is wrong: moving the threshold to maximise
-    balanced accuracy recovered +0.11 on training data alone, +0.17
-    calibrated on dev, with no retraining. The pipeline calibrates these
-    on the dev split after training (`cfg.calibrate_thresholds`), and
-    they round-trip through `config()` so a reloaded run decides the
-    same way it was evaluated. The activation thresholds stay at the
-    midpoints: learning them under the training loss buys nothing.
+    the snap point is what is wrong: `calibration.calibrate_decision_
+    thresholds` moves it, on dev rollouts after training, to the value
+    that makes the predicted level share match the true one — no
+    retraining needed. They round-trip through `config()` so a reloaded
+    run decides the same way it was evaluated. The activation thresholds
+    stay at the midpoints: learning them under the training loss buys
+    nothing.
 
-Both were tested one-step-ahead with true history; neither has been
-verified to repair the autoregressive collapse of a rare channel, which
-is where the surrogate actually fails. Treat the classification metrics
-on the reportcard as the check.
+Neither knob has been verified to repair the autoregressive collapse of
+a rare channel, which is where the surrogate actually fails. Treat the
+classification metrics on the reportcard as the check.
 
 Residual prediction (y_{k+1} = f(...) + y_k) is only meaningful for
 heads whose pre-activation `z` lives in the same space as `y_k`. That's

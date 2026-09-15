@@ -16,6 +16,9 @@ logged to MLflow. Sections (in order):
                               predicted-vs-true level share for every binary /
                               ordinal channel, beside persistence's; NRMSE
                               cannot tell a working head from a constant
+  4c. Threshold calibration — the ordinal decision-threshold search's full
+                              trace: what each dev rollout tried and produced,
+                              not just the rule it landed on
   5. Rollout stability      — per-channel rise fraction and drift vs. the
                               truth's own, flagging models that have stopped
                               responding to their inputs and are ramping
@@ -52,6 +55,7 @@ import pandas as pd
 
 from neurotemplate.common.data_utils import degenerate_mapped_columns
 from neurotemplate.modeling.config import ModelingConfig
+from neurotemplate.modeling.calibration import Calibration
 from neurotemplate.modeling.heads import BoundedHead, HeadStack, OrdinalHead
 from neurotemplate.common.metrics import (
     ChannelMetrics,
@@ -452,6 +456,43 @@ def _levels_section(
     return _section("Level metrics (staged channels)", "\n".join(body))
 
 
+def _calibration_section(
+    calibration: Optional[dict[str, Calibration]],
+    norm_stats: Optional[dict],
+) -> Optional[str]:
+    """The threshold search's full trace, in physical units: what each dev
+    rollout was run with and what it actually produced. `error` (the L1
+    distance between predicted and true level shares) is what the search
+    minimises; the kept row is not always the last one tried, since a later
+    pass can overshoot — see `calibration.calibrate_decision_thresholds`.
+    """
+    if not calibration or norm_stats is None:
+        return None
+    body = [
+        "One row per dev rollout tried. Balanced accuracy rides along for "
+        "context; the search matches level shares, not it. **Bold** marks "
+        "the pass that was kept.\n",
+    ]
+    for name, c in calibration.items():
+        stats = norm_stats[name]
+        def to_phys(vals):
+            return [v * stats["stretch"] + stats["shift"] for v in vals]
+        true_s = ", ".join(f"{s * 100:.1f}%" for s in c.true_shares)
+        body.append(f"**`{name}`** — true level shares: {true_s}\n")
+        body.append("| Pass | Thresholds | Predicted shares | Error | Balanced acc |")
+        body.append("|---:|---|---|---:|---:|")
+        for i, step in enumerate(c.trace):
+            thr_s = ", ".join(f"{t:.4g}" for t in to_phys(step.thresholds))
+            pred_s = ", ".join(f"{s * 100:.1f}%" for s in step.pred_shares)
+            cells = [str(i + 1), thr_s, pred_s, f"{step.error:.3f}",
+                    f"{step.balanced_accuracy:.3f}"]
+            if i == c.kept:
+                cells = [f"**{cell}**" for cell in cells]
+            body.append("| " + " | ".join(cells) + " |")
+        body.append("")
+    return _section("Threshold calibration", "\n".join(body))
+
+
 def _stability_section(
     stability: list[RolloutStability], test_window: Optional[int] = None
 ) -> str:
@@ -607,6 +648,7 @@ def render_reportcard(
     levels: Optional[list[LevelMetrics]] = None,
     persistence: Optional[list[ChannelMetrics]] = None,
     persistence_levels: Optional[list[LevelMetrics]] = None,
+    calibration: Optional[dict[str, Calibration]] = None,
     ensemble: Optional[EnsembleSpread] = None,
     head_stack: Optional[HeadStack] = None,
     norm_stats: Optional[dict] = None,
@@ -632,6 +674,9 @@ def render_reportcard(
                        channels; `persistence` / `persistence_levels` are the
                        copy-forward reference for both tables. All optional —
                        absent, the page reads as it did before they existed.
+        calibration:   Optional {channel: Calibration} from
+                       calibrate_decision_thresholds. None renders no extra
+                       section.
         nm_mapping:    {"Y": [...], "U": [...], "D": [...]} from data_mapping.
         ensemble:      Optional EnsembleSpread from cfg.ensemble_seeds > 1
                        independently-trained models. None (the default)
@@ -666,6 +711,9 @@ def render_reportcard(
     levels_md = _levels_section(levels or [], persistence_levels or [], head_stack, norm_stats)
     if levels_md is not None:
         parts.append(levels_md)
+    calibration_md = _calibration_section(calibration, norm_stats)
+    if calibration_md is not None:
+        parts.append(calibration_md)
     if stability is not None:
         parts.append(_stability_section(stability, cfg.test_window))
     if physics is not None:
