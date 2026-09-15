@@ -10,11 +10,11 @@ dependencies = [
     "jupyter>=1.1.1",
     "matplotlib>=3.10.7",
     "mlflow>=3.9.0",
-    # Pinned to the exact neuromancer fork commit that ships the preview/logging
-    # API this framework targets, plus the core rollout/trainer speedups
-    # (branch perf/core-speedups). This is the required state for consumers
-    # installing from git. Bump the SHA when neuromancer advances.
-    "neuromancer @ git+ssh://git@github.com/EladMichael/neuromancer.git@c3a3f2ae5240133e8b9bb6f01f3f85da7eef5c70",
+    # Pinned to the tip of develop on the official pnnl/neuromancer repo as of
+    # 2026-09-15, which carries the linear-memory rollout method this
+    # framework depends on. This is the required state for consumers
+    # installing from git. Bump the SHA when neuromancer's develop advances.
+    "neuromancer @ git+https://github.com/pnnl/neuromancer.git@1f7b4f1c15210d7db92b9b98e8aa97014a867768",
     "numpy>=2.2.6",
     "optuna>=4.8.0",
     "optuna-dashboard>=0.20.0",
@@ -43,13 +43,6 @@ packages = ["src/neurotemplate"]
 # project.dependencies is accepted by hatchling at build time.
 [tool.hatch.metadata]
 allow-direct-references = true
-
-# Local-dev override: build against an editable neuromancer checkout instead of
-# the pinned git ref above. This is a uv-only convenience that does NOT
-# propagate to downstream consumers (they get the git ref from dependencies).
-# Comment this out to exercise the real git pin locally.
-[tool.uv.sources]
-neuromancer = { path = "../../neuromancer", editable = true }
 
 [tool.uv]
 # neuromancer.modules.operators imports SFNO from neuralop, which was removed
