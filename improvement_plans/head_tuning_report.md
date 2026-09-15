@@ -227,3 +227,77 @@ Carried over from the README's own list, unchanged by this branch:
   pointed at NRMSE selects for a model that predicts nothing applies to a
   loop pointed at MSE too; `test_<ch>_balanced_acc` is now logged per trial
   retrain, but nothing uses it as an objective.
+
+---
+
+## Revision: share-matching thresholds, bounded iteration, traced in the reportcard
+
+Following review, `calibrate_decision_thresholds` was redesigned:
+
+- **Criterion changed from balanced-accuracy argmax to share-matching.**
+  Each threshold is now the quantile of `z` at the cumulative *true* level
+  share — closed-form, not a 201-candidate coordinate-ascent search. This
+  is also the right criterion for a surrogate rather than a classifier:
+  balanced accuracy is the crossing point of two conditional densities,
+  and the rare-level one is estimated from a handful of samples that a
+  changed decision rule relocates on the next rollout. Share-matching
+  reads a quantile of the marginal distribution instead, which most of
+  the data does not move when the rule changes.
+- **The revert guard became a real (bounded) fixed-point loop.** Because
+  decode()'s output feeds back as the next step's input, the thresholds
+  shape the z the next threshold would be chosen from. `calibrate_
+  decision_thresholds` now iterates up to `MAX_CALIBRATION_ITERATIONS = 5`
+  "set thresholds, roll out, see what share resulted" passes and keeps
+  whichever pass's thresholds had the lowest share-matching error — not
+  necessarily the last one tried. This subsumes the old two-rollout
+  revert check with no special-casing.
+- **Level weights: sqrt-inverse, not full inverse, frequency.** Full
+  inverse frequency is the balanced-accuracy operating point baked into
+  the loss and multiplies the per-sample gradient of exactly the samples
+  an STE surrogate trusts least. `BinaryHead` weighting was kept (binary
+  channels are still weighted; no bake-off channel uses one).
+- **`OrdinalHead(use_ste=False)` is skipped by calibration and by the
+  reportcard's decision-rule line** — its `decode()` never runs in the
+  loop, so a threshold on it would report a rule the model never applies.
+- **`build_trainer` now hands `build_loss` the head stack the model
+  owns** (the deep copy `get_dynamics` attaches), not the caller's —
+  fixes a latent bug where anything set on the model's stack after
+  construction would have been invisible to the loss.
+- **Reportcard: "Threshold calibration" section.** Every pass is
+  rendered — thresholds, predicted vs. true level shares, error,
+  balanced accuracy for context — with the kept pass bolded, so the
+  search is visible as a process.
+
+### What a real run on `data/spring` shows
+
+40 epochs, one seed, `hb_gru_advice.yaml`. The dev-rollout trace (48
+steps) for the furnace:
+
+| Pass | Threshold | Error | Balanced acc |
+|---:|---:|---:|---:|
+| 1 (start) | 3.09e4 | 0.079 | 0.500 |
+| 2 | 836.9 | 0.404 | 0.548 |
+| 3 | 1551 | 0.070 | 0.514 |
+| 4 | 1030 | 0.150 | 0.567 |
+| 5 (kept) | 1526 | 0.069 | 0.516 |
+
+This is a live instance of the "no fixed-point guarantee" caveat: the
+error does not monotonically improve (it swings 0.404 → 0.070 → 0.150 →
+0.069), the cap stops it mid-oscillation, and the kept pass (0.069) is
+barely better than doing nothing at all (pass 1, 0.079). DX and fan
+converged cleanly in 4–5 passes on the same run.
+
+**A second, more consequential finding: dev-rollout calibration
+(`dev_pred_steps=48`) does not transfer to the `test_window=287` rollout
+the reportcard actually scores.** The fan channel's dev trace matched
+shares well (predicted 44.7/49.3/6.0% vs. true 44.5/50.0/5.5% at the kept
+pass), but on the 287-step test rollout its top level fires on **41.7%**
+of steps against a true **5.9%** — a large mismatch the dev calibration
+gave no warning of. Test-split balanced accuracy across all three
+channels also dropped sharply from the old balanced-accuracy-tuned
+numbers (furnace 0.920 → 0.603, DX 0.855 → 0.539, fan 0.471 → 0.328, now
+*below* its own persistence floor of 0.336) — expected, since the new
+criterion no longer optimizes for recall, but the fan result specifically
+suggests the calibration horizon mattering, not just the criterion. This
+sits squarely inside the original bake-off's "Untested" scope
+(transfer/distribution shift) and is not addressed by this revision.
