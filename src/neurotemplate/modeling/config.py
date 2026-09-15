@@ -116,9 +116,10 @@ class ModelingConfig:
     # the rare level. Both settings come from the data, not the optimiser —
     # see modeling/calibration.py — and neither touches a regression head.
     #
-    # Weight each levelled head's loss by the inverse training frequency of
-    # its levels, so a rare level counts as much as the common one. Off, every
-    # sample weighs the same (the pre-existing behaviour).
+    # Weight each levelled head's loss by the inverse square-root training
+    # frequency of its levels, so a rare level counts more but not
+    # proportionally more (a 1% level gets 10x, not 100x). Off, every sample
+    # weighs the same (the pre-existing behaviour).
     balance_levels: bool = True
     # After training, move each ordinal head's decision thresholds to the
     # balanced-accuracy optimum on dev rollouts. Off, decode snaps at the

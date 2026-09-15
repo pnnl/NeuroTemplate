@@ -134,7 +134,7 @@ def data_head_config(
 
     A binary / ordinal channel is usually a rare-event channel (`nt data
     heads` flags a level under 5%), and the pipeline handles that for you:
-    each levelled head's loss is weighted by inverse training frequency
+    each levelled head's loss is weighted by inverse square-root training frequency
     (`cfg.balance_levels`) and, after training, each ordinal head's decision
     thresholds are calibrated on dev (`cfg.calibrate_thresholds`). Judge such
     a channel by the reportcard's level metrics, not its NRMSE. To pin either
