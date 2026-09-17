@@ -27,6 +27,32 @@ What a block owns
          defers to `cfg.model`, so a spec that never sets `model` behaves
          like a plain split: one family for everyone, just partitioned
          by block.
+  inputs what each of its U and D columns *is*, per column — see
+         "Declaring what a column is" below. Anything undeclared is an
+         ordinary network input.
+  ambient
+         the one D column that is the outdoor temperature, if any. Only
+         `2r2c` acts on it (the explicit conduction term); other families
+         see the column as an ordinary input either way.
+
+Declaring what a column is
+==========================
+
+    "inputs": {
+        "Cool SP [°C]":   {"kind": "demand", "sign": -1, "state": "Zone Temp [°C]"},
+        "Fan Power [kW]": {"kind": "linear", "sign": +1},
+    }
+
+`demand` turns a setpoint into the thermostat's clamped error against one
+of the block's *own* Y channels, `relu(sign · (setpoint − state))`, before
+any family sees it — see `heads.Demand`. `sign` is the direction the state
+moves while the demand is active (-1 cooling, +1 heating). Pairing with
+another block's channel is refused: that is what `reads` is for. A block
+with a `demand` entry has exactly one Y channel.
+
+`linear` says the column enters the zone's heat balance as one sign-fixed
+coefficient times the physical value (measured power, solar irradiance).
+Only `2r2c` acts on it; other families see the column as usual.
 
 Where the split comes from
 ===========================
@@ -65,7 +91,7 @@ exactly the speculative extension point the rules warn against.
 from __future__ import annotations
 
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional
 
 from neurotemplate._typing import beartype
@@ -93,6 +119,16 @@ class Block:
     d_idx: tuple[int, ...] = ()
     reads: tuple[int, ...] = ()
     model: Optional[str] = None
+    #: The U and D column names behind `u_idx` / `d_idx`, in the same order,
+    #: so per-column declarations can be resolved and labelled without
+    #: nm_mapping.
+    u_names: tuple[str, ...] = ()
+    d_names: tuple[str, ...] = ()
+    #: `{column: {"kind": ..., "sign": ..., "state": ...}}` for the declared
+    #: columns, validated by `build_blocks`. Empty means every column is an
+    #: ordinary input.
+    inputs: dict[str, dict] = field(default_factory=dict)
+    ambient: Optional[str] = None
 
     @property
     def ny(self) -> int:
@@ -153,6 +189,56 @@ def _resolve(columns: list[str], names: list[str], block: str, key: str,
     return [columns.index(n) for n in names]
 
 
+INPUT_KINDS = ("demand", "linear")
+
+
+def _resolve_inputs(spec: dict, block: str, y_names: list[str],
+                    u_names: list[str], d_names: list[str],
+                    ) -> tuple[dict[str, dict], Optional[str]]:
+    """Validated `(inputs, ambient)` for one block, every problem named at once."""
+    inputs = spec.get("inputs", {})
+    ambient = spec.get("ambient")
+    problems = []
+
+    if ambient is not None and ambient not in d_names:
+        problems.append(f"`ambient` ({ambient!r}) is not one of this block's D "
+                        f"columns {d_names}.")
+
+    for column, entry in inputs.items():
+        kind = entry.get("kind")
+        if column not in u_names and column not in d_names:
+            problems.append(f"`inputs` names {column!r}, which is not one of this "
+                            f"block's U {u_names} or D {d_names} columns.")
+        if kind not in INPUT_KINDS:
+            problems.append(f"`inputs[{column!r}]` has kind {kind!r}; expected one "
+                            f"of {list(INPUT_KINDS)}.")
+            continue
+        if entry.get("sign") not in (-1, 1):
+            problems.append(f"`inputs[{column!r}]` needs `sign` of -1 or +1 — the "
+                            "direction the column pushes the state; got "
+                            f"{entry.get('sign')!r}.")
+        if kind == "demand":
+            state = entry.get("state")
+            if column not in u_names:
+                problems.append(f"`inputs[{column!r}]` is `demand`, which only a U "
+                                "column (a setpoint) can be.")
+            if state not in y_names:
+                problems.append(f"`inputs[{column!r}]` pairs with state {state!r}, "
+                                f"which is not one of this block's own Y channels "
+                                f"{y_names}. A demand may only read the block's own "
+                                "state; to see another block's, use `reads`.")
+            if len(y_names) != 1:
+                problems.append(f"`inputs[{column!r}]` is `demand`, so this block "
+                                f"must have exactly one Y channel; it has {y_names}.")
+
+    if problems:
+        raise ValueError(
+            f"block_mapping: block {block!r} has an invalid declaration:\n  - "
+            + "\n  - ".join(problems)
+        )
+    return dict(inputs), ambient
+
+
 @beartype
 def build_blocks(
     nm_mapping: dict[str, list[str]],
@@ -161,8 +247,9 @@ def build_blocks(
     """Turn a `block_mapping` hook result into validated index slices.
 
     `block_spec` is `{block_name: {"Y": [...], "U": [...], "D": [...],
-    "reads": [...], "model": "..."}}`. Passing None (no hook) gives one
-    block holding every Y and U channel and reading every D column.
+    "reads": [...], "model": "...", "inputs": {...}, "ambient": "..."}}`.
+    Passing None (no hook) gives one block holding every Y and U channel
+    and reading every D column.
 
     Raises ValueError if:
       - Y is not partitioned exactly: every Y channel in one and only one
@@ -174,12 +261,15 @@ def build_blocks(
         list.
       - a `reads` entry names a channel the block already owns as Y
         output — reading your own Y is automatic and needs no declaration.
+      - an `inputs` or `ambient` declaration is malformed (see the module
+        docstring); every problem in a block is listed in one message.
     """
     y_cols, u_cols, d_cols = nm_mapping["Y"], nm_mapping["U"], nm_mapping["D"]
 
     if block_spec is None:
         return [Block("all", tuple(range(len(y_cols))), tuple(range(len(u_cols))),
-                      tuple(y_cols), tuple(range(len(d_cols))))]
+                      tuple(y_cols), tuple(range(len(d_cols))),
+                      u_names=tuple(u_cols), d_names=tuple(d_cols))]
 
     if not block_spec:
         raise ValueError("block_mapping returned an empty mapping; return None instead.")
@@ -209,7 +299,7 @@ def build_blocks(
 
         claimed_y += y_idx
         claimed_u += u_idx
-        per_block.append((name, y_idx, u_idx, d_idx, reads_idx, model))
+        per_block.append((name, y_idx, u_idx, d_idx, reads_idx, model, spec))
 
     counts = Counter(claimed_y)
     duplicated = sorted({y_cols[i] for i, n in counts.items() if n > 1})
@@ -233,9 +323,16 @@ def build_blocks(
 
     # Whatever no block asked for is shared equipment: hand it to everyone.
     shared_u = [i for i in range(len(u_cols)) if i not in claimed_u]
-    return [
-        Block(name, tuple(y_idx), tuple(sorted(u_idx + shared_u)),
-              tuple(y_cols[i] for i in y_idx), tuple(d_idx), tuple(reads_idx), model)
-        for name, y_idx, u_idx, d_idx, reads_idx, model in per_block
-    ]
+    blocks = []
+    for name, y_idx, u_idx, d_idx, reads_idx, model, spec in per_block:
+        u_idx = sorted(u_idx + shared_u)
+        y_names = [y_cols[i] for i in y_idx]
+        u_names = [u_cols[i] for i in u_idx]
+        d_names = [d_cols[i] for i in d_idx]
+        inputs, ambient = _resolve_inputs(spec, name, y_names, u_names, d_names)
+        blocks.append(Block(
+            name, tuple(y_idx), tuple(u_idx), tuple(y_names), tuple(d_idx),
+            tuple(reads_idx), model, tuple(u_names), tuple(d_names), inputs, ambient,
+        ))
+    return blocks
 

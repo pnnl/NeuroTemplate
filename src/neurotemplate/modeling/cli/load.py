@@ -145,10 +145,12 @@ def _resolve_block_spec_artifact(artifacts_dir: Path) -> Optional[dict]:
     return _load_json(block_spec_path) if block_spec_path.exists() else None
 
 
-def _load_dyn_sys(cfg, nm_mapping, head_stack, block_spec, weights_path: Path):
+def _load_dyn_sys(cfg, nm_mapping, head_stack, block_spec, norm_stats,
+                  weights_path: Path):
     """Build the dynamics system and load weights from disk."""
     dyn_sys = get_dynamics(
         cfg, nm_mapping, head_stack=head_stack, block_spec=block_spec,
+        norm_stats=norm_stats,
     ).to(cfg.device)
     state = torch.load(weights_path, map_location=cfg.device)
 
@@ -224,7 +226,8 @@ def load_trained_dynamics(
 
     head_stack = _resolve_head_stack(cfg, artifacts_dir, nm_mapping, norm_stats)
     block_spec = _resolve_block_spec_artifact(artifacts_dir)
-    dyn_sys = _load_dyn_sys(cfg, nm_mapping, head_stack, block_spec, weights_path)
+    dyn_sys = _load_dyn_sys(cfg, nm_mapping, head_stack, block_spec, norm_stats,
+                            weights_path)
     return dyn_sys, cfg, nm_mapping, norm_stats
 
 

@@ -9,10 +9,12 @@ from neurotemplate.control.scenarios import build_window_dict, build_loaders, ho
 from neurotemplate.control.policy import build_policy
 from neurotemplate.control.closed_loop import build_closed_loop, build_control_loss, build_problem
 from control_fixtures import (
+    ZONE, SETPT, DIST, Y_COLS,
     full_setup, make_control_cfg, make_frozen_dynamics, make_nm_mapping,
     make_norm_stats, make_raw_df, make_sysid_cfg,
 )
 from neurotemplate.common.data_utils import normalize_df
+from neurotemplate.modeling.dynamics import get_dynamics
 
 
 def test_closed_loop_rollout_shapes():
@@ -117,3 +119,59 @@ def test_frozen_param_count_is_zero_trainable():
         p.numel() for p in s["dyn_sys"].parameters() if p.requires_grad
     )
     assert n_trainable == 0
+
+
+def _demand_setup():
+    """full_setup, but the surrogate is a 2r2c zone with the setpoint
+    declared as `demand`, the other channels an MLP block."""
+    nm = make_nm_mapping()
+    raw = make_raw_df()
+    norm_stats = make_norm_stats(raw)
+    norm_df = normalize_df(raw, norm_stats)
+    sysid_cfg = make_sysid_cfg(model="2r2c")
+    sysid_cfg.steps_per_hour = 12.0
+    spec = {
+        "zone": {"Y": [ZONE], "U": [SETPT], "model": "2r2c", "ambient": DIST[0],
+                 "inputs": {SETPT: {"kind": "demand", "sign": -1, "state": ZONE}}},
+        "rtu": {"Y": [c for c in Y_COLS if c != ZONE], "model": "mlp"},
+    }
+    dyn_sys = get_dynamics(sysid_cfg, nm, block_spec=spec, norm_stats=norm_stats)
+    for p in dyn_sys.parameters():
+        p.requires_grad_(False)
+    dyn_sys.eval()
+    return nm, norm_df, norm_stats, sysid_cfg, make_control_cfg(), dyn_sys.nodes[0]
+
+
+def test_a_policy_parked_on_the_inactive_side_still_gets_gradient():
+    """The end-to-end form of "no dead zone". The policy is set to command
+    the highest recorded setpoint everywhere — above the zone, so the demand
+    is exactly zero and the plant would ignore it — and the raw U it emits
+    keeps its width. A hard relu would hand it zero gradient forever; the
+    soft clamp's backward lets it learn to start cooling from a coast."""
+    nm, norm_df, norm_stats, sysid_cfg, cfg, dyn_node = _demand_setup()
+    _, _, hmax = horizons(cfg, sysid_cfg)
+    P = cfg.train_pred_steps
+
+    policy = build_policy(cfg, sysid_cfg, nm, norm_stats)
+    last = policy.callable.linear[-1]
+    with torch.no_grad():
+        last.weight.zero_()
+        # Near the top of the bounded net's range without saturating its own
+        # sigmoid: the dead zone under test is the thermostat's, not the net's.
+        last.bias.fill_(2.0)
+
+    cl = build_closed_loop(dyn_node, policy, cfg, sysid_cfg)
+    data = build_window_dict(norm_df, cfg, sysid_cfg, nm, norm_stats,
+                             P=P, stride=cfg.in_steps)
+    out = cl(data)
+    assert out["U"].shape[-1] == len(nm["U"])
+
+    zone_i, sp = nm["Y"].index(ZONE), norm_stats[SETPT]
+    zone_phys = out["yn"][:, hmax:, zone_i] * norm_stats[ZONE]["stretch"] + norm_stats[ZONE]["shift"]
+    sp_phys = out["U"][:, hmax:, 0] * sp["stretch"] + sp["shift"]
+    assert (sp_phys > zone_phys).all(), "the fixture should sit on the inactive side"
+
+    out["yn"][:, hmax:, zone_i].sum().backward()
+    grads = [p.grad for p in policy.callable.parameters() if p.requires_grad]
+    assert any(g is not None and g.abs().sum() > 0 for g in grads)
+

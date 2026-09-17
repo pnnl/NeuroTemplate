@@ -126,10 +126,9 @@ The library finds the hook files automatically: by default it looks for `modelin
 | `synth_cfg(nm_mapping, norm_stats) -> SynthSpec \| None` | must be defined; return `None` to disable | physics checks |
 | `sub_plot(df_true, col_name) -> tuple \| None` | must be defined; return `None` for default | per-column subplot guidance |
 | `hyper_args(trial, base_cfg) -> Config` | required only for `nt model optuna` | Optuna trial setup |
-| `tie_norm_stats(nm_mapping, norm_stats, cfg) -> norm_stats` | optional | post-process norm stats before they are frozen (e.g. force two columns onto a shared `shift`/`stretch`) |
-| `block_mapping(nm_mapping, cfg) -> {block: {Y, U, D, reads, model}} \| None` | optional | split Y into independent sub-models, each with its own family (see [Blocks](#blocks)) |
+| `block_mapping(nm_mapping, cfg) -> {block: {Y, U, D, reads, model, inputs, ambient}} \| None` | optional | split Y into independent sub-models, each with its own family, and declare what each input column is (see [Blocks](#blocks)) |
 
-The library imports each hook by attribute (no defaulting), so every row above except `hyper_args`, `tie_norm_stats` and `block_mapping` must exist in `modeling_user_defined.py`, even when the body just returns a trivial value. `hyper_args` is only looked up on the code path that needs it; `tie_norm_stats` and `block_mapping` are `hasattr`-gated and skipped when absent.
+The library imports each hook by attribute (no defaulting), so every row above except `hyper_args` and `block_mapping` must exist in `modeling_user_defined.py`, even when the body just returns a trivial value. `hyper_args` is only looked up on the code path that needs it; `block_mapping` is `hasattr`-gated and skipped when absent.
 
 ### Control (`control_user_defined.py`)
 
@@ -222,7 +221,6 @@ nt model train --config model_configs/modeling.yaml \
 | `lssm` | black box | the same, linear |
 | `gru` | black box | stateful — its memory outlives `in_steps` |
 | `2r2c` | grey box | a thermal network: zone air, a hidden mass, and a learned heat input |
-| `dummy` | neither | a passthrough that mints a checkpoint without identifying anything |
 
 ### 2R2C: when the storage is what you need
 
@@ -311,12 +309,13 @@ the interesting fact once families are mixed:
   - **block `power` (mlp):** `MLP`, params=2,273, in=36, out=1
 ```
 
-What it gives up: `g` cannot see the state, so it cannot represent a
-thermostat deadband. "The compressor is off whenever the setpoint is above
-the zone" is a function of the *difference*, and `2r2c` renders it as a
-monotone response to setpoint with no cut-off — smooth cooling where the
-real plant's is staged. That is the price of the stability guarantee, and it
-is why this is one family among several rather than the only one.
+What `g` cannot do on its own is see the state, so an undeclared block
+cannot represent a thermostat deadband: "the compressor is off whenever the
+setpoint is above the zone" is a function of the *difference*, and the block
+renders it as a monotone response to setpoint with no cut-off. Declaring the
+setpoint as `demand` (below) is the answer — the difference is computed
+outside `g` and handed to a bounded branch that keeps the stability
+guarantee.
 
 ### Blocks
 
@@ -364,6 +363,47 @@ channel still gets its own RC network driven by every U channel. Declaring
 blocks is how you say *which setpoint drives which block*. For `mlp` and `gru`
 a single-family split is opt-in with `per_block: true`; a block naming its
 own `model` needs no flag.
+
+### Declaring what a column is
+
+A block may also say what each of its U and D columns *is*, and each family
+decides what that buys it:
+
+```python
+"zone": {
+    "Y": ["Zone Air Temperature [°C]"],
+    "U": ["Cooling Setpoint [°C]", "Fan Power [kW]"],
+    "D": ["Ambient Temperature [°C]", "GHI [W/m2]", "Occupancy"],
+    "model": "2r2c",
+    "ambient": "Ambient Temperature [°C]",
+    "inputs": {
+        "Cooling Setpoint [°C]": {"kind": "demand", "sign": -1,
+                                  "state": "Zone Air Temperature [°C]"},
+        "Fan Power [kW]": {"kind": "linear", "sign": +1},
+        "GHI [W/m2]":     {"kind": "linear", "sign": +1},
+        # Occupancy is undeclared: it feeds the learned residual.
+    },
+}
+```
+
+| kind | who acts on it | what it does |
+|---|---|---|
+| `demand` | every family | replaces the setpoint with the thermostat's clamped error against the block's own state, `relu(zone − setpoint)` for cooling (`sign = -1`) and the mirror for heating, computed in physical units from the model's *own* predicted zone during a rollout. Raising the setpoint above the zone is then free on the surrogate the way it is on the plant. Pairing with another block's state is refused — that is `reads`. |
+| `linear` | `2r2c` | one sign-fixed coefficient times the physical value: measured power removes heat, irradiance adds it. |
+| `ambient` | `2r2c` | the explicit conduction `a_o (T_ambient − zone)`, and the column leaves the residual MLP's input. |
+
+Inside a `2r2c` block a `demand` column becomes a *saturating* branch,
+`cap · tanh(x / w)` — a staged coil's response, bounded in value and in
+slope. The parameterization keeps that slope inside the stability headroom
+`1 − a_m − a_o`, so the unconditional-stability guarantee survives the one
+state read it admits. The reportcard prints each branch beside the time
+constants (`cap` in °C/step, `w` in °C of demand, and the share of the
+headroom in use). Other families ignore `linear` and `ambient` — their
+networks already see every column — and a warning says so at build time.
+The declaration is persisted with the run in `block_spec.json`.
+
+The one-step test NRMSE is not expected to improve with a declaration; the
+closed-loop and physics readouts are what it is for.
 
 Inter-block conduction is not modeled. Blocks are independent by construction
 apart from `reads`, and a plant whose groups exchange meaningful energy

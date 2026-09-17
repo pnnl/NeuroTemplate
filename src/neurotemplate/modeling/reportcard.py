@@ -230,11 +230,34 @@ def _block_lines(name: str, info: Optional[dict], indent: str = "") -> list[str]
     for channel, taus in info.get("time_constants_h", {}).items():
         lines.append(f"{indent}  - {channel}: tau_fast={taus['fast']:.2f} h, "
                      f"tau_slow={taus['slow']:.2f} h")
+    lines += _forcing_lines(info.get("forcing"), indent + "  ")
     for block_name, sub in info.get("blocks", {}).items():
         label = f"block `{block_name}`"
         if sub is not None and sub.get("model"):
             label += f" ({sub['model']})"
         lines += _block_lines(label, sub, indent + "  ")
+    return lines
+
+
+def _forcing_lines(forcing: Optional[dict], indent: str) -> list[str]:
+    """Which column feeds which branch of a 2R2C block, and what each learned.
+
+    `slope_share` is the fraction of the stability headroom a saturating
+    branch's slope uses; at 1.0 the coil has arrived at the bound the
+    parameterization enforces.
+    """
+    if not forcing:
+        return []
+    lines = []
+    if forcing.get("ambient"):
+        lines.append(f"{indent}- ambient: {forcing['ambient']}")
+    for column, term in forcing.get("linear", {}).items():
+        lines.append(f"{indent}- linear: {column}, k={term['k']:.4g} °C/step per unit")
+    for column, term in forcing.get("saturating", {}).items():
+        lines.append(f"{indent}- saturating: {column}, cap={term['cap']:.3g} °C/step, "
+                     f"w={term['w']:.3g} °C, slope_share={term['slope_share']:.2f}")
+    if forcing.get("mlp"):
+        lines.append(f"{indent}- mlp: {', '.join(forcing['mlp'])}")
     return lines
 
 
@@ -257,6 +280,13 @@ def _architecture_section(arch: dict) -> str:
         lines.append("")
         lines.append("Blocks:")
         lines.extend(block_lines)
+    pre_stack = arch.get("pre_stack")
+    if pre_stack:
+        lines.append("")
+        lines.append("Derived inputs (replace the raw column before every family):")
+        for column, entry in pre_stack.items():
+            lines.append(f"- {column}: {entry['kind']} of {entry['state']}, "
+                         f"sign={entry['sign']:+d}, scale={entry['scale']:.3g}")
     return _section("Architecture", "\n".join(lines))
 
 

@@ -5,8 +5,9 @@ Tests for the Y/U/D partition behind per-block models.
 `block_mapping` hook and every per-block model: Y is partitioned exactly,
 U may be left unclaimed (and is then shared), D has no partition
 requirement at all, `reads` may name another block's Y channel but not the
-block's own, and anything else is an error the user sees before a single
-epoch runs.
+block's own, a per-column declaration names only the block's own columns
+and pairs a `demand` only with the block's own state, and anything else is
+an error the user sees before a single epoch runs.
 """
 import pytest
 
@@ -142,6 +143,67 @@ def test_model_is_recorded_per_block():
 def test_a_broken_split_is_named_before_training_starts(spec, message):
     with pytest.raises(ValueError, match=message):
         build_blocks(MAPPING, spec)
+
+
+# ── Declarations: what a column is ───────────────────────────────
+
+def test_declarations_are_carried_with_the_blocks_own_column_names():
+    spec = {
+        "north": {"Y": ["north T"], "U": ["north sp"], "ambient": "oat",
+                  "inputs": {"north sp": {"kind": "demand", "sign": -1,
+                                          "state": "north T"},
+                             "ahu fan": {"kind": "linear", "sign": +1}}},
+        "south": {"Y": ["south T"], "U": ["south sp"]},
+    }
+    north, south = build_blocks(MAPPING, spec)
+    assert north.u_names == ("north sp", "ahu fan")     # shared fan included
+    assert north.d_names == ("oat", "ghi")
+    assert north.ambient == "oat"
+    assert set(north.inputs) == {"north sp", "ahu fan"}
+    assert south.inputs == {} and south.ambient is None
+
+
+def test_no_hook_carries_every_column_name_and_no_declaration():
+    (block,) = build_blocks(MAPPING)
+    assert block.u_names == tuple(MAPPING["U"])
+    assert block.d_names == tuple(MAPPING["D"])
+    assert block.inputs == {} and block.ambient is None
+
+
+def test_a_demand_may_only_read_the_blocks_own_state():
+    """Cross-block pairing is `reads`, which 2r2c refuses for the stability
+    reason and the other families should declare explicitly."""
+    spec = {
+        "north": {"Y": ["north T"], "U": ["north sp"],
+                  "inputs": {"north sp": {"kind": "demand", "sign": -1,
+                                          "state": "south T"}}},
+        "south": {"Y": ["south T"], "U": ["south sp"]},
+    }
+    with pytest.raises(ValueError, match="own Y channels.*use `reads`"):
+        build_blocks(MAPPING, spec)
+
+
+def test_ambient_names_exactly_one_of_the_blocks_d_columns():
+    spec = {"all": {"Y": MAPPING["Y"], "ambient": ["oat", "ghi"]}}
+    with pytest.raises(ValueError, match="`ambient`.*not one of this block's D"):
+        build_blocks(MAPPING, spec)
+
+
+def test_every_problem_in_a_declaration_is_listed_at_once():
+    spec = {"all": {"Y": MAPPING["Y"], "ambient": "typo",
+                    "inputs": {"north sp": {"kind": "demand", "sign": 2,
+                                            "state": "north T"},
+                               "oat": {"kind": "demand", "sign": -1,
+                                       "state": "north T"},
+                               "nope": {"kind": "linear", "sign": +1},
+                               "ghi": {"kind": "quadratic"}}}}
+    with pytest.raises(ValueError) as err:
+        build_blocks(MAPPING, spec)
+    message = str(err.value)
+    for expected in ("`ambient` ('typo')", "`sign` of -1 or +1",
+                     "exactly one Y channel", "only a U column",
+                     "names 'nope'", "kind 'quadratic'"):
+        assert expected in message, message
 
 
 # ── family_by_channel: which family builds which channel ──────────

@@ -8,10 +8,9 @@ without any further knowledge of your data.
 The file must be named `modeling_user_defined.py` and live in the directory
 you run `nt` from, or be pointed at by `user_hooks_path` in your YAML.
 
-Every function here except `hyper_args`, `tie_norm_stats` and `block_mapping`
-is imported by attribute with no default, so all of them must exist even when
-the body is a trivial return. Fill in `data_mapping` first; the rest have
-working defaults.
+Every function here except `hyper_args` and `block_mapping` is imported by
+attribute with no default, so all of them must exist even when the body is a
+trivial return. Fill in `data_mapping` first; the rest have working defaults.
 """
 
 from __future__ import annotations
@@ -239,41 +238,35 @@ def block_mapping(
     reads another block's state on the same step. `reads` is safe for every
     family except `2r2c`, whose stability guarantee requires its forcing map
     to never see state — a `2r2c` block with `reads` raises.
+
+    A block may also say what each of its columns *is*:
+
+        "north": {
+            "Y": ["North Zone Temperature [degC]"],
+            "U": ["North Setpoint [degC]", "Fan Power [kW]"],
+            "D": ["Ambient Temperature [degC]", "GHI [W/m2]", "Occupancy"],
+            "model": "2r2c",
+            "ambient": "Ambient Temperature [degC]",
+            "inputs": {
+                "North Setpoint [degC]": {"kind": "demand", "sign": -1,
+                                          "state": "North Zone Temperature [degC]"},
+                "Fan Power [kW]": {"kind": "linear", "sign": +1},
+                "GHI [W/m2]":     {"kind": "linear", "sign": +1},
+                # Occupancy is undeclared, so it feeds the learned residual.
+            },
+        }
+
+    `demand` replaces the setpoint, for every family, with the thermostat's
+    clamped error against the block's own state — `relu(zone − setpoint)` for
+    cooling (`sign = -1`), the mirror for heating — computed from the
+    model's *own* predicted zone during a rollout, so raising the setpoint
+    above the zone is free on the surrogate the way it is on the plant.
+    `linear` and `ambient` are read by `2r2c` only: one sign-fixed
+    coefficient per `linear` column, and the explicit conduction
+    `a_o (T_ambient − zone)` for `ambient`. Other families see those columns
+    as ordinary inputs and a warning says so at build time.
     """
     return None
-
-
-# ---------------------------------------------------------------------
-# Optional: post-process norm_stats before they are frozen
-# ---------------------------------------------------------------------
-@beartype
-def tie_norm_stats(
-    nm_mapping: dict[str, list[str]],
-    norm_stats: dict[str, dict[str, float]],
-    cfg: Config,
-) -> dict[str, dict[str, float]]:
-    """
-    Last chance to edit norm_stats after `compute_norm_stats`, before they
-    are used and saved with the run. Called only if this function exists.
-
-    Each column's shift/stretch is derived from that column alone, so two
-    columns never share a scale. The one case that matters: if a U column
-    and a Y column must be directly comparable in normalized space (e.g. a
-    setpoint that the model passes through to a state), assign them the same
-    shift/stretch here or the denormalized passthrough will be wrong.
-
-        s = norm_stats["Setpoint [degC]"]
-        for col in ("Setpoint [degC]", "Zone Temperature [degC]"):
-            norm_stats[col].update(shift=s["shift"], stretch=s["stretch"])
-
-    Also the place to fix a column's "unit" (used on plot axis labels):
-    it's parsed from the column's own trailing "[...]" by
-    `common.data_utils.parse_column_unit`, so a name that doesn't follow
-    that convention, or a unit you'd rather display differently, is a
-    one-line override here — `norm_stats[col]["unit"] = "kWh"` — not a
-    reason to add a second mechanism for the same job.
-    """
-    return norm_stats
 
 
 # ---------------------------------------------------------------------

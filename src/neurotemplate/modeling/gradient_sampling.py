@@ -34,6 +34,14 @@ class SampledGradientPenalty:
     The Jacobian includes the residual connection so we get
     d(y_{k+1})/d(input), not just d(learned_correction)/d(input).
 
+    The Jacobian is taken downstream of the model's pre-stack: sampled raw
+    inputs are pushed through it outside `jac_fn`, so a `demand` column is
+    differentiated as the demand feature, not the setpoint. That is what
+    makes a sign on it meaningful — `∂z/∂setpoint` is 0 on the inactive side
+    and has no universal sign, `∂z/∂demand` does — and it turns the Y half
+    into `∂y_{k+1}/∂y_k` at *fixed* demand, the zone's own self-coefficient
+    rather than the total derivative through the thermostat.
+
     Args:
         model:        SSMGrad instance (the raw dynamics module)
         grad_mapping: dict like {"Y": Tensor[1,1,ny,ny], "U": ...}
@@ -54,6 +62,14 @@ class SampledGradientPenalty:
                 "SampledGradientPenalty requires normalization. "
                 "Set norm_type to 'min_max', 'abs_max', or 'z_score' in config."
             )
+
+        widths = {"Y": model.ny, "U": model.nu, "D": model.nd}
+        for key, mask in grad_mapping.items():
+            if tuple(mask.shape[-2:]) != (model.ny, widths[key]):
+                raise ValueError(
+                    f"grad_mapping[{key!r}] has shape {tuple(mask.shape)}; the "
+                    f"model expects (..., {model.ny}, {widths[key]})."
+                )
 
         self.model = model
         self.grad_mapping = grad_mapping
@@ -111,6 +127,8 @@ class SampledGradientPenalty:
         y = self._repeat_sample(self.model.ny)
         u = self._repeat_sample(self.model.nu)
         d = self._repeat_sample(self.model.nd)
+        if self.model.pre_stack is not None:
+            u = self.model.pre_stack(y, u)
 
         # Each J_i has shape [n_samples, ny, in_steps * nx_i]
         J = self.jac_fn(y, u, d)

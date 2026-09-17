@@ -38,6 +38,7 @@ makes two models trained at the same in_steps see the same training set.
 """
 
 import copy
+import warnings
 
 import torch
 import torch.nn as nn
@@ -52,7 +53,7 @@ from neuromancer.system import Node, SystemPreview
 from neuromancer.modules import blocks as nm_blocks
 
 from neurotemplate.modeling import windows
-from neurotemplate.modeling.heads import HeadStack
+from neurotemplate.modeling.heads import HeadStack, PreStack
 from neurotemplate.modeling.rc import RCBlock
 from neurotemplate.modeling.blocks import Block, build_blocks
 
@@ -287,6 +288,12 @@ class SSMGrad(nn.Module):
 
     This is a pure predictor — no Jacobians computed here.
     Gradient penalties use model.compute_output externally via jacrev.
+
+    An optional `pre_stack` (see `heads.PreStack`) rewrites declared U
+    columns from the U and Y windows before `compute_output` sees them, so
+    every family consumes the derived feature and none the raw column. It
+    runs inside the autoregressive loop: the Y it reads is recorded data in
+    the seeded history and the model's own prediction past it.
     """
 
     def __init__(
@@ -301,6 +308,7 @@ class SSMGrad(nn.Module):
         residual: bool,
         separable: bool,
         head_stack: Optional[HeadStack] = None,
+        pre_stack: Optional[PreStack] = None,
     ):
         super().__init__()
         self.fy, self.fu, self.fd = fy, fu, fd
@@ -308,6 +316,7 @@ class SSMGrad(nn.Module):
         self.in_steps = in_steps
         self.residual = residual
         self.head_stack = head_stack
+        self.pre_stack = pre_stack
 
         if separable:
             self.compute_output = self.compute_separable
@@ -338,6 +347,8 @@ class SSMGrad(nn.Module):
             [batch, ny] next state — activated (post-head) if a head_stack
             is attached, otherwise raw model output.
         """
+        if self.pre_stack is not None:
+            u = self.pre_stack(y, u)
         out = self.compute_output(y, u, d)
 
         if self.head_stack is None:
@@ -427,49 +438,6 @@ def get_gru(cfg: ModelingConfig, nm_mapping: dict[str, list[str]]) -> SSMGrad:
     )
 
 
-class _SetpointPassthrough(nn.Module):
-    """Dummy dynamics: next zone temp = current cooling setpoint.
-
-    Given the inseparable [y | u | d] row, returns the U (setpoint) block as
-    the next state. `bias` is an ordinary output offset kept at zero — it only
-    exists so the sys-id optimizer has a trainable parameter to hold; mint the
-    dummy checkpoint with lr=0 and it stays zero, so the prediction is exactly
-    the setpoint.
-    """
-
-    def __init__(self, ny: int, nu: int):
-        super().__init__()
-        self.ny = ny
-        self.nu = nu
-        self.bias = nn.Parameter(torch.zeros(ny))
-
-    def forward(self, cat_yud: torch.Tensor) -> torch.Tensor:
-        setpoint = cat_yud[:, self.ny:self.ny + self.nu]
-        return setpoint + self.bias
-
-
-@beartype
-def get_dummy(cfg: ModelingConfig, nm_mapping: dict[str, list[str]]) -> SSMGrad:
-    """Content-free surrogate that predicts zone temp = cooling setpoint.
-
-    Used to test whether the DPC policy can be trained against a trivially
-    invertible model (no real sys-id needed). Requires ny == nu (each zone
-    temp is driven by its own setpoint) and must run in physical units
-    (norm_type=None) so setpoint and zone temp share units.
-    """
-    ny, nu, nd = _widths(nm_mapping)
-    if ny != nu:
-        raise ValueError(
-            f"dummy model needs one setpoint per zone temp: ny ({ny}) must "
-            f"equal nu ({nu}). Y={nm_mapping['Y']}, U={nm_mapping['U']}."
-        )
-    # in_steps=1: a passthrough only needs the current setpoint (no windowing).
-    return SSMGrad(
-        _SetpointPassthrough(ny, nu), None, None, ny, nu, nd,
-        in_steps=1, residual=False, separable=False,
-    )
-
-
 #: Families with a monolithic factory: one network over the whole Y vector.
 #: `2r2c` has no entry here — an RC network describes *a* block, never all
 #: of Y at once (see BLOCK_BUILDERS below and `_uses_per_block`) — so this
@@ -479,19 +447,18 @@ model_catalog = {
     "nssm": get_nssm,
     "lssm": get_lssm,
     "gru": get_gru,
-    "dummy": get_dummy,
 }
 
 
 # ── Per-block builders ────────────────────────────────────────────
 #
 # Each builds ONE block's module — the heterogeneous counterpart of the
-# monolithic factories above. `nssm`/`lssm`/`dummy` model all of Y jointly
+# monolithic factories above. `nssm`/`lssm` model all of Y jointly
 # and have no per-block form, so they are simply absent from this registry;
 # PER_BLOCK_FAMILIES (which gates the `per_block` flag) is derived from it
 # rather than hand-maintained a second time.
 
-def _mlp_block(cfg: ModelingConfig, block: Block) -> nn.Module:
+def _mlp_block(cfg: ModelingConfig, block: Block, norm_stats: Optional[dict]) -> nn.Module:
     insize = cfg.in_steps * (block.ny_in + block.nu + block.nd)
     return nm_blocks.MLP(
         insize=insize, outsize=block.ny, bias=True,
@@ -500,14 +467,14 @@ def _mlp_block(cfg: ModelingConfig, block: Block) -> nn.Module:
     )
 
 
-def _gru_block(cfg: ModelingConfig, block: Block) -> nn.Module:
+def _gru_block(cfg: ModelingConfig, block: Block, norm_stats: Optional[dict]) -> nn.Module:
     return GRUBlock(
         block.ny_in, block.nu, block.nd, cfg.in_steps, outsize=block.ny,
         hidden_size=(2**cfg.log2_hidden_size), num_layers=cfg.num_layers,
     )
 
 
-def _2r2c_block(cfg: ModelingConfig, block: Block) -> nn.Module:
+def _2r2c_block(cfg: ModelingConfig, block: Block, norm_stats: Optional[dict]) -> nn.Module:
     """One block's RC network. See `rc` for the physics.
 
     Refuses `reads`: `RCBlock`'s unconditional-stability guarantee holds
@@ -517,6 +484,11 @@ def _2r2c_block(cfg: ModelingConfig, block: Block) -> nn.Module:
     `reads` entry would let `g` see another block's Y, which is exactly the
     state-dependence the guarantee forbids, so it is refused here rather
     than silently building a block that looks stable and is not.
+
+    A `demand` declaration is the one state read admitted: it reaches the
+    block only as the clamped setpoint error, through the bounded
+    `saturating` branch, whose slope the parameterization keeps inside the
+    stability headroom — never through `g`.
     """
     if block.reads:
         raise ValueError(
@@ -536,10 +508,12 @@ def _2r2c_block(cfg: ModelingConfig, block: Block) -> nn.Module:
                    cfg.rc_tau_mass_zone_h),
         train_taus=cfg.rc_train_taus,
         channel_names=block.y_names,
+        u_names=block.u_names, d_names=block.d_names,
+        inputs=block.inputs, ambient=block.ambient, norm_stats=norm_stats,
     )
 
 
-BLOCK_BUILDERS: dict[str, Callable[[ModelingConfig, Block], nn.Module]] = {
+BLOCK_BUILDERS: dict[str, Callable[[ModelingConfig, Block, Optional[dict]], nn.Module]] = {
     "mlp": _mlp_block,
     "gru": _gru_block,
     "2r2c": _2r2c_block,
@@ -593,7 +567,8 @@ def family_by_channel(
     }
 
 
-def _build_block(cfg: ModelingConfig, block: Block) -> nn.Module:
+def _build_block(cfg: ModelingConfig, block: Block,
+                 norm_stats: Optional[dict]) -> nn.Module:
     """Dispatch one block to its family's per-block builder."""
     family = _resolve_family(cfg, block)
     builder = BLOCK_BUILDERS.get(family)
@@ -602,12 +577,12 @@ def _build_block(cfg: ModelingConfig, block: Block) -> nn.Module:
             f"block {block.name!r} requests model {family!r}, which has no "
             f"per-block builder; available: {sorted(BLOCK_BUILDERS)}."
         )
-    return builder(cfg, block)
+    return builder(cfg, block, norm_stats)
 
 
 def _build_per_block_model(
     cfg: ModelingConfig, nm_mapping: dict[str, list[str]],
-    blocks: list[Block], families: list[str],
+    blocks: list[Block], families: list[str], norm_stats: Optional[dict],
 ) -> SSMGrad:
     """Heterogeneous dynamics: one sub-module per block, each in whatever
     family it (or cfg.model, absent a block-level override) declares.
@@ -639,7 +614,7 @@ def _build_per_block_model(
             )
 
     fy = BlockStack(blocks, (ny, nu, nd), cfg.in_steps,
-                    make_block=lambda block: _build_block(cfg, block))
+                    make_block=lambda block: _build_block(cfg, block, norm_stats))
     return SSMGrad(
         fy, None, None, ny, nu, nd,
         cfg.in_steps, cfg.residual, separable=False,
@@ -697,6 +672,7 @@ def describe_dynamics(dyn_sys: SystemPreview, cfg: ModelingConfig) -> dict:
       - ny / nu / nd: shape parameters
       - param_count: total trainable parameters
       - blocks: per-block descriptors {fy, fu, fd}
+      - pre_stack: the derived-input declarations, or None
 
     Used by reportcard.render_reportcard.
     """
@@ -709,18 +685,20 @@ def describe_dynamics(dyn_sys: SystemPreview, cfg: ModelingConfig) -> dict:
         "fd": _describe_block(getattr(raw, "fd", None), cfg),
     }
 
+    pre_stack = getattr(raw, "pre_stack", None)
     return {
         "factory": cfg.model,
         "separable": raw.fu is not None and raw.fd is not None,
         "residual": bool(raw.residual),
-        # Context length. Matches cfg.in_steps for every real family; only the
-        # dummy passthrough narrows it to 1, since it reads just the setpoint.
         "in_steps": int(raw.in_steps),
         "ny": int(raw.ny),
         "nu": int(raw.nu),
         "nd": int(raw.nd),
         "param_count": _count_params(raw),
         "blocks": blocks_info,
+        # Derived inputs, `{u_column: {kind, state, ...}}`; None when no
+        # column is rewritten.
+        "pre_stack": pre_stack.describe() if pre_stack is not None else None,
     }
 
 
@@ -795,12 +773,59 @@ def _check_2r2c_heads(blocks: list[Block], families: list[str],
         )
 
 
+def _build_pre_stack(
+    blocks: list[Block], nm_mapping: dict[str, list[str]],
+    norm_stats: Optional[dict], in_steps: int,
+) -> Optional[PreStack]:
+    """One `PreStack` over every block's `demand` declarations, or None.
+
+    The stack is block-agnostic — each entry is resolved to a global
+    `(U column, Y channel)` pair — which is what lets one wiring point in
+    `SSMGrad.forward` serve every family.
+    """
+    demands = {
+        column: entry
+        for block in blocks
+        for column, entry in block.inputs.items() if entry["kind"] == "demand"
+    }
+    if not demands:
+        return None
+    if norm_stats is None:
+        raise ValueError(
+            f"a `demand` declaration ({sorted(demands)}) needs norm_stats to "
+            "place the setpoint and the zone in physical units; pass "
+            "norm_stats to get_dynamics."
+        )
+    return PreStack.from_config(
+        demands, nm_mapping["Y"], nm_mapping["U"], norm_stats, in_steps)
+
+
+def _warn_ignored_declarations(blocks: list[Block], families: list[str]) -> None:
+    """`linear` and `ambient` only mean something to `2r2c`; every other
+    family already sees the column as an ordinary input. Say so rather than
+    let the declaration sit inert."""
+    for block, family in zip(blocks, families):
+        if family == "2r2c":
+            continue
+        ignored = [c for c, e in block.inputs.items() if e["kind"] == "linear"]
+        if block.ambient:
+            ignored.append(block.ambient)
+        if ignored:
+            warnings.warn(
+                f"block {block.name!r} builds under {family!r}, which ignores "
+                f"the `linear`/`ambient` declaration of {ignored}: only 2r2c "
+                "gives those columns a structural term.",
+                stacklevel=3,
+            )
+
+
 @beartype
 def get_dynamics(
     cfg: ModelingConfig,
     nm_mapping: dict[str, list[str]],
     head_stack: Optional[HeadStack] = None,
     block_spec: Optional[dict[str, dict]] = None,
+    norm_stats: Optional[dict[str, dict]] = None,
 ) -> SystemPreview:
     """
     Wrap a dynamics model in a Neuromancer SystemPreview for autoregressive rollout.
@@ -813,10 +838,11 @@ def get_dynamics(
     step i, the Node receives a window of model.in_steps past values for each
     input, flattened to [batch, model.in_steps*features].
 
-    `block_spec` is the optional `block_mapping` hook's result (or the
-    splitting Y, U and D across independent
-    blocks — see `blocks`. None means one block holding every channel, which
-    is the right answer for a single-block building.
+    `block_spec` is the optional `block_mapping` hook's result, splitting Y,
+    U and D across independent blocks — see `blocks`. None means one block
+    holding every channel, which is the right answer for a single-block
+    building. `norm_stats` is needed only when the spec declares a column
+    (`inputs` / `ambient`): those branches work in physical units.
     """
     if cfg.model not in VALID_MODEL_NAMES:
         raise ValueError(
@@ -827,10 +853,12 @@ def get_dynamics(
     blocks = build_blocks(nm_mapping, block_spec)
     families = [_resolve_family(cfg, b) for b in blocks]
 
+    _warn_ignored_declarations(blocks, families)
     if _uses_per_block(cfg, blocks, families):
-        model = _build_per_block_model(cfg, nm_mapping, blocks, families)
+        model = _build_per_block_model(cfg, nm_mapping, blocks, families, norm_stats)
     else:
         model = model_catalog[cfg.model](cfg, nm_mapping)
+    model.pre_stack = _build_pre_stack(blocks, nm_mapping, norm_stats, cfg.in_steps)
 
     # Heads are attached post-construction so each factory stays focused
     # on its own block topology. The first-pass model output width is
@@ -849,19 +877,15 @@ def get_dynamics(
         model.head_stack = copy.deepcopy(head_stack)
 
     # Temporal windowing: the gathered window must be exactly as wide as the
-    # block's declared input width, and model.in_steps is that width. Only the
-    # passthrough (dummy) block declares 1, so it gets no window.
-    if model.in_steps > 1:
-        input_map = {
-            key: {
-                "past": model.in_steps - 1,
-                "future": 0,
-                "pad_mode": "nearest",
-            }
-            for key in ["yn", "U", "D"]
+    # block's declared input width, and model.in_steps is that width.
+    input_map = {
+        key: {
+            "past": model.in_steps - 1,
+            "future": 0,
+            "pad_mode": "nearest",
         }
-    else:
-        input_map = {}
+        for key in ["yn", "U", "D"]
+    }
 
     node = Node(
         model,

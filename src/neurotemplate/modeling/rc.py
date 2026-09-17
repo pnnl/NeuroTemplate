@@ -32,21 +32,49 @@ What is grey and what is black
 
 The state update is fixed physics::
 
-    z_{k+1} = z_k + a_m (m_k - z_k) - a_o z_k + g(u_k, d_k)
+    z_{k+1} = z_k + a_m (m_k - z_k) + a_o (T_oa,k - z_k)
+                  + Σ_linear      k_j · x_j
+                  + Σ_saturating  sign_j · cap_j · tanh(x_j / w_j)
+                  + g( undeclared inputs )
     m_{k+1} = m_k + a_c (z_k - m_k)
 
 with `z` the observed zone temperature, `m` the hidden mass temperature, and
-three positive per-step exchange rates `a_o`, `a_m`, `a_c`. The heat input
-`g` is learned and black: an MLP over the current inputs. We do not have a
-plug-load channel, an internal-gains channel, or a metered zone-level heat
-extraction, so `g` is where all of that goes, along with the solar gain and
-the ambient conduction term (see below). The library learns the forcing and
+three positive per-step exchange rates `a_o`, `a_m`, `a_c`. Which term an
+input column feeds is declared per column in `block_mapping` (see
+`blocks`); every declared column feeds exactly one branch, and the branches
+add. A block with no declarations is the classical form with `g` alone —
+one MLP over the current inputs, where the plug loads, internal gains,
+solar gain and anything else unmetered all go — and conduction to a *zero*
+ambient, `-a_o z_k`, which is only correct because `g` is affine in D and
+D carries the outdoor temperature. The library learns the forcing and
 asserts the storage.
 
-The `-a_o z_k` term is conduction to a *zero* ambient, which is only correct
-because `g` is affine in D and D carries the outdoor temperature: the real
-`+a_o·T_ambient` is one of the terms `g` can form. Nothing has to tell this
-block which D column is the weather.
+The declared branches are the grey-box form (Bacher & Madsen 2011): every
+known term explicit and linear in its input, a residual `g` for what is
+genuinely unknown.
+
+  ambient      one D column, the outdoor temperature. Conduction becomes
+               `a_o (T_oa - z)` with `T_oa` read from the column rather than
+               left for `g` to re-form, and the column leaves `g`'s input:
+               anything else `g` could learn from it would be a
+               weather-correlated bias, not conduction.
+  linear       a U or D column entering as one sign-fixed coefficient times
+               its physical value: measured power removes heat (`sign = -1`),
+               solar irradiance adds it (`+1`). No bias — a constant heat gain
+               belongs in `g`'s intercept.
+  saturating   what a `demand`-declared setpoint becomes here. The
+               pre-stack has already replaced the column with the
+               thermostat's clamped error (see `heads.Demand`); this branch
+               turns it into a staged coil's response, `cap · tanh(x / w)`:
+               `cap` is °C per step at full stage and `w` the °C of demand
+               over which it ramps from off to full. `tanh` is bounded in
+               value and in slope, and its derivative never reaches zero —
+               a hard clamp past the knee would be the dead-zone problem
+               again.
+
+Every non-MLP branch works in physical units and scales its result by the
+zone's `stretch`, never shifting it, so each holds the norm stats it needs
+as persistent buffers.
 
 Two properties fall out of that split, and they are the reason to reach for
 this family over `lssm`:
@@ -58,6 +86,18 @@ below `1/MIN_TAU_STEPS = 0.5` and their sum below 2, which is exactly the
 condition for the discrete update's eigenvalues to sit inside the unit
 circle (see `mode_taus`). A 2R2C rollout cannot diverge, at any horizon,
 under any input — including the adversarial inputs a DPC policy will find.
+
+The declared branches keep that guarantee. `ambient` and `linear` are
+linear in *inputs*, not state, and do not touch the state matrix. The
+`saturating` branch does read `z`, through the demand feature, and its
+local slope `s(z)` is nonnegative, zero inside the deadband and at most
+`cap / w`; the zone's own coefficient becomes `1 - a_m - a_o - s(z)`. The
+parameterization holds `cap / w` below the headroom `1 - a_m - a_o`, so
+that diagonal stays nonnegative, the state matrix stays entrywise
+nonnegative and entrywise below the undeclared block's — whose spectral
+radius `mode_taus` already places inside the unit circle — and a product of
+such matrices along a rollout is bounded by powers of it. Extra damping
+that only acts when the zone is warm can only lower the spectral radius.
 
 **Readable time constants.** The eigenvalues are reported in hours on the
 reportcard. `tau_slow` is the number pre-cooling lives on, and you can check
@@ -87,23 +127,28 @@ the data actually excites it.
 What it gives up
 ================
 
-`g` cannot see `z`, so it cannot represent a thermostat deadband — "the
-compressor is off whenever the setpoint is above the zone" is a function of
-the *difference*, and this block will render it as a monotone response to
-setpoint with no cut-off. Cooling delivered is therefore smooth where the
-real plant's is staged. That is the price of the stability guarantee, and
-it is why this is one family among several rather than the only one.
+`g` cannot see `z`, so on its own it cannot represent a thermostat deadband
+— "the compressor is off whenever the setpoint is above the zone" is a
+function of the *difference*, and an undeclared block renders a setpoint as
+a monotone response with no cut-off. The `demand` declaration is the
+answer: the difference is computed outside `g`, clamped, and handed to the
+bounded `saturating` branch, which is the one shape of state-dependence the
+stability argument admits. What the block still cannot do is let a
+*learned* map see state — a `2r2c` block refuses `reads` for that reason.
 """
 
 from __future__ import annotations
 
 import math
+from typing import Optional
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from neuromancer.modules import blocks
 
 from neurotemplate.modeling import windows
+from neurotemplate.modeling.heads import demand_scale
 
 #: Fastest exchange the parameterization allows, in timesteps. Its reciprocal
 #: bounds every rate, and rates summing below 2 is what keeps the discrete
@@ -126,6 +171,13 @@ MIN_TAU_STEPS = 2.0
 DEFAULT_TAU_AMBIENT_H = 2.0
 DEFAULT_TAU_ZONE_MASS_H = 1.0
 DEFAULT_TAU_MASS_ZONE_H = 4.0
+
+#: Raw parameter behind every learned branch coefficient at construction:
+#: `softplus(-4) ≈ 0.018`, so a fresh block starts as near-pure free decay
+#: for the same reason `g` starts at zero — an O(1) forcing would swamp the
+#: RC dynamics for the first epochs. Far enough from softplus's flat side
+#: that Adam moves it on the first step.
+_NEAR_ZERO_THETA = -4.0
 
 #: Where `softplus(theta)` becomes `theta` to double precision. The exact
 #: inverse `log(expm1(x))` differs from `x` by `log1p(-exp(-x))`, which at
@@ -197,6 +249,96 @@ def mode_taus(a_ambient, a_zone_mass, a_mass_zone):
     return 2.0 / (trace + gap), 2.0 / (trace - gap)
 
 
+# ── Declared forcing branches ──────────────────────────────────
+#
+# Each takes its input column normalised, works in physical units, and
+# returns an increment in the zone's normalised units — `zone_shift` and
+# `zone_stretch` are per channel, `[ny]`, so a term broadcasts across a
+# multi-channel block. The stats are persistent buffers, so a reloaded
+# checkpoint keeps its own numbers.
+
+
+def _buffer(module: nn.Module, name: str, value) -> None:
+    module.register_buffer(name, torch.as_tensor(value, dtype=torch.float32))
+
+
+class AmbientTerm(nn.Module):
+    """`a_o (T_oa - z)`: conduction to the declared outdoor temperature."""
+
+    def __init__(self, column: dict, zone_shift: list[float], zone_stretch: list[float]):
+        super().__init__()
+        _buffer(self, "shift", column["shift"])
+        _buffer(self, "stretch", column["stretch"])
+        _buffer(self, "zone_shift", zone_shift)
+        _buffer(self, "zone_stretch", zone_stretch)
+
+    def forward(self, a_ambient: torch.Tensor, zone: torch.Tensor,
+                outdoor: torch.Tensor) -> torch.Tensor:
+        zone_phys = zone * self.zone_stretch + self.zone_shift
+        outdoor_phys = outdoor * self.stretch + self.shift
+        return a_ambient * (outdoor_phys - zone_phys) / self.zone_stretch
+
+
+class LinearTerm(nn.Module):
+    """`k · x`, with `k = sign · softplus(θ) / stretch_x` in °C per step per
+    physical unit of the column. Dividing by the column's stretch makes the
+    near-zero start the same size whether power arrives in W or kW."""
+
+    def __init__(self, sign: int, column: dict, zone_stretch: list[float]):
+        super().__init__()
+        self.sign = int(sign)
+        self.theta = nn.Parameter(torch.tensor(_NEAR_ZERO_THETA))
+        _buffer(self, "shift", column["shift"])
+        _buffer(self, "stretch", column["stretch"])
+        _buffer(self, "zone_stretch", zone_stretch)
+
+    def coefficient(self) -> torch.Tensor:
+        """`k`, in zone units per step per physical unit of the column."""
+        return self.sign * F.softplus(self.theta) / self.stretch
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x_phys = x * self.stretch + self.shift
+        return self.coefficient() * x_phys / self.zone_stretch
+
+
+class SaturatingTerm(nn.Module):
+    """`sign · cap · tanh(x / w)`: a staged coil's response to demand.
+
+    `cap = softplus(θ_c)` is °C per step at full stage; the slope at the
+    origin is `headroom · sigmoid(θ_s)`, so `w = cap / slope` and the bound
+    `cap / w ≤ headroom` holds by construction — `headroom` is the block's
+    `1 - a_m - a_o`, handed in each step so the bound follows the rates if
+    they train. `θ_s = 0` starts at half the budget; `cap` starts near zero.
+
+    The input is the pre-stack's demand feature, scaled to about [0, 1] by
+    `demand_scale`; this branch holds the same scale and undoes it, so `w`
+    reads in °C of demand.
+    """
+
+    def __init__(self, sign: int, control: dict, state: dict):
+        super().__init__()
+        self.sign = int(sign)
+        self.theta_cap = nn.Parameter(torch.tensor(_NEAR_ZERO_THETA))
+        self.theta_slope = nn.Parameter(torch.tensor(0.0))
+        _buffer(self, "scale", demand_scale(sign, control, state))
+        _buffer(self, "zone_stretch", state["stretch"])
+
+    def cap(self) -> torch.Tensor:
+        return F.softplus(self.theta_cap)
+
+    def slope_share(self) -> torch.Tensor:
+        """Fraction of the stability headroom the slope at the origin uses."""
+        return torch.sigmoid(self.theta_slope)
+
+    def width(self, headroom: torch.Tensor) -> torch.Tensor:
+        """`w`: °C of demand over which the response ramps from off to full."""
+        return self.cap() / (headroom * self.slope_share())
+
+    def forward(self, x: torch.Tensor, headroom: torch.Tensor) -> torch.Tensor:
+        demand_c = x * self.scale
+        return self.sign * self.cap() * torch.tanh(demand_c / self.width(headroom)) / self.zone_stretch
+
+
 class RCBlock(nn.Module):
     """One 2R2C network per Y channel, sharing a learned heat-input map.
 
@@ -231,6 +373,15 @@ class RCBlock(nn.Module):
         train_taus: let the optimizer move that prior. Off by default; the
             module docstring explains why.
         channel_names: Y column names, for labelling `describe`.
+        u_names / d_names: this block's U and D column names, in the order
+            its window carries them; what `inputs` and `ambient` refer to.
+        inputs: per-column declarations, `{column: {"kind", "sign", ...}}`,
+            as validated by `blocks.build_blocks`. A `demand` column feeds a
+            `SaturatingTerm`, a `linear` one a `LinearTerm`; the rest feed
+            the MLP.
+        ambient: the D column read by the explicit conduction term, or None
+            for conduction to a zero ambient.
+        norm_stats: per-column norm stats, needed for any declared branch.
     """
 
     def __init__(self, ny: int, nu: int, nd: int, in_steps: int,
@@ -239,7 +390,12 @@ class RCBlock(nn.Module):
                      DEFAULT_TAU_AMBIENT_H, DEFAULT_TAU_ZONE_MASS_H,
                      DEFAULT_TAU_MASS_ZONE_H),
                  train_taus: bool = False,
-                 channel_names: tuple[str, ...] = ()):
+                 channel_names: tuple[str, ...] = (),
+                 u_names: tuple[str, ...] = (),
+                 d_names: tuple[str, ...] = (),
+                 inputs: Optional[dict[str, dict]] = None,
+                 ambient: Optional[str] = None,
+                 norm_stats: Optional[dict[str, dict]] = None):
         super().__init__()
         self.widths = (ny, nu, nd)
         self.ny = ny
@@ -262,21 +418,66 @@ class RCBlock(nn.Module):
             for name, hours in zip(("ambient", "zone_mass", "mass_zone"), tau_hours)
         })
 
-        # Heat input, from the current inputs only — never from the state.
-        # That restriction is the whole stability argument; see the module
-        # docstring before relaxing it.
-        self.gain = blocks.MLP(
-            insize=nu + nd, outsize=ny, bias=True,
-            linear_map=nn.Linear, nonlin=nn.ReLU,
-            hsizes=num_layers * [hidden_size],
+        # Each declared column is a position into the drive vector
+        # `cat([u_last, d_last])`: U columns first, then D.
+        inputs = inputs or {}
+        u_names = u_names or tuple(f"u{i}" for i in range(nu))
+        d_names = d_names or tuple(f"d{i}" for i in range(nd))
+        drive_names = list(u_names) + list(d_names)
+        if (inputs or ambient) and norm_stats is None:
+            raise ValueError("RCBlock needs norm_stats for a declared branch")
+        if any(e["kind"] == "demand" for e in inputs.values()) and ny != 1:
+            raise ValueError(f"a block with a `demand` column has one Y channel, not {ny}")
+        zone_shift = [norm_stats[c]["shift"] for c in self.channel_names] if norm_stats else []
+        zone_stretch = [norm_stats[c]["stretch"] for c in self.channel_names] if norm_stats else []
+
+        self.ambient_name = ambient
+        self._ambient_pos = drive_names.index(ambient) if ambient else None
+        self.ambient = (AmbientTerm(norm_stats[ambient], zone_shift, zone_stretch)
+                        if ambient else None)
+
+        self.linear_names = [c for c, e in inputs.items() if e["kind"] == "linear"]
+        self._linear_pos = [drive_names.index(c) for c in self.linear_names]
+        self.linear = nn.ModuleList(
+            LinearTerm(inputs[c]["sign"], norm_stats[c], zone_stretch)
+            for c in self.linear_names)
+
+        self.saturating_names = [c for c, e in inputs.items() if e["kind"] == "demand"]
+        self._saturating_pos = [drive_names.index(c) for c in self.saturating_names]
+        self.saturating = nn.ModuleList(
+            SaturatingTerm(inputs[c]["sign"], norm_stats[c], norm_stats[self.channel_names[0]])
+            for c in self.saturating_names)
+
+        # Heat input `g`, from the undeclared inputs only — never from the
+        # state. That restriction is the whole stability argument; see the
+        # module docstring before relaxing it.
+        declared = set(inputs) | ({ambient} if ambient else set())
+        self.mlp_names = [c for c in drive_names if c not in declared]
+        self.register_buffer(
+            "_mlp_pos",
+            torch.tensor([drive_names.index(c) for c in self.mlp_names], dtype=torch.long),
+            persistent=False,
         )
-        # Start with no forcing at all. A freshly initialized MLP emits O(1),
-        # and one step of a normalized temperature is O(0.01), so an untouched
-        # gain would swamp the RC dynamics for the first epochs and the
-        # optimizer would spend them undoing its own initialization.
-        final = self.gain.linear[-1]
-        nn.init.zeros_(final.weight)
-        nn.init.zeros_(final.bias)
+        if self.mlp_names:
+            self.gain = blocks.MLP(
+                insize=len(self.mlp_names), outsize=ny, bias=True,
+                linear_map=nn.Linear, nonlin=nn.ReLU,
+                hsizes=num_layers * [hidden_size],
+            )
+            # Start with no forcing at all. A freshly initialized MLP emits
+            # O(1), and one step of a normalized temperature is O(0.01), so
+            # an untouched gain would swamp the RC dynamics for the first
+            # epochs and the optimizer would spend them undoing its own
+            # initialization.
+            final = self.gain.linear[-1]
+            nn.init.zeros_(final.weight)
+            nn.init.zeros_(final.bias)
+            self.intercept = None
+        else:
+            # Every column is declared: what is left of `g` is a constant
+            # heat gain.
+            self.gain = None
+            self.intercept = nn.Parameter(torch.zeros(ny))
 
         self._mass: torch.Tensor | None = None
 
@@ -290,6 +491,8 @@ class RCBlock(nn.Module):
         )
 
     def reg_error(self) -> torch.Tensor:
+        if self.gain is None:
+            return torch.zeros(())
         weights = [p.pow(2).mean() for p in self.gain.parameters() if p.dim() > 1]
         return torch.mean(torch.stack(weights))
 
@@ -331,27 +534,71 @@ class RCBlock(nn.Module):
         if mass is None:
             mass = self._seed_mass(x, a_mass_zone)
 
-        increment = a_zone_mass * (mass - zone) - a_ambient * zone + self.gain(drive)
+        if self.ambient is None:
+            conduction = -a_ambient * zone
+        else:
+            conduction = self.ambient(a_ambient, zone, self._column(drive, self._ambient_pos))
+        increment = (a_zone_mass * (mass - zone) + conduction
+                     + self._heat_input(drive, headroom=1 - a_zone_mass - a_ambient))
         if batched:
             self._mass = mass + a_mass_zone * (zone - mass)
         return increment
 
+    @staticmethod
+    def _column(drive: torch.Tensor, pos: int) -> torch.Tensor:
+        """One column of the drive vector, keeping its trailing axis."""
+        return drive[..., pos:pos + 1]
+
+    def _heat_input(self, drive: torch.Tensor, headroom: torch.Tensor) -> torch.Tensor:
+        """The declared branches plus `g`, summed. `headroom` is the zone's
+        remaining self-coefficient, which bounds every saturating slope."""
+        if self.gain is None:
+            total = self.intercept.expand(*drive.shape[:-1], self.ny)
+        else:
+            total = self.gain(drive.index_select(-1, self._mlp_pos))
+        for pos, term in zip(self._linear_pos, self.linear):
+            total = total + term(self._column(drive, pos))
+        for pos, term in zip(self._saturating_pos, self.saturating):
+            total = total + term(self._column(drive, pos), headroom)
+        return total
+
     # ── description ─────────────────────────────────────────────
 
     def describe(self) -> dict:
-        """Per-channel time constants in hours, for the reportcard.
+        """Per-channel time constants in hours, and the forcing branches.
 
         `tau_slow` is the storage number: how long a temperature difference
         put into this zone survives. It is the one figure worth checking
-        against the real building.
+        against the real building. `forcing` lists which column feeds which
+        branch and what each learned: `k` in zone units per step per
+        physical unit for `linear`; `cap` (°C/step), `w` (°C of demand) and
+        `slope_share` (the fraction of the stability budget the slope uses)
+        for `saturating`.
         """
         with torch.no_grad():
+            a_ambient, a_zone_mass, _ = self.rates()
             tau_fast, tau_slow = mode_taus(*self.rates())
+            headroom = 1 - a_zone_mass - a_ambient
+            forcing = {
+                "ambient": self.ambient_name,
+                "linear": {
+                    name: {"k": round(float(term.coefficient()), 6)}
+                    for name, term in zip(self.linear_names, self.linear)
+                },
+                "saturating": {
+                    name: {"cap": round(float(term.cap()), 4),
+                           "w": round(float(term.width(headroom)), 4),
+                           "slope_share": round(float(term.slope_share()), 3)}
+                    for name, term in zip(self.saturating_names, self.saturating)
+                },
+                "mlp": list(self.mlp_names),
+            }
         per_hour = self.steps_per_hour
         return {
             "time_constants_h": {
                 name: {"fast": round(float(fast) / per_hour, 3),
                        "slow": round(float(slow) / per_hour, 3)}
                 for name, fast, slow in zip(self.channel_names, tau_fast, tau_slow)
-            }
+            },
+            "forcing": forcing,
         }

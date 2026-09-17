@@ -183,8 +183,7 @@ class ModelingConfig:
             check_positive(self, name)
 
         for name in [
-            # lr=0 is valid: it mints a fixed-model checkpoint without any
-            # parameter updates (used by the `dummy` passthrough surrogate).
+            # lr=0 is valid: it mints a checkpoint without any parameter updates.
             "lr",
             "warmup", "patience", "curriculum_steps",
             "ref_gain", "vel_gain", "sgn_gain", "sgn_steepness",

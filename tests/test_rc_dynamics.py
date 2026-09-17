@@ -14,7 +14,13 @@ only hope for, so the tests are that list of claims:
     number on the reportcard is the number you set;
   - each block is genuinely independent of the others, except for an
     explicit `reads` declaration — and `2r2c` refuses that declaration,
-    because its stability guarantee depends on never reading state.
+    because its stability guarantee depends on never reading state;
+  - the declared forcing branches keep every one of those claims: a block
+    with no declarations is byte-for-byte the classical one, a `demand`
+    column is zero on the inactive side and the saturating branch it feeds
+    can never use more slope than the stability headroom allows, a
+    `linear` sign is a constraint and not a hint, and an `ambient` column
+    leaves the MLP's input.
 
 Anything that would silently produce a wrong model instead fails loudly:
 2r2c without residual, without a timestep, under a head that will not add
@@ -30,7 +36,7 @@ from neurotemplate.modeling.config import ModelingConfig as Config
 from neurotemplate.modeling.dynamics import BlockStack, get_dynamics
 from neurotemplate.modeling.heads import BinaryHead, HeadStack, RegressionHead
 from neurotemplate.modeling.rc import (
-    MIN_TAU_STEPS, RCBlock, _init_theta, mode_taus,
+    MIN_TAU_STEPS, RCBlock, SaturatingTerm, _init_theta, mode_taus,
 )
 
 SPH = 12.0            # 5-minute data
@@ -61,6 +67,32 @@ MIXED_SPLIT = {
 }
 
 
+# Physical-unit stats for the declared-branch tests: a z-scored setpoint
+# and zone whose normalised zero-crossings do not coincide, so a demand
+# computed in normalised space would gate in the wrong place.
+STATS = {
+    "north T": {"shift": 23.0, "stretch": 1.5, "min": 20.0, "max": 27.0},
+    "north sp": {"shift": 25.0, "stretch": 2.0, "min": 21.0, "max": 30.0},
+    "ahu fan": {"shift": 0.4, "stretch": 0.3, "min": 0.0, "max": 1.0},
+    "oat": {"shift": 20.0, "stretch": 6.0, "min": 5.0, "max": 35.0},
+    "ghi": {"shift": 300.0, "stretch": 250.0, "min": 0.0, "max": 900.0},
+}
+DECLARED = {
+    "north": {
+        "Y": ["north T"], "U": ["north sp", "ahu fan"], "D": ["oat", "ghi"],
+        "model": "2r2c", "ambient": "oat",
+        "inputs": {
+            "north sp": {"kind": "demand", "sign": -1, "state": "north T"},
+            "ahu fan": {"kind": "linear", "sign": +1},
+        },
+    },
+}
+DECLARED_MAPPING = {
+    "Y": ["north T"], "U": ["north sp", "ahu fan"], "D": ["oat", "ghi"],
+    "t": ["sec_elapsed"],
+}
+
+
 def make_cfg(**over) -> Config:
     cfg = Config()
     cfg.model = "2r2c"
@@ -78,6 +110,19 @@ def make_cfg(**over) -> Config:
 def make_block(ny=1, nu=1, nd=1, **over) -> RCBlock:
     torch.manual_seed(0)
     return RCBlock(ny, nu, nd, IN_STEPS, SPH, hidden_size=8, num_layers=1, **over)
+
+
+def make_declared_block() -> RCBlock:
+    """The `north` block of DECLARED, built directly."""
+    return make_block(
+        1, 2, 2, channel_names=("north T",), u_names=("north sp", "ahu fan"),
+        d_names=("oat", "ghi"), inputs=DECLARED["north"]["inputs"],
+        ambient="oat", norm_stats=STATS,
+    )
+
+
+def normalised(name: str, value: float) -> float:
+    return (value - STATS[name]["shift"]) / STATS[name]["stretch"]
 
 
 def window(block: RCBlock, zone, drive_u, drive_d) -> torch.Tensor:
@@ -395,6 +440,155 @@ def test_a_per_block_d_subset_narrows_only_that_blocks_input_width():
     # widths: ny_in=1, nu=0 for both; nd=1 for "one", nd=2 for "two"
     assert fy.blocks[0].in_features == IN_STEPS * (1 + 0 + 1)
     assert fy.blocks[1].in_features == IN_STEPS * (1 + 0 + 2)
+
+
+# ── Declared forcing: every claim survives the branches ──────────
+
+def test_an_undeclared_block_has_the_classical_state_dict():
+    """A checkpoint trained before per-column declarations existed must load
+    into an undeclared block: no branch registers anything unless declared."""
+    assert set(make_block().state_dict()) == {
+        "_theta.ambient", "_theta.zone_mass", "_theta.mass_zone",
+        "gain.linear.0.weight", "gain.linear.0.bias",
+        "gain.linear.1.weight", "gain.linear.1.bias",
+    }
+
+
+def test_demand_is_zero_on_the_inactive_side_and_positive_on_the_active():
+    """Through the normalisation round trip: the two columns have different
+    shifts, so a setpoint 1 °C above the zone is *below* it in normalised
+    units. Only a physical-unit comparison gates in the right place."""
+    system = get_dynamics(make_cfg(), DECLARED_MAPPING, block_spec=DECLARED,
+                          norm_stats=STATS)
+    pre = system.nodes[0].callable.pre_stack
+    zone = torch.full((1, IN_STEPS), normalised("north T", 24.0))
+    coasting = torch.full((1, IN_STEPS), normalised("north sp", 25.0))
+    cooling = torch.full((1, IN_STEPS), normalised("north sp", 22.0))
+    fan = torch.zeros(1, IN_STEPS)
+    u = lambda sp: torch.stack([sp, fan], dim=-1).reshape(1, -1)  # noqa: E731
+    assert normalised("north sp", 25.0) < normalised("north T", 24.0)
+    assert torch.equal(pre(zone, u(coasting)).reshape(IN_STEPS, 2)[:, 0],
+                       torch.zeros(IN_STEPS))
+    active = pre(zone, u(cooling)).reshape(IN_STEPS, 2)[:, 0]
+    assert torch.allclose(active, torch.full((IN_STEPS,), 2.0 / (27.0 - 21.0)))
+
+
+@pytest.mark.parametrize("theta_cap,theta_slope", [(-20.0, 0.0), (0.0, 20.0), (20.0, 20.0)])
+def test_the_saturating_slope_never_exceeds_the_headroom(theta_cap, theta_slope):
+    """`cap / w ≤ 1 - a_m - a_o` by construction, so the zone's own
+    coefficient stays nonnegative wherever the parameters go. Measured as
+    the gradient of the branch's increment with respect to the zone, in
+    normalised units, at the origin where the tanh is steepest."""
+    term = SaturatingTerm(-1, STATS["north sp"], STATS["north T"])
+    with torch.no_grad():
+        term.theta_cap.fill_(theta_cap)
+        term.theta_slope.fill_(theta_slope)
+    block = make_block()
+    a_o, a_m, _ = block.rates()
+    headroom = 1 - a_m - a_o
+    # Demand in normalised-zone units: d(demand feature)/d(zone_norm) is
+    # stretch_z / scale, so the chain gives the slope in the state matrix.
+    x = torch.zeros(1, 1, requires_grad=True)
+    term(x, headroom).sum().backward()
+    slope_in_state = x.grad.abs() * STATS["north T"]["stretch"] / term.scale
+    assert slope_in_state.item() <= headroom.item() * (1 + 1e-5)
+
+
+def test_an_ambient_column_leaves_the_mlps_input():
+    block = make_declared_block()
+    assert block.mlp_names == ["ghi"]
+    assert block.gain.linear[0].in_features == 1
+    assert block.ambient_name == "oat"
+
+
+def test_a_linear_sign_is_a_constraint_not_a_hint():
+    block = make_block(1, 1, 0, u_names=("power",), inputs={
+        "power": {"kind": "linear", "sign": -1}}, norm_stats={
+        "y0": STATS["north T"], "power": STATS["ahu fan"]})
+    (term,) = block.linear
+    for theta in (-20.0, 0.0, 20.0):
+        with torch.no_grad():
+            term.theta.fill_(theta)
+        assert term.coefficient() <= 0
+
+
+def test_the_ambient_term_is_conduction_to_the_declared_column():
+    """`a_o (T_oa - z)` in physical units: zone at ambient gets no conduction,
+    zone 6 °C below it warms by `a_o · 6 / stretch_z` per step."""
+    block = make_declared_block()
+    a_o, _, _ = block.rates()
+    with torch.no_grad():
+        zone = torch.full((1, 1), normalised("north T", 24.0))
+        same = torch.full((1, 1), normalised("oat", 24.0))
+        hotter = torch.full((1, 1), normalised("oat", 30.0))
+        assert torch.allclose(block.ambient(a_o, zone, same), torch.zeros(1, 1), atol=1e-6)
+        assert torch.allclose(block.ambient(a_o, zone, hotter),
+                              a_o * 6.0 / STATS["north T"]["stretch"])
+
+
+def test_a_declared_block_persists_its_stats_and_reloads_by_config():
+    """The branches' norm stats and the pre-stack's are buffers, so the
+    checkpoint's numbers reach a rebuilt system through load_state_dict."""
+    torch.manual_seed(0)
+    system = get_dynamics(make_cfg(), DECLARED_MAPPING, block_spec=DECLARED,
+                          norm_stats=STATS)
+    state = system.state_dict()
+    assert any("pre_stack" in k for k in state)
+    assert any("saturating.0.theta_cap" in k for k in state)
+    rebuilt = get_dynamics(make_cfg(), DECLARED_MAPPING, block_spec=DECLARED,
+                           norm_stats=STATS)
+    rebuilt.load_state_dict(state)
+    x = torch.randn(2, IN_STEPS * 5)
+    y, u, d = x[:, :IN_STEPS], x[:, IN_STEPS:IN_STEPS * 3], x[:, IN_STEPS * 3:]
+    system.nodes[0].callable.fy.reset(); rebuilt.nodes[0].callable.fy.reset()
+    assert torch.equal(system.nodes[0].callable(y, u, d), rebuilt.nodes[0].callable(y, u, d))
+
+
+def test_a_week_of_adversarial_setpoints_does_not_diverge_with_demand_on():
+    """The one state read the block admits is bounded in slope, so the
+    rollout stays inside the same bound as the undeclared block's — at the
+    fastest rates and with the coil driven to its cap."""
+    torch.manual_seed(0)
+    system = get_dynamics(make_cfg(), DECLARED_MAPPING, block_spec=DECLARED,
+                          norm_stats=STATS)
+    block = system.nodes[0].callable.fy.blocks[0]
+    with torch.no_grad():
+        for name in block._theta:
+            block._theta[name].fill_(-20.0)
+        block.saturating[0].theta_cap.fill_(5.0)
+        block.saturating[0].theta_slope.fill_(20.0)   # the whole headroom
+        for p in block.gain.parameters():
+            p.normal_(0, 1.0)
+    steps = int(SPH) * 24 * 7
+    out = rollout(system, 3.0, steps, ny=1, nu=2, nd=2,
+                  u=torch.randn(1, steps, 2) * 20, d=torch.randn(1, steps, 2) * 20)
+    assert torch.isfinite(out).all()
+    assert out.abs().max() < 1e4
+
+
+def test_a_declared_block_still_differentiates_under_vmap():
+    system = get_dynamics(make_cfg(), DECLARED_MAPPING, block_spec=DECLARED,
+                          norm_stats=STATS)
+    raw = system.nodes[0].callable
+    x = torch.randn(4, IN_STEPS * 5)
+    y, u, d = x[:, :IN_STEPS], x[:, IN_STEPS:IN_STEPS * 3], x[:, IN_STEPS * 3:]
+    jac = torch.vmap(torch.func.jacrev(raw.compute_output, argnums=(0, 1, 2)))(
+        y, raw.pre_stack(y, u), d)
+    assert all(torch.isfinite(j).all() for j in jac)
+
+
+def test_the_reportcard_reads_the_branches_off_describe():
+    info = make_declared_block().describe()["forcing"]
+    assert info["ambient"] == "oat"
+    assert set(info["linear"]) == {"ahu fan"} and info["linear"]["ahu fan"]["k"] > 0
+    assert set(info["saturating"]) == {"north sp"}
+    assert 0 < info["saturating"]["north sp"]["slope_share"] < 1
+    assert info["mlp"] == ["ghi"]
+
+
+def test_a_demand_declaration_needs_norm_stats():
+    with pytest.raises(ValueError, match="norm_stats"):
+        get_dynamics(make_cfg(), DECLARED_MAPPING, block_spec=DECLARED)
 
 
 # ── The ways a wrong model is refused ────────────────────────────

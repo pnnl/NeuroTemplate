@@ -519,10 +519,7 @@ def parse_column_unit(col: str) -> Optional[str]:
     Returns None when there is no trailing bracket, when a bracket exists
     but isn't at the end (e.g. "Foo [note] Bar"), or when it's empty
     ("Foo []"). A column with no unit is not an error: `unit_of` and
-    `axis_label` both degrade to the bare column/role name, and a column
-    that doesn't follow this naming convention can still get a unit via the
-    `tie_norm_stats` hook, which runs after this and can set
-    `norm_stats[col]["unit"]` directly.
+    `axis_label` both degrade to the bare column/role name.
     """
     match = _TRAILING_UNIT_RE.search(col)
     if match is None:
@@ -596,8 +593,7 @@ def compute_norm_stats(
         norm_stats: {col_name: {"shift", "stretch", "min", "max",
                                  "mean", "stddev", "median", "unit"}}
             "unit" is `parse_column_unit(col_name)` — None unless the column
-            name ends in a bracketed token. Override it per-column with the
-            `tie_norm_stats` hook if your names don't follow that convention.
+            name ends in a bracketed token.
     """
     # Validate overrides up-front so bad values fail at startup.
     for col, nt in (column_overrides or {}).items():

@@ -13,6 +13,11 @@ Plus the two HeadStack invariants: an all-regression stack reproduces blanket
 MSE to floating-point precision, and `apply_residual` touches only the
 channels that declared themselves residual-compatible.
 
+The pre-stack section pins the input-side counterpart: the clamp is exact
+forward and never dead backward, the stack round-trips through its config,
+and — the one transposition a reshape could hide — every output step is
+computed from its own step of U and Y.
+
 The rare-level section pins the two knobs a staged channel has: class
 weights must leave the loss untouched at their default and count a rare
 level more otherwise, and the decision thresholds must move the snap
@@ -28,12 +33,15 @@ import torch.nn as nn
 from neurotemplate.modeling.heads import (
     BinaryHead,
     BoundedHead,
+    Demand,
     HeadStack,
     OrdinalHead,
+    PreStack,
     RegressionHead,
     bounds_from_norm,
     inverse_sqrt_frequency_weights,
     project_physical_to_norm,
+    soft_clamp_min,
 )
 
 INF = float("inf")
@@ -303,3 +311,57 @@ def test_bounds_project_from_physical_units_into_normalized_ones():
     # An infinite bound means "no bound" and must not become a huge number.
     assert project_physical_to_norm(INF, stats) == INF
     assert project_physical_to_norm(-INF, stats) == -INF
+
+
+# ── Pre-stack: derived inputs ────────────────────────────────────
+
+SETPOINT = {"shift": 24.0, "stretch": 2.0, "min": 20.0, "max": 28.0}
+ZONE = {"shift": 23.0, "stretch": 1.5, "min": 21.0, "max": 26.0}
+
+
+def test_soft_clamp_is_relu_forward_and_never_dead_backward():
+    x = torch.linspace(-8.0, 8.0, 33, requires_grad=True)
+    y = soft_clamp_min(x)
+    assert torch.equal(y, torch.relu(x))
+    y.sum().backward()
+    assert (x.grad[x < 0] > 0).all()
+    assert x.grad[-1] == pytest.approx(1.0, abs=1e-3)
+
+
+def test_a_pre_stack_survives_a_config_round_trip():
+    stack = PreStack([Demand(-1, SETPOINT, ZONE)], [("sp", "zone")],
+                     ["zone", "power"], ["sp", "fan"], in_steps=3)
+    config = stack.to_config()
+    assert config == {"sp": {"kind": "demand", "state": "zone", "sign": -1}}
+    rebuilt = PreStack.from_config(
+        config, ["zone", "power"], ["sp", "fan"],
+        {"sp": SETPOINT, "zone": ZONE}, in_steps=3,
+    )
+    y, u = torch.randn(4, 6), torch.randn(4, 6)
+    assert torch.equal(rebuilt(y, u), stack(y, u))
+    assert rebuilt.state_dict().keys() == stack.state_dict().keys()
+
+
+def test_each_output_step_reads_its_own_step_of_u_and_y():
+    """Distinguishable values: y[t, i] = 100·t + i, u[t, j] = -(100·t + j),
+    with identity stats and a unit range so the demand is exactly
+    `relu(y - u)` and the pairing shows in the number itself."""
+    identity = {"shift": 0.0, "stretch": 1.0, "min": 0.0, "max": 1.0}
+    in_steps, ny, nu = 3, 2, 2
+    stack = PreStack([Demand(-1, identity, identity)], [("u1", "y1")],
+                     ["y0", "y1"], ["u0", "u1"], in_steps)
+    y = torch.tensor([[100.0 * t + i for t in range(in_steps) for i in range(ny)]])
+    u = torch.tensor([[-(100.0 * t + j) for t in range(in_steps) for j in range(nu)]])
+    out = stack(y, u).reshape(in_steps, nu)
+    for t in range(in_steps):
+        assert out[t, 0] == -(100 * t)                     # untouched column
+        assert out[t, 1] == (100 * t + 1) + (100 * t + 1)  # relu(y1_t - u1_t) / 1
+    # Under vmap the window is 1-D and the layout must still hold.
+    single = torch.vmap(stack)(y, u)
+    assert torch.equal(single, stack(y, u))
+
+
+def test_demand_is_never_active_on_ranges_that_never_overlap():
+    with pytest.raises(ValueError, match="never active"):
+        Demand(-1, {"shift": 0, "stretch": 1, "min": 30.0, "max": 32.0}, ZONE)
+

@@ -99,6 +99,7 @@ def build_trainer(
     # SystemPreview with 'yn' feedback loop for autoregressive rollout
     system = get_dynamics(
         cfg, nm_mapping, head_stack=head_stack, block_spec=block_spec,
+        norm_stats=norm_stats,
     ).to(cfg.device)
 
     # The raw SSMGrad model lives inside the System's Node.

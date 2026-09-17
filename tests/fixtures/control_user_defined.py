@@ -176,8 +176,8 @@ def reference_control(
 
     The simplest rule that is actually trying: it ignores the disturbances and
     the zone state entirely and just aims at the centre of whatever band it is
-    handed. Against the `dummy` surrogate (next zone temp = setpoint) this is
-    the exactly-optimal comfort controller, which makes it a sharp check on
+    handed. Against a surrogate whose zone tracks the setpoint this is the
+    exactly-optimal comfort controller, which makes it a sharp check on
     whether a learned policy is earning its complexity.
 
     Memoryless, current step only, normalized in and normalized U out — the

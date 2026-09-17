@@ -1,5 +1,10 @@
 # Plan: let the dynamics model consume derived control features
 
+> **Superseded 2026-09-16 by [prestack_demand_plan.md](prestack_demand_plan.md).** Kept
+> for the train/serve-skew table and the Option A buffer diagram. Option A is dropped,
+> the arbitrary-`nn.Module` hook is replaced by a closed `PreStack` taxonomy, and the
+> persistence section no longer applies.
+
 ## Context
 
 The sys-id surrogate consumes raw control values — a cooling setpoint at 24.5 °C arrives

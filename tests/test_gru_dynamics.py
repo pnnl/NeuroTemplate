@@ -223,7 +223,6 @@ def test_in_steps_one_matches_a_hand_rolled_rollout(nm_mapping):
     in_steps = 1
     data = make_batch(in_steps)
     system = build_system("gru", in_steps, nm_mapping)
-    assert system.nodes[0].input_map == {}
 
     out = system(dict(data))
 
