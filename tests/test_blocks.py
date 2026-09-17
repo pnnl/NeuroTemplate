@@ -196,13 +196,15 @@ def test_every_problem_in_a_declaration_is_listed_at_once():
                                "oat": {"kind": "demand", "sign": -1,
                                        "state": "north T"},
                                "nope": {"kind": "linear", "sign": +1},
+                               "south sp": {"kind": "demand", "sign": -1,
+                                            "state": "south T", "branch": "gru"},
                                "ghi": {"kind": "quadratic"}}}}
     with pytest.raises(ValueError) as err:
         build_blocks(MAPPING, spec)
     message = str(err.value)
     for expected in ("`ambient` ('typo')", "`sign` of -1 or +1",
                      "exactly one Y channel", "only a U column",
-                     "names 'nope'", "kind 'quadratic'"):
+                     "names 'nope'", "kind 'quadratic'", "branch 'gru'"):
         assert expected in message, message
 
 

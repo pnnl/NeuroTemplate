@@ -501,6 +501,29 @@ def test_an_ambient_column_leaves_the_mlps_input():
     assert block.ambient_name == "oat"
 
 
+def test_a_declared_ambient_term_owns_a_trainable_rate():
+    """Explicit conduction makes `a_o` identifiable, so the term owns it and
+    trains it from the prior; the mass rates keep the frozen prior the module
+    docstring argues for, and an undeclared block keeps all three frozen."""
+    block = make_declared_block()
+    assert "ambient" not in block._theta
+    assert block.ambient.log_tau.requires_grad
+    assert not any(p.requires_grad for p in block._theta.parameters())
+    a_o, _, _ = block.rates()
+    assert a_o.item() == pytest.approx(1 / (2.0 * SPH), rel=1e-4)
+    assert not any(p.requires_grad for p in make_block()._theta.parameters())
+
+
+def test_branch_parameters_are_exactly_the_declared_scalars():
+    from neurotemplate.modeling.rc import branch_parameters
+    block = make_declared_block()
+    names = {n for n, p in block.named_parameters()
+             if any(p is b for b in branch_parameters(block))}
+    assert names == {"ambient.log_tau", "linear.0.theta",
+                     "saturating.0.theta_cap", "saturating.0.theta_slope"}
+    assert branch_parameters(make_block()) == []
+
+
 def test_a_linear_sign_is_a_constraint_not_a_hint():
     block = make_block(1, 1, 0, u_names=("power",), inputs={
         "power": {"kind": "linear", "sign": -1}}, norm_stats={
@@ -521,8 +544,8 @@ def test_the_ambient_term_is_conduction_to_the_declared_column():
         zone = torch.full((1, 1), normalised("north T", 24.0))
         same = torch.full((1, 1), normalised("oat", 24.0))
         hotter = torch.full((1, 1), normalised("oat", 30.0))
-        assert torch.allclose(block.ambient(a_o, zone, same), torch.zeros(1, 1), atol=1e-6)
-        assert torch.allclose(block.ambient(a_o, zone, hotter),
+        assert torch.allclose(block.ambient(zone, same), torch.zeros(1, 1), atol=1e-6)
+        assert torch.allclose(block.ambient(zone, hotter),
                               a_o * 6.0 / STATS["north T"]["stretch"])
 
 
@@ -555,6 +578,7 @@ def test_a_week_of_adversarial_setpoints_does_not_diverge_with_demand_on():
     with torch.no_grad():
         for name in block._theta:
             block._theta[name].fill_(-20.0)
+        block.ambient.log_tau.fill_(-20.0)            # fastest ambient rate too
         block.saturating[0].theta_cap.fill_(5.0)
         block.saturating[0].theta_slope.fill_(20.0)   # the whole headroom
         for p in block.gain.parameters():
@@ -579,7 +603,8 @@ def test_a_declared_block_still_differentiates_under_vmap():
 
 def test_the_reportcard_reads_the_branches_off_describe():
     info = make_declared_block().describe()["forcing"]
-    assert info["ambient"] == "oat"
+    assert info["ambient"]["column"] == "oat"
+    assert info["ambient"]["tau_h"] == pytest.approx(2.0, rel=1e-3)
     assert set(info["linear"]) == {"ahu fan"} and info["linear"]["ahu fan"]["k"] > 0
     assert set(info["saturating"]) == {"north sp"}
     assert 0 < info["saturating"]["north sp"]["slope_share"] < 1
@@ -649,3 +674,20 @@ def test_2r2c_with_reads_is_refused():
     }
     with pytest.raises(ValueError, match="cannot declare `reads`"):
         get_dynamics(make_cfg(model="mlp"), MIXED_MAPPING, block_spec=spec)
+
+
+def test_a_demand_can_be_routed_into_the_mlp_by_declaration():
+    """The unbounded fallback: the feature reaches `g` instead of a
+    saturating branch, and the block says so in `describe()`."""
+    inputs = {"north sp": {"kind": "demand", "sign": -1, "state": "north T",
+                           "branch": "mlp"}}
+    block = make_block(1, 2, 2, channel_names=("north T",),
+                       u_names=("north sp", "ahu fan"), d_names=("oat", "ghi"),
+                       inputs=inputs, norm_stats=STATS)
+    assert len(block.saturating) == 0
+    assert block.mlp_names == ["north sp", "ahu fan", "oat", "ghi"]
+    assert block.describe()["forcing"]["demand_in_mlp"] == ["north sp"]
+    spec = {"north": {**DECLARED["north"], "inputs": inputs}}
+    system = get_dynamics(make_cfg(), DECLARED_MAPPING, block_spec=spec, norm_stats=STATS)
+    assert system.nodes[0].callable.pre_stack.to_config()["north sp"] == {
+        "kind": "demand", "state": "north T", "sign": -1}

@@ -27,6 +27,7 @@ from neurotemplate.common.data_utils import get_loader
 from neurotemplate.modeling.heads import HeadStack
 from neurotemplate.modeling.dynamics import get_dynamics
 from neurotemplate.modeling.loss import build_loss
+from neurotemplate.modeling.rc import branch_parameters
 from neurotemplate.modeling.config import ModelingConfig
 
 from neuromancer.problem import Problem
@@ -136,7 +137,7 @@ def build_trainer(
         # problem.show()
         print("Building optimizer...")
 
-    optimizer = torch.optim.Adam(problem.parameters(), lr=cfg.lr)
+    optimizer = torch.optim.Adam(_parameter_groups(problem, cfg), lr=cfg.lr)
 
     if cfg.verbose:
         print("Building data loaders...")
@@ -171,6 +172,18 @@ def build_trainer(
     )
 
     return trainer
+
+
+def _parameter_groups(problem: Problem, cfg: ModelingConfig) -> list[dict]:
+    """Network weights at `cfg.lr`; a declared RC branch's physical scalars
+    at `cfg.rc_branch_lr` (see `rc.branch_parameters`)."""
+    branch = branch_parameters(problem)
+    branch_ids = {id(p) for p in branch}
+    rest = [p for p in problem.parameters() if id(p) not in branch_ids]
+    groups = [{"params": rest}]
+    if branch:
+        groups.append({"params": branch, "lr": cfg.rc_branch_lr})
+    return groups
 
 
 # ── Child Logger ─────────────────────────────────────────────────

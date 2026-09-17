@@ -57,11 +57,24 @@ genuinely unknown.
                `a_o (T_oa - z)` with `T_oa` read from the column rather than
                left for `g` to re-form, and the column leaves `g`'s input:
                anything else `g` could learn from it would be a
-               weather-correlated bias, not conduction.
+               weather-correlated bias, not conduction. Declaring it also
+               unfreezes `a_o`, with `rc_tau_ambient_h` as its start: the
+               term is now load-bearing and has no hidden state behind it,
+               so it is identifiable in a way the mass rates are not (see
+               "The storage is a prior"), and a frozen guess that is wrong
+               by a few-fold cannot be absorbed by `g` any more — whatever
+               free term is left would learn a constant heat gain of several
+               °C/h to cancel it, which holds on the training distribution
+               and nowhere else.
   linear       a U or D column entering as one sign-fixed coefficient times
                its physical value: measured power removes heat (`sign = -1`),
                solar irradiance adds it (`+1`). No bias — a constant heat gain
-               belongs in `g`'s intercept.
+               belongs in `g`'s intercept, and a block that declares every
+               column has no `g` and no free constant: unmetered gains then
+               have to enter through a declared column (occupancy, say) or
+               go unmodelled, because a free constant cannot be told apart
+               from the ambient rate on data that never sits at zero
+               outdoor gap.
   saturating   what a `demand`-declared setpoint becomes here. The
                pre-stack has already replaced the column with the
                thermostat's clamped error (see `heads.Demand`); this branch
@@ -263,20 +276,33 @@ def _buffer(module: nn.Module, name: str, value) -> None:
 
 
 class AmbientTerm(nn.Module):
-    """`a_o (T_oa - z)`: conduction to the declared outdoor temperature."""
+    """`a_o (T_oa - z)`: conduction to the declared outdoor temperature.
 
-    def __init__(self, column: dict, zone_shift: list[float], zone_stretch: list[float]):
+    Owns the ambient rate, `a_o = 1 / (MIN_TAU_STEPS + exp(log_tau))`, which
+    trains from the block's `tau_hours[0]`. Log-space, unlike the frozen
+    priors' `MIN_TAU_STEPS + softplus(θ)`, which is linear in the time
+    constant: a rate that trains has hours to days to cover, and in
+    log-space that is a few units of raw travel rather than hundreds.
+    """
+
+    def __init__(self, column: dict, zone_shift: list[float], zone_stretch: list[float],
+                 tau_steps: float):
         super().__init__()
+        excess = max(tau_steps - MIN_TAU_STEPS, 1.0)
+        self.log_tau = nn.Parameter(torch.full((len(zone_shift),), math.log(excess)))
         _buffer(self, "shift", column["shift"])
         _buffer(self, "stretch", column["stretch"])
         _buffer(self, "zone_shift", zone_shift)
         _buffer(self, "zone_stretch", zone_stretch)
 
-    def forward(self, a_ambient: torch.Tensor, zone: torch.Tensor,
-                outdoor: torch.Tensor) -> torch.Tensor:
+    def rate(self) -> torch.Tensor:
+        """`a_o`, per channel, in (0, 1/MIN_TAU_STEPS)."""
+        return 1.0 / (MIN_TAU_STEPS + torch.exp(self.log_tau))
+
+    def forward(self, zone: torch.Tensor, outdoor: torch.Tensor) -> torch.Tensor:
         zone_phys = zone * self.zone_stretch + self.zone_shift
         outdoor_phys = outdoor * self.stretch + self.shift
-        return a_ambient * (outdoor_phys - zone_phys) / self.zone_stretch
+        return self.rate() * (outdoor_phys - zone_phys) / self.zone_stretch
 
 
 class LinearTerm(nn.Module):
@@ -339,6 +365,18 @@ class SaturatingTerm(nn.Module):
         return self.sign * self.cap() * torch.tanh(demand_c / self.width(headroom)) / self.zone_stretch
 
 
+def branch_parameters(module: nn.Module) -> list[nn.Parameter]:
+    """Every declared branch's parameters under `module`.
+
+    A grey-box fit steps its few physical scalars at their own learning rate
+    (`cfg.rc_branch_lr`): Adam moves a raw parameter by about `lr` per
+    update, and a coil capacity or a time constant has units of travel to
+    cover where a network weight has thousandths.
+    """
+    terms = (AmbientTerm, LinearTerm, SaturatingTerm)
+    return [p for m in module.modules() if isinstance(m, terms) for p in m.parameters()]
+
+
 class RCBlock(nn.Module):
     """One 2R2C network per Y channel, sharing a learned heat-input map.
 
@@ -377,10 +415,12 @@ class RCBlock(nn.Module):
             its window carries them; what `inputs` and `ambient` refer to.
         inputs: per-column declarations, `{column: {"kind", "sign", ...}}`,
             as validated by `blocks.build_blocks`. A `demand` column feeds a
-            `SaturatingTerm`, a `linear` one a `LinearTerm`; the rest feed
-            the MLP.
+            `SaturatingTerm` — or the MLP, with `"branch": "mlp"`, at the
+            cost of the stability bound — a `linear` one a `LinearTerm`;
+            the rest feed the MLP.
         ambient: the D column read by the explicit conduction term, or None
-            for conduction to a zero ambient.
+            for conduction to a zero ambient. Declaring one makes the
+            ambient rate trainable.
         norm_stats: per-column norm stats, needed for any declared branch.
     """
 
@@ -410,12 +450,15 @@ class RCBlock(nn.Module):
         self._y_steps = windows.per_step(y_block, ny, in_steps)
         _, self._u_last, self._d_last = windows.last_step(self.widths, in_steps)
 
+        # A declared `AmbientTerm` owns the ambient rate (and trains it); the
+        # module docstring says why that is not true of the mass rates.
         self._theta = nn.ParameterDict({
             name: nn.Parameter(
                 torch.full((ny,), _init_theta(hours, steps_per_hour)),
                 requires_grad=train_taus,
             )
             for name, hours in zip(("ambient", "zone_mass", "mass_zone"), tau_hours)
+            if name != "ambient" or ambient is None
         })
 
         # Each declared column is a position into the drive vector
@@ -433,8 +476,10 @@ class RCBlock(nn.Module):
 
         self.ambient_name = ambient
         self._ambient_pos = drive_names.index(ambient) if ambient else None
-        self.ambient = (AmbientTerm(norm_stats[ambient], zone_shift, zone_stretch)
-                        if ambient else None)
+        self.ambient = (
+            AmbientTerm(norm_stats[ambient], zone_shift, zone_stretch,
+                        tau_steps=tau_hours[0] * steps_per_hour)
+            if ambient else None)
 
         self.linear_names = [c for c, e in inputs.items() if e["kind"] == "linear"]
         self._linear_pos = [drive_names.index(c) for c in self.linear_names]
@@ -442,17 +487,24 @@ class RCBlock(nn.Module):
             LinearTerm(inputs[c]["sign"], norm_stats[c], zone_stretch)
             for c in self.linear_names)
 
-        self.saturating_names = [c for c, e in inputs.items() if e["kind"] == "demand"]
+        demands = [c for c, e in inputs.items() if e["kind"] == "demand"]
+        self.saturating_names = [
+            c for c in demands if inputs[c].get("branch", "saturating") == "saturating"]
         self._saturating_pos = [drive_names.index(c) for c in self.saturating_names]
         self.saturating = nn.ModuleList(
             SaturatingTerm(inputs[c]["sign"], norm_stats[c], norm_stats[self.channel_names[0]])
             for c in self.saturating_names)
+        # Demand features routed into `g` by declaration: a ReLU MLP has no
+        # slope bound, so the stability guarantee is off for this block.
+        self.demand_in_mlp = [c for c in demands if c not in self.saturating_names]
 
-        # Heat input `g`, from the undeclared inputs only — never from the
-        # state. That restriction is the whole stability argument; see the
-        # module docstring before relaxing it.
-        declared = set(inputs) | ({ambient} if ambient else set())
-        self.mlp_names = [c for c in drive_names if c not in declared]
+        # Heat input `g`, from every column without a structured branch —
+        # never from the state, except through a `demand_in_mlp` column.
+        # That restriction is the whole stability argument; see the module
+        # docstring before relaxing it further.
+        structured = (set(self.linear_names) | set(self.saturating_names)
+                      | ({ambient} if ambient else set()))
+        self.mlp_names = [c for c in drive_names if c not in structured]
         self.register_buffer(
             "_mlp_pos",
             torch.tensor([drive_names.index(c) for c in self.mlp_names], dtype=torch.long),
@@ -472,12 +524,13 @@ class RCBlock(nn.Module):
             final = self.gain.linear[-1]
             nn.init.zeros_(final.weight)
             nn.init.zeros_(final.bias)
-            self.intercept = None
         else:
-            # Every column is declared: what is left of `g` is a constant
-            # heat gain.
+            # Every column is declared: no residual term at all. A free
+            # constant here would be a heat gain that is unidentifiable
+            # against the ambient rate — the two trade off along a ridge
+            # that only the equilibrium scenario, at zero outdoor gap,
+            # can see.
             self.gain = None
-            self.intercept = nn.Parameter(torch.zeros(ny))
 
         self._mass: torch.Tensor | None = None
 
@@ -485,10 +538,10 @@ class RCBlock(nn.Module):
 
     def rates(self) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """The three per-step exchange rates, each in (0, 1/MIN_TAU_STEPS)."""
-        return tuple(
-            1.0 / (MIN_TAU_STEPS + nn.functional.softplus(self._theta[name]))
-            for name in ("ambient", "zone_mass", "mass_zone")
-        )
+        def rate(name):
+            return 1.0 / (MIN_TAU_STEPS + nn.functional.softplus(self._theta[name]))
+        a_ambient = self.ambient.rate() if self.ambient is not None else rate("ambient")
+        return a_ambient, rate("zone_mass"), rate("mass_zone")
 
     def reg_error(self) -> torch.Tensor:
         if self.gain is None:
@@ -537,7 +590,7 @@ class RCBlock(nn.Module):
         if self.ambient is None:
             conduction = -a_ambient * zone
         else:
-            conduction = self.ambient(a_ambient, zone, self._column(drive, self._ambient_pos))
+            conduction = self.ambient(zone, self._column(drive, self._ambient_pos))
         increment = (a_zone_mass * (mass - zone) + conduction
                      + self._heat_input(drive, headroom=1 - a_zone_mass - a_ambient))
         if batched:
@@ -553,7 +606,7 @@ class RCBlock(nn.Module):
         """The declared branches plus `g`, summed. `headroom` is the zone's
         remaining self-coefficient, which bounds every saturating slope."""
         if self.gain is None:
-            total = self.intercept.expand(*drive.shape[:-1], self.ny)
+            total = drive.new_zeros(*drive.shape[:-1], self.ny)
         else:
             total = self.gain(drive.index_select(-1, self._mlp_pos))
         for pos, term in zip(self._linear_pos, self.linear):
@@ -573,14 +626,18 @@ class RCBlock(nn.Module):
         branch and what each learned: `k` in zone units per step per
         physical unit for `linear`; `cap` (°C/step), `w` (°C of demand) and
         `slope_share` (the fraction of the stability budget the slope uses)
-        for `saturating`.
+        for `saturating`. `demand_in_mlp` names the demand columns routed
+        into `g` by declaration, for which the stability bound does not hold.
         """
         with torch.no_grad():
             a_ambient, a_zone_mass, _ = self.rates()
             tau_fast, tau_slow = mode_taus(*self.rates())
             headroom = 1 - a_zone_mass - a_ambient
             forcing = {
-                "ambient": self.ambient_name,
+                "ambient": None if self.ambient is None else {
+                    "column": self.ambient_name,
+                    "tau_h": round(float(1 / a_ambient[0]) / self.steps_per_hour, 3),
+                },
                 "linear": {
                     name: {"k": round(float(term.coefficient()), 6)}
                     for name, term in zip(self.linear_names, self.linear)
@@ -592,6 +649,7 @@ class RCBlock(nn.Module):
                     for name, term in zip(self.saturating_names, self.saturating)
                 },
                 "mlp": list(self.mlp_names),
+                "demand_in_mlp": list(self.demand_in_mlp),
             }
         per_hour = self.steps_per_hour
         return {

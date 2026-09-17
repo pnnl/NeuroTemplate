@@ -264,7 +264,11 @@ def block_mapping(
     `linear` and `ambient` are read by `2r2c` only: one sign-fixed
     coefficient per `linear` column, and the explicit conduction
     `a_o (T_ambient − zone)` for `ambient`. Other families see those columns
-    as ordinary inputs and a warning says so at build time.
+    as ordinary inputs and a warning says so at build time. Inside `2r2c` a
+    `demand` column feeds a bounded saturating branch; `"branch": "mlp"` on
+    the entry feeds it into the residual instead, at the cost of the
+    stability bound. Every declaration is optional — an actuator that is
+    metered power rather than a setpoint is `linear`, never `demand`.
     """
     return None
 

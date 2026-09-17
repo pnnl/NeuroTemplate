@@ -390,17 +390,23 @@ decides what that buys it:
 |---|---|---|
 | `demand` | every family | replaces the setpoint with the thermostat's clamped error against the block's own state, `relu(zone − setpoint)` for cooling (`sign = -1`) and the mirror for heating, computed in physical units from the model's *own* predicted zone during a rollout. Raising the setpoint above the zone is then free on the surrogate the way it is on the plant. Pairing with another block's state is refused — that is `reads`. |
 | `linear` | `2r2c` | one sign-fixed coefficient times the physical value: measured power removes heat, irradiance adds it. |
-| `ambient` | `2r2c` | the explicit conduction `a_o (T_ambient − zone)`, and the column leaves the residual MLP's input. |
+| `ambient` | `2r2c` | the explicit conduction `a_o (T_ambient − zone)`, and the column leaves the residual MLP's input. Declaring it unfreezes `a_o` (start: `rc_tau_ambient_h`) — the term has no hidden state behind it, so it is identifiable, and a frozen guess that is wrong by a few-fold would otherwise be cancelled by a fictitious constant heat gain. The learned `tau_ambient` prints beside the column. |
 
 Inside a `2r2c` block a `demand` column becomes a *saturating* branch,
 `cap · tanh(x / w)` — a staged coil's response, bounded in value and in
 slope. The parameterization keeps that slope inside the stability headroom
 `1 − a_m − a_o`, so the unconditional-stability guarantee survives the one
-state read it admits. The reportcard prints each branch beside the time
+state read it admits. Add `"branch": "mlp"` to the entry to feed the demand
+feature into the learned residual instead; that gives up the bound, and the
+reportcard says so. The reportcard prints each branch beside the time
 constants (`cap` in °C/step, `w` in °C of demand, and the share of the
 headroom in use). Other families ignore `linear` and `ambient` — their
 networks already see every column — and a warning says so at build time.
 The declaration is persisted with the run in `block_spec.json`.
+
+Nothing is inferred from column names: a dataset whose actuator is metered
+power rather than a setpoint declares it `linear` (or leaves it undeclared)
+and writes no `demand` entry at all.
 
 The one-step test NRMSE is not expected to improve with a declaration; the
 closed-loop and physics readouts are what it is for.

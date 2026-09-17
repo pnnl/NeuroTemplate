@@ -48,11 +48,18 @@ of the block's *own* Y channels, `relu(sign · (setpoint − state))`, before
 any family sees it — see `heads.Demand`. `sign` is the direction the state
 moves while the demand is active (-1 cooling, +1 heating). Pairing with
 another block's channel is refused: that is what `reads` is for. A block
-with a `demand` entry has exactly one Y channel.
+with a `demand` entry has exactly one Y channel. Inside a `2r2c` block the
+feature feeds a bounded `saturating` branch by default; `"branch": "mlp"`
+routes it into the learned residual instead, which gives up the stability
+bound and is reported as such.
 
 `linear` says the column enters the zone's heat balance as one sign-fixed
 coefficient times the physical value (measured power, solar irradiance).
 Only `2r2c` acts on it; other families see the column as usual.
+
+Nothing is inferred: a dataset whose actuator is metered power rather than
+a setpoint declares it `linear` (or leaves it to the MLP) and never writes
+a `demand` entry.
 
 Where the split comes from
 ===========================
@@ -190,6 +197,7 @@ def _resolve(columns: list[str], names: list[str], block: str, key: str,
 
 
 INPUT_KINDS = ("demand", "linear")
+DEMAND_BRANCHES = ("saturating", "mlp")
 
 
 def _resolve_inputs(spec: dict, block: str, y_names: list[str],
@@ -230,6 +238,10 @@ def _resolve_inputs(spec: dict, block: str, y_names: list[str],
             if len(y_names) != 1:
                 problems.append(f"`inputs[{column!r}]` is `demand`, so this block "
                                 f"must have exactly one Y channel; it has {y_names}.")
+            if entry.get("branch", "saturating") not in DEMAND_BRANCHES:
+                problems.append(f"`inputs[{column!r}]` has branch "
+                                f"{entry.get('branch')!r}; expected one of "
+                                f"{list(DEMAND_BRANCHES)}.")
 
     if problems:
         raise ValueError(

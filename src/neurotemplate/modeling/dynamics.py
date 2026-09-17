@@ -783,8 +783,10 @@ def _build_pre_stack(
     `(U column, Y channel)` pair — which is what lets one wiring point in
     `SSMGrad.forward` serve every family.
     """
+    # `branch` is where a 2r2c block routes the feature; the transform itself
+    # does not carry it.
     demands = {
-        column: entry
+        column: {k: v for k, v in entry.items() if k != "branch"}
         for block in blocks
         for column, entry in block.inputs.items() if entry["kind"] == "demand"
     }

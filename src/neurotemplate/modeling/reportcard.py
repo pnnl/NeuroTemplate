@@ -250,7 +250,9 @@ def _forcing_lines(forcing: Optional[dict], indent: str) -> list[str]:
         return []
     lines = []
     if forcing.get("ambient"):
-        lines.append(f"{indent}- ambient: {forcing['ambient']}")
+        ambient = forcing["ambient"]
+        lines.append(f"{indent}- ambient: {ambient['column']}, "
+                     f"tau_ambient={ambient['tau_h']:.2f} h (learned)")
     for column, term in forcing.get("linear", {}).items():
         lines.append(f"{indent}- linear: {column}, k={term['k']:.4g} °C/step per unit")
     for column, term in forcing.get("saturating", {}).items():
@@ -258,6 +260,10 @@ def _forcing_lines(forcing: Optional[dict], indent: str) -> list[str]:
                      f"w={term['w']:.3g} °C, slope_share={term['slope_share']:.2f}")
     if forcing.get("mlp"):
         lines.append(f"{indent}- mlp: {', '.join(forcing['mlp'])}")
+    if forcing.get("demand_in_mlp"):
+        lines.append(f"{indent}- demand routed into the mlp: "
+                     f"{', '.join(forcing['demand_in_mlp'])} — unbounded slope, "
+                     "the stability guarantee does not hold for this block")
     return lines
 
 
