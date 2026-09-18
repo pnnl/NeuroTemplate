@@ -309,6 +309,22 @@ the interesting fact once families are mixed:
   - **block `power` (mlp):** `MLP`, params=2,273, in=36, out=1
 ```
 
+A block that declares its columns (below) prints one line per branch under
+its time constants, each in physical units, plus the derived inputs the
+pre-block computed:
+
+```
+  - **block `zone` (2r2c):** `RCBlock`, params=486, in=48, out=1
+    - Zone Air Temperature [°C]: tau_fast=0.78 h, tau_slow=104.00 h
+    - ambient: Ambient Temperature [°C], tau_ambient=20.10 h (learned)
+    - linear: GHI [W/m2], k=0.000105 °C/step per unit
+    - saturating: Cooling Setpoint [°C], cap=0.77 °C/step, w=8.6 °C, slope_share=0.10
+    - mlp: Occupancy
+
+Derived inputs (replace the raw column before every family):
+- Cooling Setpoint [°C]: demand of Zone Air Temperature [°C], sign=-1, scale=15.2
+```
+
 What `g` cannot do on its own is see the state, so an undeclared block
 cannot represent a thermostat deadband: "the compressor is off whenever the
 setpoint is above the zone" is a function of the *difference*, and the block
@@ -386,7 +402,10 @@ decides what that buys it:
 }
 ```
 
-| kind | who acts on it | what it does |
+The three declarations, and what each family does with them (`ambient`
+is the block-level key shown above, not an `inputs` kind):
+
+| declaration | who acts on it | what it does |
 |---|---|---|
 | `demand` | every family | replaces the setpoint with the thermostat's clamped error against the block's own state, `relu(zone − setpoint)` for cooling (`sign = -1`) and the mirror for heating, computed in physical units from the model's *own* predicted zone during a rollout. Raising the setpoint above the zone is then free on the surrogate the way it is on the plant. Pairing with another block's state is refused — that is `reads`. |
 | `linear` | `2r2c` | one sign-fixed coefficient times the physical value: measured power removes heat, irradiance adds it. |
@@ -407,6 +426,22 @@ The declaration is persisted with the run in `block_spec.json`.
 Nothing is inferred from column names: a dataset whose actuator is metered
 power rather than a setpoint declares it `linear` (or leaves it undeclared)
 and writes no `demand` entry at all.
+
+A `demand` declaration also makes the gradient-sign penalty usable on that
+column for the first time. The Jacobian is taken downstream of the
+pre-block, so `grad_path` entries for a declared column constrain
+`∂state/∂demand` — whose sign is the declared `sign` — rather than
+`∂state/∂setpoint`, which is zero on the inactive side and has no universal
+sign anywhere.
+
+**The declared branches train at their own learning rate**, `rc_branch_lr`
+(default 0.05), while the storage priors stay at `lr`. These are physical
+scalars with units of travel to cover — an ambient time constant moving 2 h
+to 20 h, a coil capacity crossing an order of magnitude — where a network
+weight moves in thousandths, and Adam steps a raw parameter by about `lr`
+per update. At `lr` they stall within a few percent of where they started,
+which reads on the reportcard as a branch that "learned" its initial value.
+Every declared block's `tau_ambient`, `k`, `cap` and `w` are in that group.
 
 The one-step test NRMSE is not expected to improve with a declaration; the
 closed-loop and physics readouts are what it is for.

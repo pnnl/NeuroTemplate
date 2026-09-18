@@ -86,6 +86,15 @@ nt model train --config model_configs/modeling.yaml --print-config
 - **`residual_delta` must be at least one `setpoint_step`** if quantization is
   on. Below that every residual snaps back to zero and you train for an hour
   to reproduce the rule; the library rejects it rather than let that happen.
+- **Declaring a column changes the physics, not the shapes.** `block_mapping`'s
+  `inputs` / `ambient` (see the hook's docstring, and
+  [Declaring what a column is](../README.md#declaring-what-a-column-is)) leave
+  `nu` and every column name alone, so a wrong declaration shows up only in
+  the reportcard's branch lines. Three things surprise people: declaring
+  `ambient` *unfreezes* the zone-to-ambient time constant, a `2r2c` block that
+  declares every one of its columns has no residual MLP and therefore no free
+  constant heat gain, and the branch scalars need `rc_branch_lr` — at `lr`
+  they barely move from their initial values.
 - **Define `reference_control` or `build_baseline_policy`, never both.** Two
   copies of one rule is two places for a cooling inset to drift apart, and the
   inset is what decides whether the rule works at all.

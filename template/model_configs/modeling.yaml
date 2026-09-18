@@ -9,7 +9,11 @@
 train_data_path: data/train.csv
 dev_data_path: data/dev.csv
 test_data_path: data/test.csv
-# JSON of known gradient signs; required when grad_gain > 0.
+# JSON of known gradient signs; required when grad_gain > 0. The Jacobian is
+# taken downstream of the pre-block, so a column declared `demand` in
+# block_mapping is differentiated as the demand feature, not the raw
+# setpoint: its sign here is the declared `sign` (-1 for cooling), which is
+# the opposite of what the setpoint itself would get.
 # grad_path: data/grad/mapping.json
 # batch_size: 256
 # Normalization: min_max | abs_max | z_score | null (none).
@@ -58,6 +62,14 @@ test_data_path: data/test.csv
 # Let training move the three above. Worth it only when the rollout is long
 # relative to the slow mode and the data excites it.
 # rc_train_taus: false
+#
+# Learning rate for the scalars of a declared branch (block_mapping's
+# `inputs` / `ambient`): the ambient rate, the linear coefficients, the
+# coil's capacity and ramp. These are physical quantities with units of
+# travel to cover where a network weight moves in thousandths, and Adam
+# steps a raw parameter by about `lr` per update — at `lr` they stall near
+# their start. The storage priors above stay at `lr`.
+# rc_branch_lr: 0.05
 
 # ── TRAIN ────────────────────────────────────────────────────────
 # epochs: 300

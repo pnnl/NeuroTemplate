@@ -196,6 +196,11 @@ def _resolve(columns: list[str], names: list[str], block: str, key: str,
     return [columns.index(n) for n in names]
 
 
+#: Every key a block spec may set. Anything else is a typo: the declaration
+#: keys change what the block fits without changing its shape, so a
+#: misspelled one has no other way of announcing itself.
+BLOCK_KEYS = frozenset({"Y", "U", "D", "reads", "model", "inputs", "ambient"})
+
 INPUT_KINDS = ("demand", "linear")
 DEMAND_BRANCHES = ("saturating", "mlp")
 
@@ -275,6 +280,7 @@ def build_blocks(
         output — reading your own Y is automatic and needs no declaration.
       - an `inputs` or `ambient` declaration is malformed (see the module
         docstring); every problem in a block is listed in one message.
+      - a block sets a key that is not one of `BLOCK_KEYS`.
     """
     y_cols, u_cols, d_cols = nm_mapping["Y"], nm_mapping["U"], nm_mapping["D"]
 
@@ -290,6 +296,14 @@ def build_blocks(
     claimed_u: list[int] = []
     per_block: list[tuple] = []
     for name, spec in block_spec.items():
+        unknown_keys = sorted(set(spec) - BLOCK_KEYS)
+        if unknown_keys:
+            raise ValueError(
+                f"block_mapping: block {name!r} has unrecognized key(s) "
+                f"{unknown_keys}; expected some of {sorted(BLOCK_KEYS)}. A "
+                "misspelled `inputs` or `ambient` would otherwise sit inert "
+                "and silently change the physics the block is fitting."
+            )
         y_idx = _resolve(y_cols, spec.get("Y", []), name, "Y")
         u_idx = _resolve(u_cols, spec.get("U", []), name, "U")
         # Absent "D" means all of D; present means exactly the named subset

@@ -183,6 +183,14 @@ def test_a_demand_may_only_read_the_blocks_own_state():
         build_blocks(MAPPING, spec)
 
 
+def test_a_misspelled_block_key_is_refused_rather_than_ignored():
+    """A declaration key changes what the block fits, not its shape, so a
+    typo has no other way of showing up."""
+    spec = {"all": {"Y": MAPPING["Y"], "Ambient": "oat", "input": {}}}
+    with pytest.raises(ValueError, match=r"unrecognized key\(s\) \['Ambient', 'input'\]"):
+        build_blocks(MAPPING, spec)
+
+
 def test_ambient_names_exactly_one_of_the_blocks_d_columns():
     spec = {"all": {"Y": MAPPING["Y"], "ambient": ["oat", "ghi"]}}
     with pytest.raises(ValueError, match="`ambient`.*not one of this block's D"):
