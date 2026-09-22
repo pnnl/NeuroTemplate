@@ -1,5 +1,5 @@
 """
-Load a frozen sys-id surrogate for closed-loop control.
+Load a frozen sys-id surrogate for closed-loop control, or a trained policy.
 
 Thin wrapper over the public src/load_model.load_trained_dynamics loader.
 Freezing is explicit here: the dynamics is held fixed while the policy trains
@@ -9,7 +9,17 @@ Freezing is explicit here: the dynamics is held fixed while the policy trains
 from __future__ import annotations
 
 
-from neurotemplate.modeling.cli.load import load_trained_dynamics
+import torch
+
+from neurotemplate.control.closed_loop import (
+    build_closed_loop, build_control_loss, build_problem,
+)
+from neurotemplate.control.config import ControlConfig
+from neurotemplate.control.policy import build_policy
+from neurotemplate.modeling.cli.load import (
+    _resolve_artifacts_dir, config_from_run_params, load_trained_dynamics,
+)
+from neurotemplate.modeling.experiment import resolve_device
 
 from neurotemplate._typing import beartype
 
@@ -43,3 +53,31 @@ def load_frozen_dynamics(
     dyn_node = dyn_sys.nodes[0]
 
     return dyn_sys, dyn_node, sysid_cfg, nm_mapping, norm_stats
+
+
+def load_trained_policy(run_id: str, run_dir=None):
+    """Rebuild a trained control run's policy and closed loop, weights loaded.
+
+    Returns (policy_node, cl_system, cfg, sysid_cfg, nm_mapping, norm_stats).
+
+    The closed loop is assembled exactly as `nt control train` assembled it —
+    same builders, from the run's own logged config and the use case's
+    `control_user_defined` hooks — and the checkpoint the trainer saved
+    (`best_model_state_dict.pth`, the whole Problem) is loaded strictly, so a
+    policy that does not rebuild to the trained shape fails here, loudly.
+    """
+    cfg = config_from_run_params(run_id, ControlConfig)
+    cfg.validate()
+    cfg.device = resolve_device(cfg.device)
+    _, dyn_node, sysid_cfg, nm_mapping, norm_stats = load_frozen_dynamics(
+        cfg.sysid_run_id, cfg.run_dir, cfg.weights)
+
+    policy_node = build_policy(cfg, sysid_cfg, nm_mapping, norm_stats)
+    cl_system = build_closed_loop(dyn_node, policy_node, cfg, sysid_cfg)
+    problem = build_problem(
+        cl_system, build_control_loss(cfg, sysid_cfg, nm_mapping, norm_stats),
+    ).to(cfg.device)
+    weights = _resolve_artifacts_dir(run_dir, run_id) / "best_model_state_dict.pth"
+    problem.load_state_dict(torch.load(weights, map_location=cfg.device))
+    problem.eval()
+    return policy_node, cl_system, cfg, sysid_cfg, nm_mapping, norm_stats

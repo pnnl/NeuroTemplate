@@ -182,3 +182,52 @@ def test_an_export_that_disagrees_is_not_written(tmp_path, monkeypatch):
     with pytest.raises(RuntimeError, match="REFUSING TO WRITE"):
         export(tmp_path, make_cfg(), MAPPING, SPLIT)
     assert not (tmp_path / "pkg").exists()
+
+
+# ── policy ───────────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize("overrides", [
+    # Plain policy: its D window runs past the present (preview), and every
+    # key has several columns, so a wrong window layout shows up.
+    {"d_preview": 2},
+    # Everything a policy can wrap around its net: the residual anchored to
+    # the reference rule, setpoint quantisation, and a tariff it reads.
+    {"residual_delta": 1.0, "setpoint_step": 0.5, "d_preview": 1, "price_preview": 3},
+], ids=["plain", "residual, quantised, priced"])
+def test_trained_policy_exports_as_the_trained_policy(tmp_path, overrides):
+    from control_fixtures import full_setup, install_price
+    from neurotemplate.control.closed_loop import build_closed_loop
+    from neurotemplate.control.policy import build_policy
+    from neurotemplate.export.policy import (
+        PolicyGraph, closed_loop_windows, export_policy, policy_inputs,
+    )
+
+    s = full_setup(**overrides)
+    if "price_preview" in overrides:
+        install_price(s["cfg"], tmp_path)
+    cfg, sysid_cfg, nm, ns = s["cfg"], s["sysid_cfg"], s["nm"], s["norm_stats"]
+    policy = build_policy(cfg, sysid_cfg, nm, ns)
+    closed_loop = build_closed_loop(s["dyn_node"], policy, cfg, sysid_cfg)
+    result = export_policy(
+        policy_node=policy, cl_system=closed_loop, cfg=cfg, sysid_cfg=sysid_cfg,
+        nm_mapping=nm, norm_stats=ns, test_dfs=[s["norm_df"]], run_id="0" * 32,
+        out_dir=tmp_path / "pkg", package="exported", exporter="legacy",
+    )
+    assert all(check.ok for check in check_reference(result.out_dir))
+
+    # The graph's physical windows are the closed loop's own windows: the
+    # wrapper around the trained net must issue the net's own commands.
+    inputs = policy_inputs(policy, cfg, nm, ns)
+    flat = closed_loop_windows(closed_loop, policy, cfg, sysid_cfg, [s["norm_df"]], nm, ns)
+    physical = [flat[i.key].reshape(-1, i.steps, len(i.columns)) * torch.tensor(i.stretch)
+                + torch.tensor(i.shift) for i in inputs]
+    stretch = torch.tensor([ns[c]["stretch"] for c in nm["U"]])
+    shift = torch.tensor([ns[c]["shift"] for c in nm["U"]])
+    with torch.no_grad():
+        wrapped = PolicyGraph(policy.callable, inputs, nm, ns)(*physical)
+        direct = policy.callable(*flat.values()) * stretch + shift
+    # Quantised commands can round the other way on float noise at a grid
+    # midpoint, so compare how many agree rather than the worst one.
+    agree = (wrapped - direct).abs() < 1e-4
+    assert agree.float().mean() > 0.99

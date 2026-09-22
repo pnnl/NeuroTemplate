@@ -35,9 +35,9 @@ EXPORTERS = ("dynamo", "legacy")
 #: a new entry is a new requirement on every consumer's runtime.
 ALLOWED_OPS = frozenset({
     "Add", "Cast", "Clip", "Concat", "Constant", "ConstantOfShape", "Div",
-    "Equal", "Exp", "Expand", "GRU", "Gather", "GatherND", "Gemm", "Greater",
-    "Identity", "Mul", "Neg", "Range", "Reciprocal", "ReduceMean",
-    "ReduceSum", "Relu", "Reshape", "ScatterND", "Shape", "Sigmoid", "Slice",
+    "Equal", "Erf", "Exp", "Expand", "GRU", "Gather", "GatherND", "Gemm", "Greater",
+    "Identity", "Max", "Min", "Mul", "Neg", "Range", "Reciprocal", "ReduceMean",
+    "ReduceSum", "Relu", "Reshape", "Round", "ScatterND", "Shape", "Sigmoid", "Slice",
     "Softplus", "Split", "Squeeze", "Sub", "Tanh", "Transpose", "Unsqueeze",
     "Where",
 })

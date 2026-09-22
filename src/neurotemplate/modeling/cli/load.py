@@ -42,8 +42,11 @@ def _load_run_params(run_id: str) -> dict[str, object]:
     return {k: _parse_value(v) for k, v in run.data.params.items()}
 
 
-def _config_from_run_params(run_id: str) -> ModelingConfig:
-    """This run's params as a ModelingConfig, tolerating fields since removed.
+def config_from_run_params(run_id: str, cls: type = ModelingConfig):
+    """This run's params as a `cls` config, tolerating fields since removed.
+
+    `cls` is ModelingConfig for a sys-id run and ControlConfig for a control
+    run; both are logged the same way, as the config's fields.
 
     `dict_to_dataclass` is strict on purpose: an unknown key in a config a
     human just wrote is a typo, and failing loudly is right. Replaying a
@@ -59,7 +62,7 @@ def _config_from_run_params(run_id: str) -> ModelingConfig:
     warning lists them rather than passing over them silently.
     """
     params = _load_run_params(run_id)
-    known = {f.name for f in fields(ModelingConfig)}
+    known = {f.name for f in fields(cls)}
     stale = sorted(set(params) - known)
     if stale:
         warnings.warn(
@@ -71,7 +74,7 @@ def _config_from_run_params(run_id: str) -> ModelingConfig:
             stacklevel=2,
         )
         params = {k: v for k, v in params.items() if k in known}
-    return dict_to_dataclass(params, ModelingConfig)
+    return dict_to_dataclass(params, cls)
 
 
 @beartype
@@ -201,7 +204,7 @@ def load_trained_dynamics(
     cfg.device is resolved here so the returned system is on a valid device.
     """
     artifacts_dir = _resolve_artifacts_dir(run_dir, run_id)
-    cfg = _config_from_run_params(run_id)
+    cfg = config_from_run_params(run_id)
     
     cfg.validate()
     cfg.device = resolve_device(cfg.device)
