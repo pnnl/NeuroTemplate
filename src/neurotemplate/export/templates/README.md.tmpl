@@ -1,0 +1,55 @@
+# $title
+
+An exported NeuroTemplate dynamics model. Two ONNX
+graphs and a small runtime; it needs `numpy` and `onnxruntime`, nothing else.
+
+```bash
+pip install -e .          # or: pip install numpy onnxruntime
+python validate.py        # does it reproduce the trained model on this machine?
+python example.py         # forecast, then step
+```
+
+## Using it
+
+```python
+from $package import Model
+
+model = Model("model")
+forecast = model.predict(frame)       # {y column: array}, open loop after warm-up
+state = model.warmup(history)         # last $history_steps rows of every column
+state = model.step(state, inputs)     # one step; inputs = every u and d column
+state.outputs                         # {y column: value}
+```
+
+`frame` and `history` are anything that maps a column name to a 1-D array:
+a dict of numpy arrays, or a pandas DataFrame. Everything is in physical
+units; normalisation happens inside the graphs.
+
+## The contract
+
+- timestep: $timestep_seconds s
+- warm-up: $history_steps steps. Step *k* predicts the outputs one timestep
+  after the row whose u and d you pass.
+- hidden state width: $state_width (carried inside `State`; 0 means the
+  model has none)
+- the graphs' shapes are frozen except for the batch axis: a window of the
+  wrong length or width is rejected by onnxruntime, naming the dimension.
+
+$contract
+
+## What is in here
+
+| path | what |
+|---|---|
+| `model/warm_start.onnx` | first step of a rollout: seeds the hidden state from the window |
+| `model/step.onnx` | every later step, with the hidden state passed explicitly |
+| `model/model.json` | columns, units, history length; `architecture` documents the model (the runtime never reads it) |
+| `data/example_input.csv` | a held-out window, physical units |
+| `data/expected_output.csv`, `expected_state.csv` | the **trained model's** own rollout on it, written at export time |
+| `data/REFERENCE.json` | where the reference came from, and the tolerances `validate.py` applies |
+| `$package/runtime.py` | the runtime: moves windows in and out of the graphs, no numeric logic |
+
+The tolerances in `REFERENCE.json` are 1e-3 of each column's normalisation
+scale. They absorb float differences between the exporting machine and
+yours; the export itself agreed with the trained model far more tightly
+(`agreement_at_export`).

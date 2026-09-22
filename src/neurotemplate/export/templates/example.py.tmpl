@@ -1,0 +1,40 @@
+"""The smallest useful program:  python example.py
+
+Two ways to call the model:
+  1. predict()  - a table in, a multi-step forecast out
+  2. step()     - one timestep at a time, which is what a controller needs
+"""
+
+import numpy as np
+
+from $package import Model, read_csv
+
+model = Model("model")
+print(model.describe())
+
+# Physical units throughout; the model normalises internally.
+index, data = read_csv("data/example_input.csv")
+print(f"\nloaded {len(index)} rows, {index[0]} .. {index[-1]}")
+
+# ── 1. forecast the whole window ────────────────────────────────
+# The first `history_steps` rows are the warm-up. After that the model runs
+# open loop: it feeds on its own predictions and reads only the u and d
+# columns, so this is a genuine forecast, not a one-step-ahead trace.
+forecast = model.predict(data)
+s = model.history_steps
+for column in model.y_columns[:4]:
+    rmse = np.sqrt(np.mean((forecast[column] - data[column][s:]) ** 2))
+    print(f"  {column}: RMSE {rmse:.3f} against the recorded values")
+
+# ── 2. step by step ─────────────────────────────────────────────
+# `step` is pure: it returns a new State and never modifies the one passed
+# in. In a control loop you choose the u columns yourself instead of
+# replaying the record.
+history = {c: v[:s] for c, v in data.items()}
+state = model.warmup(history)
+for k in range(12):
+    row = {c: data[c][s + k - 1] for c in model.u_columns + model.d_columns}
+    state = model.step(state, row)
+first = model.y_columns[0]
+print(f"\n12 steps later: {first} = {state.outputs[first]:.3f} "
+      f"(recorded {data[first][s + 11]:.3f})")

@@ -12,6 +12,7 @@ before. Groups mirror the package layout:
     nt data heads           # neurotemplate.modeling.cli.data (which head does this Y column want?)
     nt data decay           # neurotemplate.modeling.cli.data (what is the envelope time constant?)
     nt control train        # neurotemplate.control.cli.train
+    nt export model         # neurotemplate.export.cli (trained dynamics -> ONNX package)
 """
 from __future__ import annotations
 
@@ -30,6 +31,7 @@ COMMANDS: dict[tuple[str, str], str] = {
     ("data", "heads"):        "neurotemplate.modeling.cli.data:heads_main",
     ("data", "decay"):        "neurotemplate.modeling.cli.data:decay_main",
     ("control", "train"):     "neurotemplate.control.cli.train:main",
+    ("export", "model"):      "neurotemplate.export.cli:main",
 }
 
 

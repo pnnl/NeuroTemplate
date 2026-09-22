@@ -1,0 +1,41 @@
+"""Check that this package works on your machine:  python validate.py
+
+The generic check reproduces data/expected_output.csv and
+data/expected_state.csv, which the *trained* model wrote at export time, with
+this machine's onnxruntime. Passing means the whole chain reproduces the
+model: trained model -> export -> this runtime -> this platform.
+
+This file is written once and never overwritten by a re-export, so add
+project-specific checks (accuracy against the model card, step responses)
+at the end. Exits non-zero if any check fails.
+"""
+
+import sys
+
+from $package import Model, check_reference
+
+failures = []
+
+
+def check(name, ok, detail=""):
+    print(f"  [{'PASS' if ok else 'FAIL'}] {name}{'  ' + detail if detail else ''}")
+    if not ok:
+        failures.append(name)
+
+
+print("1. loading the model")
+model = Model("model")
+print("   " + model.describe().replace("\n", "\n   "))
+
+print("\n2. reproducing the trained model's own rollout")
+result = check_reference(".")
+print(result.report())
+check("matches data/expected_*.csv", result.ok)
+
+# ── project-specific checks go here ──────────────────────────────
+
+print()
+if failures:
+    print(f"FAILED {len(failures)} check(s): {', '.join(failures)}")
+    sys.exit(1)
+print("All checks passed.")
