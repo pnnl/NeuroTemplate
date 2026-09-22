@@ -109,7 +109,25 @@ class GRUBlock(nn.Module):
 
     def reset(self) -> None:
         """Clear hidden state. Call before each new sequence."""
-        self._h = None
+        self.set_rollout_state(None)
+
+    # The stateful-block protocol (see `neurotemplate.export.state`). nn.GRU
+    # keeps its state layer-first, [num_layers, batch, hidden]; the protocol
+    # is batch-first and flat, so the two methods own that reshape.
+
+    def rollout_state(self) -> Optional[torch.Tensor]:
+        """The hidden state, [batch, num_layers*hidden], or None if cold."""
+        if self._h is None:
+            return None
+        return self._h.transpose(0, 1).reshape(self._h.shape[1], -1)
+
+    def set_rollout_state(self, state: Optional[torch.Tensor]) -> None:
+        """Restore a hidden state, or None to force a cold start."""
+        if state is None:
+            self._h = None
+            return
+        layers, hidden = self.gru.num_layers, self.gru.hidden_size
+        self._h = state.reshape(-1, layers, hidden).transpose(0, 1).contiguous()
 
     def reg_error(self) -> torch.Tensor:
         weights = [p.pow(2).mean() for p in self.gru.parameters() if p.dim() > 1]
@@ -730,17 +748,28 @@ def make_reset_init(model: SSMGrad):
 
     Note: unrelated to ModelingConfig.warmup, which counts early-stopping epochs.
     """
-    # A reset() on the block is what makes it stateful — GRUBlock.reset is the
-    # single source of truth, so a new stateful block gets this for free.
-    reset = getattr(model.fy, "reset", None)
-    if reset is None:
+    blocks = stateful_blocks(model)
+    if not blocks:
         return None
 
     def reset_init(data):
-        reset()
+        for block in blocks:
+            block.set_rollout_state(None)
         return data
 
     return reset_init
+
+
+def stateful_blocks(model: nn.Module) -> list[nn.Module]:
+    """Every submodule carrying rollout state, in `modules()` order.
+
+    A block is stateful exactly when it implements the protocol
+    `rollout_state()` / `set_rollout_state(state)` (RCBlock, GRUBlock): the
+    state as one [batch, width] tensor, None when cold. A new stateful family
+    implements those two methods and gets both the per-batch reset and ONNX
+    export (see `neurotemplate.export.state`) for free.
+    """
+    return [m for m in model.modules() if hasattr(m, "set_rollout_state")]
 
 
 def _uses_per_block(cfg: ModelingConfig, blocks: list[Block], families: list[str]) -> bool:

@@ -16,6 +16,11 @@ dependencies = [
     # installing from git. Bump the SHA when neuromancer's develop advances.
     "neuromancer @ git+https://github.com/pnnl/neuromancer.git@1f7b4f1c15210d7db92b9b98e8aa97014a867768",
     "numpy>=2.2.6",
+    # ONNX export (neurotemplate.export). onnxruntime 1.24 ships no cp310
+    # wheels, and this project still supports 3.10.
+    "onnx>=1.17",
+    "onnxruntime>=1.20,<1.24",
+    "onnxscript>=0.5",
     "optuna>=4.8.0",
     "optuna-dashboard>=0.20.0",
     "pandas>=2.3.3",

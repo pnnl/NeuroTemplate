@@ -534,7 +534,19 @@ class RCBlock(nn.Module):
 
     def reset(self) -> None:
         """Clear the mass temperature. Call before each new sequence."""
-        self._mass = None
+        self.set_rollout_state(None)
+
+    # The stateful-block protocol (see `neurotemplate.export.state`): the
+    # hidden state as one [batch, width] tensor, so an exporter can lift it
+    # into explicit graph I/O without knowing what this class calls it.
+
+    def rollout_state(self) -> torch.Tensor | None:
+        """The mass temperature, [batch, ny], or None if cold."""
+        return self._mass
+
+    def set_rollout_state(self, state: torch.Tensor | None) -> None:
+        """Restore a mass temperature, or None to force a cold start."""
+        self._mass = state
 
     # ── forward ─────────────────────────────────────────────────
 
