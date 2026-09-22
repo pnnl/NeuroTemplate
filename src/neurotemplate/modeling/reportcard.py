@@ -221,6 +221,10 @@ def _block_lines(name: str, info: Optional[dict], indent: str = "") -> list[str]
     parts = [f"`{info['class']}`", f"params={info['param_count']:,}"]
     if "hsizes" in info and info["hsizes"]:
         parts.append(f"hsizes={info['hsizes']}")
+    if "hidden_size" in info:
+        parts.append(f"hidden_size={info['hidden_size']}")
+    if "num_layers" in info:
+        parts.append(f"num_layers={info['num_layers']}")
     if "in_features" in info:
         parts.append(f"in={info['in_features']}")
     if "out_features" in info:
@@ -259,7 +263,9 @@ def _forcing_lines(forcing: Optional[dict], indent: str) -> list[str]:
         lines.append(f"{indent}- saturating: {column}, cap={term['cap']:.3g} °C/step, "
                      f"w={term['w']:.3g} °C, slope_share={term['slope_share']:.2f}")
     if forcing.get("mlp"):
-        lines.append(f"{indent}- mlp: {', '.join(forcing['mlp'])}")
+        hsizes = forcing.get("mlp_hsizes") or []
+        size_s = f", hsizes={hsizes}" if hsizes else ""
+        lines.append(f"{indent}- mlp: {', '.join(forcing['mlp'])}{size_s}")
     if forcing.get("demand_in_mlp"):
         lines.append(f"{indent}- demand routed into the mlp: "
                      f"{', '.join(forcing['demand_in_mlp'])} — unbounded slope, "
@@ -267,7 +273,7 @@ def _forcing_lines(forcing: Optional[dict], indent: str) -> list[str]:
     return lines
 
 
-def _architecture_section(arch: dict) -> str:
+def _architecture_section(arch: dict, title: str = "Architecture") -> str:
     lines = [
         f"- **Factory:** `{arch['factory']}`",
         f"- **Separable:** {arch['separable']}",
@@ -293,7 +299,7 @@ def _architecture_section(arch: dict) -> str:
         for column, entry in pre_stack.items():
             lines.append(f"- {column}: {entry['kind']} of {entry['state']}, "
                          f"sign={entry['sign']:+d}, scale={entry['scale']:.3g}")
-    return _section("Architecture", "\n".join(lines))
+    return _section(title, "\n".join(lines))
 
 
 def _norm_label(stats: Optional[dict]) -> str:

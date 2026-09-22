@@ -20,6 +20,7 @@ from neuromancer.loggers import MLFlowLogger
 
 from neurotemplate.common.data_utils import get_data_splits, normalize_df
 from neurotemplate.common.run_summary import write_run_summary
+from neurotemplate.modeling.dynamics import describe_dynamics
 from neurotemplate.modeling.experiment import resolve_device, set_seeds
 
 from neurotemplate.control.config import ControlConfig, load_config_from_cli, CONTROL_CONFIG_DIR
@@ -81,6 +82,7 @@ def main() -> None:
     dyn_sys, dyn_node, sysid_cfg, nm_mapping, norm_stats = (
         load_frozen_dynamics(cfg.sysid_run_id, cfg.run_dir, cfg.weights)
     )
+    surrogate_arch = describe_dynamics(dyn_sys, sysid_cfg)
 
     h_sys, h_ctrl, hmax = horizons(cfg, sysid_cfg)
     if cfg.verbose:
@@ -192,7 +194,8 @@ def main() -> None:
 
     md = render_control_reportcard(
         cfg, sysid_cfg, arch, nm_mapping, regulated, results,
-        eval_band_seed=EVAL_BAND_SEED, baseline=baseline,
+        eval_band_seed=EVAL_BAND_SEED, surrogate_arch=surrogate_arch,
+        baseline=baseline,
         clears_reference=clears, best_dev_loss=best_dev,
         train_time_s=train_time_s,
         balance=balance, shapes=shapes,

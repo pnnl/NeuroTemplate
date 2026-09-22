@@ -8,22 +8,26 @@ that returns markdown. The caller writes it to disk and logs it.
 Sections (in order):
 
    1. Summary              — run, timestamp, surrogate, dev loss, timings
-   2. Policy architecture  — from control.policy.describe_policy
-   3. Scenario             — horizons, controlled channels, bands, weights
-   4. Objective balance    — which term was actually being optimised, and the
+   2. Surrogate architecture — the frozen sys-id model's own describe_dynamics
+                             output (num_layers, hidden size, RC forcing
+                             mappings, ...); reuses modeling/reportcard.py's
+                             renderer so the two cards never drift apart
+   3. Policy architecture  — from control.policy.describe_policy
+   4. Scenario             — horizons, controlled channels, bands, weights
+   5. Objective balance    — which term was actually being optimised, and the
                              magnitude and shape of the power signal
-   5. Closed-loop performance — comfort table, actuation, energy
-   6. Actuation            — per-control effort and time at each bound
-   7. Band-jump response   — did the loop react when the reference moved
-   8. Baseline comparison  — learned vs. rule-based, or why there is none
-   9. Tracking error       — per-channel error vs. the comfort-band midpoint
-  10. Hyperparameters      — the knobs that produced this run
+   6. Closed-loop performance — comfort table, actuation, energy
+   7. Actuation            — per-control effort and time at each bound
+   8. Band-jump response   — did the loop react when the reference moved
+   9. Baseline comparison  — learned vs. rule-based, or why there is none
+  10. Tracking error       — per-channel error vs. the comfort-band midpoint
+  11. Hyperparameters      — the knobs that produced this run
 
 Whether the configured band is reachable at all is answered on the sys-id side,
 by the reachability scenario in modeling/scenarios.py, against a declared
 equilibrium rather than whatever weather a test file happened to contain.
 
-Sections 4, 6 and 7 are the behavioural ones. They exist because the comfort
+Sections 5, 7 and 8 are the behavioural ones. They exist because the comfort
 table above them is silent about dominated objectives, what the actuators did,
 and ignored setpoint changes — every one of which has been shipped in a run
 whose pooled numbers looked fine.
@@ -41,6 +45,7 @@ from typing import Optional
 
 from neurotemplate.common.metrics import metrics_to_markdown
 from neurotemplate.common.reportcard import _fmt_float, _section
+from neurotemplate.modeling.reportcard import _architecture_section
 from neurotemplate.control.metrics import (
     actuation_to_markdown,
     comfort_to_markdown,
@@ -485,6 +490,7 @@ def render_control_reportcard(
     results,
     *,
     eval_band_seed: int,
+    surrogate_arch: Optional[dict] = None,
     baseline: Optional[object] = None,
     clears_reference: Optional[bool] = None,
     balance: Optional[ObjectiveBalance] = None,
@@ -504,6 +510,10 @@ def render_control_reportcard(
         controlled:  Regulated channel names (the `regulated` hook).
         results:     ControlResults for the learned policy.
         eval_band_seed: The fixed seed the evaluation band was drawn with.
+        surrogate_arch: Optional output of modeling.dynamics.describe_dynamics
+                     for the frozen sys-id model this policy was trained
+                     against (num_layers, hidden size, RC forcing maps, ...).
+                     None renders no extra section.
         baseline:    Optional ControlResults for the rule-based controller.
         clears_reference: Optional pipeline.clears_reference(...) verdict; the
                      baseline section renders it as a ship/don't-ship call.
@@ -527,6 +537,10 @@ def render_control_reportcard(
         f"# Control Reportcard: {name}\n",
         _summary_section(name, ts, cfg, sysid_cfg, results.eval_time_s,
                          best_dev_loss, train_time_s),
+    ]
+    if surrogate_arch is not None:
+        parts.append(_architecture_section(surrogate_arch, "Surrogate architecture"))
+    parts += [
         _policy_section(arch),
         _scenario_section(cfg, sysid_cfg, nm_mapping, controlled,
                           eval_band_seed),

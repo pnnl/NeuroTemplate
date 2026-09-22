@@ -649,6 +649,14 @@ class RCBlock(nn.Module):
                     for name, term in zip(self.saturating_names, self.saturating)
                 },
                 "mlp": list(self.mlp_names),
+                # hsizes of the learned heat-input map `g` — the one hidden
+                # mapping this otherwise-transparent block contains. `gain`
+                # is a neuromancer MLP, which exposes per-layer widths only
+                # via `linear` (a ModuleList including the output layer).
+                "mlp_hsizes": (
+                    [int(lin.out_features) for lin in self.gain.linear[:-1]]
+                    if self.gain is not None else []
+                ),
                 "demand_in_mlp": list(self.demand_in_mlp),
             }
         per_hour = self.steps_per_hour

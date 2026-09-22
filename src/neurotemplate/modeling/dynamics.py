@@ -637,9 +637,16 @@ def _describe_block(block: Optional[nn.Module], cfg: ModelingConfig) -> Optional
         "class": type(block).__name__,
         "param_count": _count_params(block),
     }
-    # MLP / Linear blocks expose hsizes via their nhidden attribute or args
-    if hasattr(block, "hsizes"):
-        info["hsizes"] = list(block.hsizes)
+    # neuromancer's MLP has no `hsizes` attribute of its own (only `nhidden`,
+    # the layer count) — the per-layer widths have to be read off `linear`,
+    # its ModuleList of nn.Linear-likes, one per layer including the output.
+    if isinstance(block, nm_blocks.MLP):
+        info["hsizes"] = [int(lin.out_features) for lin in block.linear[:-1]]
+    # GRUBlock has no hsizes (nn.GRU takes hidden_size/num_layers directly),
+    # so report those explicitly or a recurrent block's width never shows up.
+    if hasattr(block, "gru"):
+        info["hidden_size"] = block.gru.hidden_size
+        info["num_layers"] = block.gru.num_layers
     if hasattr(block, "in_features"):
         info["in_features"] = block.in_features
     if hasattr(block, "out_features"):
