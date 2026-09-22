@@ -100,17 +100,20 @@ def onnx_rollout(model_dir, frame: pd.DataFrame) -> Rollout:
 
 @dataclass(frozen=True)
 class Agreement:
-    """Worst difference per output column (physical units) and in the state."""
+    """Worst difference per output column (physical units) and in the state,
+    and how far the trained model's own rollout strayed (`reach`: the
+    largest |y - shift| / stretch it hit)."""
     y_error: dict[str, float]
     state_error: float
+    reach: float
 
     def worst_fraction(self, norm_stats: dict[str, dict]) -> float:
         """The largest output error as a fraction of its column's stretch."""
         return max(err / norm_stats[c]["stretch"] for c, err in self.y_error.items())
 
 
-def compare(reference: Rollout, exported: Rollout,
-            y_columns: list[str]) -> Agreement:
+def compare(reference: Rollout, exported: Rollout, y_columns: list[str],
+            norm_stats: dict[str, dict]) -> Agreement:
     if reference.y.shape != exported.y.shape:
         raise ValueError(f"rollout shapes differ: torch {reference.y.shape}, "
                          f"onnx {exported.y.shape}")
@@ -118,7 +121,10 @@ def compare(reference: Rollout, exported: Rollout,
                for i, c in enumerate(y_columns)}
     state_error = (float(np.abs(exported.state - reference.state).max())
                    if reference.state.size else 0.0)
-    return Agreement(y_error=y_error, state_error=state_error)
+    shift = np.array([norm_stats[c]["shift"] for c in y_columns])
+    stretch = np.array([norm_stats[c]["stretch"] for c in y_columns])
+    reach = float((np.abs(reference.y - shift) / stretch).max())
+    return Agreement(y_error=y_error, state_error=state_error, reach=reach)
 
 
 def require_agreement(agreement: Agreement, norm_stats: dict[str, dict]) -> None:
@@ -129,7 +135,12 @@ def require_agreement(agreement: Agreement, norm_stats: dict[str, dict]) -> None
             "REFUSING TO WRITE: the exported graphs do not reproduce the "
             f"trained model (worst output error {worst:.2e} of its column's "
             f"stretch, state error {agreement.state_error:.2e}; tolerance "
-            f"{AGREEMENT_TOL:.0e}). Per-column errors: {agreement.y_error}")
+            f"{AGREEMENT_TOL:.0e}). Per-column errors: {agreement.y_error}. "
+            f"The trained model's own rollout reached {agreement.reach:.3g} "
+            "stretches from its columns' means: a rollout that grows far past "
+            "its data grows float32 round-off with it, so a large reach means "
+            "the model diverges on this split rather than that the export is "
+            "wrong.")
 
 
 def tolerances(y_columns: list[str], norm_stats: dict[str, dict]) -> dict:

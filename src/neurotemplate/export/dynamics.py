@@ -84,7 +84,8 @@ def export_model(*, dyn_sys, cfg, nm_mapping: dict[str, list[str]],
             description=description))
 
         reference = torch_rollout(dyn_sys, nm_mapping, norm_stats, frame)
-        agreement = compare(reference, onnx_rollout(model_dir, frame), nm_mapping["Y"])
+        agreement = compare(reference, onnx_rollout(model_dir, frame),
+                            nm_mapping["Y"], norm_stats)
         require_agreement(agreement, norm_stats)
 
         _write_reference(model_dir / "reference", frame.iloc[:cfg.in_steps + shipped],

@@ -82,9 +82,11 @@ Then `uv sync` and a single `nt` console script is on your `PATH`. It dispatches
 | `nt data heads` | Which head does this Y column want? (pre-training advice) |
 | `nt data decay` | What is this column's envelope time constant? (pre-training advice) |
 | `nt control train` | Train a DPC policy against a frozen surrogate |
+| `nt export model` | Ship a trained surrogate as ONNX graphs + a torch-free runtime |
+| `nt export policy` | Ship a trained DPC policy the same way (same package, if you like) |
 
-`nt` with no arguments (or `nt -h`) prints the command list. Each command takes
-the same standard flags (parsed by [common/config.py](src/neurotemplate/common/config.py)):
+`nt` with no arguments (or `nt -h`) prints the command list. The `train`
+commands take the same standard flags (parsed by [common/config.py](src/neurotemplate/common/config.py)):
 
 ```
 --config PATH         YAML config path or short name resolved against the command's config directory
@@ -188,6 +190,10 @@ nt control train --config control_configs/control.yaml \
 
 # 3. Re-evaluate the surrogate on different data later.
 nt model load --run_id <run_id> --data path/to/test.csv
+
+# 4. Ship them: one package, no torch needed to run it.
+nt export model  --run_id <run_id> --data data/test.csv --out delivery/site --package site
+nt export policy --run_id <control_run_id> --out delivery/site --package site
 
 # Hyperparameter search instead of a single train:
 nt model optuna --config model_configs/modeling.yaml \
@@ -673,6 +679,35 @@ mass sits and flags a level under 5%.
   decision: the Trainer checkpoints after each epoch's optimizer steps, so
   δ = 0 is never itself a candidate and has to be scored on purpose.
 
+## Shipping a model: ONNX export
+
+`nt export model` and `nt export policy` serialise the *trained* graph —
+they never reimplement it — into a package that needs only `numpy` and
+`onnxruntime`:
+
+```
+delivery/site/
+  site/runtime.py        Model (warmup / step / rollout / predict), Policy (act)
+  model/                 warm_start.onnx, step.onnx, model.json, reference/
+  policy/                policy.onnx, policy.json, reference/
+  README.md  pyproject.toml  validate.py  example.py
+```
+
+Normalisation, window layout and the hidden state all live inside the
+graphs, so the signature is physical units in and physical units out. Every
+family, head, block split and prestack exports. Before anything is written,
+the export rolls the trained system and the package out over the whole
+held-out split (for a policy: the trained closed loop over its test split)
+and refuses to write unless they agree. The shipped `reference/` fixtures come
+from the trained torch model, so `python validate.py` on any machine checks
+the whole chain. `validate.py` and `example.py` are written once and then
+belong to the project; re-exports never overwrite them. Design and measurements:
+[improvement_plans/onnx_export_report.md](improvement_plans/onnx_export_report.md).
+
+A new stateful family exports for free if it implements
+`rollout_state()` / `set_rollout_state(state)` — its hidden state as one
+`[batch, width]` tensor — the way `RCBlock` and `GRUBlock` do.
+
 ## Programmatic use
 
 If you'd rather drive things from your own Python instead of the CLIs:
@@ -728,8 +763,19 @@ src/neurotemplate/
     ├── metrics.py       # ComfortMetrics, EnergyMetrics, ActuationMetrics, JumpResponse, ResidualMetrics
     ├── pipeline.py      # train_policy, evaluate_closed_loop, evaluate_baseline, clears_reference
     ├── reportcard.py    # render_control_reportcard
-    ├── load.py          # load_frozen_dynamics
+    ├── load.py          # load_frozen_dynamics, load_trained_policy
     └── cli/             # train
+└── export/              # nt export model / nt export policy
+    ├── state.py         # lift hidden state via the rollout-state protocol
+    ├── graphs.py        # WarmStart / Step: a trained SSMGrad in physical units
+    ├── policy.py        # PolicyGraph, closed-loop verification, export_policy
+    ├── trace.py         # torch -> ONNX, checker, operator allowlist
+    ├── verify.py        # trained-system vs package rollout, tolerances
+    ├── dynamics.py      # export_model
+    ├── package.py       # staging, install, scaffold
+    ├── spec.py          # model.json
+    ├── runtime.py       # the shipped runtime (numpy + onnxruntime only)
+    └── templates/       # README / validate / example / pyproject
 ```
 
 Module names inside `modeling/` and `control/` are unprefixed (the directory disambiguates). Anything *outside* those subpackages that is specific to one side carries an explicit `modeling_*` / `control_*` prefix — the two hook files at the app root, and the five console scripts.
@@ -753,6 +799,6 @@ If you find yourself shadowing a Neuromancer class, prefer the import.
 uv run pytest tests/
 ```
 
-All 327 pass today, against the current local Neuromancer checkout. The suite is deliberately small. It keeps the tests whose failure would mean a run silently trains on wrong numbers — normalization and windowing, the RC and GRU updates, loss alignment, gradient plumbing (what the optimizer can and cannot reach), head round-trips, calibration — plus the physics/objective/stability diagnostics that a reader acts on, and one end-to-end wiring pass per CLI sequence. It does not test report rendering (nothing downstream consumes a particular format yet), validation error messages beyond the checks that would otherwise let a run train silently on the wrong objective, or plots.
+All 371 pass today, against the current local Neuromancer checkout. The suite is deliberately small. It keeps the tests whose failure would mean a run silently trains on wrong numbers — normalization and windowing, the RC and GRU updates, loss alignment, gradient plumbing (what the optimizer can and cannot reach), head round-trips, calibration — plus the physics/objective/stability diagnostics that a reader acts on, and one end-to-end wiring pass per CLI sequence. It does not test report rendering (nothing downstream consumes a particular format yet), validation error messages beyond the checks that would otherwise let a run train silently on the wrong objective, or plots.
 
 Cases that differ only in their input live in `pytest.mark.parametrize` tables rather than in one function each. Before adding a test, ask what silently goes wrong if the logic it covers breaks; if the answer is "a worse error message" or "a differently-worded report", leave it out.
