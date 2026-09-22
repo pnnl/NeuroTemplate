@@ -7,7 +7,8 @@ Export a trained dynamics model as a standalone ONNX package.
 Loads the run, exports its two graphs, rolls both the trained system and the
 exported package out over every row of `--data` (a held-out split), and
 refuses to write unless they agree. See `neurotemplate.export.package` for
-the layout written to `--out`.
+the layout written to `--out`; a policy can share the package
+(`nt export policy`).
 """
 
 from __future__ import annotations
@@ -17,7 +18,7 @@ import sys
 from pathlib import Path
 
 from neurotemplate.common.data_utils import get_data
-from neurotemplate.export.package import export_package
+from neurotemplate.export.dynamics import export_model
 from neurotemplate.export.trace import EXPORTERS
 from neurotemplate.modeling.cli.load import load_trained_dynamics
 
@@ -53,7 +54,7 @@ def main() -> None:
         args.run_id, run_dir=args.run_dir)
     frame, timestep_seconds = get_data(args.data)
 
-    result = export_package(
+    result = export_model(
         dyn_sys=dyn_sys, cfg=cfg, nm_mapping=nm_mapping, norm_stats=norm_stats,
         frame=frame, timestep_seconds=timestep_seconds, run_id=args.run_id,
         out_dir=Path(args.out), package=args.package,

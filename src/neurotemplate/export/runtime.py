@@ -1,21 +1,23 @@
 """
-Run an exported NeuroTemplate dynamics model.
+Run exported NeuroTemplate models: a dynamics model, a control policy, or both.
 
 This file ships verbatim inside every exported package. It depends on numpy,
 onnxruntime and the standard library only: no torch, no neuromancer, no
 neurotemplate, no pandas. It knows nothing about RC networks, MLPs or GRUs.
-Everything numeric — normalisation, window layout, the model, the hidden
-state's seeding — lives inside the two graphs; this file only moves windows
-of physical values in and out of them.
+Everything numeric — normalisation, window layout, the network, the hidden
+state's seeding — lives inside the graphs; this file only moves windows of
+physical values in and out of them.
 
-    model/warm_start.onnx   (y, u, d)        -> (y_next[, state])
+    model/warm_start.onnx   (y, u, d)          -> (y_next[, state])
     model/step.onnx         (y, u, d[, state]) -> (y_next[, state])
     model/model.json        columns, units, history length, state width
+    policy/policy.onnx      (y, ymin, ymax, d[, price]) -> u
+    policy/policy.json      each input's columns and window length
 
-`y`, `u`, `d` are `[1, history_steps, n]` windows in physical units, oldest
-row first, and row -1 of `u`/`d` is the input that drives this step. The
+Every window is `[batch, steps, n]` in physical units, oldest row first. For
+the dynamics model, row -1 of `u`/`d` is the input that drives this step; the
 first step of a rollout runs `warm_start`, which seeds any hidden state from
-the window; every later step runs `step` and carries the state explicitly.
+the window, and every later step runs `step` with the state passed explicitly.
 """
 
 from __future__ import annotations
@@ -50,13 +52,30 @@ class State:
     hidden: Optional[np.ndarray]  # [1, state_width], None when cold
 
 
-def _session(path: Path) -> ort.InferenceSession:
+def _load_spec(path: Path) -> dict:
+    spec = json.loads(Path(path).read_text())
+    if spec["format"] != FORMAT:
+        raise ValueError(
+            f"{path} is format {spec['format']}; this runtime reads format "
+            f"{FORMAT}. Use the runtime.py shipped alongside it, or re-export.")
+    return spec
+
+
+def _session(path: Path, spec: dict) -> ort.InferenceSession:
+    """A session over one graph, which must come from the same export as `spec`."""
     # One thread: these graphs are small enough that thread handoff costs
     # more than it saves at batch 1.
     options = ort.SessionOptions()
     options.intra_op_num_threads = 1
     options.inter_op_num_threads = 1
-    return ort.InferenceSession(str(path), options, providers=["CPUExecutionProvider"])
+    sess = ort.InferenceSession(str(path), options, providers=["CPUExecutionProvider"])
+    meta = sess.get_modelmeta().custom_metadata_map
+    expected = {"export_id": spec["export_id"], "opset": str(spec["opset"])}
+    found = {key: meta.get(key) for key in expected}
+    if found != expected:
+        raise ValueError(f"{path.name} does not belong to the json beside it: "
+                         f"graph has {found}, json expects {expected}.")
+    return sess
 
 
 class Model:
@@ -71,32 +90,15 @@ class Model:
 
     def __init__(self, model_dir: str | Path = "model"):
         model_dir = Path(model_dir)
-        self.spec: dict = json.loads((model_dir / "model.json").read_text())
-        if self.spec["format"] != FORMAT:
-            raise ValueError(
-                f"{model_dir}/model.json is format {self.spec['format']}; this "
-                f"runtime reads format {FORMAT}. Re-export, or use the "
-                "runtime.py shipped alongside that model.")
+        self.spec = _load_spec(model_dir / "model.json")
         self.y_columns: list[str] = self.spec["y_columns"]
         self.u_columns: list[str] = self.spec["u_columns"]
         self.d_columns: list[str] = self.spec["d_columns"]
         self.history_steps: int = self.spec["history_steps"]
         self.timestep_seconds: float = self.spec["timestep_seconds"]
         self.state_width: int = self.spec["state"]["width"]
-        self._warm_start = _session(model_dir / "warm_start.onnx")
-        self._step = _session(model_dir / "step.onnx")
-        for name, sess in (("warm_start", self._warm_start), ("step", self._step)):
-            self._check_graph(name, sess)
-
-    def _check_graph(self, name: str, sess: ort.InferenceSession) -> None:
-        """The graph must come from the same export as model.json."""
-        meta = sess.get_modelmeta().custom_metadata_map
-        expected = {"export_id": self.spec["export_id"], "opset": str(self.spec["opset"])}
-        found = {key: meta.get(key) for key in expected}
-        if found != expected:
-            raise ValueError(
-                f"{name}.onnx does not belong to this model.json: graph has "
-                f"{found}, model.json expects {expected}.")
+        self._warm_start = _session(model_dir / "warm_start.onnx", self.spec)
+        self._step = _session(model_dir / "step.onnx", self.spec)
 
     # ── one step ─────────────────────────────────────────────────
 
@@ -202,7 +204,54 @@ class Model:
         )
 
 
-# ── reading the shipped data ─────────────────────────────────────
+class Policy:
+    """An exported control policy. `Policy("policy")` loads a policy directory.
+
+    Stateless: one graph, one call per control step. Each input is a window
+    of physical values, oldest row first, whose length and alignment
+    `policy.json` states (`inputs.<name>.steps` / `.current_row`): `y` and
+    `d` end at the current step, and `d`, `ymin`, `ymax` and `price` may run
+    past it into the known future (forecast weather, the comfort schedule,
+    the tariff).
+    """
+
+    def __init__(self, policy_dir: str | Path = "policy"):
+        policy_dir = Path(policy_dir)
+        self.spec = _load_spec(policy_dir / "policy.json")
+        self.inputs: dict[str, dict] = self.spec["inputs"]
+        self.u_columns: list[str] = self.spec["u_columns"]
+        self._session = _session(policy_dir / "policy.onnx", self.spec)
+
+    def act(self, y, ymin, ymax, d, price=None) -> dict[str, float]:
+        """The command for one step: `{u column: value}`.
+
+        Each argument is `[steps, n]` for that input (see `self.inputs`);
+        `price` only for a policy trained against a tariff.
+        """
+        windows = {"y": y, "ymin": ymin, "ymax": ymax, "d": d, "price": price}
+        u = self.act_batch({name: np.asarray(windows[name])[None]
+                            for name in self.inputs})[0]
+        return {c: float(v) for c, v in zip(self.u_columns, u)}
+
+    def act_batch(self, windows: Mapping[str, np.ndarray]) -> np.ndarray:
+        """Commands for a batch of windows, `{input: [batch, steps, n]}` ->
+        `[batch, n_u]`. For scoring many scenarios at once."""
+        missing = [name for name in self.inputs if name not in windows]
+        if missing:
+            raise KeyError(f"policy input(s) {missing} not supplied.")
+        feed = {name: np.asarray(windows[name], dtype=np.float32) for name in self.inputs}
+        return self._session.run(None, feed)[0]
+
+    def describe(self) -> str:
+        s = self.spec
+        shapes = ", ".join(f"{name} {spec['steps']}x{len(spec['columns'])}"
+                           for name, spec in self.inputs.items())
+        return (f"{s['description'] or 'NeuroTemplate policy'}  "
+                f"(run {s['trained_from']['run_id'][:8]}, {s['trained_from']['policy']})\n"
+                f"  commands {len(self.u_columns)} controls from windows {shapes}")
+
+
+# ── reproducing the shipped reference ────────────────────────────
 
 
 def read_csv(path: str | Path) -> tuple[list[str], dict[str, np.ndarray]]:
@@ -218,55 +267,78 @@ def read_csv(path: str | Path) -> tuple[list[str], dict[str, np.ndarray]]:
 
 @dataclass(frozen=True)
 class ReferenceCheck:
-    """This machine's rollout against the trained model's own, column by column."""
-    y_error: dict[str, float]
-    y_tolerance: dict[str, float]
-    state_error: float
-    state_tolerance: float
+    """This machine's answers against the trained model's own, per column."""
+    name: str                     # "model" or "policy"
+    error: dict[str, float]
+    tolerance: dict[str, float]
+    state_error: float = 0.0
+    state_tolerance: float = 0.0
 
     @property
     def ok(self) -> bool:
-        return (all(self.y_error[c] <= self.y_tolerance[c] for c in self.y_error)
+        return (all(self.error[c] <= self.tolerance[c] for c in self.error)
                 and self.state_error <= self.state_tolerance)
 
     def report(self) -> str:
-        worst = max(self.y_error, key=lambda c: self.y_error[c] / self.y_tolerance[c])
-        lines = [
-            f"  outputs  worst column {worst}: {self.y_error[worst]:.2e} "
-            f"(tolerance {self.y_tolerance[worst]:.0e})",
-            f"  state    max |difference| {self.state_error:.2e} "
-            f"(tolerance {self.state_tolerance:.0e})",
-        ]
-        bad = [c for c in self.y_error if self.y_error[c] > self.y_tolerance[c]]
+        worst = max(self.error, key=lambda c: self.error[c] / self.tolerance[c])
+        lines = [f"  {self.name}: worst column {worst}: {self.error[worst]:.2e} "
+                 f"(tolerance {self.tolerance[worst]:.0e})"]
+        if self.name == "model":
+            lines.append(f"  {self.name}: hidden state max |difference| "
+                         f"{self.state_error:.2e} (tolerance {self.state_tolerance:.0e})")
+        bad = [c for c in self.error if self.error[c] > self.tolerance[c]]
         if bad:
-            lines.append(f"  outputs out of tolerance: {bad}")
+            lines.append(f"  {self.name}: out of tolerance: {bad}")
         if self.state_error > self.state_tolerance:
             lines.append("  the hidden state disagrees: warm-up or step is wrong, "
                          "not just the output layer")
         return "\n".join(lines)
 
 
-def check_reference(root: str | Path = ".") -> ReferenceCheck:
-    """Reproduce `data/expected_*.csv` with this machine's onnxruntime.
+def check_reference(root: str | Path = ".") -> list[ReferenceCheck]:
+    """Reproduce every shipped `<artifact>/reference/` with this machine's
+    onnxruntime, for whichever of `model/` and `policy/` the package holds.
 
     The expected files were written by the trained torch model at export
     time, not by these graphs, so passing means the whole chain — trained
     model, export, this runtime, this platform — reproduces the model.
     """
     root = Path(root)
-    reference = json.loads((root / "data" / "REFERENCE.json").read_text())
-    model = Model(root / "model")
-    _, frame = read_csv(root / "data" / "example_input.csv")
-    _, expected = read_csv(root / "data" / "expected_output.csv")
+    checks = []
+    if (root / "model").is_dir():
+        checks.append(_check_model(root / "model"))
+    if (root / "policy").is_dir():
+        checks.append(_check_policy(root / "policy"))
+    if not checks:
+        raise FileNotFoundError(f"{root} holds neither model/ nor policy/.")
+    return checks
+
+
+def _check_model(model_dir: Path) -> ReferenceCheck:
+    reference = json.loads((model_dir / "reference" / "REFERENCE.json").read_text())
+    model = Model(model_dir)
+    _, frame = read_csv(model_dir / "reference" / "example_input.csv")
+    _, expected = read_csv(model_dir / "reference" / "expected_output.csv")
     steps = len(next(iter(expected.values())))
     outputs, hidden = model.rollout(frame, steps)
 
-    y_error = {c: float(np.abs(outputs[:, i] - expected[c]).max())
-               for i, c in enumerate(model.y_columns)}
+    error = {c: float(np.abs(outputs[:, i] - expected[c]).max())
+             for i, c in enumerate(model.y_columns)}
     state_error = 0.0
     if model.state_width:
-        _, expected_state = read_csv(root / "data" / "expected_state.csv")
+        _, expected_state = read_csv(model_dir / "reference" / "expected_state.csv")
         target = np.stack(list(expected_state.values()), axis=1)
         state_error = float(np.abs(hidden - target).max())
     tolerance = reference["tolerance"]
-    return ReferenceCheck(y_error, tolerance["y"], state_error, tolerance["state"])
+    return ReferenceCheck("model", error, tolerance["y"], state_error, tolerance["state"])
+
+
+def _check_policy(policy_dir: Path) -> ReferenceCheck:
+    reference = json.loads((policy_dir / "reference" / "REFERENCE.json").read_text())
+    policy = Policy(policy_dir)
+    with np.load(policy_dir / "reference" / "inputs.npz") as inputs:
+        actions = policy.act_batch(dict(inputs))
+    _, expected = read_csv(policy_dir / "reference" / "expected_actions.csv")
+    error = {c: float(np.abs(actions[:, i] - expected[c]).max())
+             for i, c in enumerate(policy.u_columns)}
+    return ReferenceCheck("policy", error, reference["tolerance"]["u"])

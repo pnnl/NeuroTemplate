@@ -1,7 +1,7 @@
 """
 ONNX export: the exported package must BE the trained model.
 
-Every case goes through `export_package`, which rolls the trained
+Every case goes through `export_model`, which rolls the trained
 `SystemPreview` and the exported package (through the shipped runtime) out
 over a whole synthetic split and refuses to write unless they agree, then
 runs the package's own reference check. So one export per case covers the
@@ -26,9 +26,9 @@ import pandas as pd
 import pytest
 import torch
 
-from neurotemplate.export import package as export_package_module
+from neurotemplate.export import dynamics as export_dynamics
 from neurotemplate.export.graphs import Step
-from neurotemplate.export.package import export_package
+from neurotemplate.export.dynamics import export_model
 from neurotemplate.export.runtime import Model, check_reference
 from neurotemplate.export.state import probe_state_slots
 from neurotemplate.export.trace import export_graph, session
@@ -103,7 +103,7 @@ def export(tmp_path, cfg, mapping, block_spec=None, heads=None, exporter="legacy
     head_stack = HeadStack(heads, mapping["Y"]) if heads else None
     dyn_sys = get_dynamics(cfg, mapping, head_stack=head_stack,
                            block_spec=block_spec, norm_stats=stats)
-    return export_package(
+    return export_model(
         dyn_sys=dyn_sys, cfg=cfg, nm_mapping=mapping, norm_stats=stats,
         frame=frame, timestep_seconds=300.0, run_id="0" * 32,
         out_dir=tmp_path / "pkg", package="exported", exporter=exporter,
@@ -128,7 +128,7 @@ def test_every_family_and_head_exports_as_the_trained_model(tmp_path, name):
     cfg, mapping, block_spec, heads = CASES[name]
     result = export(tmp_path, cfg, mapping, block_spec, heads() if heads else None)
     assert result.steps_verified == ROWS - IN_STEPS
-    assert check_reference(result.out_dir).ok
+    assert all(check.ok for check in check_reference(result.out_dir))
 
 
 def test_heterogeneous_model_with_prestack_and_heads_exports(tmp_path):
@@ -136,7 +136,7 @@ def test_heterogeneous_model_with_prestack_and_heads_exports(tmp_path):
     result = export(tmp_path, make_cfg(), MIXED_MAPPING, MIXED,
                     [RegressionHead(), OrdinalHead(n_levels=3)], exporter="dynamo")
     assert result.state_width == 1                  # the one zone's mass
-    assert check_reference(result.out_dir).ok
+    assert all(check.ok for check in check_reference(result.out_dir))
     # The package drives itself from its own files, with no training code.
     model = Model(result.out_dir / "model")
     assert model.y_columns == MIXED_MAPPING["Y"]
@@ -172,13 +172,13 @@ def test_step_graph_follows_the_state_it_is_handed(tmp_path):
 
 
 def test_an_export_that_disagrees_is_not_written(tmp_path, monkeypatch):
-    real = export_package_module.torch_rollout
+    real = export_dynamics.torch_rollout
 
     def off_by_a_degree(*args):
         reference = real(*args)
         return Rollout(y=reference.y + 1.0, state=reference.state)
 
-    monkeypatch.setattr(export_package_module, "torch_rollout", off_by_a_degree)
+    monkeypatch.setattr(export_dynamics, "torch_rollout", off_by_a_degree)
     with pytest.raises(RuntimeError, match="REFUSING TO WRITE"):
         export(tmp_path, make_cfg(), MAPPING, SPLIT)
     assert not (tmp_path / "pkg").exists()

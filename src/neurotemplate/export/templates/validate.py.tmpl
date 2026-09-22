@@ -1,18 +1,19 @@
 """Check that this package works on your machine:  python validate.py
 
-The generic check reproduces data/expected_output.csv and
-data/expected_state.csv, which the *trained* model wrote at export time, with
-this machine's onnxruntime. Passing means the whole chain reproduces the
-model: trained model -> export -> this runtime -> this platform.
+The generic check reproduces every */reference/ fixture, which the *trained*
+model wrote at export time, with this machine's onnxruntime. Passing means
+the whole chain reproduces the model: trained model -> export -> this
+runtime -> this platform.
 
 This file is written once and never overwritten by a re-export, so add
-project-specific checks (accuracy against the model card, step responses)
-at the end. Exits non-zero if any check fails.
+project-specific checks (accuracy against a model card, step responses) at
+the end. Exits non-zero if any check fails.
 """
 
 import sys
+from pathlib import Path
 
-from $package import Model, check_reference
+from $package import Model, Policy, check_reference
 
 failures = []
 
@@ -23,14 +24,16 @@ def check(name, ok, detail=""):
         failures.append(name)
 
 
-print("1. loading the model")
-model = Model("model")
-print("   " + model.describe().replace("\n", "\n   "))
+print("1. loading")
+if Path("model").is_dir():
+    print("   " + Model("model").describe().replace("\n", "\n   "))
+if Path("policy").is_dir():
+    print("   " + Policy("policy").describe().replace("\n", "\n   "))
 
-print("\n2. reproducing the trained model's own rollout")
-result = check_reference(".")
-print(result.report())
-check("matches data/expected_*.csv", result.ok)
+print("\n2. reproducing the trained model's own answers")
+for result in check_reference("."):
+    print(result.report())
+    check(f"{result.name} matches {result.name}/reference/", result.ok)
 
 # ── project-specific checks go here ──────────────────────────────
 

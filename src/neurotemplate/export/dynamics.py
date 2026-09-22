@@ -1,0 +1,180 @@
+"""
+Export a trained dynamics model into `<out>/model/`.
+
+    model/
+      warm_start.onnx, step.onnx   the two graphs (see `graphs`)
+      model.json                   the contract (see `spec`)
+      reference/
+        example_input.csv          a held-out window, physical units
+        expected_output.csv        the TRAINED model's rollout on it
+        expected_state.csv         ...and its hidden state, when it has one
+        REFERENCE.json             provenance and tolerances
+
+The graphs are verified against the trained system over every row of the
+split before anything is written (see `verify`); the reference fixture is
+the first rows of that same torch rollout.
+"""
+
+from __future__ import annotations
+
+import io
+import tempfile
+import uuid
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Optional
+
+import pandas as pd
+import torch
+
+from neurotemplate.export.graphs import Step, WarmStart
+from neurotemplate.export.package import (
+    FLOAT_FORMAT, check_package_name, install, provenance, stamp, write_json,
+)
+from neurotemplate.export.spec import build_spec
+from neurotemplate.export.state import StateSlot, probe_state_slots
+from neurotemplate.export.trace import export_graph
+from neurotemplate.export.verify import (
+    AGREEMENT_TOL, Agreement, Rollout, compare, onnx_rollout, require_agreement,
+    tolerances, torch_rollout,
+)
+
+
+@dataclass(frozen=True)
+class ModelExport:
+    out_dir: Path
+    agreement: Agreement
+    steps_verified: int
+    steps_shipped: int
+    state_width: int
+    kept: list[str]     # project-owned files left as they were
+
+
+def export_model(*, dyn_sys, cfg, nm_mapping: dict[str, list[str]],
+                 norm_stats: dict[str, dict], frame: pd.DataFrame,
+                 timestep_seconds: float, run_id: str, out_dir: Path,
+                 package: str, description: Optional[str] = None,
+                 exporter: str = "dynamo", fixture_steps: Optional[int] = None,
+                 version: str = "0.1.0") -> ModelExport:
+    """Export, verify over every row of `frame`, and install into `out_dir`.
+
+    `frame` is a held-out split in physical units, indexed by timestamp. The
+    agreement check covers all of it; the shipped fixture is its first
+    `in_steps + fixture_steps` rows (all of it by default).
+    """
+    check_package_name(package)
+    columns = nm_mapping["Y"] + nm_mapping["U"] + nm_mapping["D"]
+    frame = _round_trip(frame, columns)
+    steps = len(frame) - cfg.in_steps
+    shipped = steps if fixture_steps is None else fixture_steps
+    if not 1 <= shipped <= steps:
+        raise ValueError(f"the split has {steps} steps after warm-up; cannot "
+                         f"ship a fixture of {shipped}.")
+
+    dyn_sys = dyn_sys.cpu().eval()
+    export_id = uuid.uuid4().hex
+    with tempfile.TemporaryDirectory() as tmp:
+        model_dir = Path(tmp) / "model"
+        slots = _write_graphs(model_dir, dyn_sys, cfg, nm_mapping, norm_stats,
+                              exporter, export_id, run_id)
+        write_json(model_dir / "model.json", build_spec(
+            export_id=export_id, run_id=run_id, cfg=cfg, dyn_sys=dyn_sys,
+            nm_mapping=nm_mapping, norm_stats=norm_stats,
+            timestep_seconds=timestep_seconds, slots=slots,
+            description=description))
+
+        reference = torch_rollout(dyn_sys, nm_mapping, norm_stats, frame)
+        agreement = compare(reference, onnx_rollout(model_dir, frame), nm_mapping["Y"])
+        require_agreement(agreement, norm_stats)
+
+        _write_reference(model_dir / "reference", frame.iloc[:cfg.in_steps + shipped],
+                         reference, slots, cfg.in_steps, {
+                             "export_id": export_id, "run_id": run_id,
+                             "tolerance": tolerances(nm_mapping["Y"], norm_stats),
+                             "agreement_at_export": {
+                                 "steps": steps,
+                                 "tolerance_fraction_of_stretch": AGREEMENT_TOL,
+                                 "y_max_abs": agreement.y_error,
+                                 "state_max_abs": agreement.state_error,
+                             },
+                             "exported_on": provenance(exporter),
+                         }, nm_mapping["Y"])
+        kept = install(Path(tmp), Path(out_dir), "model", package, version)
+
+    return ModelExport(out_dir=Path(out_dir), agreement=agreement,
+                       steps_verified=steps, steps_shipped=shipped,
+                       state_width=sum(slot.width for slot in slots), kept=kept)
+
+
+def _round_trip(frame: pd.DataFrame, columns: list[str]) -> pd.DataFrame:
+    """`frame[columns]` exactly as the shipped CSV will read back, so the
+    torch reference is computed from the values a consumer actually has."""
+    missing = [c for c in columns if c not in frame.columns]
+    if missing:
+        raise KeyError(f"the split is missing mapped column(s) {missing}.")
+    if frame[columns].isna().any().any():
+        raise ValueError("the split has NaNs in mapped columns; a rollout over "
+                         "it has no defined answer.")
+    buffer = io.StringIO()
+    frame[columns].to_csv(buffer, float_format=FLOAT_FORMAT, index_label="timestamp")
+    buffer.seek(0)
+    return pd.read_csv(buffer, index_col="timestamp")
+
+
+def _write_graphs(model_dir: Path, dyn_sys, cfg, nm_mapping, norm_stats,
+                  exporter: str, export_id: str, run_id: str) -> list[StateSlot]:
+    """Trace both graphs into `model_dir`; return the lifted state layout."""
+    model_dir.mkdir(parents=True)
+    model = dyn_sys.nodes[0].callable
+    widths = [len(nm_mapping[key]) for key in ("Y", "U", "D")]
+    batch, steps = 2, cfg.in_steps   # batch 2: see trace.export_graph
+
+    slots = probe_state_slots(model, *(torch.randn(batch, steps * n) for n in widths))
+    width = sum(slot.width for slot in slots)
+
+    def physical(key: str) -> torch.Tensor:
+        cols = nm_mapping[key]
+        shift = torch.tensor([norm_stats[c]["shift"] for c in cols])
+        stretch = torch.tensor([norm_stats[c]["stretch"] for c in cols])
+        return shift + stretch * torch.randn(batch, steps, len(cols))
+
+    window = (physical("Y"), physical("U"), physical("D"))
+    names = ["y", "u", "d"]
+    outputs = ["y_next", "state_next"] if width else ["y_next"]
+    graphs = {
+        "warm_start": (WarmStart(model, nm_mapping, norm_stats, slots), window, names),
+        "step": (Step(model, nm_mapping, norm_stats, slots),
+                 window + ((torch.randn(batch, width),) if width else ()),
+                 names + (["state"] if width else [])),
+    }
+    for name, (graph, args, inputs) in graphs.items():
+        path = model_dir / f"{name}.onnx"
+        stamp(export_graph(graph, args, inputs, outputs, path, exporter),
+              path, export_id, run_id)
+    return slots
+
+
+def _write_reference(reference_dir: Path, frame: pd.DataFrame, reference: Rollout,
+                     slots: list[StateSlot], in_steps: int, document: dict,
+                     y_columns: list[str]) -> None:
+    """The input window, and the trained model's own output and state on it."""
+    reference_dir.mkdir(parents=True)
+    steps = len(frame) - in_steps
+    index = frame.index[in_steps:]
+
+    def write(name: str, values, columns: list[str]) -> None:
+        pd.DataFrame(values[:steps], index=index, columns=columns).to_csv(
+            reference_dir / name, float_format=FLOAT_FORMAT, index_label="timestamp")
+
+    frame.to_csv(reference_dir / "example_input.csv", float_format=FLOAT_FORMAT,
+                 index_label="timestamp")
+    write("expected_output.csv", reference.y, y_columns)
+    if slots:
+        write("expected_state.csv", reference.state,
+              [f"{slot.path}[{i}]" for slot in slots for i in range(slot.width)])
+    write_json(reference_dir / "REFERENCE.json", {
+        "source": "the trained torch model (NeuroTemplate SystemPreview), "
+                  "not the exported graphs",
+        "steps": steps,
+        **document,
+    })

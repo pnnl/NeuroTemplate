@@ -1,0 +1,29 @@
+## The dynamics model (`model/`)
+
+```python
+from $package import Model
+
+model = Model("model")
+forecast = model.predict(frame)       # {y column: array}, open loop after warm-up
+state = model.warmup(history)         # last $history_steps rows of every column
+state = model.step(state, inputs)     # one step; inputs = every u and d column
+state.outputs                         # {y column: value}
+```
+
+`frame` and `history` map each column name to a 1-D array: a dict of numpy
+arrays, or a pandas DataFrame.
+
+- timestep $timestep_seconds s; warm-up $history_steps steps. A step predicts
+  the outputs one timestep after the row whose u and d it is given.
+- hidden state width $state_width, carried inside `State` (0: none).
+- `model/model.json` states the contract; its `architecture` section
+  documents the model (the 2R2C time constants, for one) and is never read
+  by the runtime.
+
+| path | what |
+|---|---|
+| `model/warm_start.onnx` | first step of a rollout: seeds the hidden state from the window |
+| `model/step.onnx` | every later step, with the hidden state passed explicitly |
+| `model/reference/` | a held-out window, and the trained model's outputs and hidden state on it |
+
+$contract
