@@ -236,7 +236,7 @@ class Policy:
     def act_batch(self, windows: Mapping[str, np.ndarray]) -> np.ndarray:
         """Commands for a batch of windows, `{input: [batch, steps, n]}` ->
         `[batch, n_u]`. For scoring many scenarios at once."""
-        missing = [name for name in self.inputs if name not in windows]
+        missing = [name for name in self.inputs if windows.get(name) is None]
         if missing:
             raise KeyError(f"policy input(s) {missing} not supplied.")
         feed = {name: np.asarray(windows[name], dtype=np.float32) for name in self.inputs}
