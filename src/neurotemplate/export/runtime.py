@@ -229,7 +229,8 @@ class Policy:
         `price` only for a policy trained against a tariff.
         """
         windows = {"y": y, "ymin": ymin, "ymax": ymax, "d": d, "price": price}
-        u = self.act_batch({name: np.asarray(windows[name])[None]
+        u = self.act_batch({name: None if windows[name] is None
+                            else np.asarray(windows[name])[None]
                             for name in self.inputs})[0]
         return {c: float(v) for c, v in zip(self.u_columns, u)}
 
