@@ -434,14 +434,16 @@ pre-block, so `grad_path` entries for a declared column constrain
 `∂state/∂setpoint`, which is zero on the inactive side and has no universal
 sign anywhere.
 
-**The declared branches train at their own learning rate**, `rc_branch_lr`
-(default 0.05), while the storage priors stay at `lr`. These are physical
-scalars with units of travel to cover — an ambient time constant moving 2 h
-to 20 h, a coil capacity crossing an order of magnitude — where a network
-weight moves in thousandths, and Adam steps a raw parameter by about `lr`
-per update. At `lr` they stall within a few percent of where they started,
-which reads on the reportcard as a branch that "learned" its initial value.
-Every declared block's `tau_ambient`, `k`, `cap` and `w` are in that group.
+**The physical scalars train at their own learning rate**, `rc_branch_lr`
+(default 0.05). These have units of travel to cover — an ambient time
+constant moving 2 h to 20 h, a coil capacity crossing an order of magnitude —
+where a network weight moves in thousandths, and Adam steps a raw parameter
+by about `lr` per update. At `lr` they stall within a few percent of where
+they started, which reads on the reportcard as a branch that "learned" its
+initial value. Every 2r2c block's storage rates (if `rc_train_taus` unfreezes
+them), `tau_ambient`, `k`, `cap` and `w` are in that group, and every time
+constant is parameterized in log-space so hours-to-days is a few units of
+raw travel rather than hundreds.
 
 The one-step test NRMSE is not expected to improve with a declaration; the
 closed-loop and physics readouts are what it is for.

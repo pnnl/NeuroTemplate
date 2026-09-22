@@ -86,11 +86,11 @@ class ModelingConfig:
     # long relative to the slow mode AND the data excites it; otherwise it
     # drags tau_slow down and the reportcard's number stops being checkable.
     rc_train_taus: bool = False
-    # Learning rate for a declared 2r2c branch's physical scalars (ambient
-    # rate, linear coefficients, coil capacity and ramp). Adam moves a raw
-    # parameter by about `lr` per update, and these have units of travel to
-    # cover where a network weight has thousandths; at `lr` they stall near
-    # their start. The storage priors stay at `lr`.
+    # Learning rate for a 2r2c block's physical scalars: the three storage
+    # rates (when `rc_train_taus` unfreezes them), the ambient rate, linear
+    # coefficients, coil capacity and ramp. Adam moves a raw parameter by
+    # about `lr` per update, and these have units of travel to cover where a
+    # network weight has thousandths; at `lr` they stall near their start.
     rc_branch_lr: float = 0.05
 
     # ---- TRAIN ---------------------------------------------------------------

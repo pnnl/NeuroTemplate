@@ -27,7 +27,6 @@ Anything that would silently produce a wrong model instead fails loudly:
 the state back, with `reads`, or a block naming a family with no per-block
 builder.
 """
-import math
 
 import pytest
 import torch
@@ -36,7 +35,7 @@ from neurotemplate.modeling.config import ModelingConfig as Config
 from neurotemplate.modeling.dynamics import BlockStack, get_dynamics
 from neurotemplate.modeling.heads import BinaryHead, HeadStack, RegressionHead
 from neurotemplate.modeling.rc import (
-    MIN_TAU_STEPS, RCBlock, SaturatingTerm, _init_theta, mode_taus,
+    MIN_TAU_STEPS, RCBlock, SaturatingTerm, mode_taus, physical_parameters,
 )
 
 SPH = 12.0            # 5-minute data
@@ -184,16 +183,16 @@ def test_the_prior_is_what_the_config_asked_for():
 
 # ── Stability is structural, not empirical ───────────────────────
 
-@pytest.mark.parametrize("theta", [-20.0, 0.0, 20.0])
-def test_no_rate_can_leave_the_stable_range(theta):
+@pytest.mark.parametrize("log_tau", [-20.0, 0.0, 20.0])
+def test_no_rate_can_leave_the_stable_range(log_tau):
     """Rates are capped at 1/MIN_TAU_STEPS, so the three of them sum below 2
     — the condition for the update's eigenvalues to sit inside the unit
     circle. The cap is a supremum the parameterization approaches but never
     passes; float32 rounds onto it, which is why this is `<=`."""
     block = make_block()
     with torch.no_grad():
-        for name in block._theta:
-            block._theta[name].fill_(theta)
+        for name in block._log_tau:
+            block._log_tau[name].fill_(log_tau)
     rates = torch.stack([r[0] for r in block.rates()])
     assert (rates > 0).all() and (rates <= 1 / MIN_TAU_STEPS).all()
     assert rates.sum() < 2.0
@@ -206,8 +205,8 @@ def test_a_week_of_adversarial_input_does_not_diverge():
     system = get_dynamics(make_cfg(), MAPPING)
     for block in system.nodes[0].callable.fy.blocks:
         with torch.no_grad():
-            for name in block._theta:            # fastest allowed rates
-                block._theta[name].fill_(-20.0)
+            for name in block._log_tau:            # fastest allowed rates
+                block._log_tau[name].fill_(-20.0)
             for p in block.gain.parameters():
                 p.normal_(0, 1.0)
     steps = int(SPH) * 24 * 7
@@ -284,13 +283,13 @@ def test_the_time_constants_are_frozen_by_default():
     """A training rollout cannot identify them (see the module docstring),
     so they must not quietly drift away from what the config asserted."""
     block = make_block()
-    assert all(not p.requires_grad for p in block._theta.parameters())
+    assert all(not p.requires_grad for p in block._log_tau.parameters())
     assert any(p.requires_grad for p in block.gain.parameters())
 
 
 def test_the_time_constants_train_when_asked():
     block = make_block(train_taus=True)
-    assert all(p.requires_grad for p in block._theta.parameters())
+    assert all(p.requires_grad for p in block._log_tau.parameters())
 
 
 def test_the_forcing_starts_at_zero():
@@ -445,10 +444,11 @@ def test_a_per_block_d_subset_narrows_only_that_blocks_input_width():
 # ── Declared forcing: every claim survives the branches ──────────
 
 def test_an_undeclared_block_has_the_classical_state_dict():
-    """A checkpoint trained before per-column declarations existed must load
-    into an undeclared block: no branch registers anything unless declared."""
+    """No branch registers anything unless declared. The rates live under
+    `_log_tau`, not the old `_theta`: a checkpoint from the softplus-space
+    parameterization must fail to load rather than be misread as log-space."""
     assert set(make_block().state_dict()) == {
-        "_theta.ambient", "_theta.zone_mass", "_theta.mass_zone",
+        "_log_tau.ambient", "_log_tau.zone_mass", "_log_tau.mass_zone",
         "gain.linear.0.weight", "gain.linear.0.bias",
         "gain.linear.1.weight", "gain.linear.1.bias",
     }
@@ -506,22 +506,27 @@ def test_a_declared_ambient_term_owns_a_trainable_rate():
     trains it from the prior; the mass rates keep the frozen prior the module
     docstring argues for, and an undeclared block keeps all three frozen."""
     block = make_declared_block()
-    assert "ambient" not in block._theta
+    assert "ambient" not in block._log_tau
     assert block.ambient.log_tau.requires_grad
-    assert not any(p.requires_grad for p in block._theta.parameters())
+    assert not any(p.requires_grad for p in block._log_tau.parameters())
     a_o, _, _ = block.rates()
     assert a_o.item() == pytest.approx(1 / (2.0 * SPH), rel=1e-4)
-    assert not any(p.requires_grad for p in make_block()._theta.parameters())
+    assert not any(p.requires_grad for p in make_block()._log_tau.parameters())
 
 
-def test_branch_parameters_are_exactly_the_declared_scalars():
-    from neurotemplate.modeling.rc import branch_parameters
-    block = make_declared_block()
-    names = {n for n, p in block.named_parameters()
-             if any(p is b for b in branch_parameters(block))}
-    assert names == {"ambient.log_tau", "linear.0.theta",
-                     "saturating.0.theta_cap", "saturating.0.theta_slope"}
-    assert branch_parameters(make_block()) == []
+def test_physical_parameters_are_the_rates_and_the_declared_scalars():
+    """The storage rates belong in the `rc_branch_lr` group too: unfrozen
+    at the network `lr` they would stall where they started, and the
+    reportcard would read that as a fit."""
+    def names(block):
+        return {n for n, p in block.named_parameters()
+                if any(p is q for q in physical_parameters(block))}
+    assert names(make_declared_block()) == {
+        "_log_tau.zone_mass", "_log_tau.mass_zone",
+        "ambient.log_tau", "linear.0.theta",
+        "saturating.0.theta_cap", "saturating.0.theta_slope"}
+    assert names(make_block()) == {
+        "_log_tau.ambient", "_log_tau.zone_mass", "_log_tau.mass_zone"}
 
 
 def test_a_linear_sign_is_a_constraint_not_a_hint():
@@ -576,8 +581,8 @@ def test_a_week_of_adversarial_setpoints_does_not_diverge_with_demand_on():
                           norm_stats=STATS)
     block = system.nodes[0].callable.fy.blocks[0]
     with torch.no_grad():
-        for name in block._theta:
-            block._theta[name].fill_(-20.0)
+        for name in block._log_tau:
+            block._log_tau[name].fill_(-20.0)
         block.ambient.log_tau.fill_(-20.0)            # fastest ambient rate too
         block.saturating[0].theta_cap.fill_(5.0)
         block.saturating[0].theta_slope.fill_(20.0)   # the whole headroom
@@ -635,32 +640,14 @@ def test_a_head_that_will_not_add_the_state_back_is_refused():
         get_dynamics(make_cfg(), MAPPING, head_stack=stack)
 
 
-def test_a_long_time_constant_builds_instead_of_overflowing():
-    """The far end of the same clamp. The exact inverse `log(expm1(x))`
-    overflows float64 past x ~ 709.78, which used to make any prior above
-    (709.78 + MIN_TAU_STEPS) / steps_per_hour raise a bare OverflowError --
-    59 h on 5-minute data, 11.9 h on 1-minute data, below the tau_slow the
-    shipped defaults themselves produce."""
-    block = make_block(tau_hours=(200.0, 1.0, 4.0))
-    taus = block.describe()["time_constants_h"]["y0"]
-    assert math.isfinite(taus["fast"]) and math.isfinite(taus["slow"])
-    assert 0 < taus["fast"] < taus["slow"]
-
-
 @pytest.mark.parametrize("tau_hours", [0.5, 13.4, 200.0])
-def test_init_theta_inverts_the_forward_map_on_both_branches(tau_hours):
-    """Whichever branch it takes, `_init_theta` is the inverse of
-    `tau = MIN_TAU_STEPS + softplus(theta)` -- so the overflow guard is
-    arithmetic, not a different parameterization above the threshold.
-
-    Round-tripped through the same `nn.functional.softplus` `rates()` calls,
-    in float64 where `_init_theta` computes -- the block stores theta in
-    float32, so a rollout sees this to float32 precision. The 1e-9 is torch's
-    own doing: its softplus switches to the identity at 20, a little before
-    the inverse here does."""
-    theta = torch.tensor(_init_theta(tau_hours, SPH), dtype=torch.float64)
-    tau_steps = MIN_TAU_STEPS + torch.nn.functional.softplus(theta)
-    assert (tau_steps / SPH).item() == pytest.approx(tau_hours, rel=1e-9)
+def test_the_rates_read_back_the_prior(tau_hours):
+    """Above the two-step floor, whatever went in as a component time
+    constant comes back out of `rates()`, to float32 precision, however
+    long it is."""
+    block = make_block(tau_hours=(tau_hours, 1.0, 4.0))
+    a_o, _, _ = block.rates()
+    assert (1 / a_o[0] / SPH).item() == pytest.approx(tau_hours, rel=1e-5)
 
 
 def test_2r2c_with_reads_is_refused():

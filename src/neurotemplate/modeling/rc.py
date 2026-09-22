@@ -94,7 +94,7 @@ this family over `lssm`:
 
 **Unconditional stability.** `g` reads inputs only — never `z`, never `m` —
 so the state matrix is fixed by three positive rates whatever the MLP does.
-Rates are parameterized as `1 / (MIN_TAU_STEPS + softplus(θ))`, so each is
+Rates are parameterized as `1 / (MIN_TAU_STEPS + exp(log_tau))`, so each is
 below `1/MIN_TAU_STEPS = 0.5` and their sum below 2, which is exactly the
 condition for the discrete update's eigenvalues to sit inside the unit
 circle (see `mode_taus`). A 2R2C rollout cannot diverge, at any horizon,
@@ -192,45 +192,28 @@ DEFAULT_TAU_MASS_ZONE_H = 4.0
 #: that Adam moves it on the first step.
 _NEAR_ZERO_THETA = -4.0
 
-#: Where `softplus(theta)` becomes `theta` to double precision. The exact
-#: inverse `log(expm1(x))` differs from `x` by `log1p(-exp(-x))`, which at
-#: x = 36 is ~2e-16 — far below the ~7e-15 gap between adjacent float64s of
-#: that size — so past this point the two return the same float. Purely a
-#: numerical threshold; nothing about the model changes at it.
-_SOFTPLUS_LINEAR = 36.0
 
+def _log_tau_init(tau_hours: float, steps_per_hour: float) -> float:
+    """Raw parameter whose `_rate` reading is `tau_hours`.
 
-def _init_theta(tau_hours: float, steps_per_hour: float) -> float:
-    """Raw parameter whose `rates()` reading is `tau_hours`.
-
-    Inverts `tau = MIN_TAU_STEPS + softplus(theta)`. Coarse data can make a
+    Inverts `tau = MIN_TAU_STEPS + exp(log_tau)`. Coarse data can make a
     requested time constant unrepresentable — at an hourly timestep the
     1 h zone<->mass default is below the two-step floor — so the request is
     clamped rather than allowed to produce a NaN. The reportcard prints what
     the clamp settled on.
 
-    The far end is only an arithmetic hazard. `softplus` saturates to the
-    identity, so the exact inverse converges to its own argument — but
-    `math.expm1` overflows float64 past ~709.78 on the way there, which made
-    every `tau_hours` above `(709.78 + MIN_TAU_STEPS) / steps_per_hour` raise
-    a bare `OverflowError`. That ceiling tightens as the data gets finer:
-    59 h at 5-minute samples, 11.9 h at 1-minute — below the `tau_slow` the
-    shipped defaults themselves produce, so ordinary priors hit it. Past
-    `_SOFTPLUS_LINEAR` the identity *is* the exact inverse in float64, so it
-    is returned instead.
-
-    Nothing else changes at that switch, and nothing needs to: softplus
-    saturating to the identity means its derivative is 1, which is the
-    best-conditioned corner of this parameterization rather than a degenerate
-    one. A long time constant that comes back out of `rates()` is exactly the
-    one that went in; whether it is a *good* prior is what the reportcard's
-    `tau_slow` is for.
+    Log-space rather than `softplus`: a rate that trains has hours to days
+    to cover, and Adam moves a raw parameter by about `lr` per update. In
+    log-space that is a few units of travel; in a space linear in the time
+    constant it is hundreds, and the rate stalls where it started.
     """
-    tau_steps = max(tau_hours * steps_per_hour, MIN_TAU_STEPS + 1.0)
-    excess = tau_steps - MIN_TAU_STEPS
-    if excess > _SOFTPLUS_LINEAR:
-        return excess
-    return math.log(math.expm1(excess))
+    excess = max(tau_hours * steps_per_hour - MIN_TAU_STEPS, 1.0)
+    return math.log(excess)
+
+
+def _rate(log_tau: torch.Tensor) -> torch.Tensor:
+    """Per-step exchange rate, in (0, 1/MIN_TAU_STEPS)."""
+    return 1.0 / (MIN_TAU_STEPS + torch.exp(log_tau))
 
 
 def mode_taus(a_ambient, a_zone_mass, a_mass_zone):
@@ -278,26 +261,22 @@ def _buffer(module: nn.Module, name: str, value) -> None:
 class AmbientTerm(nn.Module):
     """`a_o (T_oa - z)`: conduction to the declared outdoor temperature.
 
-    Owns the ambient rate, `a_o = 1 / (MIN_TAU_STEPS + exp(log_tau))`, which
-    trains from the block's `tau_hours[0]`. Log-space, unlike the frozen
-    priors' `MIN_TAU_STEPS + softplus(θ)`, which is linear in the time
-    constant: a rate that trains has hours to days to cover, and in
-    log-space that is a few units of raw travel rather than hundreds.
+    Owns the ambient rate, which trains from the block's `tau_hours[0]`.
     """
 
     def __init__(self, column: dict, zone_shift: list[float], zone_stretch: list[float],
-                 tau_steps: float):
+                 tau_hours: float, steps_per_hour: float):
         super().__init__()
-        excess = max(tau_steps - MIN_TAU_STEPS, 1.0)
-        self.log_tau = nn.Parameter(torch.full((len(zone_shift),), math.log(excess)))
+        self.log_tau = nn.Parameter(
+            torch.full((len(zone_shift),), _log_tau_init(tau_hours, steps_per_hour)))
         _buffer(self, "shift", column["shift"])
         _buffer(self, "stretch", column["stretch"])
         _buffer(self, "zone_shift", zone_shift)
         _buffer(self, "zone_stretch", zone_stretch)
 
     def rate(self) -> torch.Tensor:
-        """`a_o`, per channel, in (0, 1/MIN_TAU_STEPS)."""
-        return 1.0 / (MIN_TAU_STEPS + torch.exp(self.log_tau))
+        """`a_o`, per channel."""
+        return _rate(self.log_tau)
 
     def forward(self, zone: torch.Tensor, outdoor: torch.Tensor) -> torch.Tensor:
         zone_phys = zone * self.zone_stretch + self.zone_shift
@@ -365,16 +344,21 @@ class SaturatingTerm(nn.Module):
         return self.sign * self.cap() * torch.tanh(demand_c / self.width(headroom)) / self.zone_stretch
 
 
-def branch_parameters(module: nn.Module) -> list[nn.Parameter]:
-    """Every declared branch's parameters under `module`.
+def physical_parameters(module: nn.Module) -> list[nn.Parameter]:
+    """Every 2R2C physical scalar under `module`: the storage rates and the
+    declared branches' coefficients.
 
-    A grey-box fit steps its few physical scalars at their own learning rate
+    A grey-box fit steps these at their own learning rate
     (`cfg.rc_branch_lr`): Adam moves a raw parameter by about `lr` per
     update, and a coil capacity or a time constant has units of travel to
-    cover where a network weight has thousandths.
+    cover where a network weight has thousandths. Frozen rates are included
+    too; Adam skips a parameter with no gradient.
     """
     terms = (AmbientTerm, LinearTerm, SaturatingTerm)
-    return [p for m in module.modules() if isinstance(m, terms) for p in m.parameters()]
+    params = [p for m in module.modules() if isinstance(m, terms) for p in m.parameters()]
+    params += [p for m in module.modules() if isinstance(m, RCBlock)
+               for p in m._log_tau.parameters()]
+    return params
 
 
 class RCBlock(nn.Module):
@@ -452,9 +436,9 @@ class RCBlock(nn.Module):
 
         # A declared `AmbientTerm` owns the ambient rate (and trains it); the
         # module docstring says why that is not true of the mass rates.
-        self._theta = nn.ParameterDict({
+        self._log_tau = nn.ParameterDict({
             name: nn.Parameter(
-                torch.full((ny,), _init_theta(hours, steps_per_hour)),
+                torch.full((ny,), _log_tau_init(hours, steps_per_hour)),
                 requires_grad=train_taus,
             )
             for name, hours in zip(("ambient", "zone_mass", "mass_zone"), tau_hours)
@@ -478,7 +462,7 @@ class RCBlock(nn.Module):
         self._ambient_pos = drive_names.index(ambient) if ambient else None
         self.ambient = (
             AmbientTerm(norm_stats[ambient], zone_shift, zone_stretch,
-                        tau_steps=tau_hours[0] * steps_per_hour)
+                        tau_hours[0], steps_per_hour)
             if ambient else None)
 
         self.linear_names = [c for c, e in inputs.items() if e["kind"] == "linear"]
@@ -538,10 +522,9 @@ class RCBlock(nn.Module):
 
     def rates(self) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """The three per-step exchange rates, each in (0, 1/MIN_TAU_STEPS)."""
-        def rate(name):
-            return 1.0 / (MIN_TAU_STEPS + nn.functional.softplus(self._theta[name]))
-        a_ambient = self.ambient.rate() if self.ambient is not None else rate("ambient")
-        return a_ambient, rate("zone_mass"), rate("mass_zone")
+        a_ambient = (self.ambient.rate() if self.ambient is not None
+                     else _rate(self._log_tau["ambient"]))
+        return a_ambient, _rate(self._log_tau["zone_mass"]), _rate(self._log_tau["mass_zone"])
 
     def reg_error(self) -> torch.Tensor:
         if self.gain is None:
