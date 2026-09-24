@@ -803,20 +803,17 @@ class HeadStack(nn.Module):
     def from_config(
         cls, data: dict[str, dict], channel_names: list[str]
     ) -> "HeadStack":
-        """Inverse of to_config.
-
-        Channels missing from `data` default to RegressionHead so older
-        configs (which only stored non-default entries) keep loading.
-        Channel names present in `data` but not in `channel_names` raise.
-        """
+        """Inverse of to_config: exactly one entry per channel, or it raises."""
         unknown = set(data) - set(channel_names)
-        if unknown:
+        missing = [name for name in channel_names if name not in data]
+        if unknown or missing:
             raise ValueError(
-                f"head config references columns not in channel_names: {sorted(unknown)}"
+                "head config does not match the Y channels: "
+                f"not in Y {sorted(unknown)}, missing {missing}"
             )
         heads: list[Head] = []
         for name in channel_names:
-            entry = data.get(name, {"kind": "regression"})
+            entry = data[name]
             kind = entry["kind"]
             if kind not in _KIND_TO_CLASS:
                 raise ValueError(

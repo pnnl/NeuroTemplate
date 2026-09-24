@@ -5,10 +5,12 @@ Public surface (functions that earn their keep by composing multiple
 non-trivial steps):
 
   - evaluate_and_plot(...)  — rollout + per-channel metrics + plotting
+  - prepare_data(...)       — everything computed from the data before a model
   - render_reportcard(...)  — describe_dynamics + render
   - write_reportcard(...)   — disk + MLflow
   - log_test_results(...)   — flatten metrics into MLflow log_metrics
-  - train_and_evaluate(...) — one full training run (used by main + optuna Phase 2)
+  - train_and_evaluate(...) — one full training run (`nt model train`, and
+                              `nt model optuna`'s final retrain)
 
 `synth_cfg` is computed once at the entry point (via user_defined.synth_cfg)
 and passed to the evaluation path. None means "physics checks disabled for
@@ -22,6 +24,7 @@ so it is the DRY home for turning several draws into a reported spread. See
 ModelingConfig.ensemble_seeds and reportcard.EnsembleSpread.
 """
 
+import math
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from time import perf_counter as tic
@@ -33,7 +36,18 @@ from pandas import DataFrame
 from neurotemplate._typing import beartype
 
 from neurotemplate.modeling.config import ModelingConfig
-from neurotemplate.common.data_utils import get_sw_dict_multi, pool_dfs, to_df, unnormalize_df
+from neurotemplate.common.data_utils import (
+    compute_norm_stats,
+    get_data_splits,
+    get_grad_masks,
+    get_sw_dict_multi,
+    normalize_df,
+    pool_dfs,
+    to_df,
+    to_physical,
+    unnormalize_df,
+    warn_degenerate_columns,
+)
 from neurotemplate.modeling.calibration import (
     Calibration,
     balance_level_weights,
@@ -45,7 +59,7 @@ from neurotemplate.common.metrics import (
     ChannelMetrics,
     LevelMetrics,
     RolloutStability,
-    _safe_metric_key,
+    metric_key,
     level_metrics,
     level_metrics_to_dict,
     metrics_to_dict,
@@ -66,7 +80,6 @@ from neurotemplate.modeling.scenarios import (
     ScenarioOutcome,
     ScenarioResult,
     SynthSpec,
-    _unnormalize_y,
     build_scenarios,
     checks_to_dict,
     format_checks,
@@ -79,11 +92,7 @@ from neurotemplate.modeling.scenarios import (
 
 
 def resolve_block_spec(hooks, nm_mapping: dict[str, list[str]], cfg: ModelingConfig):
-    """Call the hooks module's `block_mapping`, or None if it has none.
-
-    Shared by cli/train.py and cli/optuna.py, which both need this exact
-    lookup before building the trainer.
-    """
+    """Call the hooks module's optional `block_mapping`, or None if it has none."""
     if hasattr(hooks, "block_mapping"):
         return hooks.block_mapping(nm_mapping, cfg)
     return None
@@ -94,12 +103,65 @@ def build_head_stack(
     norm_stats: dict, train_dfs: list[DataFrame],
 ) -> HeadStack:
     """The hook's head stack, with level weights balanced from the training
-    data when `cfg.balance_levels`. Shared by cli/train.py and cli/optuna.py
-    so a search trial trains against the same loss as the final retrain."""
+    data when `cfg.balance_levels`."""
     head_stack = hooks.data_head_config(nm_mapping, norm_stats)
     if cfg.balance_levels:
         balance_level_weights(head_stack, train_dfs)
     return head_stack
+
+
+@dataclass
+class PreparedData:
+    """What a training run computes from the data once, before any model.
+
+    Field names are `train_and_evaluate`'s keyword arguments, so a prepared
+    run is handed over as `train_and_evaluate(cfg, logger=..., **vars(data))`.
+    """
+    train_dfs: list[DataFrame]
+    dev_dfs: list[DataFrame]
+    test_dfs: list[DataFrame]
+    freq_s: float
+    nm_mapping: dict[str, list[str]]
+    block_spec: Optional[dict[str, dict]]
+    norm_stats: dict
+    grad_masks: dict
+    synth_cfg: Optional[SynthSpec]
+    head_stack: HeadStack
+
+
+def prepare_data(cfg: ModelingConfig, hooks) -> PreparedData:
+    """Load the three splits, map and normalize them, and build the heads.
+
+    Norm stats are fitted on all training files pooled, so each column's
+    range is the union of the training data; windowing stays per file.
+    Sets `cfg.steps_per_hour` from the data's own sampling frequency — before
+    the hooks see `cfg`, since `2r2c` and `block_mapping` may read it.
+    """
+    train_raws, dev_raws, test_raws, freq_s = get_data_splits(cfg)
+    cfg.steps_per_hour = 3600.0 / freq_s
+    # Column roles only need the schema, and get_data_splits has already
+    # checked every file carries the same columns.
+    nm_mapping = hooks.data_mapping(df=train_raws[0], cfg=cfg)
+    block_spec = resolve_block_spec(hooks, nm_mapping, cfg)
+
+    norm_stats = compute_norm_stats(
+        df=pool_dfs(train_raws), norm_type=cfg.norm_type,
+        column_overrides=hooks.column_norm_config(nm_mapping),
+    )
+    warn_degenerate_columns(norm_stats, nm_mapping)
+    train_dfs = [normalize_df(r, norm_stats) for r in train_raws]
+    return PreparedData(
+        train_dfs=train_dfs,
+        dev_dfs=[normalize_df(r, norm_stats) for r in dev_raws],
+        test_dfs=[normalize_df(r, norm_stats) for r in test_raws],
+        freq_s=freq_s,
+        nm_mapping=nm_mapping,
+        block_spec=block_spec,
+        norm_stats=norm_stats,
+        grad_masks=get_grad_masks(grad_path=cfg.grad_path, nm_mapping=nm_mapping),
+        synth_cfg=hooks.synth_cfg(nm_mapping, norm_stats),
+        head_stack=build_head_stack(hooks, cfg, nm_mapping, norm_stats, train_dfs),
+    )
 
 
 def _train(cfg, *, train_dfs, dev_dfs, nm_mapping, grad_masks, norm_stats,
@@ -133,7 +195,7 @@ class TestResults:
     """Bundle of test-time outputs. Tensors stay internal to evaluate_and_plot."""
     metrics: list[ChannelMetrics]
     stability: list[RolloutStability]  # rollout shape, to catch ramping models
-    aggregate_rmse: float  # legacy single-number RMSE in normalized space
+    normalized_rmse: float  # RMSE over every channel, in normalized units
     test_time_s: float
     # Physics assertions on the thermal states. None when the use case opted
     # out of synth_cfg.
@@ -201,8 +263,8 @@ def evaluate_and_plot(
     # history when comparing to ground truth.
     pred_norm = test_out["yn"][:, cfg.in_steps:-1, :]
     true_norm = test_out["Y"][:, cfg.in_steps:, :]
-    un_pred = _unnormalize_y(pred_norm, nm_mapping, norm_stats)
-    un_true = _unnormalize_y(true_norm, nm_mapping, norm_stats)
+    un_pred = to_physical(pred_norm, nm_mapping["Y"], norm_stats)
+    un_true = to_physical(true_norm, nm_mapping["Y"], norm_stats)
     metrics = per_channel_metrics(un_pred, un_true, nm_mapping["Y"])
     # RMSE alone cannot see a model that has stopped responding to its inputs
     # and is emitting a ramp; compare the rollout's shape to the truth's too.
@@ -212,19 +274,15 @@ def evaluate_and_plot(
     # seeded history — and holds the last of it. Same span, same units.
     persist_norm = test_out["Y"][:, cfg.in_steps - 1:cfg.in_steps, :].expand_as(true_norm)
     persistence = per_channel_metrics(
-        _unnormalize_y(persist_norm, nm_mapping, norm_stats), un_true, nm_mapping["Y"],
+        to_physical(persist_norm, nm_mapping["Y"], norm_stats), un_true, nm_mapping["Y"],
     )
     head_stack = dyn_sys.nodes[0].callable.head_stack
     levels = _level_metrics(head_stack, pred_norm, true_norm, norm_stats)
     persistence_levels = _level_metrics(head_stack, persist_norm, true_norm, norm_stats)
 
-    # Legacy aggregate (averaged across channels in normalized space). Kept
-    # for back-compat with the pre-refactor `test_rmse` MLflow key.
-    err_norm = (
-        test_out["yn"][:, cfg.in_steps:-1, :]
-        - test_out["Y"][:, cfg.in_steps:, :]
-    )
-    aggregate_rmse = err_norm.pow(2).mean().sqrt().item()
+    # One unitless headline number: pooling channels is only meaningful
+    # in normalized space.
+    normalized_rmse = (pred_norm - true_norm).pow(2).mean().sqrt().item()
 
     # Physics assertions on synthetic states the recorded data never visits.
     # The verdicts are the point; the figures are for when one surprises you.
@@ -242,7 +300,7 @@ def evaluate_and_plot(
     return TestResults(
         metrics=metrics,
         stability=stability,
-        aggregate_rmse=aggregate_rmse,
+        normalized_rmse=normalized_rmse,
         test_time_s=test_time_s,
         physics=None if outcome is None else outcome.verdicts,
         physics_steps=None if outcome is None else synth_steps(cfg, freq_s),
@@ -306,7 +364,6 @@ def _plot_predictions(
             cfg=cfg,
             df_true=df_trues[src[batch]], df_pred=df_pred,
             run_dir=str(plot_run_dir),
-            verbose=cfg.verbose,
             logger=logger,
         )
 
@@ -359,7 +416,6 @@ def _run_physics_checks(
             [s.trace(cfg.synth_n_plot) for s in scenarios],
             run_dir=str(synth_dir), norm_stats=norm_stats,
             freq_s=freq_s, n_plot=cfg.synth_n_plot, verbose=cfg.verbose,
-            fallback_unit=cfg.synth_y_unit,
         )
         if logger is not None and hasattr(logger, "_mlflow"):
             logger._mlflow.log_artifact(str(synth_dir), artifact_path="plots")
@@ -383,7 +439,7 @@ def render_reportcard(
     run_name: Optional[str] = None,
     best_dev_loss: Optional[float] = None,
     train_time_s: Optional[float] = None,
-    split_sizes: Optional[dict[str, object]] = None,
+    split_sizes: Optional[dict[str, dict[str, int]]] = None,
     calibration: Optional[dict[str, Calibration]] = None,
     ensemble: Optional[EnsembleSpread] = None,
 ) -> str:
@@ -447,26 +503,26 @@ def log_test_results(
     if logger is None:
         return
 
-    flat: dict[str, float] = {"test_rmse": test_results.aggregate_rmse}
+    flat: dict[str, float] = {"test_rmse": test_results.normalized_rmse}
     for m in test_results.metrics:
-        safe = _safe_metric_key(m.name)
+        safe = metric_key(m.name)
         flat[f"test_{safe}_rmse"] = m.rmse
         flat[f"test_{safe}_mae"] = m.mae
         flat[f"test_{safe}_r2"] = m.r2
-        if m.nrmse == m.nrmse:  # not NaN
+        if not math.isnan(m.nrmse):
             flat[f"test_{safe}_nrmse"] = m.nrmse
     for st in test_results.stability:
-        safe = _safe_metric_key(st.name)
+        safe = metric_key(st.name)
         flat[f"test_{safe}_rise_excess"] = st.rise_excess
         flat[f"test_{safe}_drift_ratio"] = st.drift_ratio
     # Balanced accuracy is the number to sort a staged channel by — NRMSE
     # ranks a head that never fires above one that does.
     for lm in test_results.levels:
-        flat[f"test_{_safe_metric_key(lm.name)}_balanced_acc"] = lm.balanced_accuracy
+        flat[f"test_{metric_key(lm.name)}_balanced_acc"] = lm.balanced_accuracy
     for m in test_results.persistence:
-        flat[f"persistence_{_safe_metric_key(m.name)}_rmse"] = m.rmse
+        flat[f"persistence_{metric_key(m.name)}_rmse"] = m.rmse
     for lm in test_results.persistence_levels:
-        flat[f"persistence_{_safe_metric_key(lm.name)}_balanced_acc"] = lm.balanced_accuracy
+        flat[f"persistence_{metric_key(lm.name)}_balanced_acc"] = lm.balanced_accuracy
     if test_results.physics is not None:
         # One gate number to sort a leaderboard by, plus per-(scenario, channel)
         # detail — so a channel someone does not care about can be excluded from
@@ -476,7 +532,7 @@ def log_test_results(
         )
         flat["physics_checks_total"] = float(len(test_results.physics))
         for r in test_results.physics:
-            key = _safe_metric_key(r.key)
+            key = metric_key(r.key)
             flat[f"physics_{key}"] = r.value
             flat[f"physics_{key}_passed"] = float(r.passed)
 
@@ -521,7 +577,7 @@ def run_summary_metrics(test_results: TestResults) -> dict[str, float]:
     same idea for the staged channels, present only when there are any.
     """
     out = {
-        "test_rmse": test_results.aggregate_rmse,
+        "test_rmse": test_results.normalized_rmse,
         "worst_channel_r2": min(m.r2 for m in test_results.metrics),
     }
     if test_results.levels:
@@ -686,10 +742,10 @@ def train_and_evaluate(
     """
     Train one model, evaluate it, plot, and write the reportcard.
 
-    Used by main.py end-to-end and by optuna_main.py for the Phase 2 retrain
-    with best params. The lighter per-trial loop in optuna_main.objective
-    calls train_with_curriculum directly — it deliberately skips
-    eval/plot/reportcard for speed.
+    Used by `nt model train` end-to-end and by `nt model optuna` for the
+    Phase 2 retrain with best params. The lighter per-trial loop in
+    cli/optuna.objective calls train_with_curriculum directly — it
+    deliberately skips eval/plot/reportcard for speed.
 
     When `cfg.ensemble_seeds > 1`, this also trains that many more models at
     cfg.seed + 1 .. cfg.seed + ensemble_seeds - 1 (see `_run_ensemble_members`)

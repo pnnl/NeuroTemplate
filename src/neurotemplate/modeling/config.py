@@ -127,9 +127,9 @@ class ModelingConfig:
     # proportionally more (a 1% level gets 10x, not 100x). Off, every sample
     # weighs the same (the pre-existing behaviour).
     balance_levels: bool = True
-    # After training, move each ordinal head's decision thresholds to the
-    # balanced-accuracy optimum on dev rollouts. Off, decode snaps at the
-    # level midpoints — a p=0.5 rule the data does not justify.
+    # After training, move each ordinal head's decision thresholds so the
+    # predicted level shares on dev rollouts match the true ones. Off, decode
+    # snaps at the level midpoints — a p=0.5 rule the data does not justify.
     calibrate_thresholds: bool = True
 
     # ---- RUNTIME -------------------------------------------------------------
@@ -171,20 +171,13 @@ class ModelingConfig:
     # timestep, and for a reachability bound the horizon is load-bearing.
     synth_hours: float = 4.0
     synth_n_plot: int = 4
-    # Deprecated: units are now per-column, parsed from each state column's
-    # own "[unit]" suffix (see `common.data_utils.parse_column_unit`) and
-    # carried on `norm_stats`. This field only still matters as a fallback
-    # for a state column whose name carries no unit of its own — the
-    # synthetic-scenario y-axis falls back to this label for such a column
-    # rather than going unlabeled. Columns that name their own unit ignore it.
-    synth_y_unit: str = "°C"
 
     def validate(self) -> None:
         for name in [
             "batch_size", "in_steps", "log2_hidden_size", "num_layers",
             "epochs", "epoch_verbose", "train_pred_steps",
             "dev_pred_steps", "test_window", "test_stride",
-            "curriculum_ratio", "ensemble_seeds",
+            "curriculum_ratio", "ensemble_seeds", "trial_seeds",
         ]:
             check_positive(self, name)
 
@@ -194,7 +187,7 @@ class ModelingConfig:
             "warmup", "patience", "curriculum_steps",
             "ref_gain", "vel_gain", "sgn_gain", "sgn_steepness",
             "n_trials", "grad_gain", "trial_epochs",
-            "trial_seeds", "grad_n_samples", "synth_n_scenarios",
+            "grad_n_samples", "synth_n_scenarios",
             "synth_hours", "synth_n_plot",
         ]:
             check_non_negative(self, name)
@@ -211,6 +204,7 @@ class ModelingConfig:
         from neurotemplate.modeling.dynamics import VALID_MODEL_NAMES, PER_BLOCK_FAMILIES
 
         check_one_of(self, "model", list(VALID_MODEL_NAMES))
+        check_one_of(self, "norm_type", ["min_max", "abs_max", "z_score", None])
         check_one_of(self, "save_config", ["last_step", "all", "None", None])
 
         if self.in_steps > IN_STEPS_WARN_THRESHOLD:

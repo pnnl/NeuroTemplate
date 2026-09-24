@@ -1,7 +1,7 @@
 """
 Train the DPC policy, evaluate the closed loop, write a reportcard.
 
-Mirrors src/pipeline.py in shape. Only the policy trains — the surrogate is
+Mirrors modeling/pipeline.py in shape. Only the policy trains — the surrogate is
 frozen, so the optimizer is built over requires_grad params only.
 """
 
@@ -16,10 +16,10 @@ import torch
 
 from neuromancer.trainer import Trainer
 
-from neurotemplate.common.data_utils import axis_label
+from neurotemplate.common.data_utils import axis_label, to_physical
 from neurotemplate.common.metrics import (
     ChannelMetrics,
-    _safe_metric_key,
+    metric_key,
     metrics_to_dict,
     per_channel_metrics,
 )
@@ -81,13 +81,6 @@ class ControlResults:
         return None if self.energy is None else self.energy.mean_power
 
 
-def _phys(norm_stats, cols, device):
-    shift = torch.tensor([norm_stats[c]["shift"] for c in cols], device=device)
-    stretch = torch.tensor([norm_stats[c]["stretch"] for c in cols],
-                           device=device)
-    return shift, stretch
-
-
 # ── Train (policy only) ──────────────────────────────────────────
 
 
@@ -123,16 +116,11 @@ def train_policy(
     )
 
     t0 = tic()
-    best = trainer.train()
-    trainer.model.load_state_dict(best)
+    trainer.train()  # leaves the best weights loaded
     train_time_s = tic() - t0
 
-    best_dev = trainer.best_devloss
-    if hasattr(best_dev, "item"):
-        best_dev = best_dev.item()
-
     cl_system = trainer.model.nodes[0]
-    return cl_system, float(best_dev), train_time_s
+    return cl_system, trainer.get_devloss(), train_time_s
 
 
 # ── Evaluate (long closed-loop rollout) ──────────────────────────
@@ -187,10 +175,9 @@ def evaluate_closed_loop(
     # Plumb source_idx through `out` so plot_closed_loop can route per-batch.
     out["source_idx"] = source_idx
 
-    y_shift, y_stretch = _phys(norm_stats, regulated, device)
-    y_ctrl = out["yn"][:, hmax:, reg_idx] * y_stretch + y_shift  # [b,P,nc]
-    ymin = data["ymin"][:, hmax:, :] * y_stretch + y_shift
-    ymax = data["ymax"][:, hmax:, :] * y_stretch + y_shift
+    y_ctrl = to_physical(out["yn"][:, hmax:, reg_idx], regulated, norm_stats)  # [b,P,nc]
+    ymin = to_physical(data["ymin"][:, hmax:, :], regulated, norm_stats)
+    ymax = to_physical(data["ymax"][:, hmax:, :], regulated, norm_stats)
 
     step_hours = hours_per_step(out["t"][:, hmax:, :])
     comfort = comfort_metrics(y_ctrl, ymin, ymax, regulated, step_hours)
@@ -206,16 +193,15 @@ def evaluate_closed_loop(
     tracking = per_channel_metrics(y_ctrl, mid, regulated)
 
     u_cols = nm_mapping["U"]
-    u_shift, u_stretch = _phys(norm_stats, u_cols, device)
-    U = out["U"][:, hmax:, :] * u_stretch + u_shift
+    U = to_physical(out["U"][:, hmax:, :], u_cols, norm_stats)
     mean_abs_du = (U[:, 1:, :] - U[:, :-1, :]).abs().mean().item()
 
     # Per-control behaviour, in the same physical units as the commands. The
     # bounds come from the hook the policy is actually squashed into, so
     # "at bound" means the limit the policy was given, not the data's spread.
     umin_n, umax_n = hooks.actuation_bounds(nm_mapping, norm_stats)
-    u_lo = umin_n.to(device) * u_stretch + u_shift
-    u_hi = umax_n.to(device) * u_stretch + u_shift
+    u_lo = to_physical(umin_n.to(device), u_cols, norm_stats)
+    u_hi = to_physical(umax_n.to(device), u_cols, norm_stats)
     actuation = actuation_metrics(U, u_cols, u_lo, u_hi)
     response = response_audit(
         y_ctrl, ymin, ymax, U, regulated, u_cols, u_lo, u_hi,
@@ -242,7 +228,7 @@ def evaluate_closed_loop(
         tol = (0.5 * cfg.setpoint_step if cfg.setpoint_step > 0
                else SATURATION_TOL * max(cfg.residual_delta, 1e-12))
         residual = residual_metrics(
-            U, u_ref * u_stretch + u_shift, cfg.residual_delta, tol,
+            U, to_physical(u_ref, u_cols, norm_stats), cfg.residual_delta, tol,
         )
 
     return ControlResults(
@@ -296,7 +282,7 @@ def _flat_control_metrics(results: ControlResults, prefix: str) -> dict:
         f"{prefix}_mean_abs_du": results.mean_abs_du,
     }
     for m in results.comfort:
-        safe = _safe_metric_key(m.name)
+        safe = metric_key(m.name)
         flat[f"{prefix}_{safe}_violation_rate"] = m.violation_rate
         flat[f"{prefix}_{safe}_mean_exceedance"] = m.mean_exceedance
         flat[f"{prefix}_{safe}_rms_exceedance"] = m.rms_exceedance
@@ -304,11 +290,11 @@ def _flat_control_metrics(results: ControlResults, prefix: str) -> dict:
         flat[f"{prefix}_{safe}_max_violation"] = m.max_violation
         flat[f"{prefix}_{safe}_degree_hours"] = m.degree_hours
     for a in results.actuation:
-        safe = _safe_metric_key(a.name)
+        safe = metric_key(a.name)
         flat[f"{prefix}_{safe}_mean_abs_du"] = a.mean_abs_du
         flat[f"{prefix}_{safe}_frac_saturated"] = a.frac_saturated
     for r in results.response:
-        safe = f"{_safe_metric_key(r.name)}_{r.direction}"
+        safe = f"{metric_key(r.name)}_{r.direction}"
         flat[f"{prefix}_{safe}_actuated"] = r.frac_actuated
         flat[f"{prefix}_{safe}_resolved"] = r.frac_resolved
     if results.energy is not None:
@@ -458,46 +444,34 @@ def plot_closed_loop(
     first row, so without the origins every plot is stamped 1970 — see the
     timestamp block below.
     """
-    import matplotlib
-    matplotlib.use("Agg")
     import matplotlib.pyplot as plt
     import pandas as pd
 
-    from neurotemplate.modeling.plotting import _unique_day_dir
+    from neurotemplate.modeling.plotting import unique_day_dir
 
     hooks = load_control_hooks(cfg)
     _, _, hmax = horizons(cfg, sysid_cfg)
     regulated, reg_idx = regulated_channels(hooks, nm_mapping)
-    device = sysid_cfg.device
-    y_shift, y_stretch = _phys(norm_stats, regulated, device)
     u_cols = nm_mapping["U"]
-    u_shift, u_stretch = _phys(norm_stats, u_cols, device)
 
-    y = (out["yn"][:, hmax:, reg_idx] * y_stretch + y_shift).cpu()
-    ymin = (out["ymin"][:, hmax:, :] * y_stretch + y_shift).cpu()
-    ymax = (out["ymax"][:, hmax:, :] * y_stretch + y_shift).cpu()
-    U = (out["U"][:, hmax:, :] * u_stretch + u_shift).cpu()
+    y = to_physical(out["yn"][:, hmax:, reg_idx], regulated, norm_stats).cpu()
+    ymin = to_physical(out["ymin"][:, hmax:, :], regulated, norm_stats).cpu()
+    ymax = to_physical(out["ymax"][:, hmax:, :], regulated, norm_stats).cpu()
+    U = to_physical(out["U"][:, hmax:, :], u_cols, norm_stats).cpu()
 
     # Context traces overlaid on the temperature axis (denormalized), and the
     # optional power row. Both come from the use case — the library has no
     # opinion about which columns are interesting.
-    d_cols = nm_mapping["D"]
-    context = {}
-    for name in hooks.plot_context_channels(nm_mapping):
-        s = norm_stats[name]
-        idx = d_cols.index(name)
-        context[name] = (
-            out["D"][:, hmax:, idx] * s["stretch"] + s["shift"]
-        ).cpu()
-
-    y_cols = nm_mapping["Y"]
-    power = {}
-    for name in hooks.power_channels(nm_mapping):
-        s = norm_stats[name]
-        idx = y_cols.index(name)
-        power[name] = (
-            out["yn"][:, hmax:, idx] * s["stretch"] + s["shift"]
-        ).clamp_min(0.0).cpu()
+    d_cols, y_cols = nm_mapping["D"], nm_mapping["Y"]
+    context = {
+        name: to_physical(out["D"][:, hmax:, d_cols.index(name)], [name], norm_stats).cpu()
+        for name in hooks.plot_context_channels(nm_mapping)
+    }
+    power = {
+        name: to_physical(out["yn"][:, hmax:, y_cols.index(name)], [name],
+                          norm_stats).clamp_min(0.0).cpu()
+        for name in hooks.power_channels(nm_mapping)
+    }
 
     # The tariff, in dollars, on its own axis. A price trace next to the power
     # trace is how load shifting reads at a glance — and how a precool that
@@ -534,7 +508,7 @@ def plot_closed_loop(
         ts = origins[int(source_idx[w])] + pd.to_timedelta(t_elapsed[w], unit="s")
         day_name = ts[0].strftime("%b_%d")
         date_str = ts[0].strftime("%b-%d")
-        day_dir = _unique_day_dir(plot_dir, day_name)
+        day_dir = unique_day_dir(plot_dir, day_name)
         day_dir.mkdir(parents=True, exist_ok=True)
 
         # Trajectory CSV alongside the figure so plots can be restyled

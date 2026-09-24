@@ -134,8 +134,8 @@ def build_control_loss(
     per-window power mean M_q — same signal, same units, three questions.
 
     All three need control_user_defined.power_metric, and `cost` additionally
-    needs a `price_signal` hook; requesting one without its hook fails fast
-    rather than silently substituting a proxy.
+    needs a tariff (the three price paths + price_scale); requesting one
+    without what it needs fails fast rather than silently substituting a proxy.
 
     Nothing here checks that a weight suits the magnitude of what it
     multiplies — that is `control.objective`, run once on a real batch before

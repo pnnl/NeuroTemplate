@@ -10,7 +10,8 @@ tabulated.
 import pytest
 
 from neurotemplate.common.config import ConfigError, CONTROL_CONFIG_DIR
-from neurotemplate.control.config import ControlConfig, load_config_from_cli
+from neurotemplate.common.config import load_config_from_cli
+from neurotemplate.control.config import ControlConfig
 
 _YAML = """
 sysid_run_id: abc123

@@ -16,14 +16,16 @@ from pathlib import Path
 
 from neurotemplate._typing import beartype
 
-from neuromancer.loggers import MLFlowLogger
+import mlflow
 
+from neurotemplate.common.config import CONTROL_CONFIG_DIR, load_config_from_cli
 from neurotemplate.common.data_utils import get_data_splits, normalize_df
 from neurotemplate.common.run_summary import write_run_summary
+from neurotemplate.common.tracking import tracked_run
 from neurotemplate.modeling.dynamics import describe_dynamics
 from neurotemplate.modeling.experiment import resolve_device, set_seeds
 
-from neurotemplate.control.config import ControlConfig, load_config_from_cli, CONTROL_CONFIG_DIR
+from neurotemplate.control.config import ControlConfig
 from neurotemplate.control.load import load_frozen_dynamics
 from neurotemplate.control.scenarios import build_loaders, horizons
 from neurotemplate.control.policy import (
@@ -65,13 +67,10 @@ def main() -> None:
         config_dir=CONTROL_CONFIG_DIR,
         default_config_path=CONTROL_CONFIG_DIR / "control.yaml",
     )
-    cfg.validate()
-
     cfg.device = resolve_device(cfg.device)
     cfg.seed = set_seeds(cfg.seed)
 
     # Point MLflow at the sys-id tracking store *before* loading the run.
-    import mlflow
     mlflow.set_tracking_uri(cfg.location)
 
     if cfg.verbose:
@@ -139,90 +138,85 @@ def main() -> None:
     print(format_objective_report(balance, shapes, power_diag, notes))
 
     cfg.run = "DPC " + cfg.run
-    logger = MLFlowLogger(
-        args=cfg,
-        savedir=cfg.savedir,
+    with tracked_run(
+        cfg,
         stdout=[
             "train_loss", "dev_loss", "train_comfort_lower_loss",
             "train_comfort_upper_loss", "train_du_loss", "train_energy_loss",
             "train_cost_loss", "train_peak_loss",
         ],
-        verbosity=cfg.epoch_verbose if cfg.verbose else 0,
         logout=[
             "train_loss", "dev_loss", "time", "comfort_lower_loss",
             "comfort_upper_loss", "du_loss", "energy_loss", "cost_loss",
             "peak_loss",
         ],
-        nested=False,
-    )
-
-    if cfg.verbose:
-        print("Training policy (dynamics frozen)...")
-    cl_system, best_dev, train_time_s = train_policy(
-        cfg, problem, train_loader, dev_loader, logger=logger,
-    )
-
-    if cfg.verbose:
-        print("Evaluating closed loop on test split...")
-    results, out = evaluate_closed_loop(
-        cfg, sysid_cfg, cl_system, test_dfs, nm_mapping, norm_stats,
-    )
-
-    # Optional rule-based comparison. Scored on the same windows and the same
-    # fixed-seed band; None when the use case defines no baseline.
-    baseline = evaluate_baseline(
-        cfg, sysid_cfg, dyn_node, test_dfs, nm_mapping, norm_stats,
-    )
-    clears = clears_reference(results, baseline)
-    if cfg.verbose:
-        if baseline is None:
-            print("No baseline defined (no reference_control hook).")
-        else:
-            print("Baseline comfort violation rate: "
-                  f"{baseline.comfort_violation_rate * 100:.2f}%")
-            print("Learned policy clears its reference: "
-                  f"{'yes' if clears else 'NO — ship the reference'}")
-
-    if cfg.plot:
-        # `t` is elapsed seconds from each file's first row, so the plots need
-        # the files' wall-clock origins to be stamped with the real dates.
-        plot_closed_loop(
-            cfg, sysid_cfg, out, nm_mapping, norm_stats,
-            Path(cfg.savedir) / "plots",
-            origins=[df.index[0] for df in test_dfs],
+    ) as logger:
+        if cfg.verbose:
+            print("Training policy (dynamics frozen)...")
+        cl_system, best_dev, train_time_s = train_policy(
+            cfg, problem, train_loader, dev_loader, logger=logger,
         )
 
-    md = render_control_reportcard(
-        cfg, sysid_cfg, arch, nm_mapping, regulated, results,
-        eval_band_seed=EVAL_BAND_SEED, surrogate_arch=surrogate_arch,
-        baseline=baseline,
-        clears_reference=clears, best_dev_loss=best_dev,
-        train_time_s=train_time_s,
-        balance=balance, shapes=shapes,
-        power=power_diag, objective_notes=notes,
-    )
-    write_reportcard(md, Path(cfg.savedir), logger=logger)
-    log_control_results(logger, results, baseline=baseline)
-    logger.log_dict(objective_to_dict(balance, shapes, power_diag, notes),
-                     name="objective_diagnostics.json")
+        if cfg.verbose:
+            print("Evaluating closed loop on test split...")
+        results, out = evaluate_closed_loop(
+            cfg, sysid_cfg, cl_system, test_dfs, nm_mapping, norm_stats,
+        )
 
-    write_run_summary(
-        logger, stage="control", config_path=cli.config, cfg=cfg,
-        metrics={"control_violation_rate": results.comfort_violation_rate,
-                 "control_mean_abs_du": results.mean_abs_du},
-    )
+        # Optional rule-based comparison. Scored on the same windows and the
+        # same fixed-seed band; None when the use case defines no baseline.
+        baseline = evaluate_baseline(
+            cfg, sysid_cfg, dyn_node, test_dfs, nm_mapping, norm_stats,
+        )
+        clears = clears_reference(results, baseline)
+        if cfg.verbose:
+            if baseline is None:
+                print("No baseline defined (no reference_control hook).")
+            else:
+                print("Baseline comfort violation rate: "
+                      f"{baseline.comfort_violation_rate * 100:.2f}%")
+                print("Learned policy clears its reference: "
+                      f"{'yes' if clears else 'NO — ship the reference'}")
 
-    print(f"Comfort violation rate: "
-          f"{results.comfort_violation_rate * 100:.2f}%")
-    print(f"Mean |Δsetpoint|: {results.mean_abs_du:.4g}")
-    rid = logger.run.info.run_id
-    print(f"Finished DPC run: {rid}")
-    with open("latest_control_run_id.dat", "w") as f:
-        f.write(rid)
+        if cfg.plot:
+            # `t` is elapsed seconds from each file's first row, so the plots
+            # need the files' wall-clock origins to be stamped with real dates.
+            plot_closed_loop(
+                cfg, sysid_cfg, out, nm_mapping, norm_stats,
+                Path(cfg.savedir) / "plots",
+                origins=[df.index[0] for df in test_dfs],
+            )
 
-    # Push savedir (plots + reportcard) to MLflow before clean_up rmtrees it.
-    logger.log_artifacts({})
-    logger.clean_up()
+        md = render_control_reportcard(
+            cfg, sysid_cfg, arch, nm_mapping, regulated, results,
+            eval_band_seed=EVAL_BAND_SEED, surrogate_arch=surrogate_arch,
+            baseline=baseline,
+            clears_reference=clears, best_dev_loss=best_dev,
+            train_time_s=train_time_s,
+            balance=balance, shapes=shapes,
+            power=power_diag, objective_notes=notes,
+        )
+        write_reportcard(md, Path(cfg.savedir), logger=logger)
+        log_control_results(logger, results, baseline=baseline)
+        logger.log_dict(objective_to_dict(balance, shapes, power_diag, notes),
+                        name="objective_diagnostics.json")
+
+        write_run_summary(
+            logger, stage="control", config_path=cli.config, cfg=cfg,
+            metrics={"control_violation_rate": results.comfort_violation_rate,
+                     "control_mean_abs_du": results.mean_abs_du},
+        )
+
+        print(f"Comfort violation rate: "
+              f"{results.comfort_violation_rate * 100:.2f}%")
+        print(f"Mean |Δsetpoint|: {results.mean_abs_du:.4g}")
+        rid = logger.run.info.run_id
+        print(f"Finished DPC run: {rid}")
+        with open("latest_control_run_id.dat", "w") as f:
+            f.write(rid)
+
+        # Push savedir (plots + reportcard) to MLflow before it is removed.
+        logger.log_artifacts({})
 
 
 if __name__ == "__main__":

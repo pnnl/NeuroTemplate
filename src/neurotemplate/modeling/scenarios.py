@@ -60,6 +60,7 @@ from typing import Optional
 import torch
 
 from neurotemplate._typing import beartype
+from neurotemplate.common.data_utils import to_physical
 
 
 # Pass thresholds, all expressed as a share of a state channel's own recorded
@@ -380,22 +381,6 @@ def _rollout_data(yn_row, u_rows, d_rows, in_steps, n_steps, ny, device):
     }
 
 
-def _to_physical(y_norm, cols, norm_stats):
-    """[n, steps, ny] normalized -> physical, per column."""
-    phys = torch.zeros_like(y_norm)
-    for i, col in enumerate(cols):
-        s = norm_stats[col]
-        phys[:, :, i] = y_norm[:, :, i] * s["stretch"] + s["shift"]
-    return phys
-
-
-# Kept under its historical name: modeling/pipeline.py unnormalizes test
-# rollouts with it and has nothing to do with scenarios.
-def _unnormalize_y(predictions, nm_mapping, norm_stats):
-    """Convert normalized Y predictions [n, steps, ny] to physical units."""
-    return _to_physical(predictions, nm_mapping["Y"], norm_stats)
-
-
 # ── Scenarios ────────────────────────────────────────────────────
 
 
@@ -446,7 +431,7 @@ class _Scenario:
         Index 0 is the last seeded step (the equilibrium the rollout starts
         from), so `[:, k] - [:, 0]` is movement caused by the rollout.
         """
-        phys = _to_physical(y_pred, self.nm_mapping["Y"], self.norm_stats)
+        phys = to_physical(y_pred, self.nm_mapping["Y"], self.norm_stats)
         return phys[:, self.in_steps - 1:, self.state_idx]
 
     def check(self, n: Optional[int] = None) -> list[ScenarioResult]:
@@ -461,7 +446,7 @@ class _Scenario:
         a known constant in the min or max. It is reported separately as
         `seeded_at` so the spread has a reference point.
         """
-        phys = _to_physical(y_pred, self.nm_mapping["Y"], self.norm_stats)
+        phys = to_physical(y_pred, self.nm_mapping["Y"], self.norm_stats)
         free = phys[:, self.in_steps:, :]
         qs = torch.tensor(READOUT_QUANTILES, device=free.device)
         return [
@@ -889,7 +874,7 @@ def _trace(name, data, y_pred, nm_mapping, norm_stats, spec, in_steps) -> dict:
     a = norm_stats[spec.ambient]
     return {
         "name": name,
-        "predictions": _to_physical(
+        "predictions": to_physical(
             y_pred, nm_mapping["Y"], norm_stats).detach().cpu(),
         "ambient_traj": (
             data["D"][:, :, j] * a["stretch"] + a["shift"]).detach().cpu(),

@@ -7,21 +7,21 @@ Builds a single Neuromancer PenaltyLoss containing:
 
 All loss terms are proper Neuromancer objectives so they flow through
 Problem.forward() and show up with correct labels in the Trainer's
-output dict. Physics losses are active in both train and eval so that
-dev_loss (and early stopping) accounts for physics compliance.
+output dict. The gradient penalty is train-only: it samples fresh random
+points on every call, so scoring it in eval would make dev_loss (and so
+early stopping) noisy without measuring anything about the fit.
 """
 
 import warnings
+from typing import Optional
 
 import torch
 from torch.nn.functional import softplus
 
-from neurotemplate.modeling.config import ModelingConfig
 from neuromancer.constraint import variable, Loss
 from neuromancer.loss import PenaltyLoss
 
-from typing import Optional
-
+from neurotemplate.modeling.config import ModelingConfig
 from neurotemplate.modeling.gradient_sampling import SampledGradientPenalty
 from neurotemplate.modeling.heads import HeadStack
 

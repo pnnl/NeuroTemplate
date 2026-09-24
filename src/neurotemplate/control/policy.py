@@ -7,7 +7,7 @@ A bounded network wrapped in a Neuromancer Node:
 
 Output is squashed into the actuator limits (normalized U space) by
 blocks.MLP_bounds. Windowing uses the same input_map convention as
-src/models.get_dynamics so the policy composes with the frozen dynamics Node.
+modeling/dynamics.get_dynamics so the policy composes with the frozen dynamics Node.
 
 `policy_catalog` selects the network family the same way `model_catalog`
 selects a dynamics family on the sys-id side:

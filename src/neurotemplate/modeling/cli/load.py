@@ -3,30 +3,24 @@ Load a trained model from an MLflow run, evaluate it on a dataset the caller
 points at, and optionally plot. Wrapper over pipeline.evaluate_and_plot.
 """
 
-import sys
+import argparse
 import json
+import sys
 import warnings
+from dataclasses import fields
+from datetime import datetime
 from pathlib import Path
 from time import perf_counter as tic
-from datetime import datetime
 from typing import Optional
 from urllib.parse import urlparse
-import argparse
-
-from dataclasses import fields
 
 import mlflow
-import numpy as np
 import torch
 
 from neurotemplate.modeling.config import ModelingConfig
 from neurotemplate.common.config import dict_to_dataclass, _parse_value
-from neurotemplate.common.data_utils import (
-    normalize_df,
-    get_data,
-    get_grad_masks,
-)
-from neurotemplate.modeling.experiment import resolve_device
+from neurotemplate.common.data_utils import get_grad_masks, load_split, normalize_df
+from neurotemplate.modeling.experiment import resolve_device, set_seeds
 from neurotemplate.modeling.gradient_sampling import SampledGradientPenalty
 from neurotemplate.modeling.heads import HeadStack
 from neurotemplate.modeling.dynamics import get_dynamics
@@ -90,52 +84,13 @@ def _resolve_artifacts_dir(run_dir: Optional[str], run_id: str) -> Path:
 
 @beartype
 def _load_json(path: Path) -> dict:
-    with path.open("r") as f:
+    if not path.exists():
+        raise FileNotFoundError(
+            f"{path.name} is missing from the run's artifacts ({path.parent}); "
+            "every run `nt model train` finishes writes it."
+        )
+    with path.open("r", encoding="utf-8") as f:
         return json.load(f)
-
-
-@beartype
-def _remap_state_dict_keys(
-    state_dict: dict, target_keys: set[str]
-) -> Optional[dict]:
-    """Strip a Neuromancer System wrapper from a saved state_dict.
-
-    When a SystemPreview is saved, its inner module's parameter keys are
-    prefixed with `nodes.<i>.` (we only ever use one node, so `nodes.0.`).
-    Loading those weights back into the bare inner module fails unless the
-    prefix is stripped — which is what this function does.
-    """
-    NODE_PREFIX = "nodes.0."
-    if all(k.startswith(NODE_PREFIX) for k in state_dict.keys()):
-        remapped = {k[len(NODE_PREFIX):]: v for k, v in state_dict.items()}
-        if set(remapped.keys()) == target_keys:
-            return remapped
-    return None
-
-
-def _resolve_head_stack(
-    cfg,
-    artifacts_dir: Path,
-    nm_mapping: dict[str, list[str]],
-    norm_stats: dict[str, dict[str, float]],
-) -> HeadStack:
-    """Prefer the head_config.json artifact saved at train time.
-
-    Older runs (trained before head config was persisted) don't have the
-    artifact; fall back to the live modeling_user_defined.data_head_config
-    with a loud warning, since drift there silently changes the loaded
-    model's output behaviour.
-    """
-    head_config_path = artifacts_dir / "head_config.json"
-    if head_config_path.exists():
-        return HeadStack.from_config(_load_json(head_config_path), nm_mapping["Y"])
-    warnings.warn(
-        f"No head_config.json in {artifacts_dir}; falling back to "
-        "modeling_user_defined.data_head_config(). This is correct only "
-        "if modeling_user_defined.py has not changed since the run was trained.",
-        stacklevel=2,
-    )
-    return load_modeling_hooks(cfg).data_head_config(nm_mapping, norm_stats)
 
 
 def _resolve_block_spec_artifact(artifacts_dir: Path) -> Optional[dict]:
@@ -148,43 +103,33 @@ def _resolve_block_spec_artifact(artifacts_dir: Path) -> Optional[dict]:
     return _load_json(block_spec_path) if block_spec_path.exists() else None
 
 
+#: Training saves the whole Problem's state_dict, whose first node is the
+#: dynamics System; this prefix is that node's place in it.
+_PROBLEM_NODE_PREFIX = "nodes.0."
+
+
 def _load_dyn_sys(cfg, nm_mapping, head_stack, block_spec, norm_stats,
                   weights_path: Path):
-    """Build the dynamics system and load weights from disk."""
+    """Build the dynamics system and load its weights from a training checkpoint.
+
+    The checkpoint is `best_model_state_dict.pth` as training writes it: the
+    Problem's state_dict. The System's own keys are those under the Problem's
+    first node, and they are loaded strictly, so a rebuilt topology that does
+    not match the trained one fails here, naming the keys.
+    """
     dyn_sys = get_dynamics(
         cfg, nm_mapping, head_stack=head_stack, block_spec=block_spec,
         norm_stats=norm_stats,
     ).to(cfg.device)
-    state = torch.load(weights_path, map_location=cfg.device)
-
-    if isinstance(state, dict):
-        state_dict = (
-            state["state_dict"]
-            if "state_dict" in state and isinstance(state["state_dict"], dict)
-            else state
-        )
-        try:
-            dyn_sys.load_state_dict(state_dict)
-        except RuntimeError:
-            remapped = _remap_state_dict_keys(
-                state_dict, set(dyn_sys.state_dict().keys())
-            )
-            if remapped is None:
-                raise
-            dyn_sys.load_state_dict(remapped)
-    elif hasattr(state, "nodes"):
-        dyn_sys = (
-            state.nodes[0].to(cfg.device)
-            if hasattr(state.nodes[0], "nodes")
-            else state.to(cfg.device)
-        )
-    elif hasattr(state, "state_dict"):
-        dyn_sys = state.to(cfg.device)
-    else:
+    problem_state = torch.load(weights_path, map_location=cfg.device)
+    if not all(k.startswith(_PROBLEM_NODE_PREFIX) for k in problem_state):
         raise ValueError(
-            "Unrecognized weights format; expected state_dict or model object."
+            f"{weights_path} is not a training checkpoint: expected the "
+            f"Problem state_dict `nt model train` saves, with every key under "
+            f"{_PROBLEM_NODE_PREFIX!r}."
         )
-
+    dyn_sys.load_state_dict({k[len(_PROBLEM_NODE_PREFIX):]: v
+                             for k, v in problem_state.items()})
     dyn_sys.eval()
     return dyn_sys
 
@@ -197,37 +142,32 @@ def load_trained_dynamics(
     """
     Load a trained dynamics SystemPreview from an MLflow run.
 
-    Public entry point reused by control_src to obtain a frozen surrogate.
+    Public entry point, reused by the control side and the exporter.
     Returns (dyn_sys, cfg, nm_mapping, norm_stats). The caller is responsible
     for freezing / eval-mode if it wants the dynamics held fixed.
+
+    `weights` overrides the run's own `best_model_state_dict.pth`; it must be
+    a checkpoint in the same format.
 
     cfg.device is resolved here so the returned system is on a valid device.
     """
     artifacts_dir = _resolve_artifacts_dir(run_dir, run_id)
     cfg = config_from_run_params(run_id)
-    
     cfg.validate()
     cfg.device = resolve_device(cfg.device)
-    
-    norm_stats_path = artifacts_dir / "norm_stats.json"
-    nm_mapping_path = artifacts_dir / "nm_mapping.json"
-    if not norm_stats_path.exists() or not nm_mapping_path.exists():
-        raise FileNotFoundError(
-            "Missing norm_stats.json or nm_mapping.json in run artifacts."
-        )
-    norm_stats = _load_json(norm_stats_path)
-    nm_mapping = _load_json(nm_mapping_path)
 
-    if weights is not None:
-        weights_path = Path(weights).expanduser()
-    else:
-        weights_path = artifacts_dir / "best_model_state_dict.pth"
-        if not weights_path.exists():
-            weights_path = artifacts_dir / "best_model.pth"
+    norm_stats = _load_json(artifacts_dir / "norm_stats.json")
+    nm_mapping = _load_json(artifacts_dir / "nm_mapping.json")
+
+    weights_path = (Path(weights).expanduser() if weights is not None
+                    else artifacts_dir / "best_model_state_dict.pth")
     if not weights_path.exists():
         raise FileNotFoundError(f"Weights not found at {weights_path}")
 
-    head_stack = _resolve_head_stack(cfg, artifacts_dir, nm_mapping, norm_stats)
+    # The head topology and calibrated thresholds as trained, independent of
+    # whatever the hooks file says now.
+    head_stack = HeadStack.from_config(
+        _load_json(artifacts_dir / "head_config.json"), nm_mapping["Y"])
     block_spec = _resolve_block_spec_artifact(artifacts_dir)
     dyn_sys = _load_dyn_sys(cfg, nm_mapping, head_stack, block_spec, norm_stats,
                             weights_path)
@@ -271,18 +211,7 @@ def _eval_one_split(cfg, dyn_sys, data_paths, norm_stats, nm_mapping,
     (length >= 1) of unnormalized dataframes — callers needing a row
     count sum lengths across the list.
     """
-    raw_dfs: list = []
-    freq_s: Optional[float] = None
-    for p in data_paths:
-        df, f = get_data(p, verbose=False)
-        if df.isna().any().any():
-            raise ValueError(f"NaNs found in {p}")
-        if freq_s is None:
-            freq_s = f
-        elif f != freq_s:
-            raise ValueError(f"Sampling frequency mismatch across split files: {p}")
-        raw_dfs.append(df)
-
+    raw_dfs, freq_s = load_split(data_paths, "--data")
     norm_dfs = [normalize_df(df, norm_stats) for df in raw_dfs]
     test_results = evaluate_and_plot(
         cfg=cfg, dyn_sys=dyn_sys,
@@ -328,8 +257,7 @@ def main() -> None:
         run_id=args.run_id, run_dir=args.run_dir, weights=args.weights,
     )
 
-    torch.manual_seed(cfg.seed)
-    np.random.seed(cfg.seed)
+    set_seeds(cfg.seed)
 
     if cfg.verbose:
         print(f"Using device: {cfg.device}")
@@ -365,7 +293,7 @@ def main() -> None:
     )
     eval_time_s = tic() - eval_t0
 
-    print(f"Aggregate RMSE: {test_results.aggregate_rmse:.4f} (normalized space)")
+    print(f"Normalized RMSE: {test_results.normalized_rmse:.4f}")
     if cfg.verbose:
         print(f"Evaluation time: {eval_time_s:.2f} sec")
 
@@ -387,7 +315,7 @@ def main() -> None:
         print("\nGrad Penalty (raw): N/A (no grad_path)")
 
     with open(plot_run_dir / "stats.dat", "w") as f:
-        f.write(f"rmse {test_results.aggregate_rmse:.6f}\n")
+        f.write(f"rmse {test_results.normalized_rmse:.6f}\n")
         if grad_penalty is not None:
             f.write(f"grad_penalty_raw {grad_penalty:.6f}\n")
 

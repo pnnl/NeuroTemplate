@@ -36,7 +36,7 @@ from neurotemplate._typing import beartype
 _METRIC_KEY_SANITIZER = re.compile(r"[^A-Za-z0-9_.\-]+")
 
 
-def _safe_metric_key(name: str) -> str:
+def metric_key(name: str) -> str:
     """Sanitize a column name into something MLflow accepts as a metric key."""
     return _METRIC_KEY_SANITIZER.sub("_", name).strip("_")
 
@@ -149,6 +149,22 @@ class RolloutStability:
         return float("inf") if self.pred_drift > 0 else 1.0
 
 
+def _check_rollout_shapes(y_pred: torch.Tensor, y_true: torch.Tensor,
+                          channel_names: list[str]) -> None:
+    """Both [batch, time, ny], matching, with one name per channel."""
+    if y_pred.shape != y_true.shape:
+        raise ValueError(
+            f"y_pred shape {tuple(y_pred.shape)} != y_true shape {tuple(y_true.shape)}"
+        )
+    if y_pred.ndim != 3:
+        raise ValueError(f"Expected 3D [batch, time, ny] tensors; got {y_pred.ndim}D")
+    if len(channel_names) != y_pred.shape[-1]:
+        raise ValueError(
+            f"channel_names has {len(channel_names)} entries but tensors have "
+            f"ny={y_pred.shape[-1]}"
+        )
+
+
 @beartype
 def per_channel_metrics(
     y_pred: torch.Tensor,
@@ -164,19 +180,7 @@ def per_channel_metrics(
     Returns:
         One ChannelMetrics per channel, in the order of channel_names.
     """
-    if y_pred.shape != y_true.shape:
-        raise ValueError(
-            f"y_pred shape {tuple(y_pred.shape)} != y_true shape {tuple(y_true.shape)}"
-        )
-    if y_pred.ndim != 3:
-        raise ValueError(
-            f"Expected 3D [batch, time, ny] tensors; got {y_pred.ndim}D"
-        )
-    ny = y_pred.shape[-1]
-    if len(channel_names) != ny:
-        raise ValueError(
-            f"channel_names has {len(channel_names)} entries but tensors have ny={ny}"
-        )
+    _check_rollout_shapes(y_pred, y_true, channel_names)
 
     # Detach + move to CPU once for stable scalar extraction.
     pred = y_pred.detach().cpu()
@@ -261,20 +265,7 @@ def rollout_stability(
     Statistics are computed per window and then averaged across windows, so a
     single diverging window cannot be hidden by the others' step counts.
     """
-    if y_pred.shape != y_true.shape:
-        raise ValueError(
-            f"y_pred shape {tuple(y_pred.shape)} != y_true shape "
-            f"{tuple(y_true.shape)}"
-        )
-    if y_pred.ndim != 3:
-        raise ValueError(
-            f"Expected 3D [batch, time, ny] tensors; got {y_pred.ndim}D"
-        )
-    if len(channel_names) != y_pred.shape[-1]:
-        raise ValueError(
-            f"channel_names has {len(channel_names)} entries but tensors have "
-            f"ny={y_pred.shape[-1]}"
-        )
+    _check_rollout_shapes(y_pred, y_true, channel_names)
     if y_pred.shape[1] < 2:
         raise ValueError(
             f"Need at least 2 timesteps to measure rollout shape; got "

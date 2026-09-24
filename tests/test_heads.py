@@ -203,11 +203,6 @@ def test_a_half_bounded_head_is_still_half_bounded_after_a_reload():
     assert head.activate(torch.tensor([[-50.0]])).item() < 1e-10
 
 
-def test_channels_the_config_does_not_mention_default_to_regression():
-    stack = HeadStack.from_config({}, ["a", "b"])
-    assert all(isinstance(h, RegressionHead) for h in stack.heads)
-
-
 # ── A malformed head config is refused, not built ─────────────────
 
 @pytest.mark.parametrize("build,message", [
@@ -220,6 +215,8 @@ def test_channels_the_config_does_not_mention_default_to_regression():
                  id="unordered decision thresholds"),
     pytest.param(lambda: HeadStack.from_config({"typo": {"kind": "binary"}}, ["x", "y"]),
                  "typo", id="unknown channel"),
+    pytest.param(lambda: HeadStack.from_config({"x": {"kind": "regression"}}, ["x", "y"]),
+                 r"missing \['y'\]", id="missing channel"),
 ])
 def test_a_malformed_head_refuses_to_be_built(build, message):
     with pytest.raises(ValueError, match=message):

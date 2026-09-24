@@ -4,7 +4,7 @@ import matplotlib.pyplot as plt
 from pathlib import Path
 from typing import Optional
 
-from neurotemplate.common.data_utils import axis_label, unit_of
+from neurotemplate.common.data_utils import axis_label
 from neurotemplate.hooks import load_modeling_hooks
 
 from neurotemplate._typing import beartype
@@ -38,7 +38,7 @@ def safe_name(name: str) -> str:
 # Find a unique day-based subdirectory within base_dir.
 # If "May_14" exists, tries "May_14_1", "May_14_2", etc.
 @beartype
-def _unique_day_dir(base_dir: Path, day_name: str) -> Path:
+def unique_day_dir(base_dir: Path, day_name: str) -> Path:
     candidate = base_dir / day_name
     if not candidate.exists():
         return candidate
@@ -57,7 +57,6 @@ def plot_predictions(
     df_true: pd.DataFrame,
     df_pred: pd.DataFrame,
     run_dir: str,
-    verbose: bool = False,
     logger: Optional[object] = None,
 ) -> None:
     sub_plot = load_modeling_hooks(cfg).sub_plot
@@ -75,8 +74,9 @@ def plot_predictions(
     base_dir = Path(run_dir)
     base_dir.mkdir(parents=True, exist_ok=True)
 
-    df_pred['timestamp'] = df_true.index[0] + pd.to_timedelta(df_pred['sec_elapsed'],unit='s')
-    df_pred = df_pred.set_index('timestamp')
+    df_pred = df_pred.set_index(
+        df_true.index[0] + pd.to_timedelta(df_pred["sec_elapsed"], unit="s")
+    ).rename_axis("timestamp")
 
     common_index = df_true.index.intersection(df_pred.index)
     if len(common_index) == 0:
@@ -87,7 +87,7 @@ def plot_predictions(
 
     # Organize plots into day-based subdirectories (e.g., May_14/, May_14_1/)
     day_name = df_true.index[0].strftime('%b_%d')
-    plot_dir = _unique_day_dir(base_dir, day_name)
+    plot_dir = unique_day_dir(base_dir, day_name)
     plot_dir.mkdir(parents=True, exist_ok=True)
 
     date_str = df_true.index[0].strftime('%b-%d')
@@ -159,7 +159,6 @@ def plot_synthetic(
     freq_s: float = 300.0,
     n_plot: int = 4,
     verbose: bool = False,
-    fallback_unit: Optional[str] = None,
 ) -> None:
     """
     One figure per synthetic-scenario instance: the state channels against the
@@ -178,9 +177,6 @@ def plot_synthetic(
             than printing a wrong label.
         freq_s: seconds per timestep, for the x axis.
         n_plot: max instances drawn per scenario.
-        fallback_unit: unit used for a state column whose name carries none
-            of its own — the deprecated `cfg.synth_y_unit`. None column units
-            with no fallback set just render "Temperature", unit-less.
     """
     plot_dir = Path(run_dir)
     plot_dir.mkdir(parents=True, exist_ok=True)
@@ -201,14 +197,7 @@ def plot_synthetic(
         # (no input drives the final state).
         t_input = t_minutes[:len(ambient[0])]
 
-        # Each state's own unit, falling back to `fallback_unit` (the
-        # deprecated cfg.synth_y_unit) only for a column whose name carries
-        # none. A one-off stand-in norm_stats so `axis_label` — the same
-        # unit-agreement logic every other axis label uses — need not know
-        # about the fallback at all.
-        with_fallback = {c: {"unit": unit_of(norm_stats, c) or fallback_unit}
-                          for c in states}
-        ylabel = axis_label(with_fallback, states, "Temperature")
+        ylabel = axis_label(norm_stats, states, "Temperature")
 
         for row in range(min(n_plot, preds.shape[0])):
             fig, ax = plt.subplots(1, 1, figsize=(8, 4.5))

@@ -2,7 +2,7 @@
 Head diagnostics: plot activation and gradient curves of a trained model's
 output heads.
 
-Loads a run via load_model.load_trained_dynamics, then probes the
+Loads a run via cli/load.load_trained_dynamics, then probes the
 head_stack directly — no dataset, no rollout, just the heads themselves.
 
 Useful for catching:
@@ -15,8 +15,8 @@ Useful for catching:
     gradient saturates almost everywhere.
 
 Usage:
-    uv run python debug_heads.py --run_id <RUN_ID>
-    uv run python debug_heads.py --run_id <RUN_ID> --output /tmp/heads.png
+    nt model debug-heads --run_id <RUN_ID>
+    nt model debug-heads --run_id <RUN_ID> --output /tmp/heads.png
 """
 
 import argparse

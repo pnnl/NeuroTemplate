@@ -31,8 +31,10 @@ class SampledGradientPenalty:
       2. Computes Jacobians of the full dynamics step via jacrev + vmap
       3. Returns the mean sign violation (unweighted scalar)
 
-    The Jacobian includes the residual connection so we get
-    d(y_{k+1})/d(input), not just d(learned_correction)/d(input).
+    The Jacobian is of `model.pre_activation` — the learned map plus the
+    residual, applied per channel exactly as in a rollout — so it is
+    d(y_{k+1})/d(input) up to each head's monotone activation, which cannot
+    change a sign, rather than just d(learned_correction)/d(input).
 
     The Jacobian is taken downstream of the model's pre-stack: sampled raw
     inputs are pushed through it outside `jac_fn`, so a `demand` column is
@@ -72,7 +74,9 @@ class SampledGradientPenalty:
                 )
 
         self.model = model
-        self.grad_mapping = grad_mapping
+        # [ny, nx] float sign matrices, on the device the Jacobians land on.
+        self.signs = {key: mask[0, 0].to(device=device, dtype=torch.float32)
+                      for key, mask in grad_mapping.items()}
         self.n_samples = n_samples
         self.device = device
         self.norm_type = cfg.norm_type
@@ -85,19 +89,8 @@ class SampledGradientPenalty:
                 argnums.append(i)
                 self.keys.append(key)
 
-        ny = model.ny
-
-        # Build the function to differentiate.
-        # Includes residual so we get d(y_{k+1})/d(input).
-        def full_step(y, u, d):
-            out = model.compute_output(y, u, d)
-            if model.residual:
-                # Under vmap y is 1D: [in_steps * ny]. Last ny elements = most recent state.
-                out = out + y[-ny:]
-            return out
-
         self.jac_fn = torch.vmap(
-            torch.func.jacrev(full_step, argnums=tuple(argnums))
+            torch.func.jacrev(model.pre_activation, argnums=tuple(argnums))
         )
 
     def _repeat_sample(self, nx: int) -> torch.Tensor:
@@ -137,13 +130,12 @@ class SampledGradientPenalty:
 
         total = torch.tensor(0.0, device=self.device)
         for j_mat, key in zip(J, self.keys):
-            mask = self.grad_mapping[key]       # [1, ny, nx]
-            nx = mask.shape[-1]
+            m = self.signs[key]                  # [ny, nx]
+            nx = m.shape[-1]
 
             # Only care about the most recent input step.
             # Jacobian: [n_samples, ny, in_steps*nx] — slice last nx columns.
             j_last = j_mat[:, :, -nx:]           # [n_samples, ny, nx]
-            m = mask.squeeze()                   # [ny, nx]
 
             # Penalize sign violations:
             #   mask=+1 → penalize negative Jacobian entries

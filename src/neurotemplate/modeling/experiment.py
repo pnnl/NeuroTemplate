@@ -4,22 +4,19 @@ Training loop and utilities.
 Uses a standard Neuromancer Problem (no subclass needed). Physics losses
 are proper Neuromancer Loss objects inside PenaltyLoss, so they flow
 through Problem.forward() and appear in the Trainer's output dict with
-the correct labels (e.g., 'train_grad_penalty').
-
-Physics losses are active in both train and eval. During training they
-use the tunable gain; during eval they use a fixed weight of 1.0 so
-that dev_loss rewards physics compliance without being gameable.
+the correct labels (e.g., 'train_grad_penalty'). See loss.py for which
+terms are train-only.
 """
 
 import os
-import torch
-import numpy as np
-from typing import Optional
-from pandas import DataFrame
 import random
+from dataclasses import replace
 from datetime import datetime
+from typing import Optional
 
-
+import numpy as np
+import torch
+from pandas import DataFrame
 
 from neurotemplate._typing import beartype
 
@@ -196,10 +193,11 @@ def create_child_logger(
     curriculum_step: int,
     save_weights: bool = False,
 ) -> MLFlowLogger:
-    """Create a nested MLflow child run for a curriculum stage."""
-    default_pred_steps = cfg.train_pred_steps
-    cfg.train_pred_steps = pred_steps
+    """Create a nested MLflow child run for a curriculum stage.
 
+    The child logs the stage's own config — its rollout length and run name —
+    built as a copy, so the caller's `cfg` is never touched.
+    """
     child_savedir = f"{cfg.savedir}/pred_steps_{pred_steps}"
     # MLFlowLogger.clean_up() unconditionally rmtree's savedir, but never
     # creates it; for a curriculum stage that writes no local artifact the
@@ -207,10 +205,10 @@ def create_child_logger(
     # front so the stage tears down cleanly.
     os.makedirs(child_savedir, exist_ok=True)
 
-    tmp_run_name = cfg.run
-    cfg.run = f"Curriculum Step {curriculum_step}"
+    stage_cfg = replace(cfg, train_pred_steps=pred_steps,
+                        run=f"Curriculum Step {curriculum_step}")
     child_logger = MLFlowLogger(
-        cfg,
+        stage_cfg,
         savedir=child_savedir,
         stdout=global_logger.stdout,
         verbosity=cfg.epoch_verbose if cfg.verbose else 0,
@@ -218,8 +216,6 @@ def create_child_logger(
         nested=True,
         save_weights=save_weights,
     )
-    cfg.run = tmp_run_name
-    cfg.train_pred_steps = default_pred_steps
 
     child_logger._mlflow.log_param("curriculum_step", curriculum_step)
     return child_logger
@@ -274,8 +270,7 @@ def train_with_curriculum(
             )
             trainer.logger = child_logger
 
-        best_model = trainer.train()
-        trainer.model.load_state_dict(best_model)
+        trainer.train()  # leaves the best weights loaded
 
         if child_logger is not None:
             child_logger.clean_up()
@@ -289,14 +284,7 @@ def train_with_curriculum(
                 name="train",
                 steps=cfg.in_steps + pred_steps,
             )
-            # Reset LitTrainer's early-stopping/epoch bookkeeping so the next
-            # curriculum step gets its own full patience window instead of
-            # inheriting badcount/best_devloss from the step just finished.
-            # These are Neuromancer internals, not a public reset API; if
-            # LitTrainer's field names change, this silently stops resetting.
-            trainer.badcount = 0
-            trainer.best_devloss = torch.inf
-            trainer.current_epoch = 0
+            _reset_early_stopping(trainer)
 
     # Extract the trained System (first node of the Problem)
     dyn_sys = trainer.model.nodes[0]
@@ -307,8 +295,23 @@ def train_with_curriculum(
             "best_model.pth": trainer.model,
         })
 
-    best_devloss = trainer.best_devloss
-    if hasattr(best_devloss, "item"):
-        best_devloss = best_devloss.item()
+    return dyn_sys, trainer.get_devloss()
 
-    return dyn_sys, best_devloss
+
+def _reset_early_stopping(trainer: Trainer) -> None:
+    """Give the next curriculum step its own full patience window.
+
+    Neuromancer's Trainer has no public reset, so this writes its
+    bookkeeping fields directly — and checks they exist first, because
+    setting a renamed field would silently create a new attribute and stop
+    resetting anything.
+    """
+    fields = {"badcount": 0, "best_devloss": torch.inf, "current_epoch": 0}
+    missing = [name for name in fields if not hasattr(trainer, name)]
+    if missing:
+        raise AttributeError(
+            f"neuromancer's Trainer no longer has {missing}; curriculum "
+            "training cannot reset early stopping between steps."
+        )
+    for name, value in fields.items():
+        setattr(trainer, name, value)

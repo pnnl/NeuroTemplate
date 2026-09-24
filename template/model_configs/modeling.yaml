@@ -161,6 +161,4 @@ run: ""
 # synth_hours: 4.0
 # Scenario instances drawn on the diagnostic figures.
 # synth_n_plot: 4
-# Y-axis unit label on those figures. Override if your state channels
-# aren't in Celsius.
-# synth_y_unit: "°C"
+# (Their y-axis unit comes from the state columns' own "[unit]" suffix.)

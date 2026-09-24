@@ -36,9 +36,6 @@ logged to MLflow. Sections (in order):
                               samples fall outside the head's [lo, hi]
   9. Hyperparameters        — lr, batch_size, train_pred_steps, curriculum, gains
 
-The "auto-detected anomalies" section listed in updates.md is left for
-a future, more creative pass and intentionally not implemented here.
-
 Single entry point: render_reportcard(...) returns the markdown string.
 The caller (pipeline.py) is responsible for writing it to disk and
 logging it to MLflow.
@@ -311,14 +308,12 @@ def _norm_label(stats: Optional[dict]) -> str:
 
 def _data_section(
     nm_mapping: dict,
-    split_sizes: Optional[dict[str, object]],
+    split_sizes: Optional[dict[str, dict[str, int]]],
     head_stack: Optional[HeadStack] = None,
     norm_stats: Optional[dict] = None,
 ) -> str:
-    """`split_sizes` entries may be plain ints (legacy single-file shape)
-    or dicts of the form {"rows": int, "files": int} (multi-file). When
-    `files == 1` only the row count is rendered, so single-file reports
-    are byte-identical to the pre-change output."""
+    """`split_sizes` is `{split: {"rows": int, "files": int}}`; the file
+    count is only printed when a split spans more than one."""
     def cols(key: str) -> str:
         names = nm_mapping.get(key, [])
         if not names:
@@ -340,11 +335,8 @@ def _data_section(
         return "\n  - " + "\n  - ".join(lines)
 
     def _fmt_size(v):
-        if isinstance(v, dict):
-            rows = v.get("rows", 0)
-            files = v.get("files", 1)
-            return f"{rows:,}" if files == 1 else f"{rows:,} across {files} files"
-        return f"{int(v):,}"
+        rows, files = v["rows"], v["files"]
+        return f"{rows:,}" if files == 1 else f"{rows:,} across {files} files"
 
     parts = []
     if split_sizes:
@@ -700,7 +692,7 @@ def render_reportcard(
     best_dev_loss: Optional[float] = None,
     train_time_s: Optional[float] = None,
     test_time_s: Optional[float] = None,
-    split_sizes: Optional[dict[str, object]] = None,
+    split_sizes: Optional[dict[str, dict[str, int]]] = None,
 ) -> str:
     """
     Render a markdown reportcard for one training run.
@@ -733,7 +725,7 @@ def render_reportcard(
         best_dev_loss: Best dev loss across training.
         train_time_s:  Total training wall-clock seconds.
         test_time_s:   Test rollout wall-clock seconds.
-        split_sizes:   Optional {"train": N, "dev": N, "test": N} row counts.
+        split_sizes:   Optional {split: {"rows": N, "files": K}} per split.
 
     Returns:
         Markdown string. The caller writes it to disk and logs it.

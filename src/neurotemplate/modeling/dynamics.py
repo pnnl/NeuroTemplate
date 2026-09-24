@@ -304,8 +304,8 @@ class SSMGrad(nn.Module):
         Separable:   y_{k+1} = fy(y_k) + fu(u_k) + fd(d_k)
         Inseparable: y_{k+1} = fy(cat(y_k, u_k, d_k))
 
-    This is a pure predictor — no Jacobians computed here.
-    Gradient penalties use model.compute_output externally via jacrev.
+    This is a pure predictor — no Jacobians computed here. The sampled
+    gradient penalty differentiates `pre_activation` externally via jacrev.
 
     An optional `pre_stack` (see `heads.PreStack`) rewrites declared U
     columns from the U and Y windows before `compute_output` sees them, so
@@ -348,9 +348,9 @@ class SSMGrad(nn.Module):
         return self.fy(torch.cat([y, u, d], dim=-1))
 
     def _last_y(self, y: torch.Tensor) -> torch.Tensor:
-        """Extract the most recent in_steps slice as [batch, ny]."""
-        in_steps, ny = self.in_steps, self.ny
-        return y[:, (in_steps - 1) * ny : in_steps * ny]
+        """The newest step of the Y window, [..., ny]: the window is
+        oldest-first, so it is the last ny entries, batched or not."""
+        return y[..., -self.ny:]
 
     def forward(self, y, u, d):
         """
@@ -367,19 +367,25 @@ class SSMGrad(nn.Module):
         """
         if self.pre_stack is not None:
             u = self.pre_stack(y, u)
+        out = self.pre_activation(y, u, d)
+        return out if self.head_stack is None else self.head_stack(out)
+
+    def pre_activation(self, y, u, d):
+        """The learned map plus the residual, before any head activates it.
+
+        With heads, the residual goes only to the channels whose head opts in
+        (see `HeadStack.apply_residual`). Takes `u` after the pre-stack. The
+        sampled gradient penalty differentiates this: every head's activation
+        is monotone increasing, so the signs it checks are the same as the
+        activated output's, and it stays vmap-safe where a snapping decode
+        does not.
+        """
         out = self.compute_output(y, u, d)
-
-        if self.head_stack is None:
-            # Pre-heads path: residual + identity, unchanged behaviour.
-            if self.residual:
-                out = out + self._last_y(y)
+        if not self.residual:
             return out
-
-        # Heads path: residual is applied per-channel (only to channels
-        # whose head opts in) BEFORE activation, then the stack activates.
-        if self.residual:
-            out = self.head_stack.apply_residual(out, self._last_y(y))
-        return self.head_stack(out)
+        if self.head_stack is None:
+            return out + self._last_y(y)
+        return self.head_stack.apply_residual(out, self._last_y(y))
 
 
 # ── Model factory functions ──────────────────────────────────────
@@ -396,14 +402,19 @@ def _widths(nm_mapping: dict[str, list[str]]) -> tuple[int, int, int]:
     return tuple(len(nm_mapping[key]) for key in ("Y", "U", "D"))
 
 
+def _mlp(cfg: ModelingConfig, insize: int, outsize: int) -> nm_blocks.MLP:
+    """The ReLU MLP every family builds, sized by cfg's hidden width and depth."""
+    return nm_blocks.MLP(
+        insize=insize, outsize=outsize, bias=True,
+        linear_map=nn.Linear, nonlin=nn.ReLU,
+        hsizes=cfg.num_layers * [2**cfg.log2_hidden_size],
+    )
+
+
 @beartype
 def get_mlp(cfg: ModelingConfig, nm_mapping: dict[str, list[str]]) -> SSMGrad:
     ny, nu, nd = _widths(nm_mapping)
-    fy = nm_blocks.MLP(
-        insize=cfg.in_steps * (ny + nu + nd), outsize=ny, bias=True,
-        linear_map=nn.Linear, nonlin=nn.ReLU,
-        hsizes=cfg.num_layers * [(2**cfg.log2_hidden_size)],
-    )
+    fy = _mlp(cfg, cfg.in_steps * (ny + nu + nd), ny)
     return SSMGrad(
         fy, None, None, ny, nu, nd,
         cfg.in_steps, cfg.residual, separable=False,
@@ -415,12 +426,7 @@ def get_nssm(cfg: ModelingConfig, nm_mapping: dict[str, list[str]]) -> SSMGrad:
     ny, nu, nd = _widths(nm_mapping)
     s = cfg.in_steps
 
-    fy = nm_blocks.MLP(s*ny, ny, bias=True, linear_map=nn.Linear,
-                       nonlin=nn.ReLU, hsizes=cfg.num_layers * [(2**cfg.log2_hidden_size)])
-    fu = nm_blocks.MLP(s*nu, ny, bias=True, linear_map=nn.Linear,
-                       nonlin=nn.ReLU, hsizes=cfg.num_layers * [(2**cfg.log2_hidden_size)])
-    fd = nm_blocks.MLP(s*nd, ny, bias=True, linear_map=nn.Linear,
-                       nonlin=nn.ReLU, hsizes=cfg.num_layers * [(2**cfg.log2_hidden_size)])
+    fy, fu, fd = _mlp(cfg, s * ny, ny), _mlp(cfg, s * nu, ny), _mlp(cfg, s * nd, ny)
 
     return SSMGrad(
         fy, fu, fd, ny, nu, nd,
@@ -477,12 +483,7 @@ model_catalog = {
 # rather than hand-maintained a second time.
 
 def _mlp_block(cfg: ModelingConfig, block: Block, norm_stats: Optional[dict]) -> nn.Module:
-    insize = cfg.in_steps * (block.ny_in + block.nu + block.nd)
-    return nm_blocks.MLP(
-        insize=insize, outsize=block.ny, bias=True,
-        linear_map=nn.Linear, nonlin=nn.ReLU,
-        hsizes=cfg.num_layers * [(2**cfg.log2_hidden_size)],
-    )
+    return _mlp(cfg, cfg.in_steps * (block.ny_in + block.nu + block.nd), block.ny)
 
 
 def _gru_block(cfg: ModelingConfig, block: Block, norm_stats: Optional[dict]) -> nn.Module:
@@ -542,9 +543,6 @@ BLOCK_BUILDERS: dict[str, Callable[[ModelingConfig, Block, Optional[dict]], nn.M
 #: per-block unconditionally, so it needs no flag (and
 #: ModelingConfig.validate() refuses the combination as redundant).
 PER_BLOCK_FAMILIES = tuple(name for name in BLOCK_BUILDERS if name != "2r2c")
-
-#: Deprecated alias.
-PER_ZONE_FAMILIES = PER_BLOCK_FAMILIES
 
 #: Every valid `cfg.model` name: the union of model_catalog (monolithic
 #: factories) and BLOCK_BUILDERS (per-block-only factories — today just
@@ -690,7 +688,7 @@ def describe_dynamics(dyn_sys: SystemPreview, cfg: ModelingConfig) -> dict:
     Describe the trained dynamics system for the reportcard.
 
     Returns a dict with:
-      - factory: model family name (mlp/nssm/lssm/gru)
+      - factory: cfg.model, the run-wide family name
       - separable: whether the SSM is separable (fy + fu + fd)
       - residual: whether y_{k+1} adds y_k as a residual base
       - in_steps: context length (cfg.in_steps) — see below
@@ -899,9 +897,8 @@ def get_dynamics(
     model.pre_stack = _build_pre_stack(blocks, nm_mapping, norm_stats, cfg.in_steps)
 
     # Heads are attached post-construction so each factory stays focused
-    # on its own block topology. The first-pass model output width is
-    # still ny (every head has width 1) — once OrdinalHead lands we will
-    # need to thread raw_width back into the factories.
+    # on its own block topology. Every head has width 1, so the factories'
+    # output width ny is also the stack's raw width.
     if head_stack is not None:
         if head_stack.raw_width != model.ny:
             raise ValueError(

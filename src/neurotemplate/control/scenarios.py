@@ -37,7 +37,7 @@ from pandas import DataFrame, Timestamp
 
 from neuromancer.dataset import DictDataset
 
-from neurotemplate.common.data_utils import get_data
+from neurotemplate.common.data_utils import get_data, sliding_windows
 from neurotemplate.hooks import load_control_hooks
 
 from neurotemplate._typing import beartype
@@ -288,22 +288,6 @@ def build_price(cfg, n_samples: int, nsteps: int, price_path: Optional[str],
     return series[idx] / scale
 
 
-def _sliding(df: DataFrame, cols: list[str], steps: int, stride: int,
-             device) -> torch.Tensor:
-    """[n_windows, steps, len(cols)] sliding windows over df rows."""
-    x = torch.tensor(df[cols].to_numpy(), dtype=torch.float32, device=device)
-    if x.shape[0] < steps:
-        raise ValueError(
-            f"Split has {x.shape[0]} rows but a control window needs {steps}. "
-            "Reduce train_pred_steps/test_window/in_steps or use a longer split."
-        )
-    starts = torch.arange(0, x.shape[0] - steps + 1, stride, device=device)
-    idx = starts[:, None] + torch.arange(steps, device=device)[None, :]
-    return x.index_select(0, idx.flatten()).reshape(
-        starts.shape[0], steps, x.shape[1]
-    )
-
-
 @beartype
 def build_window_dict(
     df: DataFrame,
@@ -333,10 +317,10 @@ def build_window_dict(
     if price_path is None:
         price_path = cfg.train_price_path
 
-    Y = _sliding(df, nm_mapping["Y"], W, stride, device)
-    U = _sliding(df, nm_mapping["U"], W, stride, device)
-    D = _sliding(df, nm_mapping["D"], W, stride, device)
-    t = _sliding(df, nm_mapping["t"], W, stride, device)
+    Y = sliding_windows(df, nm_mapping["Y"], W, stride, device)
+    U = sliding_windows(df, nm_mapping["U"], W, stride, device)
+    D = sliding_windows(df, nm_mapping["D"], W, stride, device)
+    t = sliding_windows(df, nm_mapping["t"], W, stride, device)
     n = Y.shape[0]
 
     ymin, ymax = load_control_hooks(cfg).comfort_band_signal(

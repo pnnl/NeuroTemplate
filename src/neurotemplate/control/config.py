@@ -6,19 +6,14 @@ import warnings
 from dataclasses import asdict, dataclass, field
 from typing import Optional, Union
 
-from neurotemplate.common.config import (  # noqa: F401  re-exported
+from neurotemplate.common.config import (
     _check_paths_field,
     check_non_negative,
     check_one_of,
     check_positive,
     default_savedir,
-    load_config_from_cli,
-    paths_as_list,
-    CONTROL_CONFIG_DIR,
 )
 from neurotemplate.modeling.config import IN_STEPS_WARN_THRESHOLD
-
-from neurotemplate._typing import beartype
 
 # How a window's slice of the price record is drawn. See `price_align`.
 PRICE_ALIGNMENTS = {"random", "day"}
@@ -135,7 +130,7 @@ class ControlConfig:
     # to be implemented (fail-fast at problem build).
     energy_weight: float = 0.1
     # Energy-cost weight: multiplies mean_t(price * power), in $/h. > 0
-    # additionally requires the control_user_defined.price_signal hook.
+    # additionally requires the three price paths + price_scale above.
     cost_weight: float = 0.0
     # Peak-demand weight: multiplies the per-window power mean M_q(power),
     # averaged over the batch. Same units as the energy term.
@@ -385,8 +380,3 @@ class ControlConfig:
     def asdict(self) -> dict:
         return asdict(self)
 
-
-__all__ = [
-    "ControlConfig",
-    "load_config_from_cli",
-]

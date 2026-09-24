@@ -11,9 +11,10 @@ it deliberately skips eval/plot/reportcard for speed.
 """
 
 import sys
+from dataclasses import replace
+from datetime import datetime
 from pathlib import Path
 from time import perf_counter as tic
-from datetime import datetime
 from typing import Optional
 
 from optuna import Trial, create_study
@@ -23,26 +24,19 @@ from pandas import DataFrame
 
 from neurotemplate._typing import beartype
 
-from neurotemplate.modeling.config import ModelingConfig
 from neurotemplate.common.config import load_config_from_cli, MODEL_CONFIG_DIR
+from neurotemplate.common.data_utils import get_grad_masks
 from neurotemplate.common.run_summary import write_run_summary
-from neuromancer.loggers import MLFlowLogger
-
-from neurotemplate.common.data_utils import (
-    normalize_df,
-    compute_norm_stats,
-    warn_degenerate_columns,
-    get_data_splits,
-    get_grad_masks,
-    pool_dfs,
-)
+from neurotemplate.common.tracking import tracked_run
+from neurotemplate.hooks import load_modeling_hooks
+from neurotemplate.modeling.cli.train import LOGGED_METRICS, print_finished
+from neurotemplate.modeling.config import ModelingConfig
 from neurotemplate.modeling.experiment import resolve_device, set_seeds, train_with_curriculum
 from neurotemplate.modeling.heads import HeadStack
 from neurotemplate.modeling.pipeline import (
-    build_head_stack, resolve_block_spec, run_summary_metrics, train_and_evaluate,
+    prepare_data, run_summary_metrics, train_and_evaluate,
 )
 from neurotemplate.modeling.reportcard import spread_stats
-from neurotemplate.hooks import load_modeling_hooks
 
 
 @beartype
@@ -116,11 +110,7 @@ def main() -> None:
 
     cfg.device = resolve_device(cfg.device)
     cfg.seed = set_seeds(cfg.seed)
-
     hooks = load_modeling_hooks(cfg)
-    data_mapping = hooks.data_mapping
-    column_norm_config = hooks.column_norm_config
-    build_synth_cfg = hooks.synth_cfg
 
     if cfg.verbose:
         print(f"Device: {cfg.device}")
@@ -130,35 +120,19 @@ def main() -> None:
         print("=" * 60)
         print("Loading data...")
 
-    # ── Data, normalization, synth_cfg (all shared across trials) ─
-    train_raws, dev_raws, test_raws, freq_s = get_data_splits(cfg)
-    cfg.steps_per_hour = 3600.0 / freq_s
-    nm_mapping = data_mapping(df=train_raws[0], cfg=cfg)
-    block_spec = resolve_block_spec(hooks, nm_mapping, cfg)
-
-    norm_overrides = column_norm_config(nm_mapping)
-    train_pool = pool_dfs(train_raws)
-    norm_stats = compute_norm_stats(
-        df=train_pool, norm_type=cfg.norm_type, column_overrides=norm_overrides,
-    )
-    warn_degenerate_columns(norm_stats, nm_mapping)
-    train_dfs = [normalize_df(r, norm_stats) for r in train_raws]
-    dev_dfs = [normalize_df(r, norm_stats) for r in dev_raws]
-    test_dfs = [normalize_df(r, norm_stats) for r in test_raws]
-    synth_cfg = build_synth_cfg(nm_mapping, norm_stats)
-    head_stack = build_head_stack(hooks, cfg, nm_mapping, norm_stats, train_dfs)
+    # Shared by every trial and the final retrain.
+    data = prepare_data(cfg, hooks)
 
     # ── Phase 1: Optuna search ───────────────────────────────────
     optuna_dir = Path(cfg.optuna_dir)
     optuna_dir.mkdir(parents=True, exist_ok=True)
     cfg.study_name += datetime.now().strftime("_%b%d_%H_%M")
     db_path = optuna_dir / f"{cfg.study_name}.sqlite3"
-    storage = f"sqlite:///{db_path}"
 
     study = create_study(
         direction="minimize",
         study_name=cfg.study_name,
-        storage=storage,
+        storage=f"sqlite:///{db_path}",
         load_if_exists=True,
         pruner=MedianPruner(n_startup_trials=10, n_warmup_steps=0),
     )
@@ -171,8 +145,8 @@ def main() -> None:
     search_t0 = tic()
     study.optimize(
         lambda trial: objective(
-            trial, cfg, train_dfs, dev_dfs,
-            nm_mapping, norm_stats, head_stack, block_spec,
+            trial, cfg, data.train_dfs, data.dev_dfs,
+            data.nm_mapping, data.norm_stats, data.head_stack, data.block_spec,
         ),
         n_trials=cfg.n_trials,
         n_jobs=1,
@@ -188,66 +162,36 @@ def main() -> None:
             print(f"  {k}: {v}")
 
     # ── Phase 2: Full retrain ────────────────────────────────────
-    if cfg.verbose:
-        print("\n" + "=" * 60)
-        print("PHASE 2: Full Training with Best Hyperparameters")
-        print("=" * 60)
-        if cfg.ensemble_seeds > 1:
-            print(f"Ensemble: {cfg.ensemble_seeds} seeds "
-                  f"({cfg.seed}..{cfg.seed + cfg.ensemble_seeds - 1})")
-
-    set_seeds(cfg.seed)
     unknown = [k for k in study.best_params if not hasattr(cfg, k)]
     if unknown:
         raise ValueError(f"Best params not in ModelingConfig: {unknown}")
-    for key, value in study.best_params.items():
-        setattr(cfg, key, value)
+    cfg = replace(cfg, **study.best_params, verbose=True,
+                  run=cfg.study_name + "_result")
+    cfg.validate()
+    data.grad_masks = get_grad_masks(grad_path=cfg.grad_path, nm_mapping=data.nm_mapping)
 
-    cfg.verbose = True
-    grad_masks = get_grad_masks(grad_path=cfg.grad_path, nm_mapping=nm_mapping)
+    print("\n" + "=" * 60)
+    print("PHASE 2: Full Training with Best Hyperparameters")
+    print("=" * 60)
+    if cfg.ensemble_seeds > 1:
+        print(f"Ensemble: {cfg.ensemble_seeds} seeds "
+              f"({cfg.seed}..{cfg.seed + cfg.ensemble_seeds - 1})")
 
-    cfg.run = cfg.study_name + "_result"
-    global_logger = MLFlowLogger(
-        args=cfg,
-        savedir=cfg.savedir,
-        stdout=["train_loss", "dev_loss"],
-        verbosity=cfg.epoch_verbose,
-        logout=[
-            "train_loss", "dev_loss",
-            "ref_loss", "sgn_loss", "vel_loss",
-            "grad_penalty",
-            "time", "rmse",
-        ],
-        nested=False,
-    )
-    global_logger.log_dict(study.best_params, name="best_params.json")
-
-    result = train_and_evaluate(
-        cfg=cfg,
-        train_dfs=train_dfs, dev_dfs=dev_dfs,
-        test_dfs=test_dfs,
-        nm_mapping=nm_mapping, norm_stats=norm_stats,
-        grad_masks=grad_masks, synth_cfg=synth_cfg,
-        freq_s=freq_s, logger=global_logger,
-        head_stack=head_stack, block_spec=block_spec,
-        extra_metrics={"search_time": search_time_s},
-    )
-
-    write_run_summary(
-        global_logger, stage="model", config_path=cli.config, cfg=cfg,
-        metrics=run_summary_metrics(result["test_results"]),
-        mapping=nm_mapping,
-    )
-
-    r_id = global_logger.run.info.run_id
-    print(f"Finished run: {r_id}, "
-          f"test_rmse: {result['test_results'].aggregate_rmse:.3f}")
-    print("MLflow UI:    uv run mlflow ui")
-    print(f"Load model:   uv run nt model load --run_id {r_id}")
-    print("Load Optuna Dashboard for this study: \n")
-    print(f"uv run optuna-dashboard sqlite:///optuna_dbs/{cfg.study_name}.sqlite3")
-
-    global_logger.clean_up()
+    with tracked_run(cfg, stdout=["train_loss", "dev_loss"],
+                     logout=LOGGED_METRICS) as logger:
+        logger.log_dict(study.best_params, name="best_params.json")
+        result = train_and_evaluate(
+            cfg, logger=logger, extra_metrics={"search_time": search_time_s},
+            **vars(data),
+        )
+        write_run_summary(
+            logger, stage="model", config_path=cli.config, cfg=cfg,
+            metrics=run_summary_metrics(result["test_results"]),
+            mapping=data.nm_mapping,
+        )
+        print_finished(logger.run.info.run_id,
+                       result["test_results"].normalized_rmse)
+        print(f"Optuna dashboard: uv run optuna-dashboard sqlite:///{db_path}")
 
 
 if __name__ == "__main__":

@@ -1,29 +1,26 @@
-import pandas as pd
-import torch
 import json
 import re
 import warnings
 from typing import Optional
 
+import pandas as pd
+import torch
 from neuromancer.dataset import DictDataset
 
 from neurotemplate.common.config import paths_as_list
 
 from neurotemplate._typing import beartype
-    
+
 
 # ---------------------- Data utilities ---------------------- #
 
-# Load CSV data, enforce timestamp frequency, and add elapsed time column.
 @beartype
-def get_data(
-    path: str, 
-    verbose: Optional[bool] = False,
-):
-    """
-    Args:
-        path: CSV file path used to load the raw dataset.
-        verbose: Reserved for caller-level logging control (currently unused here).
+def get_data(path: str) -> tuple[pd.DataFrame, float]:
+    """Load one CSV onto a regular DatetimeIndex, with a `sec_elapsed` column.
+
+    Returns `(df, timestep_seconds)`. The time column is auto-detected by name
+    and the sampling frequency inferred from it; gaps in the timestamps become
+    NaN rows (the caller decides whether that is an error).
     """
     df = pd.read_csv(path)
 
@@ -146,16 +143,18 @@ def _warn_timestamp_overlap(
         )
 
 
-def _load_split(paths: list[str], name: str, verbose: bool):
+def load_split(paths: list[str], name: str) -> tuple[list[pd.DataFrame], float]:
     """Read every CSV in `paths` and return (dfs, shared_freq_seconds).
 
     Each file must have the same sampling frequency and no NaNs. Returns
     a list of one df for the single-path case so callers always iterate.
     """
+    if not paths:
+        raise ValueError(f"{name} split has no data paths.")
     dfs: list[pd.DataFrame] = []
     freq: Optional[float] = None
     for i, path in enumerate(paths):
-        df, f = get_data(path, verbose)
+        df, f = get_data(path)
         if df.isna().any().any():
             raise ValueError(f"NaNs found in {name}[{i}] ({path})")
         if freq is None:
@@ -166,7 +165,6 @@ def _load_split(paths: list[str], name: str, verbose: bool):
                 f"(path: {path})"
             )
         dfs.append(df)
-    assert freq is not None  # _check_paths_field rejects empty lists upstream
     return dfs, freq
 
 
@@ -181,15 +179,9 @@ def get_data_splits(cfg) -> tuple[
     >= 1) plus the shared sampling frequency. Downstream code iterates
     the lists so the single-file case requires no special handling.
     """
-    train_dfs, train_freq = _load_split(
-        paths_as_list(cfg.train_data_path), "train", cfg.verbose,
-    )
-    dev_dfs, dev_freq = _load_split(
-        paths_as_list(cfg.dev_data_path), "dev", cfg.verbose,
-    )
-    test_dfs, test_freq = _load_split(
-        paths_as_list(cfg.test_data_path), "test", cfg.verbose,
-    )
+    train_dfs, train_freq = load_split(paths_as_list(cfg.train_data_path), "train")
+    dev_dfs, dev_freq = load_split(paths_as_list(cfg.dev_data_path), "dev")
+    test_dfs, test_freq = load_split(paths_as_list(cfg.test_data_path), "test")
 
     if train_freq != dev_freq:
         raise ValueError(f"Train freq != dev freq: {train_freq} vs {dev_freq}")
@@ -213,7 +205,7 @@ def get_data_splits(cfg) -> tuple[
 def get_grad_masks(
     grad_path: Optional[str],
     nm_mapping: dict[str, list[str]],
-) -> dict[str, torch.tensor]:
+) -> dict[str, torch.Tensor]:
     """
     Args:
         grad_path: JSON mapping path that enables/defines gradient constraints (None disables).
@@ -223,14 +215,18 @@ def get_grad_masks(
     entries are all {-1,0,+1}
 
     Output:
-        grad_mask["Y"]: (ny, ny)  with entries in {-1,0,+1}
-        grad_mask["U"]: (ny, nu)
-        grad_mask["D"]: (ny, nd)
+        grad_mask["Y"]: (1, 1, ny, ny)  with entries in {-1,0,+1}
+        grad_mask["U"]: (1, 1, ny, nu)
+        grad_mask["D"]: (1, 1, ny, nd)
+
+    Keys naming a Y channel this mapping does not have are skipped with a
+    warning, so one grad file can serve several mappings; an unknown
+    dependency column under a known key is an error.
     """
     if grad_path is None:
         return {}
 
-    with open(grad_path, "r") as f:
+    with open(grad_path, "r", encoding="utf-8") as f:
         key_mapping = json.load(f)
 
     Y_names = nm_mapping["Y"]
@@ -240,6 +236,14 @@ def get_grad_masks(
     ny, nu, nd = len(Y_names), len(U_names), len(D_names)
 
     grad_masks = {}
+
+    skipped = [k for k in key_mapping if k not in Y_names]
+    if skipped:
+        warnings.warn(
+            f"{grad_path} constrains columns that are not Y channels of this "
+            f"mapping; ignored: {skipped}",
+            stacklevel=2,
+        )
 
     for key_i, deps in key_mapping.items():
         if key_i not in Y_names:
@@ -278,84 +282,54 @@ def get_grad_masks(
     return grad_masks
 
 
-# Create sliding window tensors for Y/U/D/t based on split indices.
+def sliding_windows(
+    df: pd.DataFrame, cols: list[str], steps: int, stride: int, device,
+) -> torch.Tensor:
+    """[n_windows, steps, len(cols)] windows over `df[cols]`, one every `stride` rows.
+
+    Raises when `df` is shorter than one window rather than returning an empty
+    tensor that fails somewhere less obvious later.
+    """
+    x = torch.tensor(df[cols].to_numpy(), dtype=torch.float32, device=device)
+    if x.shape[0] < steps:
+        raise ValueError(
+            f"Data has {x.shape[0]} rows but a window needs {steps}. Use a "
+            "longer file or shorten the window (train_pred_steps/test_window/"
+            "in_steps)."
+        )
+    # Row w of `idx` holds the row numbers of window w: its start plus 0..steps-1.
+    starts = torch.arange(0, x.shape[0] - steps + 1, stride, device=device)
+    idx = starts[:, None] + torch.arange(steps, device=device)[None, :]
+    return x.index_select(0, idx.flatten()).reshape(starts.shape[0], steps, x.shape[1])
+
+
 @beartype
 def get_sw_dict(
     df: pd.DataFrame,
     cfg,
     nm_mapping: dict[str, list[str]],
     steps: Optional[int] = None,
-    stride: Optional[int] = None
-):
-    """
+    stride: Optional[int] = None,
+) -> dict:
+    """Sliding-window Y/U/D/t tensors for one normalized dataframe.
+
     Args:
         df: Full normalized dataframe used to build sliding windows.
-        cfg providing in_steps/train_pred_steps, device placement, and verbosity.
+        cfg: provides in_steps/train_pred_steps and device placement.
         nm_mapping: Column mapping that defines Y/U/D/t extraction order.
-        steps: Optional override for window length (None uses in_steps + train_pred_steps).
+        steps: window length. None uses in_steps + train_pred_steps; a
+            negative value means one window spanning the whole frame.
+        stride: rows between window starts. None uses in_steps.
     """
-
-    # Resolve window length based on args or full-length rollouts.
     if steps is None:
-        # Default: history window + training rollout length.
         steps = cfg.in_steps + cfg.train_pred_steps
     elif steps < 0:
-        # if the time steps is negative, we give 
-        # the full data window. This is used for
-        # test sets where we want to do long
-        # autoregressive rollouts to test a model
         steps = df.shape[0]
-    elif steps > df.shape[0]:
-        warnmsg = f"Warning: Sub-Dataset size of {df.shape[0]}"
-        warnmsg += f" cannot support data window size {steps}"
-        warnmsg += f"\nReducing to maximum window size: {df.shape[0]}"
-        if cfg.verbose:
-            print(warnmsg)
-        steps = df.shape[0]
+    stride = stride or cfg.in_steps
 
-    if not stride:
-        stride = cfg.in_steps
-
-    # Construct windowed tensors for a given key with stride = in_steps.
-    def build_sliding_windows(df, key):
-
-        x = torch.tensor(
-            df[nm_mapping[key]].to_numpy(), 
-            dtype=torch.float32,
-            device=cfg.device
-        )  # shape (steps, features)
-
-        starts = torch.arange(
-            0,
-            x.shape[0] - steps + 1, 
-            stride, 
-            device=cfg.device
-        )  # these are the beginning of each sliding window
-
-        nw = starts.shape[0]  # number of windows
-        feat = x.shape[1]  # feature dimension
-
-        # [:,None] turns starts into a column vector of shape [num_windows,1]
-        # [None, :] turns torch.arange(steps) into a vector of shape [1, steps]
-        # Adding them together row by row increments the number of steps by 
-        # the start index, and you get a tensor of shape [num_windows, steps]
-        # where each window row has the indices which belong in that window
-        idx = starts[:, None]+torch.arange(steps, device=cfg.device)[None, :]
-
-        # flatten out those indices, select them all, and reshape the result
-        xw = x.index_select(0, idx.flatten()).reshape(nw, steps, feat)
-        return xw
-
-    # --- Extract Y,U,D,t ---
-    Y, U, D, t = [build_sliding_windows(df, key) for key in ['Y', 'U', 'D', 't']]
-    
-    sliding_window_dataset = {
-        't': t, 'Y': Y,
-        'U': U, 'D': D,
-        'yn': Y[:, 0:cfg.in_steps, :]
-    }
-
-    return sliding_window_dataset
+    Y, U, D, t = [sliding_windows(df, nm_mapping[key], steps, stride, cfg.device)
+                  for key in ("Y", "U", "D", "t")]
+    return {"t": t, "Y": Y, "U": U, "D": D, "yn": Y[:, :cfg.in_steps, :]}
 
 
 @beartype
@@ -440,7 +414,8 @@ def get_loader(
 
     dataset = DictDataset(data, name=name)
 
-    # Keep DataLoader RNG on CPU for portability across devices.
+    # On cfg.device, which resolve_device also made torch's default device:
+    # the sampler's randperm runs there, and needs a generator that matches.
     generator = torch.Generator(device=cfg.device)
     generator.manual_seed(cfg.seed)
 
@@ -735,6 +710,20 @@ def normalize_df(
         if col in df_norm.columns:
             df_norm[col] = (df_norm[col] - stats["shift"]) / stats["stretch"]
     return df_norm
+
+
+@beartype
+def to_physical(
+    x: torch.Tensor,
+    cols: list[str],
+    norm_stats: dict[str, dict[str, float]],
+) -> torch.Tensor:
+    """Undo normalization on a tensor whose last axis is `cols`, any leading shape."""
+    shift = torch.tensor([norm_stats[c]["shift"] for c in cols],
+                         dtype=x.dtype, device=x.device)
+    stretch = torch.tensor([norm_stats[c]["stretch"] for c in cols],
+                           dtype=x.dtype, device=x.device)
+    return x * stretch + shift
 
 
 # Undo normalization using stored shift/stretch stats.

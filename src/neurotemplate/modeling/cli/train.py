@@ -1,9 +1,9 @@
 """
 Entry point for training with physics-informed losses.
 
-Thin wrapper: this file owns CLI parsing, run-name policy, status files,
-and the MLflow logger lifecycle. Everything else (data prep, training,
-eval, plotting, reportcard) is in pipeline.train_and_evaluate.
+Thin wrapper: this file owns CLI parsing, the run name, and the MLflow run.
+Data prep is pipeline.prepare_data; training, eval, plotting and the
+reportcard are pipeline.train_and_evaluate.
 
 Usage:
     nt model train --config model_configs/modeling.yaml
@@ -12,33 +12,35 @@ Usage:
 """
 
 import sys
-from pathlib import Path
 
 from neurotemplate._typing import beartype
 
 from neurotemplate.common.config import load_config_from_cli, MODEL_CONFIG_DIR
 from neurotemplate.common.run_summary import write_run_summary
+from neurotemplate.common.tracking import tracked_run
+from neurotemplate.hooks import load_modeling_hooks
 from neurotemplate.modeling.config import ModelingConfig
-from neuromancer.loggers import MLFlowLogger
-
-from neurotemplate.common.data_utils import (
-    normalize_df,
-    compute_norm_stats,
-    get_data_splits,
-    get_grad_masks,
-    pool_dfs,
-    warn_degenerate_columns,
-)
 from neurotemplate.modeling.experiment import resolve_device, set_seeds
 from neurotemplate.modeling.pipeline import (
-    build_head_stack, resolve_block_spec, run_summary_metrics, train_and_evaluate,
+    prepare_data, run_summary_metrics, train_and_evaluate,
 )
-from neurotemplate.hooks import load_modeling_hooks
+
+#: Loss terms echoed to stdout each epoch, and the substrings of the metric
+#: keys logged to MLflow. Shared with `nt model optuna`'s final retrain.
+STDOUT_METRICS = ["train_loss", "train_ref_loss", "train_grad_penalty", "dev_loss"]
+LOGGED_METRICS = ["train_loss", "dev_loss", "ref_loss", "sgn_loss", "vel_loss",
+                  "grad_penalty", "time", "rmse"]
+
+
+def print_finished(run_id: str, normalized_rmse: float) -> None:
+    """The closing lines of a training run: its id and how to look at it."""
+    print(f"Finished run: {run_id}, test_rmse: {normalized_rmse:.3f}")
+    print("MLflow UI:  uv run mlflow ui")
+    print(f"Load model: uv run nt model load --run_id {run_id} --data <test csv>")
 
 
 @beartype
 def main() -> None:
-
     cfg, cli = load_config_from_cli(
         sys.argv[1:],
         cls=ModelingConfig,
@@ -48,11 +50,7 @@ def main() -> None:
 
     cfg.device = resolve_device(cfg.device)
     cfg.seed = set_seeds(cfg.seed)
-
     hooks = load_modeling_hooks(cfg)
-    data_mapping = hooks.data_mapping
-    column_norm_config = hooks.column_norm_config
-    build_synth_cfg = hooks.synth_cfg
 
     if cfg.verbose:
         print(f"Device: {cfg.device}")
@@ -63,86 +61,25 @@ def main() -> None:
         if cfg.grad_gain > 0:
             print(f"Gradient penalty: gain={cfg.grad_gain}, "
                   f"samples={cfg.grad_n_samples}")
-
-    # ── Data, normalization, masks, synth_cfg (computed once) ────
-    if cfg.verbose:
         print("Loading data...")
 
-    train_raws, dev_raws, test_raws, freq_s = get_data_splits(cfg)
-    cfg.steps_per_hour = 3600.0 / freq_s
-    # Column classification only needs the schema — first train df is
-    # enough since `_validate_split_columns` already enforced cross-file
-    # column match.
-    nm_mapping = data_mapping(df=train_raws[0], cfg=cfg)
-    block_spec = resolve_block_spec(hooks, nm_mapping, cfg)
+    data = prepare_data(cfg, hooks)
 
-    norm_overrides = column_norm_config(nm_mapping)
-    # Stats pooled across all training files so per-column ranges reflect
-    # the union of training data. The concatenated frame is built once and
-    # never used for windowing — windowing stays per-file.
-    train_pool = pool_dfs(train_raws)
-    norm_stats = compute_norm_stats(
-        df=train_pool, norm_type=cfg.norm_type, column_overrides=norm_overrides,
-    )
-    warn_degenerate_columns(norm_stats, nm_mapping)
-    train_dfs = [normalize_df(r, norm_stats) for r in train_raws]
-    dev_dfs = [normalize_df(r, norm_stats) for r in dev_raws]
-    test_dfs = [normalize_df(r, norm_stats) for r in test_raws]
-
-    grad_masks = get_grad_masks(grad_path=cfg.grad_path, nm_mapping=nm_mapping)
-    synth_cfg = build_synth_cfg(nm_mapping, norm_stats)
-    head_stack = build_head_stack(hooks, cfg, nm_mapping, norm_stats, train_dfs)
-
-    # ── Run name & MLflow logger ─────────────────────────────────
+    # With a curriculum, each step is a nested child run under this parent.
     cfg.run = cfg.model.upper() + " " + cfg.run
-    parent_run_name = cfg.run
-    if cfg.curriculum_steps:
-        cfg.run += " Parent"
+    run_name = cfg.run + " Parent" if cfg.curriculum_steps else cfg.run
 
-    if cfg.verbose:
-        print("Setting up MLflow logger...")
-
-    global_logger = MLFlowLogger(
-        args=cfg,
-        savedir=cfg.savedir,
-        stdout=["train_loss", "train_ref_loss", "train_grad_penalty",
-                "dev_loss"],
-        verbosity=cfg.epoch_verbose if cfg.verbose else 0,
-        logout=[
-            "train_loss", "dev_loss",
-            "ref_loss", "sgn_loss", "vel_loss",
-            "grad_penalty",
-            "time", "rmse",
-        ],
-        nested=False,
-    )
-    cfg.run = parent_run_name
-
-    # ── Train + evaluate + reportcard + plot ─────────────────────
-    result = train_and_evaluate(
-        cfg=cfg,
-        train_dfs=train_dfs, dev_dfs=dev_dfs,
-        test_dfs=test_dfs,
-        nm_mapping=nm_mapping, norm_stats=norm_stats,
-        grad_masks=grad_masks, synth_cfg=synth_cfg,
-        freq_s=freq_s, logger=global_logger,
-        head_stack=head_stack, block_spec=block_spec,
-    )
-
-    write_run_summary(
-        global_logger, stage="model", config_path=cli.config, cfg=cfg,
-        metrics=run_summary_metrics(result["test_results"]),
-        mapping=nm_mapping,
-    )
-
-    if cfg.verbose:
-        r_id = global_logger.run.info.run_id
-        print(f"Finished run: {r_id}, "
-              f"test_rmse: {result['test_results'].aggregate_rmse:.3f}")
-        print(f"MLflow UI:  uv run mlflow ui")
-        print(f"Load model: uv run nt model load --run_id {r_id}")
-
-    global_logger.clean_up()
+    with tracked_run(cfg, stdout=STDOUT_METRICS, logout=LOGGED_METRICS,
+                     run_name=run_name) as logger:
+        result = train_and_evaluate(cfg, logger=logger, **vars(data))
+        write_run_summary(
+            logger, stage="model", config_path=cli.config, cfg=cfg,
+            metrics=run_summary_metrics(result["test_results"]),
+            mapping=data.nm_mapping,
+        )
+        if cfg.verbose:
+            print_finished(logger.run.info.run_id,
+                           result["test_results"].normalized_rmse)
 
 
 if __name__ == "__main__":

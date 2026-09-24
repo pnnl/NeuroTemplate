@@ -1,7 +1,7 @@
 """
 Load a frozen sys-id surrogate for closed-loop control, or a trained policy.
 
-Thin wrapper over the public src/load_model.load_trained_dynamics loader.
+Thin wrapper over modeling/cli/load.load_trained_dynamics.
 Freezing is explicit here: the dynamics is held fixed while the policy trains
 (the canonical Neuromancer "freeze identified dynamics, train policy" pattern).
 """
