@@ -6,5 +6,6 @@ The trained graph is serialised, not reimplemented: `graphs` wraps a trained
 inside the traced graph, `state` lifts hidden state into explicit tensors via
 the stateful-block protocol, `trace` exports and audits, `verify` proves the
 result reproduces the trained system, and `package` writes a consumer
-package around the shipped `runtime`. Entry point: `nt export model`.
+package around the shipped `runtime` and its C++ twin in `cpp/`. Entry
+points: `nt export model`, `nt export policy`.
 """

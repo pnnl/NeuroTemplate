@@ -266,6 +266,23 @@ def read_csv(path: str | Path) -> tuple[list[str], dict[str, np.ndarray]]:
     return index, columns
 
 
+def window_columns(name: str, entry: Mapping) -> list[str]:
+    """The fixture columns holding one `[steps, n]` window of input `name`
+    (a `policy.json` input entry), time-major: `y[0].zone T`, ... Must match
+    `window_columns` in cpp/runtime.hpp."""
+    return [f"{name}[{t}].{column}"
+            for t in range(entry["steps"]) for column in entry["columns"]]
+
+
+def read_windows(path: str | Path, inputs: Mapping[str, Mapping]) -> dict[str, np.ndarray]:
+    """Policy windows stored one per row (`policy/reference/inputs.csv`) ->
+    `{input: [windows, steps, n]}` float32, ready for `Policy.act_batch`."""
+    _, table = read_csv(path)
+    return {name: np.stack([table[c] for c in window_columns(name, entry)], axis=1)
+                    .astype(np.float32).reshape(-1, entry["steps"], len(entry["columns"]))
+            for name, entry in inputs.items()}
+
+
 @dataclass(frozen=True)
 class ReferenceCheck:
     """This machine's answers against the trained model's own, per column."""
@@ -337,8 +354,8 @@ def _check_model(model_dir: Path) -> ReferenceCheck:
 def _check_policy(policy_dir: Path) -> ReferenceCheck:
     reference = json.loads((policy_dir / "reference" / "REFERENCE.json").read_text())
     policy = Policy(policy_dir)
-    with np.load(policy_dir / "reference" / "inputs.npz") as inputs:
-        actions = policy.act_batch(dict(inputs))
+    actions = policy.act_batch(read_windows(policy_dir / "reference" / "inputs.csv",
+                                            policy.inputs))
     _, expected = read_csv(policy_dir / "reference" / "expected_actions.csv")
     error = {c: float(np.abs(actions[:, i] - expected[c]).max())
              for i, c in enumerate(policy.u_columns)}

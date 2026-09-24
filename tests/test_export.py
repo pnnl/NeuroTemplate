@@ -18,8 +18,12 @@ which traces the same forward code.
 
 Plus two failure modes that would ship a wrong model silently: a step graph
 with its hidden state baked in as a constant, and an export that disagrees
-with the trained model being written anyway.
+with the trained model being written anyway. And the shipped C++ runner,
+built and run against a package holding both a model and a policy.
 """
+
+import shutil
+import subprocess
 
 import numpy as np
 import pandas as pd
@@ -231,3 +235,41 @@ def test_trained_policy_exports_as_the_trained_policy(tmp_path, overrides):
     # midpoint, so compare how many agree rather than the worst one.
     agree = (wrapped - direct).abs() < 1e-4
     assert agree.float().mean() > 0.99
+
+
+# ── the C++ runner ───────────────────────────────────────────────
+
+
+@pytest.mark.skipif(shutil.which("cmake") is None, reason="needs cmake and a C++17 compiler")
+def test_cpp_runner_reproduces_the_reference(tmp_path, request):
+    """Build the package's cpp/ and run its `validate` on a model with hidden
+    state and a priced policy in one package. This is what keeps
+    runtime.hpp in step with the json and fixtures that runtime.py reads.
+    The first run downloads onnxruntime; later runs reuse pytest's cache."""
+    from control_fixtures import full_setup, install_price
+    from neurotemplate.control.closed_loop import build_closed_loop
+    from neurotemplate.control.policy import build_policy
+    from neurotemplate.export.policy import export_policy
+
+    package = export(tmp_path, make_cfg(), MAPPING, SPLIT).out_dir
+    s = full_setup(d_preview=1, price_preview=3)
+    install_price(s["cfg"], tmp_path)
+    cfg, sysid_cfg, nm, ns = s["cfg"], s["sysid_cfg"], s["nm"], s["norm_stats"]
+    policy = build_policy(cfg, sysid_cfg, nm, ns)
+    export_policy(
+        policy_node=policy, cl_system=build_closed_loop(s["dyn_node"], policy, cfg, sysid_cfg),
+        cfg=cfg, sysid_cfg=sysid_cfg, nm_mapping=nm, norm_stats=ns,
+        test_dfs=[s["norm_df"]], run_id="0" * 32, out_dir=package, package="exported",
+        exporter="legacy",
+    )
+
+    deps = request.config.cache.mkdir("cpp-deps")
+    build = tmp_path / "build"
+    for command in (["cmake", "-S", "cpp", "-B", str(build), "-DCMAKE_BUILD_TYPE=Release",
+                     f"-DFETCHCONTENT_BASE_DIR={deps}"],
+                    ["cmake", "--build", str(build), "--target", "validate"]):
+        subprocess.run(command, cwd=package, check=True, capture_output=True)
+    result = subprocess.run([str(build / "validate")], cwd=package,
+                            capture_output=True, text=True)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "[PASS] model" in result.stdout and "[PASS] policy" in result.stdout

@@ -5,7 +5,8 @@ Export a trained DPC policy into `<out>/policy/`.
       policy.onnx           (y, ymin, ymax, d[, price]) -> u, physical units
       policy.json           each input's columns, window length and alignment
       reference/
-        inputs.npz          real closed-loop windows the trained policy saw
+        inputs.csv          real closed-loop windows the trained policy saw,
+                            one per row (see `runtime.window_columns`)
         expected_actions.csv  the TRAINED policy's commands on them
         REFERENCE.json      provenance and tolerances
 
@@ -40,7 +41,7 @@ from neurotemplate.control.scenarios import price_scale
 from neurotemplate.export.package import (
     FLOAT_FORMAT, check_package_name, install, provenance, stamp, write_json,
 )
-from neurotemplate.export.runtime import Policy
+from neurotemplate.export.runtime import Policy, window_columns
 from neurotemplate.export.spec import FORMAT
 from neurotemplate.export.trace import OPSET, export_graph
 from neurotemplate.export.verify import AGREEMENT_TOL, REPRODUCE_TOL
@@ -183,9 +184,9 @@ def export_policy(*, policy_node, cl_system, cfg, sysid_cfg,
         stamp(export_graph(graph, tuple(x[:2] for x in physical.values()),
                            [GRAPH_NAMES[s.key] for s in inputs], ["u"], path, exporter),
               path, export_id, run_id)
-        write_json(policy_dir / "policy.json", _spec(
-            export_id, run_id, cfg, inputs, nm_mapping, description,
-            describe_policy(policy_node, cfg, sysid_cfg, nm_mapping, norm_stats)))
+        spec = _spec(export_id, run_id, cfg, inputs, nm_mapping, description,
+                     describe_policy(policy_node, cfg, sysid_cfg, nm_mapping, norm_stats))
+        write_json(policy_dir / "policy.json", spec)
 
         named = {GRAPH_NAMES[key]: x.numpy() for key, x in physical.items()}
         actions = Policy(policy_dir).act_batch(named)
@@ -199,8 +200,8 @@ def export_policy(*, policy_node, cl_system, cfg, sysid_cfg,
                 f"stretch; tolerance {AGREEMENT_TOL:.0e}). Per column: {error}")
 
         shipped = np.unique(np.linspace(0, count - 1, min(fixture_windows, count)).astype(int))
-        _write_reference(policy_dir / "reference", named, reference, shipped,
-                         nm_mapping["U"], {
+        _write_reference(policy_dir / "reference", spec["inputs"], named, reference,
+                         shipped, nm_mapping["U"], {
                              "export_id": export_id, "run_id": run_id,
                              "tolerance": {"u": {c: REPRODUCE_TOL * s
                                                  for c, s in u_stretch.items()}},
@@ -240,12 +241,17 @@ def _spec(export_id: str, run_id: str, cfg, inputs: list[PolicyInput],
     }
 
 
-def _write_reference(reference_dir: Path, named: dict[str, np.ndarray],
-                     reference: np.ndarray, shipped: np.ndarray,
-                     u_columns: list[str], document: dict) -> None:
+def _write_reference(reference_dir: Path, inputs: dict[str, dict],
+                     named: dict[str, np.ndarray], reference: np.ndarray,
+                     shipped: np.ndarray, u_columns: list[str], document: dict) -> None:
+    """CSV throughout, so the C++ runner reads the same fixture as Python."""
     reference_dir.mkdir()
-    np.savez(reference_dir / "inputs.npz",
-             **{name: windows[shipped] for name, windows in named.items()})
+    windows = pd.DataFrame(
+        np.concatenate([named[name][shipped].reshape(len(shipped), -1) for name in inputs],
+                       axis=1),
+        columns=[c for name, entry in inputs.items() for c in window_columns(name, entry)])
+    windows.to_csv(reference_dir / "inputs.csv", float_format=FLOAT_FORMAT,
+                   index_label="window")
     pd.DataFrame(reference[shipped], columns=u_columns).to_csv(
         reference_dir / "expected_actions.csv", float_format=FLOAT_FORMAT,
         index_label="window")

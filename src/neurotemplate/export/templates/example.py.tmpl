@@ -4,7 +4,7 @@ from pathlib import Path
 
 import numpy as np
 
-from $package import Model, Policy, read_csv
+from $package import Model, Policy, read_csv, read_windows
 
 if Path("model").is_dir():
     model = Model("model")
@@ -37,6 +37,6 @@ if Path("policy").is_dir():
     policy = Policy("policy")
     print("\n" + policy.describe())
     # The shipped reference holds real windows from a closed-loop rollout.
-    with np.load("policy/reference/inputs.npz") as inputs:
-        first = {name: inputs[name][0] for name in policy.inputs}
+    windows = read_windows("policy/reference/inputs.csv", policy.inputs)
+    first = {name: window[0] for name, window in windows.items()}
     print("  first reference window ->", policy.act(**first))

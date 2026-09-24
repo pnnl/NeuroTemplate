@@ -7,6 +7,8 @@ The consumer package every export writes into, and what the exports share.
       validate.py          written once; add project-specific checks to it
       example.py           written once
       <package>/           the shipped runtime (export/runtime.py, verbatim)
+      cpp/                 the same runtime in C++, plus validate and example
+                           programs and their CMakeLists.txt (export/cpp/, verbatim)
       model/               a dynamics model: warm_start.onnx, step.onnx,
                            model.json, reference/   (`nt export model`)
       policy/              a control policy: policy.onnx, policy.json,
@@ -15,9 +17,9 @@ The consumer package every export writes into, and what the exports share.
 An export builds its artifact directory in a staging directory, and installs
 it only once the staged package passes its own reference check — so a failed
 export leaves `<out>` untouched. Installing replaces that one artifact
-directory and regenerates the generated files; the other artifact, the
-project's `validate.py` / `example.py`, and anything else the project keeps
-at the top level (a `MODEL_CARD.md`, say) are left alone.
+directory and regenerates the generated files and both runtimes; the other
+artifact, the project's `validate.py` / `example.py`, and anything else the
+project keeps at the top level (a `MODEL_CARD.md`, say) are left alone.
 """
 
 from __future__ import annotations
@@ -38,6 +40,8 @@ from neurotemplate.export import runtime
 from neurotemplate.export.trace import OPSET
 
 TEMPLATES = Path(__file__).parent / "templates"
+#: The C++ runner, shipped verbatim into `<out>/cpp/`.
+CPP = Path(__file__).parent / "cpp"
 
 #: Written into every shipped CSV. `%.6f` does not round-trip float32 (it
 #: keeps 83 of 1000 normalised-state values and 493 of 1000 kW values exact);
@@ -105,6 +109,10 @@ def _write_runtime(root: Path, package: str) -> None:
     (root / package).mkdir(exist_ok=True)
     shutil.copyfile(Path(runtime.__file__), root / package / "runtime.py")
     (root / package / "__init__.py").write_text(_render("__init__.py.tmpl"))
+    # File by file, so a build directory someone keeps inside cpp/ survives.
+    (root / "cpp").mkdir(exist_ok=True)
+    for source in CPP.iterdir():
+        shutil.copyfile(source, root / "cpp" / source.name)
 
 
 def _write_package_files(out_dir: Path, package: str, version: str) -> list[str]:

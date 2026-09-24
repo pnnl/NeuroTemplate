@@ -25,7 +25,7 @@ trained against it was exported into the same package and agreed on all
 | 2 — delivery: `model.json`, runtime, `validate.py`, CLI, no pandas | done |
 | 3 — migration | partly done: the NSSM is re-exported and verified against its shipped reference; the 2R2C can't be loaded by `main` at all (§6.1); `elexity_v2` itself is untouched |
 | 4 — trained policy export | done (`nt export policy`) |
-| 5 — C++ single binary | not started (optional; the plan says to prototype first) |
+| 5 — C++ single binary | C++ runner shipped 2026-09-24, linked to the prebuilt shared onnxruntime; the static single binary is still open ([cpp_runner_report.md](cpp_runner_report.md)) |
 
 Two design points changed during the work:
 - **The runtime API.** You lifted the plan's "keep the public API unchanged"
@@ -79,7 +79,8 @@ delivery/site/
   model/   warm_start.onnx  step.onnx  model.json
            reference/ example_input.csv  expected_output.csv  expected_state.csv  REFERENCE.json
   policy/  policy.onnx  policy.json
-           reference/ inputs.npz  expected_actions.csv  REFERENCE.json
+           reference/ inputs.csv  expected_actions.csv  REFERENCE.json
+  cpp/     runtime.hpp  validate.cpp  example.cpp  CMakeLists.txt   (added later; see cpp_runner_report.md)
 ```
 
 Each export replaces only its own directory (`model/` or `policy/`). Anything
@@ -283,9 +284,9 @@ it has to be retrained. I left this alone, per the no-compatibility stance.
 - **Cross-platform reproducibility is still unmeasured** (plan §8). Every
   number above is macOS arm64. The consumer tolerance keeps its 10×
   headroom until someone runs `validate.py` on x86 Linux.
-- **Phase 5 (C++ single binary)** is not started. The runtime contains no
-  numeric logic, so a C++ driver only has to move windows, but the
-  minimal-build size is still unverified.
+- **Phase 5 (C++ single binary)**: the C++ runner shipped on 2026-09-24
+  ([cpp_runner_report.md](cpp_runner_report.md)). It links the prebuilt
+  shared onnxruntime. A static, minimal-operator build is still unmeasured.
 - **`elexity_v2`'s MLflow store was written by a newer mlflow (schema
   `6f8d9c3b2a1e`) than this venv's 3.9.0.** `nt export` can't open it
   in-place. I re-exported the NSSM through a scratch driver that reads the

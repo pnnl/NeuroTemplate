@@ -15,6 +15,48 @@ wrong length or width is rejected by onnxruntime, which names the dimension.
 
 $sections
 
+## From C++
+
+`cpp/` holds the same runtime in C++17 (`cpp/runtime.hpp`, header-only). It
+reads the same json and runs the same graphs, and it too holds no numeric
+logic. You need a C++17 compiler and CMake 3.24 or newer. Configuring
+downloads the prebuilt onnxruntime release for your platform and
+nlohmann/json, both pinned by SHA256:
+
+```bash
+cmake -S cpp -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build --config Release
+build/validate            # reproduces */reference/ from C++; exits 1 on a mismatch
+build/example             # a forecast, a step-by-step rollout, one policy command
+```
+
+On Windows the programs land in `build\Release\`. Run them from this
+directory, or pass the package directory as the first argument to `validate`.
+To use an onnxruntime you already have, pass
+`-DONNXRUNTIME_ROOT=<unpacked release>`. An installed nlohmann/json 3.11+ is
+used in preference to the download.
+
+To use it in your own program, link `onnxruntime` and include `runtime.hpp`:
+
+```cpp
+#include "runtime.hpp"
+
+nt::Model model("model");
+nt::State state = model.warmup(y, u, d);    // each [history_steps, n], row-major
+state = model.step(state, u_now, d_now);    // [nu], [nd] -> a new State
+state.outputs;                              // [ny], in model.y_columns order
+
+nt::Policy policy("policy");
+std::vector<float> command = policy.act({{"y", y}, {"ymin", ymin}, {"ymax", ymax}, {"d", d}});
+```
+
+Every array is a flat `std::vector<float>` in physical units. Its columns
+follow the order in `model.json` / `policy.json`, which `model.y_columns`,
+`policy.inputs` and so on expose. The program loads `libonnxruntime` at run
+time. If you ship a binary, put that library beside it or on the loader
+path. `cpp/` is rewritten on every export, so copy the files out before you
+change them.
+
 ## Checking it
 
 `validate.py` reproduces each `*/reference/` fixture with this machine's

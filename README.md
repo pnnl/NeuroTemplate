@@ -683,11 +683,13 @@ mass sits and flags a level under 5%.
 
 `nt export model` and `nt export policy` serialise the *trained* graph —
 they never reimplement it — into a package that needs only `numpy` and
-`onnxruntime`:
+`onnxruntime`, or, from C++, only `onnxruntime`:
 
 ```
 delivery/site/
   site/runtime.py        Model (warmup / step / rollout / predict), Policy (act)
+  cpp/                   the same runtime in C++17 (runtime.hpp), validate.cpp,
+                         example.cpp, CMakeLists.txt
   model/                 warm_start.onnx, step.onnx, model.json, reference/
   policy/                policy.onnx, policy.json, reference/
   README.md  pyproject.toml  validate.py  example.py
@@ -703,6 +705,13 @@ from the trained torch model, so `python validate.py` on any machine checks
 the whole chain. `validate.py` and `example.py` are written once and then
 belong to the project; re-exports never overwrite them. Design and measurements:
 [improvement_plans/onnx_export_report.md](improvement_plans/onnx_export_report.md).
+
+From C++, `cmake -S cpp -B build && cmake --build build && build/validate`
+in the package directory checks the same fixtures through `cpp/runtime.hpp`.
+Configuring downloads a pinned onnxruntime release unless
+`-DONNXRUNTIME_ROOT` names one. The C++ runtime is header-only and
+bit-identical to the Python one. The package's README shows the API.
+Details: [improvement_plans/cpp_runner_report.md](improvement_plans/cpp_runner_report.md).
 
 A new stateful family exports for free if it implements
 `rollout_state()` / `set_rollout_state(state)` — its hidden state as one
@@ -775,6 +784,7 @@ src/neurotemplate/
     ├── package.py       # staging, install, scaffold
     ├── spec.py          # model.json
     ├── runtime.py       # the shipped runtime (numpy + onnxruntime only)
+    ├── cpp/             # the shipped C++ runtime, validate / example, CMakeLists
     └── templates/       # README / validate / example / pyproject
 ```
 
@@ -799,6 +809,6 @@ If you find yourself shadowing a Neuromancer class, prefer the import.
 uv run pytest tests/
 ```
 
-All 371 pass today, against the current local Neuromancer checkout. The suite is deliberately small. It keeps the tests whose failure would mean a run silently trains on wrong numbers — normalization and windowing, the RC and GRU updates, loss alignment, gradient plumbing (what the optimizer can and cannot reach), head round-trips, calibration — plus the physics/objective/stability diagnostics that a reader acts on, and one end-to-end wiring pass per CLI sequence. It does not test report rendering (nothing downstream consumes a particular format yet), validation error messages beyond the checks that would otherwise let a run train silently on the wrong objective, or plots.
+All 377 pass today, against the current local Neuromancer checkout. The suite is deliberately small. It keeps the tests whose failure would mean a run silently trains on wrong numbers — normalization and windowing, the RC and GRU updates, loss alignment, gradient plumbing (what the optimizer can and cannot reach), head round-trips, calibration — plus the physics/objective/stability diagnostics that a reader acts on, and one end-to-end wiring pass per CLI sequence. It does not test report rendering (nothing downstream consumes a particular format yet), validation error messages beyond the checks that would otherwise let a run train silently on the wrong objective, or plots.
 
 Cases that differ only in their input live in `pytest.mark.parametrize` tables rather than in one function each. Before adding a test, ask what silently goes wrong if the logic it covers breaks; if the answer is "a worse error message" or "a differently-worded report", leave it out.
