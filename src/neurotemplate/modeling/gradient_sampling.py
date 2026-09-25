@@ -29,7 +29,8 @@ class SampledGradientPenalty:
     On each call to compute():
       1. Samples n_samples random points in the normalized input space
       2. Computes Jacobians of the full dynamics step via jacrev + vmap
-      3. Returns the mean sign violation (unweighted scalar)
+      3. Sums each Jacobian over the in_steps lags and returns the mean sign
+         violation of that sum (unweighted scalar)
 
     The Jacobian is of `model.pre_activation` — the learned map plus the
     residual, applied per channel exactly as in a rollout — so it is
@@ -133,15 +134,20 @@ class SampledGradientPenalty:
             m = self.signs[key]                  # [ny, nx]
             nx = m.shape[-1]
 
-            # Only care about the most recent input step.
-            # Jacobian: [n_samples, ny, in_steps*nx] — slice last nx columns.
-            j_last = j_mat[:, :, -nx:]           # [n_samples, ny, nx]
+            # Sum the Jacobian over the in_steps lags: the response to shifting
+            # the whole (constant) history window, i.e. a sustained change.
+            # Individual lag coefficients have no physical sign — an older lag
+            # may go negative to carry rate information — but their sum does.
+            # Jacobian: [n_samples, ny, in_steps*nx], flattened oldest→newest.
+            j_sustained = j_mat.reshape(
+                j_mat.shape[0], j_mat.shape[1], self.model.in_steps, nx
+            ).sum(dim=2)                         # [n_samples, ny, nx]
 
             # Penalize sign violations:
             #   mask=+1 → penalize negative Jacobian entries
             #   mask=-1 → penalize positive Jacobian entries
             #   mask= 0 → no penalty (relu of 0 is 0)
-            violations = relu(-j_last * m)       # [n_samples, ny, nx]
+            violations = relu(-j_sustained * m)  # [n_samples, ny, nx]
             total = total + violations.mean()
 
         return total

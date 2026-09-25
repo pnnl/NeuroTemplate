@@ -1,5 +1,5 @@
 """The sampled gradient sign penalty scores each declared sign against its own
-(output, input) pair and nothing else."""
+(output, input) pair and nothing else, summed over the in_steps lags."""
 
 import torch
 
@@ -8,15 +8,19 @@ from neurotemplate.modeling.gradient_sampling import SampledGradientPenalty
 
 
 class _Linear:
-    """y_next = W @ u_newest, so d(y_i)/d(u_j) = W[i, j] exactly."""
+    """y_next = sum_k W[k] @ u_k over a two-step window (oldest first), so
+    d(y_i)/d(u_j) at lag k = W[k, i, j] exactly. A [ny, nu] weight acts on
+    the newest step only."""
 
     def __init__(self, weights: torch.Tensor):
+        if weights.dim() == 2:
+            weights = torch.stack([torch.zeros_like(weights), weights])
         self.w = weights
-        self.ny, self.nu = weights.shape
-        self.nd, self.in_steps, self.pre_stack = 1, 2, None
+        self.in_steps, self.ny, self.nu = weights.shape
+        self.nd, self.pre_stack = 1, None
 
     def pre_activation(self, y, u, d):
-        return self.w @ u[-self.nu:]
+        return torch.einsum("kij,kj->i", self.w, u.reshape(self.in_steps, self.nu))
 
 
 def _penalty(weights: torch.Tensor, mask: torch.Tensor) -> float:
@@ -41,3 +45,15 @@ def test_a_single_input_column_constrains_only_its_declared_output():
 def test_a_violated_sign_is_penalised():
     weights = torch.tensor([[-2.0], [5.0]])
     assert _penalty(weights, _mask(2, 1, {(0, 0): 1})) > 0.0
+
+
+def test_a_negative_older_lag_is_allowed_when_the_sum_obeys_the_sign():
+    # Older lag -1, newest +3: the sustained response is +2, which obeys +1.
+    weights = torch.tensor([[[-1.0]], [[3.0]]])
+    assert _penalty(weights, _mask(1, 1, {(0, 0): 1})) == 0.0
+
+
+def test_a_sum_over_lags_that_violates_the_sign_is_penalised():
+    # Newest lag alone obeys +1, but the older lag drags the sum negative.
+    weights = torch.tensor([[[-3.0]], [[1.0]]])
+    assert _penalty(weights, _mask(1, 1, {(0, 0): 1})) > 0.0
