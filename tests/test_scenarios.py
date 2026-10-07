@@ -23,7 +23,8 @@ def test_window_dict_shapes():
     n = d["yn"].shape[0]
     assert n > 0
     assert d["yn"].shape == (n, hmax, len(nm["Y"]))
-    assert d["U"].shape == (n, hmax, len(nm["U"]))
+    # One shorter than yn: the policy writes U before the dynamics reads it.
+    assert d["U"].shape == (n, hmax - 1, len(nm["U"]))
     assert d["D"].shape == (n, W, len(nm["D"]))
     assert d["t"].shape == (n, W, 1)
     from control_user_defined import regulated

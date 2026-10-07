@@ -51,7 +51,7 @@ class ModelingConfig:
     # ---- MODEL ---------------------------------------------------------------
     model: str = "nssm"
     in_steps: int = 12
-    log2_hidden_size: int = 8
+    log2_hidden_size: int = 6
     num_layers: int = 3
     residual: bool = True
     # Give each block its own sub-model, with its own parameters and hidden

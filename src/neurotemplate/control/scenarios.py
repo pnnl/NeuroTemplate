@@ -9,8 +9,8 @@ A lean control-specific windower. Per window:
     P      = pure prediction length (train_pred_steps for train, test_window-Hmax for eval)
     W      = Hmax + P
 
-    yn   : seed = first Hmax real Y steps   [n, Hmax, ny]  (grows in rollout)
-    U    : seed = first Hmax real U steps   [n, Hmax, nu]  (policy appends)
+    yn   : seed = first Hmax real Y steps   [n, Hmax,   ny]  (grows in rollout)
+    U    : seed = first Hmax-1 real U steps [n, Hmax-1, nu]  (policy appends)
     D    : full real disturbances           [n, W,   nd]
     t    : full sec_elapsed (for plots)     [n, W,   1]
     ymin : comfort lower-band signal        [n, W,   n_ctrl]  (normalized)
@@ -24,6 +24,14 @@ windows are deliberately independent of the weather windows.
 
 The closed-loop System rolls out with start_iter = Hmax - 1 and an explicit
 nsteps = P, so predicted yn occupies indices [Hmax : Hmax+P].
+
+U is seeded one step shorter than yn because of where each is written within a
+rollout step. SystemPreview reads every key at index i but appends each output
+at the end of its buffer. yn is written last and read at the start of the next
+step, so it needs Hmax seeded steps. U is written by the policy and read by the
+dynamics within the same step, so it needs Hmax - 1: the command the policy
+chooses at step i then lands at U[i], and the dynamics applies it immediately
+rather than one step late. See `scored_steps` for the resulting alignment.
 """
 
 from __future__ import annotations
@@ -59,6 +67,20 @@ def horizons(cfg, sysid_cfg) -> tuple[int, int, int]:
     h_sys = sysid_cfg.in_steps
     h_ctrl = cfg.in_steps
     return h_sys, h_ctrl, max(h_sys, h_ctrl)
+
+
+@beartype
+def scored_steps(key: str, hmax: int) -> slice:
+    """Time slice of `key` covering the P scored steps of a closed-loop rollout.
+
+    Scored step k is the transition into index hmax + k. Every key is read at
+    that index except U, which is read one index earlier: U[hmax - 1 + k] is
+    the command the policy chose from the signals at hmax - 1 + k, and the
+    dynamics applied it in that same rollout step to produce yn[hmax + k].
+    Works on tensors and on neuromancer variables alike.
+    """
+    start = hmax - 1 if key == "U" else hmax
+    return slice(start, None)
 
 
 @beartype
@@ -330,7 +352,7 @@ def build_window_dict(
 
     out = {
         "yn": Y[:, :hmax, :].contiguous(),
-        "U": U[:, :hmax, :].contiguous(),
+        "U": U[:, :hmax - 1, :].contiguous(),   # one shorter: see module docstring
         "D": D,
         "t": t,
         "ymin": ymin.to(device),

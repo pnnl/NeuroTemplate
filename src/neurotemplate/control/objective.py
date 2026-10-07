@@ -31,6 +31,7 @@ from typing import Optional
 
 import torch
 
+from neurotemplate.control.scenarios import scored_steps
 from neurotemplate._typing import beartype
 
 
@@ -187,8 +188,10 @@ def power_gradient(term_fn, out: dict, hmax: int) -> tuple[torch.Tensor, torch.T
     term reads the rollout is exactly what the caller is asking.
     """
     with torch.enable_grad():
-        yn = out["yn"][:, hmax:, :].detach().clone().requires_grad_(True)
-        power = term_fn(yn, out["U"][:, hmax:, :], out["D"][:, hmax:, :])
+        yn = (out["yn"][:, scored_steps("yn", hmax), :]
+              .detach().clone().requires_grad_(True))
+        power = term_fn(yn, out["U"][:, scored_steps("U", hmax), :],
+                        out["D"][:, scored_steps("D", hmax), :])
         if not power.requires_grad:
             return power.detach(), torch.zeros_like(power)
         grad, = torch.autograd.grad(power.sum(), yn, allow_unused=True)
@@ -281,9 +284,9 @@ def term_shapes(
     one-at-a-time reading the step-response scenario uses: what does this term
     ask *this* actuator to do, holding the rest of the rollout fixed.
     """
-    yn = out["yn"][:, hmax:, :]
-    u = out["U"][:, hmax:, :]
-    d = out["D"][:, hmax:, :]
+    yn = out["yn"][:, scored_steps("yn", hmax), :]
+    u = out["U"][:, scored_steps("U", hmax), :]
+    d = out["D"][:, scored_steps("D", hmax), :]
     device = u.device
     u_min, u_max = u_min.to(device), u_max.to(device)
 

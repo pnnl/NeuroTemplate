@@ -18,7 +18,7 @@ from neurotemplate.control.policy import (
     build_reference_node,
     reference_over_horizon,
 )
-from neurotemplate.control.scenarios import build_window_dict, horizons
+from neurotemplate.control.scenarios import build_window_dict, horizons, scored_steps
 from control_fixtures import full_setup
 
 
@@ -64,7 +64,7 @@ def test_a_fresh_residual_policy_emits_the_reference_exactly():
 
     _, out = _rollout(s)
     u_ref = reference_over_horizon(cfg, out, hmax, nm, ns)
-    assert torch.allclose(out["U"][:, hmax:, :], u_ref, atol=1e-6)
+    assert torch.allclose(out["U"][:, scored_steps("U", hmax), :], u_ref, atol=1e-6)
 
 
 @pytest.mark.parametrize("method", ["sigmoid_scale", "relu_clamp"])
@@ -75,7 +75,7 @@ def test_zero_init_holds_for_both_bound_methods(method):
     _, _, hmax = horizons(cfg, sysid_cfg)
     _, out = _rollout(s)
     u_ref = reference_over_horizon(cfg, out, hmax, nm, ns)
-    assert torch.allclose(out["U"][:, hmax:, :], u_ref, atol=1e-6)
+    assert torch.allclose(out["U"][:, scored_steps("U", hmax), :], u_ref, atol=1e-6)
 
 
 def test_a_zero_width_box_pins_the_policy_to_the_rule_forever():
@@ -96,7 +96,7 @@ def test_a_zero_width_box_pins_the_policy_to_the_rule_forever():
         P=cfg.train_pred_steps, stride=cfg.in_steps,
     ))
     u_ref = reference_over_horizon(cfg, out, hmax, nm, ns)
-    assert torch.allclose(out["U"][:, hmax:, :], u_ref, atol=1e-6)
+    assert torch.allclose(out["U"][:, scored_steps("U", hmax), :], u_ref, atol=1e-6)
 
 
 # ── The box actually bounds ──────────────────────────────────────
@@ -119,7 +119,7 @@ def test_a_trained_residual_never_leaves_the_box():
     ))
     u_ref = reference_over_horizon(cfg, out, hmax, nm, ns)
     stretch = torch.tensor([ns[c]["stretch"] for c in nm["U"]])
-    delta_phys = ((out["U"][:, hmax:, :] - u_ref) * stretch).abs().detach()
+    delta_phys = ((out["U"][:, scored_steps("U", hmax), :] - u_ref) * stretch).abs().detach()
     assert float(delta_phys.max()) <= cfg.residual_delta + 1e-4
 
 
@@ -135,7 +135,7 @@ def test_the_residual_still_learns():
         s["norm_df"], cfg, sysid_cfg, nm, ns,
         P=cfg.train_pred_steps, stride=cfg.in_steps,
     ))
-    out["U"][:, hmax:, :].pow(2).mean().backward()
+    out["U"][:, scored_steps("U", hmax), :].pow(2).mean().backward()
     grads = [p.grad for p in policy.parameters() if p.grad is not None]
     assert any(float(g.abs().sum()) > 0 for g in grads)
 
@@ -213,7 +213,7 @@ def test_a_grid_aligned_reference_leaves_no_snapping_floor(monkeypatch):
         _, out = _rollout(s)
         u_ref = reference_over_horizon(cfg, out, hmax, nm, ns)
         return residual_metrics(
-            (out["U"][:, hmax:, :] * stretch + shift).detach(),
+            (out["U"][:, scored_steps("U", hmax), :] * stretch + shift).detach(),
             (u_ref * stretch + shift).detach(), cfg.residual_delta, 0.25,
         ).mean_abs_delta
 

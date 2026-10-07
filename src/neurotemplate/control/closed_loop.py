@@ -3,11 +3,12 @@ Closed-loop assembly + DPC objective.
 
     SystemPreview([policy_node, frozen_dyn_node])
 
-At rollout step i: the policy writes U (appended to data['U']); the frozen
-dynamics consumes a U/D/yn window ending at i and writes the next yn (fed
-back). With start_iter = Hmax-1 and explicit nsteps = P, predicted yn occupies
-indices [Hmax : Hmax+P], aligned with the comfort-band signal slice
-[Hmax : Hmax+P].
+At rollout step i: the policy writes U[i]; the frozen dynamics consumes a
+U/D/yn window ending at i, so it applies that fresh command, and writes
+yn[i+1] (fed back). With start_iter = Hmax-1 and explicit nsteps = P,
+predicted yn occupies indices [Hmax : Hmax+P], aligned with the comfort-band
+signal slice [Hmax : Hmax+P], and the commands that produced it occupy
+[Hmax-1 : Hmax-1+P]. `scenarios.scored_steps` is that alignment, in one place.
 
 A stateful surrogate needs its hidden state cleared between batches, which is
 all init_func does here — it warms itself from the same H_sys-wide window a
@@ -26,7 +27,7 @@ from neuromancer.constraint import variable
 from neuromancer.loss import PenaltyLoss
 
 from neurotemplate.control.policy import regulated_channels
-from neurotemplate.control.scenarios import horizons, price_scale
+from neurotemplate.control.scenarios import horizons, price_scale, scored_steps
 from neurotemplate.modeling.dynamics import make_reset_init
 from neurotemplate.hooks import load_control_hooks
 
@@ -152,9 +153,9 @@ def build_control_loss(
     d = variable("D")
 
     # Predicted regulated channels over the horizon vs. the band.
-    y_ctrl = yn[:, hmax:, reg_idx]      # [b, P, n_ctrl]
-    ymin_h = ymin[:, hmax:, :]           # [b, P, n_ctrl]
-    ymax_h = ymax[:, hmax:, :]
+    y_ctrl = yn[:, scored_steps("yn", hmax), reg_idx]      # [b, P, n_ctrl]
+    ymin_h = ymin[:, scored_steps("ymin", hmax), :]         # [b, P, n_ctrl]
+    ymax_h = ymax[:, scored_steps("ymax", hmax), :]
 
     objectives = []
 
@@ -168,7 +169,7 @@ def build_control_loss(
 
     du_weights = resolve_du_weights(cfg.du_weight, nm_mapping["U"])
     if any(w > 0 for w in du_weights):
-        u_h = u[:, hmax:, :]            # policy-produced control [b, P, nu]
+        u_h = u[:, scored_steps("U", hmax), :]   # policy commands [b, P, nu]
         du_abs = torch.abs(u_h[:, 1:, :] - u_h[:, :-1, :])
         # Weighted per channel, then averaged over channels — so a scalar
         # weight reproduces the pooled mean exactly.
@@ -213,7 +214,9 @@ def _power_objectives(cfg, nm_mapping, norm_stats, hmax, yn, u, d) -> list:
         )
 
     def _power(yn_v, u_v, d_v):
-        return term(yn_v[:, hmax:, :], u_v[:, hmax:, :], d_v[:, hmax:, :])
+        return term(yn_v[:, scored_steps("yn", hmax), :],
+                    u_v[:, scored_steps("U", hmax), :],
+                    d_v[:, scored_steps("D", hmax), :])
 
     # Built once and reduced three ways, so the terms cannot drift apart:
     # a cost that priced a different power signal than the energy term
@@ -239,7 +242,7 @@ def _power_objectives(cfg, nm_mapping, norm_stats, hmax, yn, u, d) -> list:
         # Price is data: no gradient, non-negative. So the cost term is a
         # per-timestep *reweighting* of the energy gradient — it cannot flip
         # the sign of anything the energy term was already doing.
-        price = variable("price")[:, hmax:, 0]           # [b, P], scaled
+        price = variable("price")[:, scored_steps("price", hmax), 0]   # [b, P], scaled
         objectives.append(
             _penalty(cfg.cost_weight * torch.mean(power * price * scale),
                      "cost_loss")

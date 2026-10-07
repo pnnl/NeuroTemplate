@@ -15,7 +15,7 @@ from neurotemplate.control.pipeline import (
     evaluate_closed_loop,
 )
 from neurotemplate.control.policy import build_policy, build_reference_node
-from neurotemplate.control.scenarios import horizons
+from neurotemplate.control.scenarios import horizons, scored_steps
 from control_user_defined import actuation_bounds, reference_control
 from control_fixtures import full_setup
 
@@ -61,8 +61,8 @@ def test_reference_node_reads_the_current_step_in_the_closed_loop():
     """The Node has no input_map, so every signal arrives unwindowed — which
     is what makes _ReferenceRule's slicing the identity here.
 
-    Also pins the one-step offset: the rollout starts at `hmax - 1`, so the
-    command at `U[hmax + k]` was chosen from the band at `hmax - 1 + k`.
+    Also pins the alignment: the command at `U[hmax - 1 + k]` was chosen from
+    the band at that same index, and applied in the same rollout step.
     """
     s = _setup()
     cfg, sysid_cfg, nm, ns = s["cfg"], s["sysid_cfg"], s["nm"], s["norm_stats"]
@@ -72,11 +72,11 @@ def test_reference_node_reads_the_current_step_in_the_closed_loop():
         cfg, sysid_cfg, cl, s["test_dfs"], nm, ns,
     )
     _, _, hmax = horizons(cfg, sysid_cfg)
-    P = out["U"].shape[1] - hmax
-    band = slice(hmax - 1, hmax - 1 + P)
-    mid = 0.5 * (out["ymin"][:, band, :] + out["ymax"][:, band, :])
+    commands = scored_steps("U", hmax)
+    P = out["U"][:, commands].shape[1]
+    mid = 0.5 * (out["ymin"][:, commands, :] + out["ymax"][:, commands, :])[:, :P]
     umin, umax = actuation_bounds(nm, ns)
-    assert torch.allclose(out["U"][:, hmax:, :], mid.clamp(umin, umax),
+    assert torch.allclose(out["U"][:, commands, :], mid.clamp(umin, umax),
                           atol=1e-5)
     assert 0.0 <= results.comfort_violation_rate <= 1.0
 

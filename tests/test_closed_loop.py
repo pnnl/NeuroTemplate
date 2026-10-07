@@ -5,7 +5,9 @@ shapes, and gradients reach ONLY the policy (dynamics stays frozen).
 
 import torch
 
-from neurotemplate.control.scenarios import build_window_dict, build_loaders, horizons
+from neurotemplate.control.scenarios import (
+    build_window_dict, build_loaders, horizons, scored_steps,
+)
 from neurotemplate.control.policy import build_policy
 from neurotemplate.control.closed_loop import build_closed_loop, build_control_loss, build_problem
 from control_fixtures import (
@@ -31,9 +33,32 @@ def test_closed_loop_rollout_shapes():
     )
     out = cl(data)
     n = data["yn"].shape[0]
-    # seed (hmax) + P appended predictions / actions
+    # seed + P appended predictions / actions; U's seed is one shorter
     assert out["yn"].shape == (n, hmax + P, len(nm["Y"]))
-    assert out["U"].shape == (n, hmax + P, len(nm["U"]))
+    assert out["U"].shape == (n, hmax - 1 + P, len(nm["U"]))
+
+
+def test_the_first_prediction_already_responds_to_the_policy():
+    """The dynamics applies the policy's command in the step it was chosen.
+
+    With U seeded as long as yn, the policy's command landed one index past
+    where the dynamics read, so yn[hmax] was driven by recorded data and the
+    policy trained against a one-step actuation delay the plant does not have.
+    """
+    s = full_setup()
+    cfg, sysid_cfg, nm = s["cfg"], s["sysid_cfg"], s["nm"]
+    _, _, hmax = horizons(cfg, sysid_cfg)
+
+    policy = build_policy(cfg, sysid_cfg, nm, s["norm_stats"])
+    cl = build_closed_loop(s["dyn_node"], policy, cfg, sysid_cfg)
+    data = build_window_dict(
+        s["norm_df"], cfg, sysid_cfg, nm, s["norm_stats"],
+        P=cfg.train_pred_steps, stride=cfg.in_steps,
+    )
+    cl(data)["yn"][:, hmax, :].sum().backward()
+
+    grads = [p.grad for p in policy.callable.parameters() if p.requires_grad]
+    assert any(g is not None and g.abs().sum() > 0 for g in grads)
 
 
 def test_gradients_only_reach_policy():
@@ -94,20 +119,21 @@ def test_gru_surrogate_rolls_out_and_warms_up():
     out = cl(dict(data))
     n = data["yn"].shape[0]
     assert out["yn"].shape == (n, hmax + P, len(nm["Y"]))
-    assert out["U"].shape == (n, hmax + P, len(nm["U"]))
+    assert out["U"].shape == (n, hmax - 1 + P, len(nm["U"]))
 
     # Reset: two forwards on the same window must agree.
     assert torch.allclose(out["yn"], cl(dict(data))["yn"])
 
     # The surrogate warms from its own h_sys-wide window ending at hmax-1, so
     # feeding that window to a freshly reset block reproduces the first
-    # prediction. Control never has to know those indices — SystemPreview's
+    # prediction. The window is read from `out`, because its last U row is the
+    # policy's first command rather than recorded data. Control never has to know those indices — SystemPreview's
     # input_map derives the window from the model's declared in_steps.
     model = dyn_node.callable
     model.fy.reset()
     with torch.no_grad():
         expected = model(*[
-            data[key][:, hmax - h_sys:hmax, :].reshape(data[key].shape[0], -1)
+            out[key][:, hmax - h_sys:hmax, :].reshape(out[key].shape[0], -1)
             for key in ("yn", "U", "D")
         ])
     assert torch.allclose(out["yn"][:, hmax, :], expected, atol=1e-6)
@@ -168,7 +194,7 @@ def test_a_policy_parked_on_the_inactive_side_still_gets_gradient():
 
     zone_i, sp = nm["Y"].index(ZONE), norm_stats[SETPT]
     zone_phys = out["yn"][:, hmax:, zone_i] * norm_stats[ZONE]["stretch"] + norm_stats[ZONE]["shift"]
-    sp_phys = out["U"][:, hmax:, 0] * sp["stretch"] + sp["shift"]
+    sp_phys = out["U"][:, scored_steps("U", hmax), 0] * sp["stretch"] + sp["shift"]
     assert (sp_phys > zone_phys).all(), "the fixture should sit on the inactive side"
 
     out["yn"][:, hmax:, zone_i].sum().backward()

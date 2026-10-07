@@ -3,7 +3,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from neurotemplate.control.scenarios import build_window_dict, horizons
+from neurotemplate.control.scenarios import build_window_dict, horizons, scored_steps
 from neurotemplate.control.policy import (
     POLICY_BOUND_METHODS,
     STEQuantize,
@@ -246,7 +246,7 @@ def test_policy_output_lands_on_physical_grid():
 
     # Denormalize the policy-produced U back to °C and assert each value sits
     # on a 0.5 °C grid (modulo numerical noise).
-    U = out["U"][:, hmax:, :].detach()
+    U = out["U"][:, scored_steps("U", hmax), :].detach()
     for j, col in enumerate(nm["U"]):
         s_col = s["norm_stats"][col]
         u_phys = U[:, :, j] * s_col["stretch"] + s_col["shift"]
@@ -282,7 +282,7 @@ def test_bounds_respected_for_every_family_and_method(family, method):
         s["norm_df"], cfg, sysid_cfg, nm, s["norm_stats"],
         P=cfg.train_pred_steps, stride=cfg.in_steps,
     )
-    U = cl(data)["U"][:, hmax:, :]
+    U = cl(data)["U"][:, scored_steps("U", hmax), :]
 
     umin, umax = actuation_bounds(nm, s["norm_stats"])
     tol = 1e-4

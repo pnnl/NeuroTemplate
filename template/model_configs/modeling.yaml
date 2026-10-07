@@ -1,122 +1,106 @@
-# System-ID surrogate training config. `nt model train` reads this file by
-# default. Every field below is shown with its built-in default, commented
-# out — uncomment only what you change. Override any of them per-run with
-# `--set key=value`, and check the result with `--print-config`.
+# System-ID surrogate config. `nt model train` reads this file by default.
+# Fields are shown at their built-in defaults, commented out — uncomment what
+# you change. Override any of them per run with `--set key=value`, and check
+# the result with `--print-config`. Step counts are in timesteps of your data.
 
 # ── DATA ─────────────────────────────────────────────────────────
-# Required. Each may be one path or a list of paths; with a list, files are
-# windowed independently and pooled, so no rollout ever spans two files.
+# Required. Each may be one path or a list; files in a list are windowed
+# independently and pooled, so no window spans two files.
 train_data_path: data/train.csv
 dev_data_path: data/dev.csv
 test_data_path: data/test.csv
-# JSON of known gradient signs; required when grad_gain > 0. The Jacobian is
-# taken downstream of the pre-block, so a column declared `demand` in
-# block_mapping is differentiated as the demand feature, not the raw
-# setpoint: its sign here is the declared `sign` (-1 for cooling), which is
-# the opposite of what the setpoint itself would get.
-# grad_path: data/grad/mapping.json
 # batch_size: 256
-# Normalization: min_max | abs_max | z_score | null (none).
+# min_max | abs_max | z_score | null. Per-column overrides: column_norm_config.
 # norm_type: z_score
-# Substring patterns; matching columns are dropped before Y/U/D mapping.
+# Substring patterns; data_mapping drops matching columns.
 # exclude_columns: []
-# Path or dotted module name of the hooks file. Unset = modeling_user_defined.py in CWD.
+# Hooks file (path or dotted module). Unset = modeling_user_defined.py in CWD.
 # user_hooks_path: null
 
 # ── MODEL ────────────────────────────────────────────────────────
-# Family: mlp | nssm | lssm | gru | 2r2c | dummy. "2r2c" is the grey-box
-# thermal model — see the 2R2C block below. "dummy" is a passthrough used to
-# mint a checkpoint without identifying anything.
+# Family: mlp | nssm | lssm | gru | 2r2c.
+#   2r2c   grey-box thermal network: a state, a hidden mass, conduction to
+#          ambient, a heat input. Stable under any input by construction,
+#          with storage time constants you can read and check — the family
+#          for a temperature a controller will plan against.
+#   mlp, nssm, lssm, gru   black boxes. Often the best fit, but nothing
+#          bounds a long rollout; read the reportcard's rollout-stability
+#          and physics sections before steering with one.
+# Families can be mixed, one per block of Y channels — see `block_mapping`
+# in modeling_user_defined.py (e.g. one 2r2c block per zone, an mlp for a meter).
 # model: nssm
-# Context length: how much history the model sees before the first scored
-# prediction, and the stride between training windows. Every family reads it as
-# a flattened input window; gru and 2r2c also carry a hidden state, so during a
-# rollout their memory runs past in_steps.
+# History the model reads before its first prediction, and the stride between
+# training windows. gru and 2r2c also carry state through a rollout.
 # in_steps: 12
-# Hidden width is 2**log2_hidden_size.
-# log2_hidden_size: 8
+# Network width is 2**log2_hidden_size. Under 2r2c this net only maps the
+# columns you left undeclared to a heat flow, and it can be very small.
+# Larger nets tend to buy fit with physics: grow one when the reportcard
+# says the model underfits, not because dev loss went down.
+# log2_hidden_size: 6
 # num_layers: 3
-# Predict the delta from the current state instead of the state itself.
+# Predict the change from the current state rather than the state.
 # residual: true
-# Give each block from the block_mapping hook its own sub-model, with its own
-# parameters and hidden state. mlp and gru only; 2r2c is always per-block.
-# A block that names its own `model` needs no flag — this one is for splitting
-# every block under a single family. (Field name kept for compatibility.)
+# Split every block under one mlp or gru family. Not needed when a block
+# names its own `model`; 2r2c is always per-block.
 # per_block: false
 
 # ── 2R2C ─────────────────────────────────────────────────────────
-# Only read when model: 2r2c. The RC network's three component time constants
-# in hours — zone<->ambient, zone<->mass from the zone's side, and mass<->zone
-# from the mass's side. The last two differ by the capacitance ratio
-# C_mass / C_zone, so 1 against 4 makes the mass four times heavier than the
-# air. The defaults give a 0.6 h fast mode and a 13.4 h slow one on 5-minute
-# data; the reportcard prints what you actually got.
-#
-# These are a prior, not a fit. The mass temperature is unobserved, so a
-# training rollout cannot identify them, and left trainable the optimizer
-# shortens the slow mode to hide a mass it had to guess. Set them from what
-# you know: a measured free-decay time constant is what tau_slow should match.
+# Read by any 2r2c block. The storage prior, in hours: zone<->ambient,
+# zone<->mass from the zone's side, mass<->zone from the mass's side. The mass
+# is unobserved, so training cannot identify these — set them from what you
+# know (`nt data decay` fits the envelope constant from free-decay episodes)
+# and check the resulting modes on the reportcard. Once a block declares
+# `ambient`, rc_tau_ambient_h is only the starting value of a learned rate.
 # rc_tau_ambient_h: 2.0
 # rc_tau_zone_mass_h: 1.0
 # rc_tau_mass_zone_h: 4.0
-# Let training move the three above. Worth it only when the rollout is long
-# relative to the slow mode and the data excites it.
+# Let training move the three above. Only with rollouts long enough to excite
+# the slow mode; otherwise it shortens the slow mode to hide a bad guess.
 # rc_train_taus: false
-#
-# Learning rate for the scalars of a declared branch (block_mapping's
-# `inputs` / `ambient`): the ambient rate, the linear coefficients, the
-# coil's capacity and ramp. These are physical quantities with units of
-# travel to cover where a network weight moves in thousandths, and Adam
-# steps a raw parameter by about `lr` per update — at `lr` they stall near
-# their start. The storage priors above stay at `lr`.
+# Learning rate for 2r2c's physical scalars (declared-branch coefficients,
+# and the storage rates when trainable). At `lr` they barely leave their start.
 # rc_branch_lr: 0.05
 
 # ── TRAIN ────────────────────────────────────────────────────────
 # epochs: 300
-# Print cadence, in epochs.
 # epoch_verbose: 1
-# Epochs before early stopping is allowed to trigger.
+# Epochs before early stopping may trigger, then epochs without improvement.
 # warmup: 5
 # patience: 25
-# Rollout length during training; each window is in_steps + train_pred_steps.
+# Rollout length per training window. A rollout much shorter than the
+# plant's slow dynamics lets a model re-read its inputs instead of learning
+# to integrate them.
 # train_pred_steps: 48
-# Curriculum stages, each multiplying train_pred_steps by curriculum_ratio.
-# 0 disables the curriculum.
+# Stages that each multiply train_pred_steps by curriculum_ratio. 0 = off.
 # curriculum_steps: 0
 # curriculum_ratio: 4.0
 # lr: 0.001
-
-# ── DEV ──────────────────────────────────────────────────────────
-# Fixed validation horizon, so dev loss stays comparable across curriculum stages.
+# Fixed validation horizon, so dev loss compares across curriculum stages.
 # dev_pred_steps: 48
-
-# ── TEST ─────────────────────────────────────────────────────────
-# Evaluation window length, in_steps warmup included.
+# Test window length (in_steps included) and stride. The defaults are one
+# day of 5-minute data.
 # test_window: 287
-# Gap between the start of consecutive test windows.
 # test_stride: 288
 
 # ── LOSS ─────────────────────────────────────────────────────────
-# Weight on plain state-tracking error.
-# ref_gain: 1.0
-# Weight on matching the first difference (velocity) of each channel.
-# vel_gain: 0.0
-# Weight on penalizing velocity sign errors (softplus-shaped).
-# sgn_gain: 0.0
+# ref_gain: 1.0          # state-tracking error
+# vel_gain: 0.0          # error in each channel's first difference
+# sgn_gain: 0.0          # penalty on first-difference sign errors
 # sgn_steepness: 2.0
 
-# ── STAGED CHANNELS (binary / ordinal heads) ─────────────────────
-# A staged channel is usually a rare-event channel, and neither MSE nor a
-# midpoint snap values the rare level. Both settings are read off the data.
-# Weight each levelled head's loss by inverse square-root training frequency of its levels.
+# ── BINARY / ORDINAL HEADS ───────────────────────────────────────
+# Weight each levelled head's loss by inverse square-root level frequency.
 # balance_levels: true
-# After training, move each ordinal head's decision thresholds to the
-# balanced-accuracy optimum on dev rollouts (reported on the reportcard).
+# After training, fit each ordinal head's thresholds on dev rollouts.
 # calibrate_thresholds: true
 
 # ── RUNTIME ──────────────────────────────────────────────────────
 # -1 draws a random seed and records it with the run.
 # seed: -1
+# Train this many seeds (seed, seed+1, ...) and report their spread on the
+# reportcard; only the first is saved. Differences between two configs are
+# often inside this spread on small datasets.
+# ensemble_seeds: 1
 # cpu | cuda | mps; unset auto-detects.
 # device: null
 # verbose: true
@@ -124,10 +108,9 @@ test_data_path: data/test.csv
 # ── LOGGING ──────────────────────────────────────────────────────
 # Scratch dir for run artifacts; unset generates a unique temp_<hash>.
 # savedir: temp_<random>
-# MLflow tracking store.
 # location: sqlite:///mlflow.db
 # exp: Model Training
-# MLflow run name; the model family is prefixed automatically.
+# MLflow run name; the family is prefixed automatically.
 run: ""
 # plots_dir: plots
 # plot: true
@@ -135,30 +118,28 @@ run: ""
 # save_config: last_step
 
 # ── OPTUNA (nt model optuna) ─────────────────────────────────────
-# Search space lives in modeling_user_defined.hyper_args.
+# The search space is modeling_user_defined.hyper_args.
 # n_trials: 100
 # study_name: study
-# Epochs per search trial; the winner is retrained for the full `epochs`.
+# Epochs per trial; the winner is retrained for the full `epochs`.
 # trial_epochs: 100
 # optuna_dir: optuna_dbs
-# Seeds averaged per trial, to stop noise winning the search.
+# Seeds averaged per trial.
 # trial_seeds: 3
 
-# ── PHYSICS PENALTIES ────────────────────────────────────────────
-# Gradient-sign penalty weight; > 0 requires grad_path. 0 disables.
+# ── PHYSICS ──────────────────────────────────────────────────────
+# Gradient-sign penalty, evaluated at random off-trajectory points. 0 = off;
+# > 0 requires grad_path (written by write_gradient_mapping in
+# modeling_user_defined.py). Its useful scale is dataset-specific — size it
+# by what the physics section does, not by switching it on.
 # grad_gain: 0.0
-# Random off-trajectory points sampled per step for the gradient penalty.
+# grad_path: data/grad/mapping.json
 # grad_n_samples: 128
-# The physics scenarios are assertions, not a loss term: whenever
-# modeling_user_defined.synth_cfg returns a SynthSpec, the run asserts them
-# after training and reports pass/fail per scenario in physical units. There is
-# no weight to tune. Physicality during training is grad_gain's job.
-# Scenario instances per check, and how long each one is rolled out, in HOURS
-# (converted against the data's own sampling frequency). A longer horizon is a
-# harder test — a model can hold for 30 minutes and diverge over 4 hours — and
-# the reachability bound is only as meaningful as the time it was given.
+# The physics checks (equilibrium, step response, reachability, free decay)
+# run after training whenever synth_cfg returns a spec. Instances per check,
+# and horizon in hours: raise the count if pass rates swing between seeds,
+# and keep the horizon comparable to the plant's slow time constant.
 # synth_n_scenarios: 32
 # synth_hours: 4.0
-# Scenario instances drawn on the diagnostic figures.
+# Instances drawn on the diagnostic figures.
 # synth_n_plot: 4
-# (Their y-axis unit comes from the state columns' own "[unit]" suffix.)

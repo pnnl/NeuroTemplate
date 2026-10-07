@@ -1,6 +1,7 @@
-# Smallest run that exercises the whole control pipeline. Use it to check the
-# hooks, the closed-loop assembly, and the reportcard before training for real:
+# A 2-epoch run that exercises the whole control pipeline — hooks, closed
+# loop, reportcard — before you train for real:
 #   nt control train --config control_configs/debug.yaml --set sysid_run_id=<id>
+# Copy the band (and residual_delta, if you use one) from your real config.
 
 sysid_run_id: ""
 
@@ -11,14 +12,10 @@ test_data_path: data/test.csv
 in_steps: 4
 train_pred_steps: 4
 
-band_lo: 20.0
-band_hi: 26.0
-band_width_min: 0.5
-band_width_max: 2.0
+# Required, in the physical units of the regulated channel.
+band_lo: null
+band_hi: null
 
-energy_weight: 0.0
-
-policy: mlp
 log2_policy_hidden: 3
 policy_layers: 1
 

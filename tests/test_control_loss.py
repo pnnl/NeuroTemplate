@@ -16,7 +16,7 @@ def _data_dict(s, y_ctrl_value):
     W = hmax + P
     return {
         "yn": torch.full((b, W, ny), float(y_ctrl_value)),
-        "U": torch.zeros(b, W, nu),
+        "U": torch.zeros(b, W - 1, nu),
         "D": torch.zeros(b, W, nd),
         "ymin": torch.zeros(b, W, n_ctrl),
         "ymax": torch.ones(b, W, n_ctrl),

@@ -127,8 +127,9 @@ class ControlConfig:
     # mis-weighted for one of them.
     du_weight: Union[float, list[float], dict[str, float]] = 10
     # Effort/energy term weight. > 0 requires control_user_defined.power_metric
-    # to be implemented (fail-fast at problem build).
-    energy_weight: float = 0.1
+    # to be implemented (fail-fast at problem build), so it defaults off like
+    # the other two power reductions below.
+    energy_weight: float = 0.0
     # Energy-cost weight: multiplies mean_t(price * power), in $/h. > 0
     # additionally requires the three price paths + price_scale above.
     cost_weight: float = 0.0

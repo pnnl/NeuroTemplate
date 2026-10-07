@@ -14,7 +14,7 @@ from neurotemplate.control.pipeline import (
     clears_reference, evaluate_baseline, evaluate_closed_loop, train_policy,
 )
 from neurotemplate.control.policy import build_policy, reference_over_horizon
-from neurotemplate.control.scenarios import build_loaders, horizons
+from neurotemplate.control.scenarios import build_loaders, horizons, scored_steps
 from control_fixtures import full_setup, install_price
 
 
@@ -61,7 +61,7 @@ def test_a_residual_policy_trains_and_stays_in_its_box(tmp_path):
     # quantization — the guarantee the residual exists to give.
     u_ref = reference_over_horizon(cfg, out, hmax, nm, ns)
     stretch = torch.tensor([ns[c]["stretch"] for c in nm["U"]])
-    delta = ((out["U"][:, hmax:, :] - u_ref) * stretch).abs()
+    delta = ((out["U"][:, scored_steps("U", hmax), :] - u_ref) * stretch).abs()
     assert float(delta.max()) <= cfg.residual_delta + 1e-4
     assert results.residual.max_abs_delta <= cfg.residual_delta + 1e-4
 

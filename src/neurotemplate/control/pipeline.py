@@ -51,6 +51,7 @@ from neurotemplate.control.scenarios import (
     build_window_dict_multi,
     horizons,
     price_scale,
+    scored_steps,
 )
 from neurotemplate.hooks import load_control_hooks
 
@@ -175,11 +176,12 @@ def evaluate_closed_loop(
     # Plumb source_idx through `out` so plot_closed_loop can route per-batch.
     out["source_idx"] = source_idx
 
-    y_ctrl = to_physical(out["yn"][:, hmax:, reg_idx], regulated, norm_stats)  # [b,P,nc]
-    ymin = to_physical(data["ymin"][:, hmax:, :], regulated, norm_stats)
-    ymax = to_physical(data["ymax"][:, hmax:, :], regulated, norm_stats)
+    y_ctrl = to_physical(out["yn"][:, scored_steps("yn", hmax), reg_idx],
+                         regulated, norm_stats)  # [b,P,nc]
+    ymin = to_physical(data["ymin"][:, scored_steps("ymin", hmax), :], regulated, norm_stats)
+    ymax = to_physical(data["ymax"][:, scored_steps("ymax", hmax), :], regulated, norm_stats)
 
-    step_hours = hours_per_step(out["t"][:, hmax:, :])
+    step_hours = hours_per_step(out["t"][:, scored_steps("t", hmax), :])
     comfort = comfort_metrics(y_ctrl, ymin, ymax, regulated, step_hours)
     # Two pooled headline numbers across all regulated channels. The rate is
     # what an operator asks about; the exceedance is what to tune on, because a
@@ -193,7 +195,7 @@ def evaluate_closed_loop(
     tracking = per_channel_metrics(y_ctrl, mid, regulated)
 
     u_cols = nm_mapping["U"]
-    U = to_physical(out["U"][:, hmax:, :], u_cols, norm_stats)
+    U = to_physical(out["U"][:, scored_steps("U", hmax), :], u_cols, norm_stats)
     mean_abs_du = (U[:, 1:, :] - U[:, :-1, :]).abs().mean().item()
 
     # Per-control behaviour, in the same physical units as the commands. The
@@ -210,13 +212,15 @@ def evaluate_closed_loop(
     energy = None
     if getattr(hooks, "POWER_METRIC_IMPLEMENTED", False):
         power = hooks.power_metric(
-            out["yn"][:, hmax:, :], out["U"][:, hmax:, :], out["D"][:, hmax:, :],
+            out["yn"][:, scored_steps("yn", hmax), :],
+            out["U"][:, scored_steps("U", hmax), :],
+            out["D"][:, scored_steps("D", hmax), :],
             nm_mapping, norm_stats,
         )
         # The tariff rides through the rollout untouched, so it is already
         # co-indexed with the power it prices.
         price = (None if "price" not in out else
-                 out["price"][:, hmax:, 0] * price_scale(cfg))
+                 out["price"][:, scored_steps("price", hmax), 0] * price_scale(cfg))
         energy = energy_metrics(power, step_hours, price)
 
     # How much of the ±Δ box a residual policy actually used. Replaying the
@@ -454,21 +458,26 @@ def plot_closed_loop(
     regulated, reg_idx = regulated_channels(hooks, nm_mapping)
     u_cols = nm_mapping["U"]
 
-    y = to_physical(out["yn"][:, hmax:, reg_idx], regulated, norm_stats).cpu()
-    ymin = to_physical(out["ymin"][:, hmax:, :], regulated, norm_stats).cpu()
-    ymax = to_physical(out["ymax"][:, hmax:, :], regulated, norm_stats).cpu()
-    U = to_physical(out["U"][:, hmax:, :], u_cols, norm_stats).cpu()
+    y = to_physical(out["yn"][:, scored_steps("yn", hmax), reg_idx],
+                    regulated, norm_stats).cpu()
+    ymin = to_physical(out["ymin"][:, scored_steps("ymin", hmax), :],
+                       regulated, norm_stats).cpu()
+    ymax = to_physical(out["ymax"][:, scored_steps("ymax", hmax), :],
+                       regulated, norm_stats).cpu()
+    # U[k] is the command that drove y[k] (see scored_steps).
+    U = to_physical(out["U"][:, scored_steps("U", hmax), :], u_cols, norm_stats).cpu()
 
     # Context traces overlaid on the temperature axis (denormalized), and the
     # optional power row. Both come from the use case — the library has no
     # opinion about which columns are interesting.
     d_cols, y_cols = nm_mapping["D"], nm_mapping["Y"]
     context = {
-        name: to_physical(out["D"][:, hmax:, d_cols.index(name)], [name], norm_stats).cpu()
+        name: to_physical(out["D"][:, scored_steps("D", hmax), d_cols.index(name)],
+                          [name], norm_stats).cpu()
         for name in hooks.plot_context_channels(nm_mapping)
     }
     power = {
-        name: to_physical(out["yn"][:, hmax:, y_cols.index(name)], [name],
+        name: to_physical(out["yn"][:, scored_steps("yn", hmax), y_cols.index(name)], [name],
                           norm_stats).clamp_min(0.0).cpu()
         for name in hooks.power_channels(nm_mapping)
     }
@@ -478,7 +487,7 @@ def plot_closed_loop(
     # never happened becomes obvious.
     scale = price_scale(cfg)
     price = (None if "price" not in out else
-             (out["price"][:, hmax:, 0] * scale).cpu())
+             (out["price"][:, scored_steps("price", hmax), 0] * scale).cpu())
 
     # Per-step wall-clock timestamps. `t` is `sec_elapsed`, which `get_data`
     # rebases to zero at its file's first row, so it is elapsed seconds and
@@ -486,7 +495,7 @@ def plot_closed_loop(
     # and only preserves hour-of-day for files that happen to start at
     # midnight. `source_idx` says which file each window came from, so the
     # window's real clock is that file's origin plus its elapsed seconds.
-    t_elapsed = out["t"][:, hmax:, 0].cpu().numpy()
+    t_elapsed = out["t"][:, scored_steps("t", hmax), 0].cpu().numpy()
     source_idx = out["source_idx"].cpu().numpy()
     if len(origins) <= int(source_idx.max()):
         raise ValueError(

@@ -31,7 +31,7 @@ import torch.nn as nn
 from neuromancer.system import Node
 from neuromancer.modules import blocks
 
-from neurotemplate.control.scenarios import horizons
+from neurotemplate.control.scenarios import horizons, scored_steps
 from neurotemplate.hooks import load_control_hooks
 from neurotemplate.modeling import windows
 
@@ -492,12 +492,13 @@ def reference_over_horizon(
     The rule is memoryless, so every (window, step) can be evaluated at once by
     folding time into the batch axis. What comes back is exactly the command
     the rule would have issued at each step of this trajectory, which makes
-    `U[:, hmax:] - u_ref` the *realized* residual — after quantization and
-    after the actuator clamp, i.e. the deviation that was actually deployed.
+    `U[:, scored_steps("U", hmax)] - u_ref` the *realized* residual — after
+    quantization and after the actuator clamp, i.e. the deviation that was
+    actually deployed.
 
-    Mind the one-step offset. The rollout starts at `start_iter = hmax - 1`,
-    so the command appended at `U[hmax + k]` was chosen from the signals at
-    index `hmax - 1 + k`. Reading the inputs at `hmax + k` instead would
+    The command at `U[hmax - 1 + k]` was chosen from the signals at that same
+    index, so the rule's inputs are read over the command slice, not over
+    `[hmax:]` like the scored outputs. Reading them at `hmax + k` would
     silently compare each command against the *next* step's rule, which on a
     band that moves is a residual that never was.
     """
@@ -506,10 +507,10 @@ def reference_over_horizon(
         raise NotImplementedError(
             "control_user_defined.reference_control is not defined."
         )
-    P = out["U"].shape[1] - hmax
-    start = hmax - 1
-    parts = [out[k][:, start:start + P, :]
-             for k in ("yn", "ymin", "ymax", "D")]
+    # The other keys run one step past U, so bound the slice by U's length.
+    steps = slice(scored_steps("U", hmax).start, out["U"].shape[1])
+    P = steps.stop - steps.start
+    parts = [out[k][:, steps, :] for k in ("yn", "ymin", "ymax", "D")]
     b = parts[0].shape[0]
     flat = [x.reshape(b * P, x.shape[-1]) for x in parts]
     return rule(*flat, nm_mapping, norm_stats).reshape(b, P, -1)

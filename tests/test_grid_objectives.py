@@ -16,7 +16,7 @@ from neurotemplate.control.closed_loop import (
     build_problem,
 )
 from neurotemplate.control.policy import build_policy
-from neurotemplate.control.scenarios import build_window_dict, horizons
+from neurotemplate.control.scenarios import build_window_dict, horizons, scored_steps
 from control_fixtures import (
     PRICE_SCALE,
     alternating_price,
@@ -46,7 +46,9 @@ def _power_of(s, out):
     import control_user_defined as hooks
     _, _, hmax = horizons(s["cfg"], s["sysid_cfg"])
     return hooks.power_metric(
-        out["yn"][:, hmax:, :], out["U"][:, hmax:, :], out["D"][:, hmax:, :],
+        out["yn"][:, scored_steps("yn", hmax), :],
+        out["U"][:, scored_steps("U", hmax), :],
+        out["D"][:, scored_steps("D", hmax), :],
         s["nm"], s["norm_stats"],
     )
 

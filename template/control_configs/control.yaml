@@ -1,11 +1,11 @@
 # DPC policy training config. `nt control train` reads this file by default.
-# Every field below is shown with its built-in default, commented out —
-# uncomment only what you change. The Y/U/D roles and the normalization are
-# inherited from the frozen surrogate, so they are not repeated here.
+# Fields are shown at their built-in defaults, commented out — uncomment what
+# you change. Y/U/D roles and normalization come from the frozen surrogate.
+# Step counts are in timesteps of your data.
 
 # ── SURROGATE ────────────────────────────────────────────────────
-# Required: the MLflow run id printed by `nt model train` ("Finished run: ...").
-# Pass it on the command line instead with --set sysid_run_id=<id>.
+# Required: the MLflow run id `nt model train` printed ("Finished run: ...").
+# Or pass it per run: --set sysid_run_id=<id>
 sysid_run_id: ""
 # Override the run's artifact directory.
 # run_dir: null
@@ -13,163 +13,115 @@ sysid_run_id: ""
 # weights: null
 
 # ── DATA ─────────────────────────────────────────────────────────
-# Required, and never inherited from the sys-id run — the policy should be
-# trained on the window distribution you want it to control over.
+# Required, never inherited from the sys-id run: train the policy on the
+# windows you want it to control over.
 train_data_path: data/train.csv
 dev_data_path: data/dev.csv
 test_data_path: data/test.csv
 # batch_size: 256
-# Path or dotted module name of the hooks file. Unset = control_user_defined.py in CWD.
+# Hooks file (path or dotted module). Unset = control_user_defined.py in CWD.
 # user_hooks_path: null
 
-# ── ENERGY TARIFF (optional; required together for cost_weight > 0) ──
-# One CSV per split — a timestamp column plus one price column, in $/kWh.
-# Sampled independently of the weather windows, so the test file is where to
-# put whatever price swings you want the eval judged on.
+# ── HORIZON ──────────────────────────────────────────────────────
+# Closed-loop rollout length in training. It has to span the behaviour you
+# want learned — an action and the payoff it buys (a pre-cool and the coast
+# after it, a daily peak) must fit inside one rollout.
+# train_pred_steps: 48
+# History the policy sees.
+# in_steps: 12
+# Future disturbance steps the policy previews. Ignored if the
+# preview_config hook exists — that hook replaces it entirely.
+# d_preview: 0
+
+# ── TARIFF (optional; required together for cost_weight > 0) ─────
+# One CSV per split: a timestamp column and a price column. Set all three
+# paths and price_scale, or none. Price reaches the policy and the objective
+# only; it is never a surrogate input.
 # train_price_path: null
 # dev_price_path: null
 # test_price_path: null
 # Only needed if a price CSV has more than one non-timestamp column.
 # price_column: null
-# Plant timesteps per price-file row (12 = hourly price over 5-min data).
+# Plant timesteps per price row (12 = hourly prices on 5-minute data).
 # price_repeat: 1
-# $/kWh unit the tariff is divided by so the policy sees an O(1) input.
-# Required (and must be > 0) whenever the three paths above are set.
+# Divisor so the policy sees an O(1) price.
 # price_scale: null
-# Future price steps the policy sees, on top of the current one. This is what
-# separates load *shifting* from a slightly more expensive thermostat:
-# precooling happens BEFORE the expensive block, so a policy that only sees
-# today's price can react but never shift. Cover the cycle you want it to
-# anticipate — 48 steps = 4 h on 5-minute data. A cost_weight > 0 with this
-# at 0 is flagged on the reportcard.
+# Future price steps the policy sees. Shifting load means acting before the
+# expensive hours, which a policy can only do if it sees them coming.
 # price_preview: 0
-# How each window's slice of the price record is drawn.
-#   random — a uniformly random offset (default). The tariff's peak lands at
-#     a random hour of the plant's day, which is what stops the policy from
-#     reading the price channel as a clock.
-#   day — the offset is chosen so the tariff's time of day matches the plant
-#     window's own, with the day still drawn at random. Set this when the
-#     point is to SEE pre-cooling — an 8 pm peak is drawn at the plant's
-#     8 pm, in every window and every plot. Needs plant frames with a real
-#     DatetimeIndex, which is what `get_data` produces. The trade is that a
-#     series peaking at the same hour most days becomes learnable as that
-#     hour, so confirm a price response by re-scoring the trained policy
-#     against a tariff whose peak has been moved, not from the trajectory.
+# Where each window's price slice comes from: `random` (any offset, so the
+# policy has to read the price) or `day` (same time of day as the plant
+# window — plots line up with the plant's clock, but a tariff that peaks at
+# the same hour daily becomes learnable as the clock instead).
 # price_align: random
 
-# ── HORIZON ──────────────────────────────────────────────────────
-# Closed-loop rollout length during training.
-# train_pred_steps: 48
-# How much input history the policy sees (H_ctrl).
-# in_steps: 12
-# Future disturbance steps the policy previews. IGNORED if
-# control_user_defined.preview_config exists — that hook replaces it entirely.
-# d_preview: 0
-
 # ── COMFORT BAND ─────────────────────────────────────────────────
-# Physical units of the controlled channel, so these have no sane default:
-# set all four. Per window segment, width ~ U[width_min, width_max] and the
-# lower bound ~ U[band_lo, band_hi - width].
-band_lo: 20.0
-band_hi: 26.0
-band_width_min: 0.5
-band_width_max: 2.0
-# Contiguous segments per window: 1 = constant band, k > 1 = k-1 step jumps.
-# Training on a constant band and evaluating on a jumpy one is a reasonable
-# default — the jumps make training gradients noisy.
+# Required, in the physical units of the regulated channel. Per segment,
+# width ~ U[width_min, width_max] and lower edge ~ U[band_lo, band_hi - width].
+# Train over the range of bands the policy will be handed in service.
+band_lo: null
+band_hi: null
+# band_width_min: 0.5
+# band_width_max: 2.0
+# Segments per window: 1 = constant band, k > 1 = k-1 step changes.
 # train_band_sub_samples: 1
 # test_band_sub_samples: 4
-# Evaluate against a different band than you trained on. Unset = train values.
+# A separate band for evaluation — set it to the band you will be judged
+# on, so the reportcard describes that case. Unset = the training values.
 # test_band_lo: null
 # test_band_hi: null
 # test_band_width_min: null
 # test_band_width_max: null
 
-# ── OBJECTIVE WEIGHTS ────────────────────────────────────────────
-# Penalty for leaving the comfort band.
+# ── OBJECTIVE ────────────────────────────────────────────────────
+# Weights are scale factors between terms in different units, so they do
+# not port between plants. Before training, every run prints each term's
+# share of the objective and sweeps the power signal across the actuation
+# box; the trained run's reportcard repeats the shares. A term at ~0% of
+# the trained objective is not in the objective, whatever its weight says.
+#
+# Leaving the comfort band.
 # comfort_weight: 50.0
-# Penalty on the step-to-step change in the control signal (anti-chatter).
-# A scalar covers every actuator; a list (one per U column, in the
-# surrogate's order) or a mapping weights them separately, which is worth
-# doing as soon as two actuators differ in authority — one pooled penalty is
-# then necessarily too coarse for one of them.
+# Step-to-step change in each actuator. A scalar, a list (one per U column,
+# in the surrogate's order), or a mapping keyed by column name:
 # du_weight: 10
-# du_weight: {"Zone Heating Setpoint [°C]": 10, "Zone Cooling Setpoint [°C]": 50}
-# Penalty on control_user_defined.power_metric. Must stay 0.0 until that hook
-# is implemented and POWER_METRIC_IMPLEMENTED is True — otherwise the run
-# fails at problem build.
-energy_weight: 0.0
-
-# ── GRID RESPONSE ────────────────────────────────────────────────
-# Two more reductions of the SAME power signal `energy_weight` averages, so
-# all three need power_metric. Both default to off.
+# du_weight: {"Actuator A": 10, "Actuator B": 50}
 #
-# Load shifting: weights mean_t(price · power), in $/h. Additionally requires
-# the train/dev/test_price_path + price_scale fields above, which sample
-# windows out of a real historical price series. Only solvable if the policy
-# previews the price — see price_preview above.
+# The three terms below are reductions of control_user_defined.power_metric,
+# and each > 0 requires it (POWER_METRIC_IMPLEMENTED = True).
+# Mean power.
+# energy_weight: 0.0
+# Mean price × power; also requires the TARIFF fields.
 # cost_weight: 0.0
-# Peak shaving: weights the per-window power mean M_q, averaged over the
-# batch. Same units as energy, so the two weights are directly comparable.
+# Per-window power mean M_q — 1 = plain mean, 2 = RMS, larger approaches the
+# peak. On its own it will happily raise total energy to flatten a profile,
+# so pair it with energy_weight or cost_weight.
 # peak_weight: 0.0
-# 1 = plain mean (no peak preference), 2 = RMS, larger = closer to a hard max.
 # peak_q: 4
-#
-# Two things to know before turning either on:
-#   - train_pred_steps: 48 is too short for both. At 5-minute data that is 4
-#     hours — shorter than a precool-plus-coast cycle, and blind to a daily
-#     peak. Expect 144-288 steps, which raises rollout memory roughly
-#     linearly. That is the main compute cost of the feature.
-#   - peak_weight alone will happily RAISE total energy: flattening a profile
-#     by adding off-peak load minimises M_q perfectly well. Always carry a
-#     non-zero energy_weight or cost_weight alongside it.
-
-# These weights do not port across datasets, and the library does not try to
-# guess them for you. It does check them: every run prints each term's share
-# of the objective on one batch before training, and sweeps the power signal
-# across the actuation box to see whether it has an interior minimum at all.
-# Read that output on iteration 1 — it is the cheapest thing in the run.
 
 # ── POLICY ───────────────────────────────────────────────────────
-# Family: mlp | linear ("linear" is a single saturated affine feedback law,
-# u = sat(K x + b) — small enough to read off, and a good sanity baseline).
+# mlp | linear. `linear` is one saturated affine law, u = sat(Kx + b): few
+# parameters, gains you can read, and hard to overfit to the surrogate.
 # policy: mlp
-# gelu | relu | tanh | silu. Ignored for the linear policy.
+# gelu | relu | tanh | silu (mlp only).
 # policy_nonlin: gelu
-# How the output is squashed into the actuator box: sigmoid_scale (smooth,
-# never quite reaches the limits) or relu_clamp (hard clip).
+# How the output is squashed into the actuation box: sigmoid_scale (smooth)
+# or relu_clamp (hard clip).
 # policy_bound_method: sigmoid_scale
-# Hidden width is 2**log2_policy_hidden. Ignored for the linear policy.
+# Width 2**log2_policy_hidden (mlp only).
 # log2_policy_hidden: 6
 # policy_layers: 2
-# Snap the policy output to a grid, in the plant's physical units (e.g. 0.5
-# for half-degree HVAC thermostat steps). Straight-through, so gradients
-# still flow. 0 disables — the default, since a grid step is one plant's
-# actuator resolution. Note a grid coarser than band_width_min cannot fit
-# inside the narrowest band and will cost you violations.
+# Snap the output to a grid, in physical units (the actuator's resolution).
+# Straight-through, so gradients still flow. 0 = continuous.
 # setpoint_step: 0.0
 
 # ── RESIDUAL CONTROL ─────────────────────────────────────────────
-# Half-width of the residual box, in the plant's physical units. Unset (null)
-# is a plain policy over the actuation box. Set it and the policy commands
-# `reference_control(...) + δ` with |δ| <= residual_delta, which requires the
-# control_user_defined.reference_control hook.
-#
-# What it buys is not that a network finds zero easier to learn than identity —
-# it is a trust region on surrogate error. Training's gradient and its
-# model-selection criterion both come from a surrogate whose held-out score is
-# not the plant's, and a ±Δ box caps what that error can cost you. Δ is also
-# an operator-legible knob: "how far from the comfort rule am I willing to
-# move for money."
-#
-# Δ bounds the ACTION, not the outcome: the commanded setpoint stays within Δ
-# of the rule's, the zone temperature does not, because the plant is in
-# between. With a setpoint→zone gain under 1 °C/°C, Δ = 1 °C of setpoint is
-# comfortably under 1 °C of zone deviation. State it that way.
-#
-# 0.0 emits the reference exactly — a floor to train nothing and score.
-# A Δ smaller than setpoint_step is rejected: every δ would quantize back to
-# zero, and you would train for an hour to reproduce the rule.
+# Set to command reference_control(...) + δ with |δ| <= residual_delta, in
+# physical units (needs the reference_control hook). It bounds how far
+# surrogate error can move the plant from a rule you trust. null = a free
+# policy over the whole actuation box. 0.0 = the rule itself, which is a
+# cheap first run: it scores the rule on your surrogate. Must be at least
+# setpoint_step when the output is quantized.
 # residual_delta: null
 
 # ── TRAINING ─────────────────────────────────────────────────────
@@ -180,7 +132,8 @@ energy_weight: 0.0
 # lr: 0.001
 
 # ── EVAL ─────────────────────────────────────────────────────────
-# Long closed-loop rollout window, warmup included.
+# Closed-loop test window (warmup included) and stride. The defaults are one
+# day of 5-minute data.
 # test_window: 287
 # test_stride: 288
 
@@ -191,7 +144,7 @@ energy_weight: 0.0
 
 # ── LOGGING ──────────────────────────────────────────────────────
 # savedir: temp_<random>
-# Must point at the same store the sys-id run was logged to.
+# Must be the store the sys-id run was logged to.
 # location: sqlite:///mlflow.db
 # exp: DPC Training
 run: ""

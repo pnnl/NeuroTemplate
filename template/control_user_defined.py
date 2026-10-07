@@ -2,19 +2,19 @@
 Control hooks — the glue between the DPC machinery and *your* plant.
 
 These answer: which states are held inside a reference band, what that band
-looks like, what the actuator limits are, and (optionally) what energy
-costs. The Y/U/D roles and the normalization come from the frozen sys-id run,
-so nothing here re-derives them.
+looks like, what the actuator limits are, and optionally what power costs
+and what rule a learned policy should be measured against. The Y/U/D roles
+and the normalization come from the frozen sys-id run.
 
-Everything returned "in normalized space" uses the same per-column
-shift/stretch as the loaded surrogate (norm_stats), so it lines up directly
-with the surrogate's states and inputs.
+Everything returned "in normalized space" uses the surrogate's own
+per-column shift/stretch (norm_stats).
 
 The file must be named `control_user_defined.py` and live in the directory
 you run `nt` from, or be pointed at by `user_hooks_path` in your YAML.
 
-Fill in `regulated` first. `comfort_band_signal` and `actuation_bounds`
-below are generic and work unedited.
+Fill in REGULATED_COLUMNS first; every other required hook runs as written.
+Then consider `reference_control`: a learned policy is only worth shipping
+if it beats a simple rule, and this is how the reportcard knows the rule.
 """
 
 from __future__ import annotations
@@ -124,10 +124,15 @@ def actuation_bounds(
     Per-U-channel (umin, umax) in NORMALIZED space; the policy output is
     squashed into this box.
 
-    The default below uses each U column's observed physical range in the
-    training data, which keeps the policy inside the region the surrogate
-    was actually identified on. Replace with hard-coded physical limits if
-    the real actuator range is wider or narrower than what the data covers.
+    The default below is each U column's observed range in the training
+    data — the region the surrogate was identified on. That makes the box
+    only as wide as the data's excitation: if the data never drove an
+    actuator where you need the policy to go, the policy cannot go there
+    (the reportcard's Actuation section shows time pinned at each bound).
+    Hard-code physical
+    limits here to narrow the box, e.g. to keep one actuator out of
+    another's way; widening it past the data asks the surrogate about
+    inputs it has never seen.
     """
     u_cols = nm_mapping["U"]
     if not u_cols:
@@ -174,14 +179,9 @@ def plot_context_channels(nm_mapping: dict[str, list[str]]) -> list[str]:
 # ---------------------------------------------------------------------
 # Required when a power term is weighted: the signal they all reduce
 # ---------------------------------------------------------------------
-# Set to True once `power_metric` below is implemented. The library checks
-# this flag at problem-build time and fails fast if energy_weight > 0 while
-# it is False, so `energy_weight` must stay 0.0 in your YAML until then.
-#
-# Failing fast is the point. The tempting alternative — quietly falling back
-# to an actuation proxy when the surrogate meters no power — substitutes a
-# different objective in different units, and it is where three of this
-# library's four recorded campaigns lost iterations. See `power_metric`.
+# Set to True once `power_metric` below is implemented. Until then any
+# energy_weight / cost_weight / peak_weight > 0 fails at problem build,
+# rather than silently optimizing something you did not write.
 POWER_METRIC_IMPLEMENTED = False
 
 
@@ -194,42 +194,31 @@ def power_metric(
     norm_stats: dict[str, dict[str, float]],
 ) -> torch.Tensor:
     """
-    Instantaneous power per timestep, shape [batch, time]. The training
-    objective drives its closed-loop mean toward zero and the reportcard
-    integrates it over time.
+    Instantaneous power per timestep, shape [batch, time]: the signal that
+    energy_weight, cost_weight and peak_weight each reduce, and that the
+    reportcard integrates.
 
     Inputs are the normalized trajectories: yn [batch, time, ny],
-    U [batch, time, nu], D [batch, time, nd]. Denormalize whatever you use
-    (`x * stretch + shift`) — the library never converts units, and labels
-    the integrated result `power·h`, so returning Watts gives Wh.
+    U [batch, time, nu], D [batch, time, nd]. Denormalize what you use
+    (`x * stretch + shift`, or `_denorm` below). The library converts no
+    units: return Watts and the integral is in Wh. At each step, U is the
+    command that drove the plant into that step's yn.
 
-    The shape this should take: sum the power channels the surrogate already
-    predicts.
+    Two shapes work. If the surrogate predicts metered power, sum it — real
+    units, so the energy numbers mean something outside this run:
 
         total = sum(_denorm(yn, c, nm_mapping, norm_stats)
                     for c in power_channels(nm_mapping))
         return total.clamp_min(0.0)
 
-    Metered power channels are the best thing to return when the surrogate
-    predicts them, because the units are real and the reportcard's energy
-    numbers then mean something outside this run.
-
-    An actuation proxy such as `(setpoint - ambient) ** 2` is a legitimate
-    alternative when nothing meters power. It is a different quantity in
-    different units, so read the energy section as relative rather than
-    physical — but a term that drives good closed-loop behaviour is a good
-    term, whatever its analytic minimum looks like.
-
-    The one thing that has actually cost campaigns here is **scale**, not
-    shape: a proxy weighted to a previous dataset came out at 1.7x the entire
-    comfort objective and every pooled metric looked fine for ten consecutive
-    runs. Before training, the library prints each term's value and share of
-    the objective, and sweeps this term across each actuation box so its
-    magnitude and shape are both on screen. Compare them and set
-    `energy_weight` from what you see.
-
-    If you would rather not weight a power term at all, leave this
-    unimplemented and keep `energy_weight: 0.0`.
+    Otherwise write a proxy from the states and inputs, from the physics of
+    when the equipment draws power (e.g. a compressor that runs only while
+    the zone is above its cooling setpoint). A proxy is also worth
+    considering when a predicted power channel is staged or on/off: a
+    regression head averages it, and the policy then cannot tell *when*
+    power is drawn. Whatever you return, the gradient is what the policy
+    learns from — check its shape in the pre-training sweep across the
+    actuation box, and its scale in the objective-share printout.
     """
     raise NotImplementedError(
         "power_metric is not implemented. Keep energy_weight: 0.0 in the "
@@ -249,63 +238,56 @@ def _denorm(x: torch.Tensor, col: str, nm_mapping: dict[str, list[str]],
 # ---------------------------------------------------------------------
 # Optional: the energy tariff, for the cost objective
 # ---------------------------------------------------------------------
-# No hook here — the tariff is config, not code. Set `train_price_path`,
-# `dev_price_path` and `test_price_path` in control.yaml (one CSV per split,
-# a timestamp column plus one price column in $/kWh) plus `price_scale`, and
-# `cost_weight > 0` weights mean_t(price · power). Leave all three paths
-# unset and `cost_weight` must stay 0.0.
-#
-# **Use a real historical price series**, not a time-of-use table keyed on
-# hour-of-day: `t` (`sec_elapsed`) counts from the first row of the file
-# rather than from midnight, and a tariff that is a deterministic function of
-# the clock is one the policy can learn *as* the clock — D is strongly
-# hour-of-day correlated, so "read the price" and "read the time" collapse
-# into the same task, and you get a convincing load-shifting trace with no
-# price responsiveness in it. Real day-to-day variation is what forces the
-# policy to read the channel.
-#
-# The library samples its own window offsets out of each split's file,
-# independent of the weather windows — that is deliberate, and it is why the
-# test file is the place to put whatever price swings you want the eval
-# judged on. See control.yaml's ENERGY TARIFF section for the fields, and
-# control.scenarios.build_price for the sampling contract.
-#
-# For a real dataset: PG&E Hourly Flex Pricing. Download it once (see "How
-# Might Hourly Prices Vary?" under the FAQ at
-# https://www.pge.com/en/account/rate-plans/hourly-flex-pricing.html), or
-# fetch the hosted sample:
-#
-#   https://raw.githubusercontent.com/EladMichael/small_example_datasets/main/hourly-flex-prices-historical-sample.xlsx
-#
-# It is hourly and in .xlsx; convert it to a two-column
-# (timestamp, price [$/kWh]) CSV and set `price_repeat` to the number of
-# plant timesteps one hour spans (12 for 5-minute data).
+# No hook: the tariff is config (control.yaml's TARIFF section). Prefer a
+# real historical price series to a fixed time-of-use table: a tariff that
+# is a function of the clock can be learned as the clock, and the policy
+# never has to read the price. Price windows are sampled independently of
+# the plant windows, so put the price behaviour you want evaluated in the
+# test file. (No price data? PG&E's Hourly Flex Pricing history is public.)
 
 
 # ---------------------------------------------------------------------
 # Optional: the reference rule — baseline, and the residual policy's anchor
 # ---------------------------------------------------------------------
-# Worth the fifteen lines twice over. Defined, it does two jobs:
+# Defined, it does two jobs:
 #
-#   1. `nt control train` rolls it out on the same test windows against the
-#      same fixed-seed band and adds a learned-vs-rule table to the reportcard.
-#      It is the only thing that tells you whether the learned policy is
-#      beating the obvious rule — and the reportcard says outright that a
-#      policy which does not clear its reference should ship the reference.
-#   2. With `residual_delta` set, the policy commands `reference_control(...)
-#      + δ` with |δ| bounded, instead of commanding a setpoint outright. The
-#      rule keeps comfort; δ answers whatever else you are optimising (price,
-#      peak) inside a box you can point at. Δ is an operator-legible knob:
-#      "how far from the comfort rule am I willing to move for money."
+#   1. Baseline. `nt control train` rolls the rule out on the same test
+#      windows and band as the learned policy and adds a learned-vs-rule
+#      table to the reportcard — the only direct answer to "is the learned
+#      policy earning its keep?"
+#   2. Anchor. With `residual_delta` set, the policy commands
+#      `reference_control(...) + δ`, |δ| <= residual_delta: the rule does the
+#      routine work and the policy only adjusts it, inside a bound you chose.
 #
-# Three deliberate restrictions: current step only, unflattened (the library
-# slices the window for you); memoryless (a rule with its own integrator is
-# out of scope — use `build_baseline_policy` below for that); normalized in,
-# normalized U out, the same space the learned policy emits.
+# Current step only, memoryless, normalized in and normalized U out — the
+# same space the learned policy emits. A rule that needs its own state goes
+# in `build_baseline_policy` below instead; define one or the other, never
+# both (the library raises).
 #
-# LEAVE COMMENTED OUT if you have no rule. Do not define it *and*
-# `build_baseline_policy` — two copies of one rule is two places for the
-# cooling inset to drift, and the library raises rather than pick one.
+# Leave it commented out if you have no rule. The example below is for one
+# setpoint per regulated channel; `bracket_band` after it is a rule for the
+# common case of a heating/cooling setpoint pair holding one band.
+#
+# @beartype
+# def reference_control(
+#     yn_now: torch.Tensor,      # [b, ny]     current state, normalized
+#     ymin_now: torch.Tensor,    # [b, n_ctrl] current band, normalized
+#     ymax_now: torch.Tensor,    # [b, n_ctrl]
+#     d_now: torch.Tensor,       # [b, nd]     current disturbances, normalized
+#     nm_mapping: dict[str, list[str]],
+#     norm_stats: dict[str, dict[str, float]],
+# ) -> torch.Tensor:             # [b, nu]     normalized U
+#     """Aim each setpoint at the middle of its channel's band."""
+#     regulated_cols, _ = regulated(nm_mapping)
+#     y_shift = torch.tensor([norm_stats[c]["shift"] for c in regulated_cols])
+#     y_stretch = torch.tensor([norm_stats[c]["stretch"] for c in regulated_cols])
+#     target = 0.5 * (ymin_now + ymax_now) * y_stretch + y_shift   # physical
+#
+#     u_cols = nm_mapping["U"]                       # one per regulated channel
+#     u_shift = torch.tensor([norm_stats[c]["shift"] for c in u_cols])
+#     u_stretch = torch.tensor([norm_stats[c]["stretch"] for c in u_cols])
+#     umin, umax = actuation_bounds(nm_mapping, norm_stats)
+#     return torch.clamp((target - u_shift) / u_stretch, umin, umax)
 
 
 @beartype
@@ -316,48 +298,33 @@ def bracket_band(
     cool_inset: float = 0.0,
     heat_inset: float = 0.0,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Straddle a comfort band with a (cooling, heating) setpoint pair.
+    """Straddle a band with a (cooling, heating) setpoint pair, in physical units.
 
-    Example code for the commented-out `reference_control` below, not a
-    library-blessed algorithm: it is a two-stage HVAC thermostat convention
-    (bracket the band instead of both stages aiming at one target) specific
-    to a heating/cooling actuator pair, so it lives in the template rather
-    than in `control.policy` — the library has no opinion on what a
-    rule-based controller should do, only on how one plugs into the residual
-    policy and the baseline table `evaluate_baseline` scores. Adapt or
-    replace this for a different plant's actuators.
+    Example code for `reference_control`, not library behaviour. Heating sits
+    at the band floor and cooling at the ceiling, so the two bracket the band
+    instead of both chasing one target. Both snap to the `step` grid *toward
+    the band interior* (heating up, cooling down), never outside it.
 
-    It puts heating at the band floor and cooling at the band ceiling so the
-    two actuators bracket the band, instead of both chasing one target.
-
-    Everything is in physical units (°C), and both setpoints are snapped to the
-    `step` grid **toward the band interior** — heating rounds up, cooling
-    down. Rounding outward would place a setpoint outside the band it is meant
-    to hold, which is the easy mistake here.
-
-    The insets pull each setpoint further inside its edge. `cool_inset` is
-    normally the one that matters: a zone floats *above* its cooling setpoint
-    because the plant's setpoint→zone gain is well under 1 °C/°C, so aiming
-    exactly at the ceiling violates constantly. Treat the inset as a
-    *correction* for that gain, measured on the plant — not as a safety margin
-    to be increased for comfort. Overshooting it is actively harmful: once the
-    two setpoints collide the rule stops bracketing and falls back to the
-    collapse branch below, and on a coarse grid that can happen within a single
-    grid step.
-
-    When the band is too narrow to seat both setpoints on the grid, both
-    collapse to one grid point near the band midpoint. Letting heating command
-    *above* cooling would make the two stages fight each other, which is worse
-    than giving up the deadband.
+    The insets pull each setpoint further inside its edge. A zone usually
+    floats somewhat above its cooling setpoint, so `cool_inset` corrects for
+    that — measure it on the plant rather than treating it as a comfort
+    margin: too large and the two setpoints collide. When the band is too
+    narrow to seat both on the grid, both collapse to the grid point nearest
+    the midpoint, so heating never commands above cooling.
 
     Args:
-        lo, hi: comfort band edges, any broadcast-compatible shape, in °C.
-        step: setpoint quantization in °C (e.g. 0.5). Must be > 0.
-        cool_inset: °C to pull the cooling setpoint below the band ceiling.
-        heat_inset: °C to pull the heating setpoint above the band floor.
+        lo, hi: band edges, any broadcast-compatible shape.
+        step: setpoint grid (e.g. 0.5). Must be > 0.
+        cool_inset: pull the cooling setpoint below the ceiling by this much.
+        heat_inset: pull the heating setpoint above the floor by this much.
 
     Returns:
         (cooling, heating), each the shape of `lo`/`hi` broadcast together.
+
+    Wired into `reference_control`, after denormalizing the band as above:
+
+        cool, heat = bracket_band(lo, hi, step=0.5, cool_inset=0.3)
+        phys = torch.cat([cool, heat], dim=-1)    # U order: [cooling, heating]
     """
     if step <= 0:
         raise ValueError(f"step must be > 0, got {step}")
@@ -374,52 +341,13 @@ def bracket_band(
     return torch.where(collapse, mid, cool), torch.where(collapse, mid, heat)
 
 
-# @beartype
-# def reference_control(
-#     yn_now: torch.Tensor,      # [b, ny]     current state, normalized
-#     ymin_now: torch.Tensor,    # [b, n_ctrl] current band, normalized
-#     ymax_now: torch.Tensor,    # [b, n_ctrl]
-#     d_now: torch.Tensor,       # [b, nd]     current disturbances, normalized
-#     nm_mapping: dict[str, list[str]],
-#     norm_stats: dict[str, dict[str, float]],
-# ) -> torch.Tensor:             # [b, nu]     normalized U
-#     """Bracket the comfort band with a (cooling, heating) setpoint pair."""
-#     regulated_cols, _ = regulated(nm_mapping)
-#     s = norm_stats[regulated_cols[0]]
-#     lo = ymin_now * s["stretch"] + s["shift"]        # °C
-#     hi = ymax_now * s["stretch"] + s["shift"]
-#     cool, heat = bracket_band(lo, hi, step=0.5, cool_inset=0.3)
-#
-#     umin, umax = actuation_bounds(nm_mapping, norm_stats)
-#     u_cols = nm_mapping["U"]                         # [cooling, heating]
-#     phys = torch.cat([cool, heat], dim=-1)
-#     shift = torch.tensor([norm_stats[c]["shift"] for c in u_cols])
-#     stretch = torch.tensor([norm_stats[c]["stretch"] for c in u_cols])
-#     return torch.clamp((phys - shift) / stretch, umin, umax)
-#
-# On what rule to write, for a two-actuator heating/cooling setpoint pair:
-# **bracket the band** — heating at the band floor, cooling at (or just
-# inside) the band ceiling, so the two setpoints straddle the band rather than
-# both aiming at one target. `bracket_band` above implements it, and its
-# docstring records the two details that are easy to get backwards: round
-# each setpoint toward the band *interior*, and treat the cooling inset as a
-# correction for a setpoint→zone gain under 1 °C/°C, not as a safety margin
-# (too large and the two setpoints collide and it stops bracketing at all).
-#
-# A plain band-midpoint rule (`0.5 * (ymin + ymax)` on both actuators) is
-# simpler and worth having as a sanity check, but it does not bracket, so it
-# gives up the deadband the two actuators could be holding. See
-# tests/fixtures/control_user_defined.py for that one, complete.
-
-
 # ---------------------------------------------------------------------
-# Optional escape hatch: a baseline a memoryless rule cannot express
+# Optional: a baseline a memoryless rule cannot express
 # ---------------------------------------------------------------------
-# Only for a rule that genuinely needs its own state (an integrator, a
-# staged-equipment timer). Return a Neuromancer Node writing ["U"] with no
-# trainable parameters — it is evaluated, never trained — reading any of the
-# closed-loop signals ("yn", "ymin", "ymax", "D"). Mutually exclusive with
-# `reference_control`, and it cannot anchor a residual policy.
+# For a rule that needs its own state (an integrator, an equipment timer).
+# Return a Neuromancer Node writing ["U"] with no trainable parameters,
+# reading any of "yn", "ymin", "ymax", "D". It is scored, never trained, and
+# cannot anchor a residual policy.
 #
 # def build_baseline_policy(cfg, sysid_cfg, nm_mapping, norm_stats):
 #     from neuromancer.system import Node
@@ -430,27 +358,16 @@ def bracket_band(
 
 
 # ---------------------------------------------------------------------
-# Optional: how many future steps of each signal the policy previews
+# Optional: per-signal preview
 # ---------------------------------------------------------------------
-# LEAVE THIS COMMENTED OUT unless you want per-signal preview. If the
-# function merely EXISTS, it fully replaces `cfg.d_preview` — so a stub
-# returning {} would silently disable a preview set in YAML.
+# Leave commented out unless you need it: if this function EXISTS it fully
+# replaces `d_preview` from the YAML, so even an empty stub disables preview.
 #
-# Keys are D column names (disturbance forecast) or the literal "band"
-# (future ymin/ymax). Values are non-negative step counts; omitted signals
-# get no preview. The disturbance window is one block, so it is sized to the
-# largest per-column value requested.
-#
-# Band preview earns its keep when the dynamics lag: the state at step i
-# responds to the input chosen at i-1, so the policy needs to see the band
-# it is steering into or it overshoots at every band change.
-#
-# The TARIFF preview is not here — it is `price_preview` in the control
-# config. How far ahead to look at the weather is a property of the plant and
-# is shared by every run against it; how far ahead to look at the price is a
-# per-run knob. Keeping it here meant one config wanting a price preview
-# forced price paths onto every other config sharing this file.
+# Keys are D column names or the literal "band" (future ymin/ymax); values
+# are step counts. Band preview helps when the dynamics lag, so the policy
+# can act before a band change rather than after it. The price preview is
+# `price_preview` in the YAML, not here.
 #
 # @beartype
 # def preview_config(nm_mapping: dict[str, list[str]]) -> dict[str, int]:
-#     return {"band": 2, "Ambient Temperature [degC]": 2}
+#     return {"band": 2, "Outdoor Temperature [degC]": 12}

@@ -1,16 +1,18 @@
 """
 Modeling hooks — the glue between NeuroTemplate and *your* dataset.
 
-The library calls each function below, gets back a dataset-specific answer
-(column roles, head topology, normalization overrides, ...), and proceeds
-without any further knowledge of your data.
+The library calls each function below for a dataset-specific answer (column
+roles, output heads, model structure, physics checks) and knows nothing else
+about your data. Each docstring is that hook's specification.
 
 The file must be named `modeling_user_defined.py` and live in the directory
 you run `nt` from, or be pointed at by `user_hooks_path` in your YAML.
 
-Every function here except `hyper_args` and `block_mapping` is imported by
-attribute with no default, so all of them must exist even when the body is a
-trivial return. Fill in `data_mapping` first; the rest have working defaults.
+Every function here except `hyper_args` and `block_mapping` must exist, even
+when its body is a trivial return. Fill in the column lists first; every
+other hook runs as written. Then decide on model structure (`block_mapping`)
+and the physics checks (`synth_cfg`) — those two shape what you get more
+than any hyperparameter.
 """
 
 from __future__ import annotations
@@ -41,8 +43,12 @@ from neurotemplate.modeling.scenarios import (  # noqa: F401  — cited in synth
 # ---------------------------------------------------------------------
 # Required: assign every dataframe column a role
 # ---------------------------------------------------------------------
-# Y = states the model predicts, U = inputs a controller can move,
-# D = exogenous disturbances the model sees but cannot influence.
+# Y = what the model predicts, U = what a controller can move,
+# D = exogenous inputs: things you could know without the plant (weather, a
+#     schedule). Anything the plant itself produces — a meter, a temperature
+#     the plant affects — is Y or dropped, never D: a policy can only be fed
+#     a D it has a forecast for.
+# Predict only what you need: every extra Y channel costs model capacity.
 # Any column not listed is dropped.
 Y_COLUMNS: list[str] = [
     # "Tank Temperature [degC]",
@@ -131,14 +137,10 @@ def data_head_config(
       OrdinalHead(n_levels=K, level_values=t)
                                         K ordered levels at given values
 
-    A binary / ordinal channel is usually a rare-event channel (`nt data
-    heads` flags a level under 5%), and the pipeline handles that for you:
-    each levelled head's loss is weighted by inverse square-root training frequency
-    (`cfg.balance_levels`) and, after training, each ordinal head's decision
-    thresholds are calibrated on dev (`cfg.calibrate_thresholds`). Judge such
-    a channel by the reportcard's level metrics, not its NRMSE. To pin either
-    by hand instead, pass `level_weights=` / `decision_thresholds=` here and
-    switch the corresponding flag off.
+    Levelled heads are rebalanced and threshold-calibrated for you
+    (`balance_levels`, `calibrate_thresholds`); judge them by the
+    reportcard's level metrics, not NRMSE. Pin either by hand with
+    `level_weights=` / `decision_thresholds=` and the flag off.
 
     Bounds and level values live in head-space, i.e. AFTER normalization.
     Write them in physical units and project:
@@ -190,7 +192,7 @@ def column_norm_config(
 
 
 # ---------------------------------------------------------------------
-# Optional: split the states into independent blocks, each its own family
+# Optional: model structure — blocks, a family per block, declared columns
 # ---------------------------------------------------------------------
 @beartype
 def block_mapping(
@@ -198,77 +200,69 @@ def block_mapping(
     cfg: Config,
 ) -> Optional[dict[str, dict]]:
     """
-    Group Y channels into blocks, each getting its own sub-model — its own
-    parameters, its own architecture (via `model`), and its own hidden state
-    if the family is stateful. Called only if this function exists; delete
-    it, or return None, for a single block holding every channel.
+    Model structure: split Y into blocks, each its own sub-model with its own
+    parameters, family (`model`) and hidden state. Return None (or delete
+    this function) for one block holding every channel.
 
-    A block owns its own Y channels and its own U channels; it sees all of D
-    by default, or a named subset; and any U channel no block claims is
-    shared with all of them — which is what you want for one air handler
-    serving several blocks. Y must partition exactly: each state in one
-    block and no state left out. D has no such rule — it is exogenous and
-    shared by nature, so several blocks may each claim the same column, or
-    all of it, with no conflict.
+    Worth doing whenever the plant is several parts that interact mainly
+    through shared inputs — zones on common weather, each with its own
+    actuator; a zone and a meter that responds to it. A joint model has to
+    learn that the cross-couplings are ~zero, and short records rarely
+    teach it; separate blocks get that for free.
 
         return {
-            "north": {"Y": ["North Zone Temperature [degC]"],
-                      "U": ["North Setpoint [degC]"],
-                      "model": "2r2c"},
-            "power": {"Y": ["Total Power [W]"],
-                      "reads": ["North Zone Temperature [degC]"],
-                      "D": ["Ambient Temperature [degC]"],
-                      "model": "mlp"},
+            "zone_a": {"Y": ["Zone A Temp [degC]"],
+                       "U": ["Zone A Setpoint [degC]"],
+                       "model": "2r2c"},
+            "zone_b": {"Y": ["Zone B Temp [degC]"],
+                       "U": ["Zone B Setpoint [degC]"],
+                       "model": "2r2c"},
+            "meter":  {"Y": ["Total Power [kW]"],
+                       "reads": ["Zone A Temp [degC]", "Zone B Temp [degC]"],
+                       "model": "mlp"},
         }
-        # "AHU Fan Speed [-]" is claimed by neither, so both blocks get it.
 
-    `model` is a family name ("mlp", "gru", "2r2c") or omitted, meaning "use
-    cfg.model" — so a spec that never sets `model` behaves exactly like a
-    plain block split, one family for everyone. `reads` names other blocks'
-    Y channels this block may also see, as an ordinary input (see the
-    `power` block above, reading the zone it measures alongside).
+    Rules: every Y channel is in exactly one block. A block's U are its
+    own; a U no block claims is shared by all. D is all of D unless a block
+    names a subset, and blocks may overlap on it. `reads` lets a block see
+    other blocks' Y as an ordinary input (not allowed in `2r2c`, whose
+    stability guarantee depends on never reading state). `model` omitted
+    means `cfg.model`; under `mlp`/`gru` the split then needs
+    `per_block: true`. `2r2c` gives every Y channel its own network even
+    without this hook — the hook is how you say which actuator drives which.
 
-    `model: 2r2c` is per-block whether or not this hook exists — with no
-    hook each Y channel still gets its own RC network, driven by every U
-    channel. Declaring blocks is how you say *which setpoint drives which
-    block*. For `mlp` and `gru` the split only happens with `per_block: true`
-    or by naming `model` explicitly here.
+    A block may also declare what each column *is*, which changes the
+    physics rather than the shapes:
 
-    Blocks are independent by construction: no term in one block's update
-    reads another block's state on the same step. `reads` is safe for every
-    family except `2r2c`, whose stability guarantee requires its forcing map
-    to never see state — a `2r2c` block with `reads` raises.
-
-    A block may also say what each of its columns *is*:
-
-        "north": {
-            "Y": ["North Zone Temperature [degC]"],
-            "U": ["North Setpoint [degC]", "Fan Power [kW]"],
-            "D": ["Ambient Temperature [degC]", "GHI [W/m2]", "Occupancy"],
-            "model": "2r2c",
-            "ambient": "Ambient Temperature [degC]",
+        "zone_a": {
+            ...,
+            "ambient": "Outdoor Temp [degC]",
             "inputs": {
-                "North Setpoint [degC]": {"kind": "demand", "sign": -1,
-                                          "state": "North Zone Temperature [degC]"},
-                "Fan Power [kW]": {"kind": "linear", "sign": +1},
-                "GHI [W/m2]":     {"kind": "linear", "sign": +1},
-                # Occupancy is undeclared, so it feeds the learned residual.
+                "Zone A Setpoint [degC]": {"kind": "demand", "sign": -1,
+                                           "state": "Zone A Temp [degC]"},
+                "Solar [W/m2]":           {"kind": "linear", "sign": +1},
             },
         }
 
-    `demand` replaces the setpoint, for every family, with the thermostat's
-    clamped error against the block's own state — `relu(zone − setpoint)` for
-    cooling (`sign = -1`), the mirror for heating — computed from the
-    model's *own* predicted zone during a rollout, so raising the setpoint
-    above the zone is free on the surrogate the way it is on the plant.
-    `linear` and `ambient` are read by `2r2c` only: one sign-fixed
-    coefficient per `linear` column, and the explicit conduction
-    `a_o (T_ambient − zone)` for `ambient`. Other families see those columns
-    as ordinary inputs and a warning says so at build time. Inside `2r2c` a
-    `demand` column feeds a bounded saturating branch; `"branch": "mlp"` on
-    the entry feeds it into the residual instead, at the cost of the
-    stability bound. Every declaration is optional — an actuator that is
-    metered power rather than a setpoint is `linear`, never `demand`.
+      demand   a setpoint, replaced for every family by the thermostat's
+               clamped error against the block's own predicted state —
+               relu(state − setpoint) for cooling (sign -1), the mirror for
+               heating — so a setpoint beyond the state commands nothing,
+               as on a real thermostat. In `2r2c` it drives a bounded,
+               saturating heat input (`"branch": "mlp"` routes it into the
+               learned residual instead, losing the stability bound).
+      linear   one sign-fixed coefficient times the physical value: metered
+               heat or power delivered, irradiance. An actuator that is a
+               power rather than a setpoint is `linear`, never `demand`.
+      ambient  the outdoor-temperature column, as explicit conduction with a
+               learned rate (starting from `rc_tau_ambient_h`).
+
+    `linear` and `ambient` act only inside `2r2c`; other families see those
+    columns as ordinary inputs, with a build-time warning. Undeclared
+    columns feed the block's learned residual. A `2r2c` block that declares
+    every column has no residual, and so no free constant heat gain — the
+    most constrained model, and a fair test of whether the declared physics
+    explains the data. The reportcard prints each branch in physical units.
     """
     return None
 
@@ -282,49 +276,28 @@ def synth_cfg(
     norm_stats: dict,
 ) -> Optional[SynthSpec]:
     """
-    Three physics assertions run after training whatever else you configure:
-    the states must hold at equilibrium, move the right way when an actuator is
-    driven off its rest value, and relax toward ambient when the HVAC is off. They put the
-    surrogate in states the recorded data never contains, so they answer a
-    question no test split can — and a surrogate that fails them will not
-    control well however good its NRMSE is.
+    Physics checks, run after training: equilibrium (states hold when nothing
+    drives them), step response (each actuator moves each state the declared
+    way), reachability, and free decay (states relax toward ambient with the
+    actuators off). They put the surrogate in states the recorded data never
+    visits — which is where a controller will take it — so they answer what
+    no test split can. A surrogate that fails step response is not one to
+    plan against, whatever its fit. Return None to skip them.
 
-    Filling this in is a few lines and worth doing. Return None to skip the
-    checks entirely.
-
-    Only two things are per-column work:
-
-      states   Y channels that behave like temperatures — they hold when
-               nothing drives them and relax toward ambient. Naming them is
-               required, because writing an equilibrium temperature into a
-               power channel produces silent garbage.
-      off      the physical value of each CONTROL column when nothing is
-               running. Required for controls and only for controls: an
-               actuator's "off" is not guessable (a cooling setpoint is off
-               at its *maximum*). Every other column defaults to its recorded
-               minimum, which is what "no forcing" means for solar,
-               occupancy, power and flow.
-
-               For a setpoint actuator, pick a value that is off across the
-               *whole* `states` range — equilibria are sampled from all of
-               it, and a 26 °C cooling setpoint is a call for cooling on a
-               zone that reaches 28.
-
-      responds `{state: {control: +1 or -1}}` — the sign of each state's
-               movement as that control INCREASES. Required for every control.
-               The library sweeps each control from its `off` value to each end
-               of its range and asserts every declared state moved the right
-               way, so an actuator cannot go untested because nobody wrote a
-               case for it, and one that warms one zone while cooling another
-               is expressible.
-
-               This looks like the `grad_path` mapping and is deliberately not
-               the same thing. That file declares partials valid at *every*
-               point in state space, which is why its U half is usually empty:
-               a cooling setpoint above the current zone temperature commands
-               nothing, so the partial is 0 there and positive only where
-               cooling runs. Here the scenario has *built* the state where the
-               actuator is live, so the sign is well defined.
+      states   Y channels that hold at rest and relax toward `ambient`
+               (temperatures, typically). Not meters: an equilibrium value
+               written into a power channel is meaningless.
+      off      the physical value of each U column when it asks for
+               nothing. Not guessable — a cooling setpoint is off at its
+               *maximum* — so required for every U. Pick a value that is
+               off across the whole `states` range, since equilibria are
+               sampled from all of it. Other columns default to their
+               recorded minimum ("no forcing" for solar, occupancy, flow).
+      responds `{state: {control: +1 | -1}}`: the direction each state moves
+               as that control INCREASES, from a state where the control is
+               live. Required for every U. A `demand` declaration in
+               `block_mapping` does not change these signs — they describe
+               the column, not the feature built from it.
 
         from neurotemplate.modeling.scenarios import SynthSpec
 
@@ -378,8 +351,8 @@ def hyper_args(trial, base_cfg: Config) -> Config:
     """
     cfg = deepcopy(base_cfg)
     # cfg.lr = trial.suggest_float("lr", 1e-4, 1e-2, log=True)
-    # cfg.log2_hidden_size = trial.suggest_int("log2_hidden_size", 4, 9)
-    # cfg.num_layers = trial.suggest_int("num_layers", 1, 4)
+    # cfg.log2_hidden_size = trial.suggest_int("log2_hidden_size", 3, 6)
+    # cfg.num_layers = trial.suggest_int("num_layers", 1, 3)
     return cfg
 
 
@@ -388,10 +361,13 @@ def hyper_args(trial, base_cfg: Config) -> Config:
 # ---------------------------------------------------------------------
 # `grad_gain > 0` requires `grad_path` to point at a JSON of known-sign
 # partial derivatives: {output_col: {input_col: +1 | -1}}. Only list edges
-# that follow from conservation laws and hold anywhere in the state space —
-# the penalty is evaluated at random off-trajectory samples, so relationships
-# that only hold under your supervisory controller will fire in the wrong
-# places and hurt. Run `python modeling_user_defined.py` to write the file.
+# that hold everywhere in state space — the penalty is evaluated at random
+# off-trajectory points, so a relationship that holds only while some
+# controller is active will fire in the wrong places — a raw setpoint's
+# partial, for one, is zero wherever the setpoint is satisfied. A setpoint
+# declared `demand` in block_mapping is differentiated as the demand feature
+# instead, so its sign here is the declared `sign` (-1 for cooling).
+# Run `python modeling_user_defined.py` to write the file.
 def write_gradient_mapping(path: str = "data/grad/mapping.json") -> str:
     mapping: dict[str, dict[str, int]] = {
         # "Tank Temperature [degC]": {

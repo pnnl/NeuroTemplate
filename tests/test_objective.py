@@ -145,7 +145,7 @@ _SCORED = torch.tensor([[-2.0, -1.0, 1.0, 2.0]])
 
 def _fake_out():
     yn = torch.cat([torch.zeros(1, HMAX), _SCORED], dim=1)[:, :, None]
-    return {"yn": yn, "U": torch.ones(1, HMAX + 4, 1),
+    return {"yn": yn, "U": torch.ones(1, HMAX - 1 + 4, 1),
             "D": torch.ones(1, HMAX + 4, 1)}
 
 
@@ -232,13 +232,13 @@ def test_scalar_du_weight_reproduces_the_pooled_penalty():
     loss = build_control_loss(cfg, sysid_cfg, nm, s["norm_stats"])
 
     b, W, nu = 2, hmax + cfg.train_pred_steps, len(nm["U"])
-    u = torch.randn(b, W, nu)
+    u = torch.randn(b, W - 1, nu)
     data = {
         "yn": torch.zeros(b, W, len(nm["Y"])), "U": u,
         "D": torch.zeros(b, W, len(nm["D"])),
         "ymin": torch.zeros(b, W, 1), "ymax": torch.ones(b, W, 1),
     }
-    u_h = u[:, hmax:, :]
+    u_h = u[:, hmax - 1:, :]
     expected = 3.0 * (u_h[:, 1:, :] - u_h[:, :-1, :]).abs().mean()
 
     assert float(loss(data)["loss"]) == pytest.approx(float(expected), rel=1e-5)
