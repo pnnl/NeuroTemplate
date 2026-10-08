@@ -2,9 +2,7 @@
 Tests for the `nt data heads` / `nt data decay` statistics.
 
 `diagnostics.py` is deliberately pure (numpy in, dataclasses/strings out) so
-these tests build synthetic arrays instead of a dataset and a config file —
-see generalization_report.md §4.2 for what each shape is supposed to mean and
-improvement_plans/rc_identification.md §3 for the decay estimator's.
+these tests build synthetic arrays instead of a dataset and a config file.
 
 The head-recommendation tests are built around one claim in particular: the
 statistic must key off the SHAPE of the distribution (modes with unoccupied

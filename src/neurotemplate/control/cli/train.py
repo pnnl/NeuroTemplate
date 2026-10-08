@@ -212,7 +212,7 @@ def main() -> None:
         print(f"Mean |Δsetpoint|: {results.mean_abs_du:.4g}")
         rid = logger.run.info.run_id
         print(f"Finished DPC run: {rid}")
-        with open("latest_control_run_id.dat", "w") as f:
+        with open("latest_control_run_id.dat", "w", encoding="utf-8") as f:
             f.write(rid)
 
         # Push savedir (plots + reportcard) to MLflow before it is removed.

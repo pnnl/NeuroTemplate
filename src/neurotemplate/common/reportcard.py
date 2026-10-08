@@ -38,7 +38,7 @@ def write_reportcard(
     """
     out_dir.mkdir(parents=True, exist_ok=True)
     path = out_dir / filename
-    path.write_text(markdown)
+    path.write_text(markdown, encoding="utf-8")
     if logger is not None and hasattr(logger, "_mlflow"):
         logger._mlflow.log_text(markdown, filename)
     return path

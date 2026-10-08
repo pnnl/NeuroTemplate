@@ -324,7 +324,8 @@ def load_config_from_cli(
 
     if cli_args.dump_config:
         dump_path = Path(cli_args.dump_config).expanduser()
-        dump_path.write_text(yaml.safe_dump(cfg.asdict(), sort_keys=False))
+        dump_path.write_text(yaml.safe_dump(cfg.asdict(), sort_keys=False),
+                             encoding="utf-8")
         raise SystemExit(0)
 
     return cfg, cli_args

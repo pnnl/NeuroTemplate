@@ -40,7 +40,7 @@ Four signatures moved. All four fail loudly — none of them degrade silently.
 
 `ResidualMetrics.frac_at_cap` is now `Optional[float]` and is `None` at Δ = 0, where a zero-width box made it vacuously 1.0.
 
-Open work tracked in [audit.md](audit.md).
+Defects are tracked in [audit.md](audit.md), unfinished work in [issues.md](issues.md), and design direction in [generalization_report.md](generalization_report.md).
 
 ## Installing as a dependency
 
@@ -703,15 +703,14 @@ held-out split (for a policy: the trained closed loop over its test split)
 and refuses to write unless they agree. The shipped `reference/` fixtures come
 from the trained torch model, so `python validate.py` on any machine checks
 the whole chain. `validate.py` and `example.py` are written once and then
-belong to the project; re-exports never overwrite them. Design and measurements:
-[improvement_plans/onnx_export_report.md](improvement_plans/onnx_export_report.md).
+belong to the project; re-exports never overwrite them. What has and has not
+been verified (one platform so far) is in [issues.md](issues.md#8-export-platforms-diverging-models).
 
 From C++, `cmake -S cpp -B build && cmake --build build && build/validate`
 in the package directory checks the same fixtures through `cpp/runtime.hpp`.
 Configuring downloads a pinned onnxruntime release unless
 `-DONNXRUNTIME_ROOT` names one. The C++ runtime is header-only and
 bit-identical to the Python one. The package's README shows the API.
-Details: [improvement_plans/cpp_runner_report.md](improvement_plans/cpp_runner_report.md).
 
 A new stateful family exports for free if it implements
 `rollout_state()` / `set_rollout_state(state)` — its hidden state as one

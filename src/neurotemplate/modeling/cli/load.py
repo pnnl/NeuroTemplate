@@ -314,7 +314,7 @@ def main() -> None:
         grad_penalty = None
         print("\nGrad Penalty (raw): N/A (no grad_path)")
 
-    with open(plot_run_dir / "stats.dat", "w") as f:
+    with open(plot_run_dir / "stats.dat", "w", encoding="utf-8") as f:
         f.write(f"rmse {test_results.normalized_rmse:.6f}\n")
         if grad_penalty is not None:
             f.write(f"grad_penalty_raw {grad_penalty:.6f}\n")

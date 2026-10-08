@@ -49,6 +49,11 @@ def _help_text() -> str:
 def main(argv: Optional[list[str]] = None) -> None:
     argv = list(sys.argv[1:] if argv is None else argv)
 
+    # Reports print symbols (Δ, ⚠, −) that Windows' default cp1252 cannot
+    # encode when stdout is a pipe or a log file; a console already takes UTF-8.
+    sys.stdout.reconfigure(encoding="utf-8")
+    sys.stderr.reconfigure(encoding="utf-8")
+
     if not argv or argv[0] in ("-h", "--help"):
         print(_help_text())
         return

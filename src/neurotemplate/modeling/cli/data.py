@@ -1,7 +1,6 @@
 """
 `nt data heads` and `nt data decay` -- offline diagnostics that read a
-dataset and print a recommendation, described in full in
-generalization_report.md §4.1-4.3. Both load the dataset the same way
+dataset and print a recommendation. Both load the dataset the same way
 `nt model train` does (see `train.py`'s first ~80 lines) and hand the raw
 numbers to the pure functions in `modeling/diagnostics.py`; this file is
 only argument parsing and printing.

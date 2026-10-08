@@ -53,7 +53,7 @@ class State:
 
 
 def _load_spec(path: Path) -> dict:
-    spec = json.loads(Path(path).read_text())
+    spec = json.loads(Path(path).read_text(encoding="utf-8"))
     if spec["format"] != FORMAT:
         raise ValueError(
             f"{path} is format {spec['format']}; this runtime reads format "
@@ -257,7 +257,7 @@ class Policy:
 
 def read_csv(path: str | Path) -> tuple[list[str], dict[str, np.ndarray]]:
     """A CSV whose first column is an index -> (index, {column: float64 array})."""
-    with open(path, newline="") as f:
+    with open(path, newline="", encoding="utf-8") as f:
         rows = list(csv.reader(f))
     header, body = rows[0], rows[1:]
     index = [row[0] for row in body]
@@ -333,7 +333,7 @@ def check_reference(root: str | Path = ".") -> list[ReferenceCheck]:
 
 
 def _check_model(model_dir: Path) -> ReferenceCheck:
-    reference = json.loads((model_dir / "reference" / "REFERENCE.json").read_text())
+    reference = json.loads((model_dir / "reference" / "REFERENCE.json").read_text(encoding="utf-8"))
     model = Model(model_dir)
     _, frame = read_csv(model_dir / "reference" / "example_input.csv")
     _, expected = read_csv(model_dir / "reference" / "expected_output.csv")
@@ -352,7 +352,7 @@ def _check_model(model_dir: Path) -> ReferenceCheck:
 
 
 def _check_policy(policy_dir: Path) -> ReferenceCheck:
-    reference = json.loads((policy_dir / "reference" / "REFERENCE.json").read_text())
+    reference = json.loads((policy_dir / "reference" / "REFERENCE.json").read_text(encoding="utf-8"))
     policy = Policy(policy_dir)
     actions = policy.act_batch(read_windows(policy_dir / "reference" / "inputs.csv",
                                             policy.inputs))

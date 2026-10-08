@@ -2,8 +2,8 @@
 The seed ensemble: pipeline.train_and_evaluate trains cfg.ensemble_seeds
 models (at cfg.seed, cfg.seed + 1, ...) and reports the spread across them.
 
-Every number the reportcard prints is otherwise a single seed's draw (see
-generalization_report.md §6, item 1). These are the two claims that matter:
+Every number the reportcard prints is otherwise a single seed's draw. These are
+the two claims that matter:
 
   - ensemble_seeds=1 reproduces today's single-model behaviour exactly (no
     ensemble, no extra section).

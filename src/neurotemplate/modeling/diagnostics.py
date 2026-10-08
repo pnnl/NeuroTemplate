@@ -20,9 +20,6 @@ Everything here is pure: numpy arrays in, dataclasses/strings out. The CLI
 (`modeling/cli/data.py`) owns loading the dataset and hooks and printing
 these results; that split is what makes the statistics testable with plain
 synthetic arrays instead of a real dataset and config file.
-
-See generalization_report.md §4.1-4.3 for the design rationale and
-improvement_plans/rc_identification.md §3, §5 for the decay estimator's.
 """
 
 from __future__ import annotations
@@ -457,9 +454,8 @@ def estimate_decay(
     a bogus tau -- see `_fit_log_decay` for the three rejections.
 
     Returns one `DecayWindow` per run that fits cleanly, in time order.
-    Empty means no qualifying window was found in this data -- see
-    `improvement_plans/rc_identification.md` §3 for what to do then (an
-    Optuna sweep over `rc_tau_ambient_h`, not a guess).
+    Empty means no qualifying window was found in this data -- the prior then
+    has to come from an Optuna sweep over `rc_tau_ambient_h`, not a guess.
     """
     gap = np.asarray(state, dtype=float) - np.asarray(ref, dtype=float)
     windows = []

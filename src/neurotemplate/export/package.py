@@ -81,7 +81,7 @@ def provenance(exporter: str) -> dict:
 
 
 def write_json(path: Path, document: dict) -> None:
-    path.write_text(json.dumps(document, indent=2) + "\n")
+    path.write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")
 
 
 def install(stage: Path, out_dir: Path, artifact: str, package: str,
@@ -102,13 +102,14 @@ def install(stage: Path, out_dir: Path, artifact: str, package: str,
 
 
 def _render(name: str, **values: str) -> str:
-    return Template((TEMPLATES / name).read_text()).substitute(values)
+    return Template((TEMPLATES / name).read_text(encoding="utf-8")).substitute(values)
 
 
 def _write_runtime(root: Path, package: str) -> None:
     (root / package).mkdir(exist_ok=True)
     shutil.copyfile(Path(runtime.__file__), root / package / "runtime.py")
-    (root / package / "__init__.py").write_text(_render("__init__.py.tmpl"))
+    (root / package / "__init__.py").write_text(_render("__init__.py.tmpl"),
+                                                encoding="utf-8")
     # File by file, so a build directory someone keeps inside cpp/ survives.
     (root / "cpp").mkdir(exist_ok=True)
     for source in CPP.iterdir():
@@ -118,7 +119,7 @@ def _write_runtime(root: Path, package: str) -> None:
 def _write_package_files(out_dir: Path, package: str, version: str) -> list[str]:
     """Everything around the artifact directories, from what `out_dir` holds."""
     _write_runtime(out_dir, package)
-    specs = {name: json.loads((out_dir / name / f"{name}.json").read_text())
+    specs = {name: json.loads((out_dir / name / f"{name}.json").read_text(encoding="utf-8"))
              for name in ("model", "policy") if (out_dir / name).is_dir()}
     title = next((s["description"] for s in specs.values() if s["description"]),
                  "NeuroTemplate export")
@@ -136,15 +137,18 @@ def _write_package_files(out_dir: Path, package: str, version: str) -> list[str]
         sections.append(_render("README_policy.md.tmpl", **values,
                                 contract=_policy_contract(specs["policy"])))
     (out_dir / "README.md").write_text(
-        _render("README.md.tmpl", **values, sections="\n\n".join(sections)))
-    (out_dir / "pyproject.toml").write_text(_render("pyproject.toml.tmpl", **values))
+        _render("README.md.tmpl", **values, sections="\n\n".join(sections)),
+        encoding="utf-8")
+    (out_dir / "pyproject.toml").write_text(_render("pyproject.toml.tmpl", **values),
+                                          encoding="utf-8")
 
     kept = []
     for name in WRITE_ONCE:
         if (out_dir / name).exists():
             kept.append(name)
         else:
-            (out_dir / name).write_text(_render(f"{name}.tmpl", **values))
+            (out_dir / name).write_text(_render(f"{name}.tmpl", **values),
+                                       encoding="utf-8")
     return kept
 
 
