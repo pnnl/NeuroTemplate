@@ -183,6 +183,22 @@ def test_a_demand_may_only_read_the_blocks_own_state():
         build_blocks(MAPPING, spec)
 
 
+def test_a_shared_setpoint_is_a_demand_in_one_block_only():
+    """Two blocks each pairing the shared column with their own state would
+    collapse to one entry in the pre-stack, and the other block would get a
+    demand computed against the wrong zone."""
+    spec = {
+        "north": {"Y": ["north T"], "U": ["north sp"],
+                  "inputs": {"ahu fan": {"kind": "demand", "sign": -1,
+                                         "state": "north T"}}},
+        "south": {"Y": ["south T"], "U": ["south sp"],
+                  "inputs": {"ahu fan": {"kind": "demand", "sign": -1,
+                                         "state": "south T"}}},
+    }
+    with pytest.raises(ValueError, match=r"'ahu fan': \['north', 'south'\]"):
+        build_blocks(MAPPING, spec)
+
+
 def test_a_misspelled_block_key_is_refused_rather_than_ignored():
     """A declaration key changes what the block fits, not its shape, so a
     typo has no other way of showing up."""

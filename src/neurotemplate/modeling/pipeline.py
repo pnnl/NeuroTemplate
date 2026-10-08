@@ -91,6 +91,44 @@ from neurotemplate.modeling.scenarios import (
 # ── Block spec resolution ────────────────────────────────────────
 
 
+ROLES = ("Y", "U", "D", "t")
+
+
+def resolve_nm_mapping(hooks, df: DataFrame, cfg: ModelingConfig) -> dict[str, list[str]]:
+    """Call the hooks module's `data_mapping` and check what it returns.
+
+    Checked here rather than in the hook, so a rewritten hook gets the same
+    checks: the four roles and nothing else, every name a column of `df`,
+    no column in two roles or twice in one, a non-empty Y, and
+    `cfg.exclude_columns` both matching some column (a pattern that matches
+    nothing is a typo) and matching no mapped column. Every problem is listed
+    at once.
+    """
+    nm_mapping = hooks.data_mapping(df=df, cfg=cfg)
+    problems = []
+    if set(nm_mapping) != set(ROLES):
+        problems.append(f"keys must be exactly {list(ROLES)}, got {sorted(nm_mapping)}")
+    named = [c for role in ROLES for c in nm_mapping.get(role, [])]
+    unknown = [c for c in named if c not in df.columns]
+    if unknown:
+        problems.append(f"columns not in the dataframe: {unknown}")
+    repeated = sorted({c for c in named if named.count(c) > 1})
+    if repeated:
+        problems.append(f"columns in more than one role (or twice in one): {repeated}")
+    if not nm_mapping.get("Y"):
+        problems.append("Y is empty, so the model has nothing to predict")
+    unmatched = [p for p in cfg.exclude_columns if not any(p in c for c in df.columns)]
+    if unmatched:
+        problems.append(f"cfg.exclude_columns patterns match no column: {unmatched}")
+    excluded = [c for c in named if any(p in c for p in cfg.exclude_columns)]
+    if excluded:
+        problems.append(f"columns matching cfg.exclude_columns are still mapped: {excluded}")
+    if problems:
+        raise ValueError("data_mapping returned an unusable mapping:\n  - "
+                         + "\n  - ".join(problems))
+    return nm_mapping
+
+
 def resolve_block_spec(hooks, nm_mapping: dict[str, list[str]], cfg: ModelingConfig):
     """Call the hooks module's optional `block_mapping`, or None if it has none."""
     if hasattr(hooks, "block_mapping"):
@@ -141,7 +179,7 @@ def prepare_data(cfg: ModelingConfig, hooks) -> PreparedData:
     cfg.steps_per_hour = 3600.0 / freq_s
     # Column roles only need the schema, and get_data_splits has already
     # checked every file carries the same columns.
-    nm_mapping = hooks.data_mapping(df=train_raws[0], cfg=cfg)
+    nm_mapping = resolve_nm_mapping(hooks, train_raws[0], cfg)
     block_spec = resolve_block_spec(hooks, nm_mapping, cfg)
 
     norm_stats = compute_norm_stats(
@@ -640,9 +678,11 @@ def _build_ensemble_spread(
             balanced_acc.setdefault(lm.name, []).append(lm.balanced_accuracy)
 
     physics: dict[str, list[float]] = {}
+    physics_passed: dict[str, int] = {}
     for results in per_seed_physics:
         for r in (results or []):
             physics.setdefault(r.key, []).append(r.value)
+            physics_passed[r.key] = physics_passed.get(r.key, 0) + int(r.passed)
 
     tau_slow: dict[str, list[float]] = {}
     for taus in per_seed_tau_slow:
@@ -655,6 +695,7 @@ def _build_ensemble_spread(
         physics={k: spread_stats(v) for k, v in physics.items()},
         tau_slow={k: spread_stats(v) for k, v in tau_slow.items()},
         balanced_acc={k: spread_stats(v) for k, v in balanced_acc.items()},
+        physics_passed=physics_passed,
     )
 
 

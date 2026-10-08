@@ -19,12 +19,12 @@ from __future__ import annotations
 
 import json
 import os
-from copy import deepcopy
 from typing import Optional
 
 import pandas as pd
 
 from neurotemplate._typing import beartype
+from neurotemplate.common.data_utils import NormStats
 from neurotemplate.modeling.config import ModelingConfig as Config
 from neurotemplate.modeling.heads import (  # noqa: F401  — cited in comments
     BinaryHead,
@@ -69,45 +69,17 @@ def data_mapping(
     """
     Return {"Y": [...], "U": [...], "D": [...], "t": ["sec_elapsed"]}.
 
-    Names must match `df` columns exactly and appear in dataframe order —
-    downstream indexing is positional. `cfg.exclude_columns` holds substring
-    patterns to drop; a pattern matching nothing raises, to catch typos.
-
-    `sec_elapsed` is added by the CSV loader from the timestamp index.
+    Names must match `df` columns exactly; `sec_elapsed` is added by the CSV
+    loader from the timestamp index. `cfg.exclude_columns` holds substring
+    patterns to drop. The library checks what this returns (unknown or
+    doubly-assigned columns, an empty Y, an exclude pattern matching
+    nothing), so the hook only has to say which column plays which role.
     """
-    missing = [c for c in cfg.exclude_columns
-               if not any(c in col for col in df.columns)]
-    if missing:
-        raise ValueError(
-            f"cfg.exclude_columns lists patterns matching no columns: {missing}"
-        )
-
     def keep(names: list[str]) -> list[str]:
-        unknown = [c for c in names if c not in df.columns]
-        if unknown:
-            raise ValueError(f"Columns not in dataframe: {unknown}")
-        return [
-            c for c in df.columns
-            if c in names and not any(p in c for p in cfg.exclude_columns)
-        ]
+        return [c for c in names if not any(p in c for p in cfg.exclude_columns)]
 
-    y_cols, u_cols, d_cols = keep(Y_COLUMNS), keep(U_COLUMNS), keep(D_COLUMNS)
-
-    for (a_name, a), (b_name, b) in [
-        (("Y", y_cols), ("U", u_cols)),
-        (("Y", y_cols), ("D", d_cols)),
-        (("U", u_cols), ("D", d_cols)),
-    ]:
-        overlap = set(a) & set(b)
-        if overlap:
-            raise ValueError(f"Columns in both {a_name} and {b_name}: {overlap}")
-
-    if not y_cols:
-        raise ValueError("Y is empty — the model has nothing to predict.")
-    if "sec_elapsed" not in df.columns:
-        raise ValueError("sec_elapsed column missing from dataframe.")
-
-    return {"Y": y_cols, "U": u_cols, "D": d_cols, "t": ["sec_elapsed"]}
+    return {"Y": keep(Y_COLUMNS), "U": keep(U_COLUMNS), "D": keep(D_COLUMNS),
+            "t": ["sec_elapsed"]}
 
 
 # ---------------------------------------------------------------------
@@ -116,7 +88,7 @@ def data_mapping(
 @beartype
 def data_head_config(
     nm_mapping: dict[str, list[str]],
-    norm_stats: dict[str, dict[str, float]],
+    norm_stats: NormStats,
 ) -> HeadStack:
     """
     Return a HeadStack with exactly one head per Y column, in Y order.
@@ -344,12 +316,11 @@ def sub_plot(
 # Required only for `nt model optuna`: hyperparameter search space
 # ---------------------------------------------------------------------
 @beartype
-def hyper_args(trial, base_cfg: Config) -> Config:
+def hyper_args(trial, cfg: Config) -> Config:
     """
-    Return a copy of `base_cfg` with the fields this trial should vary.
+    Set the fields this trial should vary on `cfg` (a copy) and return it.
     Any ModelingConfig field is fair game; keep the space small.
     """
-    cfg = deepcopy(base_cfg)
     # cfg.lr = trial.suggest_float("lr", 1e-4, 1e-2, log=True)
     # cfg.log2_hidden_size = trial.suggest_int("log2_hidden_size", 3, 6)
     # cfg.num_layers = trial.suggest_int("num_layers", 1, 3)

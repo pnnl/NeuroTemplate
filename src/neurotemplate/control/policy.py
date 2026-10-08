@@ -31,6 +31,7 @@ import torch.nn as nn
 from neuromancer.system import Node
 from neuromancer.modules import blocks
 
+from neurotemplate.common.data_utils import NormStats
 from neurotemplate.control.scenarios import horizons, scored_steps
 from neurotemplate.hooks import load_control_hooks
 from neurotemplate.modeling import windows
@@ -169,7 +170,7 @@ class _ReferenceRule(nn.Module):
     """
 
     def __init__(self, rule, nm_mapping: dict[str, list[str]],
-                 norm_stats: dict[str, dict[str, float]],
+                 norm_stats: NormStats,
                  h_ctrl: int, ny: int, n_ctrl: int, nd: int):
         super().__init__()
         self.rule = rule
@@ -448,7 +449,7 @@ def build_reference_node(
     cfg,
     sysid_cfg,
     nm_mapping: dict[str, list[str]],
-    norm_stats: dict[str, dict[str, float]],
+    norm_stats: NormStats,
 ) -> Node:
     """The use case's reference rule as a standalone controller Node.
 
@@ -485,7 +486,7 @@ def reference_over_horizon(
     out: dict,
     hmax: int,
     nm_mapping: dict[str, list[str]],
-    norm_stats: dict[str, dict[str, float]],
+    norm_stats: NormStats,
 ) -> torch.Tensor:
     """The reference rule replayed on a recorded rollout, [b, P, nu] normalized.
 
@@ -521,7 +522,7 @@ def build_policy(
     cfg,
     sysid_cfg,
     nm_mapping: dict[str, list[str]],
-    norm_stats: dict[str, dict[str, float]],
+    norm_stats: NormStats,
 ) -> Node:
     if cfg.policy not in policy_catalog:
         raise ValueError(
@@ -644,7 +645,7 @@ def describe_policy(
     cfg,
     sysid_cfg,
     nm_mapping: dict[str, list[str]],
-    norm_stats: dict[str, dict[str, float]],
+    norm_stats: NormStats,
 ) -> dict:
     """
     Describe the constructed policy for the reportcard.

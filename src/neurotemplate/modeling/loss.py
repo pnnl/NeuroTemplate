@@ -34,8 +34,6 @@ def build_loss(
     raw_model: torch.nn.Module,
     system: torch.nn.Module,
     grad_masks: dict[str, torch.Tensor],
-    nm_mapping: dict[str, list[str]],
-    norm_stats: dict[str, dict[str, float]],
     head_stack: Optional[HeadStack] = None,
 ) -> PenaltyLoss:
     """
@@ -46,8 +44,7 @@ def build_loss(
         raw_model:    SSMGrad instance (the raw dynamics module inside the System)
         system:       Neuromancer SystemPreview wrapping the dynamics model
         grad_masks:   {key: Tensor[1,1,ny,nx]} with sign constraints, or empty dict
-        nm_mapping:   {"Y": [...], "U": [...], "D": [...]}
-        norm_stats:   {col: {"shift", "stretch", "min", "max", ...}} per-column stats
+        head_stack:   per-channel output heads, or None for blanket MSE
 
     Returns:
         PenaltyLoss combining all active loss terms

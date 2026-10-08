@@ -45,7 +45,7 @@ from pandas import DataFrame, Timestamp
 
 from neuromancer.dataset import DictDataset
 
-from neurotemplate.common.data_utils import get_data, sliding_windows
+from neurotemplate.common.data_utils import NormStats, get_data, sliding_windows
 from neurotemplate.hooks import load_control_hooks
 
 from neurotemplate._typing import beartype
@@ -67,6 +67,20 @@ def horizons(cfg, sysid_cfg) -> tuple[int, int, int]:
     h_sys = sysid_cfg.in_steps
     h_ctrl = cfg.in_steps
     return h_sys, h_ctrl, max(h_sys, h_ctrl)
+
+
+@beartype
+def eval_pred_steps(cfg, hmax: int) -> int:
+    """P for the evaluation rollout. `test_window` counts the hmax warmup, as
+    on the sys-id side, so a window no longer than hmax scores nothing."""
+    steps = cfg.test_window - hmax
+    if steps <= 0:
+        raise ValueError(
+            f"test_window ({cfg.test_window}) must be > hmax ({hmax}), the "
+            "longer of the surrogate's and the policy's in_steps; otherwise "
+            "there is no rollout after the warmup."
+        )
+    return steps
 
 
 @beartype
@@ -316,7 +330,7 @@ def build_window_dict(
     cfg,
     sysid_cfg,
     nm_mapping: dict[str, list[str]],
-    norm_stats: dict[str, dict[str, float]],
+    norm_stats: NormStats,
     P: int,
     stride: int,
     band: Optional[BandSpec] = None,
@@ -379,7 +393,7 @@ def build_window_dict_multi(
     cfg,
     sysid_cfg,
     nm_mapping: dict[str, list[str]],
-    norm_stats: dict[str, dict[str, float]],
+    norm_stats: NormStats,
     P: int,
     stride: int,
     band: Optional[BandSpec] = None,
@@ -416,7 +430,7 @@ def build_loaders(
     cfg,
     sysid_cfg,
     nm_mapping: dict[str, list[str]],
-    norm_stats: dict[str, dict[str, float]],
+    norm_stats: NormStats,
     train_dfs: list[DataFrame],
     dev_dfs: list[DataFrame],
 ):

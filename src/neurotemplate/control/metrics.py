@@ -162,7 +162,8 @@ class JumpResponse:
 
 @beartype
 def hours_per_step(t: torch.Tensor) -> float:
-    """Timestep length in hours, from the `t` channel (POSIX seconds).
+    """Timestep length in hours, from the `t` channel (seconds elapsed since
+    the file's first row).
 
     `t` is [batch, time, 1]; the grid is uniform, so one difference is enough.
     """

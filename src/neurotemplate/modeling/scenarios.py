@@ -933,12 +933,6 @@ def run_scenarios(scenarios: list, n: Optional[int] = None) -> ScenarioOutcome:
 
 
 @beartype
-def run_checks(scenarios: list, n: Optional[int] = None) -> list[ScenarioResult]:
-    """Every scenario's verdict, flattened."""
-    return run_scenarios(scenarios, n).verdicts
-
-
-@beartype
 def checks_to_markdown(results: list[ScenarioResult]) -> str:
     rows = ["| Scenario | Channel | Verdict | What happened |",
             "|---|---|---|---|"]

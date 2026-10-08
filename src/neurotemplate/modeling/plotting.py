@@ -11,12 +11,11 @@ from neurotemplate._typing import beartype
 
 # ---------------------- Plotting ---------------------- #
 
-# Publication-friendly defaults. LINE_THICKNESS is applied as the default
-# matplotlib line width; individual calls can still override via linewidth=.
-
-plt.rcParams['lines.linewidth'] = 4
-plt.rcParams['text.usetex'] = False
-plt.rcParams['font.family'] = 'serif'
+# Publication-friendly defaults for every plot the library draws. Applied per
+# plotting entry point (`plt.rc_context(PLOT_STYLE)`), never on import, so
+# importing the library leaves the caller's matplotlib settings alone.
+# Individual calls can still override via linewidth=.
+PLOT_STYLE = {"lines.linewidth": 4, "text.usetex": False, "font.family": "serif"}
 
 # Fixed-order categorical palette for synthetic-scenario state lines, plus the
 # muted tones used for the ambient signal, rollout boundary, and gridlines.
@@ -51,6 +50,7 @@ def unique_day_dir(base_dir: Path, day_name: str) -> Path:
 
 
 # Plot predicted vs. true signals and log artifacts when a logger is provided.
+@plt.rc_context(PLOT_STYLE)
 @beartype
 def plot_predictions(
     cfg,
@@ -152,6 +152,7 @@ def plot_predictions(
         plt.close(fig)
 
 
+@plt.rc_context(PLOT_STYLE)
 def plot_synthetic(
     traces: list[dict],
     run_dir: str,

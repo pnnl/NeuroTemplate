@@ -178,17 +178,23 @@ def _scenario_section(cfg, sysid_cfg, nm_mapping: dict, controlled: list[str],
 def _objective_section(balance: ObjectiveBalance,
                        shapes: list[TermShape],
                        power: Optional[PowerDiagnostics] = None,
-                       notes: Optional[list[str]] = None) -> str:
-    """What the weights actually bought, measured on one batch before training.
+                       notes: Optional[list[str]] = None,
+                       trained: Optional[ObjectiveBalance] = None) -> str:
+    """What the weights actually bought, measured on one batch before training
+    and again through the trained policy.
 
     Objective weights do not port across datasets, and the library's job is
     not a better default — it is making a bad one visible on iteration 1.
+    The trained shares are what a weight can be tuned against: a residual
+    policy starts at δ ≡ 0, so its Δu term is exactly zero before training.
     """
     body = [
         "Each objective term on a single training batch, taken before the "
-        "first optimizer step. The share column is what the policy is really "
+        "first optimizer step"
+        + (" and again through the trained policy" if trained is not None else "")
+        + ". The share column is what the policy is really "
         "being asked to minimise, whatever the weights suggest.\n",
-        balance_to_markdown(balance),
+        balance_to_markdown(balance, trained),
     ]
     dominant = balance.dominant()
     if dominant:
@@ -494,6 +500,7 @@ def render_control_reportcard(
     baseline: Optional[object] = None,
     clears_reference: Optional[bool] = None,
     balance: Optional[ObjectiveBalance] = None,
+    trained_balance: Optional[ObjectiveBalance] = None,
     shapes: Optional[list[TermShape]] = None,
     power: Optional[PowerDiagnostics] = None,
     objective_notes: Optional[list[str]] = None,
@@ -519,6 +526,8 @@ def render_control_reportcard(
                      baseline section renders it as a ship/don't-ship call.
         balance:     Optional objective.ObjectiveBalance from the pre-training
                      forward pass; the section is skipped without it.
+        trained_balance: Optional ObjectiveBalance of the same batch through
+                     the trained policy, shown beside `balance`.
         shapes:      Optional objective.term_shapes(...) for the power signal.
         power:       Optional objective.power_diagnostics(...): how often the
                      power signal reads zero, how much of that is a dead
@@ -547,7 +556,7 @@ def render_control_reportcard(
     ]
     if balance is not None:
         parts.append(_objective_section(balance, shapes or [],
-                                        power, objective_notes))
+                                        power, objective_notes, trained_balance))
     parts += [
         _performance_section(results),
         _actuation_section(results),

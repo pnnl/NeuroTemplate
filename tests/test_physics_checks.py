@@ -19,7 +19,7 @@ from neurotemplate.modeling.scenarios import (
     SynthSpec,
     build_scenarios,
     checks_to_dict,
-    run_checks,
+    run_scenarios,
 )
 
 ZONE = "zone [°C]"
@@ -421,8 +421,8 @@ def test_a_readout_that_wanders_shows_it_in_the_spread():
 # ── Reporting ────────────────────────────────────────────────────
 
 
-def test_run_checks_flattens_every_scenario():
-    results = run_checks(_scenarios(_perfect))
+def test_run_scenarios_flattens_every_scenario():
+    results = run_scenarios(_scenarios(_perfect)).verdicts
     assert [r.name for r in results] == [
         "Equilibrium", f"Step response: {SETPT} to 20", "Reachability",
         "Free decay",
@@ -442,7 +442,7 @@ def test_every_scenario_reports_on_every_state_channel():
         # Zone ramps (fails equilibrium); supply air sits still (passes).
         return torch.stack([y[:, 0] + 0.5, y[:, 1], y[:, 2]], dim=1)
 
-    results = run_checks(_two_state_scenarios(stats, zone_drifts_supply_holds))
+    results = run_scenarios(_two_state_scenarios(stats, zone_drifts_supply_holds)).verdicts
 
     equilibrium = [r for r in results if r.name == "Equilibrium"]
     assert [r.channel for r in equilibrium] == [ZONE, SUPPLY]
@@ -464,7 +464,7 @@ def test_the_scenarios_are_assertions_and_carry_no_training_term():
     """
     for s in _scenarios(_rampng):
         assert not hasattr(s, "compute")
-    assert not any(hasattr(r, "penalty") for r in run_checks(_scenarios(_perfect)))
+    assert not any(hasattr(r, "penalty") for r in run_scenarios(_scenarios(_perfect)).verdicts)
 
 
 # ── Horizon ──────────────────────────────────────────────────────

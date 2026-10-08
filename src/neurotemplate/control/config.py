@@ -329,11 +329,6 @@ class ControlConfig:
         if any(w < 0 for w in weights):
             raise ValueError(f"du_weight must be >= 0, got {self.du_weight}")
 
-        if self.band_width_min > self.band_width_max:
-            raise ValueError(
-                f"band_width_min ({self.band_width_min}) must be <= "
-                f"band_width_max ({self.band_width_max})"
-            )
         if self.band_lo is None or self.band_hi is None:
             raise ValueError(
                 "band_lo and band_hi must both be set — the comfort band's "
@@ -341,21 +336,24 @@ class ControlConfig:
                 "for a battery, ...), so there is no library-wide default "
                 "for them."
             )
-        if self.band_lo > self.band_hi:
-            raise ValueError(
-                f"band_lo ({self.band_lo}) must be <= "
-                f"band_hi ({self.band_hi})"
-            )
-        tb = self.test_band()
-        if tb.width_min > tb.width_max:
-            raise ValueError(
-                f"resolved test band width_min ({tb.width_min}) must be <= "
-                f"width_max ({tb.width_max})"
-            )
-        if tb.lo > tb.hi:
-            raise ValueError(
-                f"resolved test band lo ({tb.lo}) must be <= hi ({tb.hi})"
-            )
+        # The band sampler draws a width in [width_min, width_max] and a lower
+        # edge in [lo, hi - width], so a width wider than hi - lo would put
+        # the lower edge below lo.
+        for prefix, band in (("band_", self.train_band()),
+                             ("resolved test_band_", self.test_band())):
+            if band.lo > band.hi:
+                raise ValueError(
+                    f"{prefix}lo ({band.lo}) must be <= {prefix}hi ({band.hi})")
+            if band.width_min > band.width_max:
+                raise ValueError(
+                    f"{prefix}width_min ({band.width_min}) must be <= "
+                    f"{prefix}width_max ({band.width_max})")
+            if band.width_max > band.hi - band.lo:
+                raise ValueError(
+                    f"{prefix}width_max ({band.width_max}) is wider than "
+                    f"{prefix}hi - {prefix}lo ({band.hi - band.lo}), so a "
+                    f"sampled band would leave [{band.lo}, {band.hi}]."
+                )
 
     def train_band(self):
         from neurotemplate.control.scenarios import BandSpec

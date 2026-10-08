@@ -23,6 +23,7 @@ from typing import Optional
 
 import torch
 
+from neurotemplate.common.data_utils import NormStats
 from neurotemplate.control.scenarios import BandSpec
 
 if os.environ.get("RUNTIME_TYPING", 0):
@@ -64,7 +65,7 @@ def regulated(
 @beartype
 def comfort_band_signal(
     nm_mapping: dict[str, list[str]],
-    norm_stats: dict[str, dict[str, float]],
+    norm_stats: NormStats,
     n_samples: int,
     nsteps: int,
     band: BandSpec,
@@ -124,7 +125,7 @@ def comfort_band_signal(
 @beartype
 def actuation_bounds(
     nm_mapping: dict[str, list[str]],
-    norm_stats: dict[str, dict[str, float]],
+    norm_stats: NormStats,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Per-U-channel (umin, umax) in NORMALIZED space for blocks.MLP_bounds.
@@ -170,7 +171,7 @@ def reference_control(
     ymax_now: torch.Tensor,
     d_now: torch.Tensor,
     nm_mapping: dict[str, list[str]],
-    norm_stats: dict[str, dict[str, float]],
+    norm_stats: NormStats,
 ) -> torch.Tensor:
     """Park the setpoint at the middle of the comfort band.
 
@@ -236,7 +237,7 @@ def power_metric(
     U: torch.Tensor,
     D: torch.Tensor,
     nm_mapping: dict[str, list[str]],
-    norm_stats: dict[str, dict[str, float]],
+    norm_stats: NormStats,
 ) -> torch.Tensor:
     """
     Total HVAC electrical power per timestep.

@@ -43,6 +43,7 @@ logging it to MLflow.
 
 from __future__ import annotations
 
+import math
 import statistics
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -63,6 +64,8 @@ from neurotemplate.common.metrics import (
     stability_to_markdown,
 )
 from neurotemplate.modeling.scenarios import (
+    DECAY_MIN_CLOSED,
+    FreeDecayScenario,
     ReadoutSummary,
     ScenarioResult,
     checks_to_markdown,
@@ -119,6 +122,10 @@ class EnsembleSpread:
     # channel -> spread, levelled (binary / ordinal) channels only. Rare-level
     # heads vary far more across seeds than their RMSE lets on.
     balanced_acc: dict[str, SeedSpread] = field(default_factory=dict)
+    # "scenario | channel" -> how many seeds passed the check. The loud
+    # signal: a verdict that flips between seeds is not a property of the
+    # model family, whatever the values' spread looks like.
+    physics_passed: dict[str, int] = field(default_factory=dict)
 
 
 def _spread_table(rows: list[tuple[str, SeedSpread]]) -> list[str]:
@@ -163,12 +170,13 @@ def _ensemble_section(ensemble: Optional[EnsembleSpread]) -> Optional[str]:
 
     if ensemble.physics:
         body.append("**Physics-check values:**\n")
-        body.append("| Scenario | Channel | Min | Median | Max |")
-        body.append("|---|---|---:|---:|---:|")
+        body.append("| Scenario | Channel | Passed | Min | Median | Max |")
+        body.append("|---|---|---:|---:|---:|---:|")
         for key, s in sorted(ensemble.physics.items()):
             scenario, channel = key.split(" | ", 1)
-            body.append(f"| {scenario} | `{channel}` | {s.min:.4g} | "
-                        f"{s.median:.4g} | {s.max:.4g} |")
+            passed = ensemble.physics_passed.get(key, 0)
+            body.append(f"| {scenario} | `{channel}` | {passed}/{ensemble.n_seeds} | "
+                        f"{s.min:.4g} | {s.median:.4g} | {s.max:.4g} |")
 
     return _section("Seed ensemble spread", "\n".join(body))
 
@@ -252,8 +260,9 @@ def _forcing_lines(forcing: Optional[dict], indent: str) -> list[str]:
     lines = []
     if forcing.get("ambient"):
         ambient = forcing["ambient"]
+        taus = ", ".join(f"{channel} {tau:.2f} h" for channel, tau in ambient["tau_h"].items())
         lines.append(f"{indent}- ambient: {ambient['column']}, "
-                     f"tau_ambient={ambient['tau_h']:.2f} h (learned)")
+                     f"tau_ambient {taus} (learned)")
     for column, term in forcing.get("linear", {}).items():
         lines.append(f"{indent}- linear: {column}, k={term['k']:.4g} °C/step per unit")
     for column, term in forcing.get("saturating", {}).items():
@@ -604,6 +613,16 @@ def _physics_section(results: list[ScenarioResult],
         "so a channel you are not relying on cannot hide one you are.\n",
         checks_to_markdown(results),
     ]
+    if hours is not None and any(r.name == FreeDecayScenario.label for r in results):
+        # closed = 1 - exp(-hours / tau) clears DECAY_MIN_CLOSED for any tau
+        # up to this, so the check cannot falsify a slow-mode prior.
+        longest_h = hours / -math.log(1 - DECAY_MIN_CLOSED)
+        body += [
+            "",
+            f"*Free decay passes any slow mode shorter than ~{longest_h:.0f} h "
+            "at this horizon: it tests the sign of the envelope coupling, not "
+            "its rate, so a pass does not corroborate `tau_slow`.*",
+        ]
     if failed:
         body += [
             "",

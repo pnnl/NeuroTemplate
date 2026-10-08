@@ -526,16 +526,6 @@ class RCBlock(nn.Module):
                      else _rate(self._log_tau["ambient"]))
         return a_ambient, _rate(self._log_tau["zone_mass"]), _rate(self._log_tau["mass_zone"])
 
-    def reg_error(self) -> torch.Tensor:
-        if self.gain is None:
-            return torch.zeros(())
-        weights = [p.pow(2).mean() for p in self.gain.parameters() if p.dim() > 1]
-        return torch.mean(torch.stack(weights))
-
-    def reset(self) -> None:
-        """Clear the mass temperature. Call before each new sequence."""
-        self.set_rollout_state(None)
-
     # The stateful-block protocol (see `neurotemplate.export.state`): the
     # hidden state as one [batch, width] tensor, so an exporter can lift it
     # into explicit graph I/O without knowing what this class calls it.
@@ -629,9 +619,13 @@ class RCBlock(nn.Module):
             tau_fast, tau_slow = mode_taus(*self.rates())
             headroom = 1 - a_zone_mass - a_ambient
             forcing = {
+                # One learned conduction rate per Y channel.
                 "ambient": None if self.ambient is None else {
                     "column": self.ambient_name,
-                    "tau_h": round(float(1 / a_ambient[0]) / self.steps_per_hour, 3),
+                    "tau_h": {
+                        name: round(float(1 / a) / self.steps_per_hour, 3)
+                        for name, a in zip(self.channel_names, a_ambient)
+                    },
                 },
                 "linear": {
                     name: {"k": round(float(term.coefficient()), 6)}

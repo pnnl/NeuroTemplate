@@ -27,7 +27,7 @@ from neurotemplate.modeling.experiment import resolve_device, set_seeds
 
 from neurotemplate.control.config import ControlConfig
 from neurotemplate.control.load import load_frozen_dynamics
-from neurotemplate.control.scenarios import build_loaders, horizons
+from neurotemplate.control.scenarios import build_loaders, eval_pred_steps, horizons
 from neurotemplate.control.policy import (
     build_policy,
     describe_policy,
@@ -84,6 +84,7 @@ def main() -> None:
     surrogate_arch = describe_dynamics(dyn_sys, sysid_cfg)
 
     h_sys, h_ctrl, hmax = horizons(cfg, sysid_cfg)
+    eval_pred_steps(cfg, hmax)   # fail now, not after the policy has trained
     if cfg.verbose:
         print(f"Horizons: H_sys={h_sys} H_ctrl={h_ctrl} "
               f"train_pred_steps={cfg.train_pred_steps}")
@@ -120,7 +121,8 @@ def main() -> None:
     # One forward pass before training: which term is actually being
     # optimised, and does the power term have an interior minimum at all.
     # Both answers cost seconds here and an iteration each if skipped.
-    balance_out = run_objective_pass(problem, next(iter(train_loader)))
+    balance_batch = next(iter(train_loader))
+    balance_out = run_objective_pass(problem, balance_batch)
     balance = objective_balance(loss, balance_out)
     power = power_term(cfg, nm_mapping, norm_stats)
     power_weighted = (cfg.energy_weight > 0 or cfg.cost_weight > 0
@@ -156,6 +158,13 @@ def main() -> None:
         cl_system, best_dev, train_time_s = train_policy(
             cfg, problem, train_loader, dev_loader, logger=logger,
         )
+        # The same batch through the trained policy: the shares a weight can
+        # be tuned against (a residual's Δu term is exactly zero before).
+        trained_balance = objective_balance(
+            loss, run_objective_pass(problem, balance_batch))
+        if cfg.verbose:
+            print("Objective shares after training: " + ", ".join(
+                f"{t.name} {t.share * 100:.0f}%" for t in trained_balance.terms))
 
         if cfg.verbose:
             print("Evaluating closed loop on test split...")
@@ -193,12 +202,13 @@ def main() -> None:
             baseline=baseline,
             clears_reference=clears, best_dev_loss=best_dev,
             train_time_s=train_time_s,
-            balance=balance, shapes=shapes,
+            balance=balance, trained_balance=trained_balance, shapes=shapes,
             power=power_diag, objective_notes=notes,
         )
         write_reportcard(md, Path(cfg.savedir), logger=logger)
         log_control_results(logger, results, baseline=baseline)
-        logger.log_dict(objective_to_dict(balance, shapes, power_diag, notes),
+        logger.log_dict(objective_to_dict(balance, shapes, power_diag, notes,
+                                          trained_balance),
                         name="objective_diagnostics.json")
 
         write_run_summary(
@@ -212,8 +222,6 @@ def main() -> None:
         print(f"Mean |Δsetpoint|: {results.mean_abs_du:.4g}")
         rid = logger.run.info.run_id
         print(f"Finished DPC run: {rid}")
-        with open("latest_control_run_id.dat", "w", encoding="utf-8") as f:
-            f.write(rid)
 
         # Push savedir (plots + reportcard) to MLflow before it is removed.
         logger.log_artifacts({})

@@ -18,7 +18,6 @@ import warnings
 from pathlib import Path
 
 import onnx
-import onnxruntime as ort
 import torch
 import torch.nn as nn
 
@@ -104,13 +103,3 @@ def audit_operators(proto: onnx.ModelProto, label: str) -> None:
             "consumer's runtime may not implement them. If they are core "
             "ONNX and genuinely needed, add them to trace.ALLOWED_OPS."
         )
-
-
-def opset_of(proto: onnx.ModelProto) -> int:
-    """The default-domain opset a graph was written against."""
-    return next(o.version for o in proto.opset_import if o.domain in ("", "ai.onnx"))
-
-
-def session(path: Path) -> ort.InferenceSession:
-    """A CPU inference session over one exported graph."""
-    return ort.InferenceSession(str(path), providers=["CPUExecutionProvider"])

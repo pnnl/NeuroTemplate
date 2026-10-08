@@ -226,6 +226,16 @@ class ModelingConfig:
                 f"available: {list(PER_BLOCK_FAMILIES)}.{extra}"
             )
 
+        # The first in_steps of a test window are the seeded history, not
+        # predictions; a window no longer than that scores nothing and the
+        # run would fail only after training, in the test metrics.
+        if self.test_window <= self.in_steps:
+            raise ValueError(
+                f"test_window ({self.test_window}) must be > in_steps "
+                f"({self.in_steps}); the first in_steps of each test window "
+                "are seeded history, so nothing would be scored."
+            )
+
         if (self.grad_gain > 0) and (self.grad_path is None):
             raise ValueError("grad_gain set but not grad_path")
 

@@ -130,7 +130,7 @@ def test_gru_surrogate_rolls_out_and_warms_up():
     # policy's first command rather than recorded data. Control never has to know those indices — SystemPreview's
     # input_map derives the window from the model's declared in_steps.
     model = dyn_node.callable
-    model.fy.reset()
+    model.fy.set_rollout_state(None)
     with torch.no_grad():
         expected = model(*[
             out[key][:, hmax - h_sys:hmax, :].reshape(out[key].shape[0], -1)

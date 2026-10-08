@@ -167,6 +167,22 @@ def test_estimate_decay_rejects_a_tau_the_window_could_not_resolve():
     assert estimate_decay(t_hours, state, ref, off, min_run_steps=48) == ()
 
 
+def test_estimate_decay_fits_only_the_decay_before_the_reference_is_crossed():
+    """Overnight decay toward recorded ambient, then the morning warms past
+    the zone. The crossing used to be fitted with the decay and pull tau off;
+    the decay before it is the measurement."""
+    tau_true, n_decay = 8.0, 96                    # 8 h of clean decay at 12/h
+    t_hours = np.arange(150) / 12.0
+    gap = np.empty(150)
+    gap[:n_decay] = 3.0 * np.exp(-t_hours[:n_decay] / tau_true)
+    gap[n_decay:] = -0.1 * np.arange(1, 150 - n_decay + 1)   # ambient now above
+    ref = np.full(150, 15.0)
+    off = np.ones(150, dtype=bool)
+    (window,) = estimate_decay(t_hours, ref + gap, ref, off, min_run_steps=48)
+    assert window.n_steps == n_decay
+    assert window.tau_h == pytest.approx(tau_true, rel=1e-6)
+
+
 # ── Small pure helpers used to build the decay windows ───────────
 
 

@@ -26,6 +26,7 @@ import shutil
 import subprocess
 
 import numpy as np
+import onnxruntime as ort
 import pandas as pd
 import pytest
 import torch
@@ -35,7 +36,7 @@ from neurotemplate.export.graphs import Step
 from neurotemplate.export.dynamics import export_model
 from neurotemplate.export.runtime import Model, check_reference
 from neurotemplate.export.state import probe_state_slots
-from neurotemplate.export.trace import export_graph, session
+from neurotemplate.export.trace import export_graph
 from neurotemplate.export.verify import Rollout
 from neurotemplate.modeling.config import ModelingConfig as Config
 from neurotemplate.modeling.dynamics import get_dynamics
@@ -162,7 +163,7 @@ def test_step_graph_follows_the_state_it_is_handed(tmp_path):
     export_graph(graph, (*windows, torch.randn(2, width)), ["y", "u", "d", "state"],
                  ["y_next", "state_next"], path, exporter="legacy")
 
-    sess = session(path)
+    sess = ort.InferenceSession(str(path), providers=["CPUExecutionProvider"])
     answers = []
     for seed in (1, 2):
         state = torch.randn(2, width, generator=torch.Generator().manual_seed(seed))

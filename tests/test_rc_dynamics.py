@@ -32,7 +32,8 @@ import pytest
 import torch
 
 from neurotemplate.modeling.config import ModelingConfig as Config
-from neurotemplate.modeling.dynamics import BlockStack, get_dynamics
+from neurotemplate.export.state import clear_state
+from neurotemplate.modeling.dynamics import BlockStack, get_dynamics, stateful_blocks
 from neurotemplate.modeling.heads import BinaryHead, HeadStack, RegressionHead
 from neurotemplate.modeling.rc import (
     MIN_TAU_STEPS, RCBlock, SaturatingTerm, mode_taus, physical_parameters,
@@ -242,11 +243,11 @@ def test_the_mass_carries_state_across_calls_until_reset():
     block = make_block()
     ramp = torch.arange(IN_STEPS, dtype=torch.float32).unsqueeze(0)
     x = torch.cat([ramp, torch.zeros(1, IN_STEPS * 2)], dim=-1)
-    block.reset()
+    block.set_rollout_state(None)
     first = block(x.clone())
     second = block(x.clone())
     assert not torch.allclose(first, second)      # the mass moved
-    block.reset()
+    block.set_rollout_state(None)
     assert torch.allclose(block(x.clone()), first)
 
 
@@ -311,11 +312,11 @@ def test_one_blocks_input_cannot_move_another_blocks_state():
                 p.normal_(0, 1.0)
 
     x = torch.randn(2, IN_STEPS * 7)
-    fy.reset()
+    clear_state(stateful_blocks(fy))
     before = fy(x.clone())
     nudged = x.clone()
     nudged[:, IN_STEPS * 2 + 0::3] += 5.0        # the north setpoint alone
-    fy.reset()
+    clear_state(stateful_blocks(fy))
     moved = (fy(nudged) - before).abs().max(0).values
     assert moved[0] > 0.1 and moved[1] == 0.0
 
@@ -334,7 +335,7 @@ def test_outputs_come_back_in_the_mappings_channel_order():
 def test_each_block_holds_its_own_parameters_and_its_own_names():
     system = get_dynamics(make_cfg(), MAPPING, block_spec=SPLIT)
     fy = system.nodes[0].callable.fy
-    assert fy.block_names == ["north", "south"]
+    assert [b.name for b in fy.block_specs] == ["north", "south"]
     assert [b.channel_names for b in fy.blocks] == [("north T",), ("south T",)]
     north, south = (dict(b.named_parameters()) for b in fy.blocks)
     assert not torch.equal(north["gain.linear.0.weight"],
@@ -346,7 +347,7 @@ def test_reset_reaches_every_block():
     fy = system.nodes[0].callable.fy
     fy(torch.randn(2, IN_STEPS * 7))
     assert all(b._mass is not None for b in fy.blocks)
-    fy.reset()
+    clear_state(stateful_blocks(fy))
     assert all(b._mass is None for b in fy.blocks)
 
 
@@ -361,25 +362,24 @@ def test_per_block_wraps_any_family_the_flag_allows():
 
 def test_a_mixed_family_model_scatters_both_kinds_back_in_y_order():
     """One block is `2r2c`, the other `mlp`, in a single graph. The scatter
-    must still land in nm_mapping["Y"] order, and reset() must reach only
+    must still land in nm_mapping["Y"] order, and a reset must reach only
     the stateful (2r2c) child."""
     cfg = make_cfg(model="mlp")   # blocks that don't override use "mlp"
     system = get_dynamics(cfg, MIXED_MAPPING, block_spec=MIXED_SPLIT)
     fy = system.nodes[0].callable.fy
 
-    assert fy.block_names == ["north", "power"]
+    assert [b.name for b in fy.block_specs] == ["north", "power"]
     assert type(fy.blocks[0]).__name__ == "RCBlock"
     assert type(fy.blocks[1]).__name__ == "MLP"
-    assert not hasattr(fy.blocks[1], "reset")     # the mlp block is stateless
+    assert stateful_blocks(fy) == [fy.blocks[0]]  # the mlp block is stateless
 
     out = fy(torch.randn(2, IN_STEPS * 4))
     assert out.shape == (2, 2)                    # nm_mapping["Y"] order, ny=2
 
     fy(torch.randn(2, IN_STEPS * 4))
     assert fy.blocks[0]._mass is not None          # the RC block warmed up
-    fy.reset()
+    clear_state(stateful_blocks(fy))
     assert fy.blocks[0]._mass is None              # reset reaches it...
-    # ...and the mlp block, having no reset(), is simply untouched by it.
 
 
 def test_reads_changes_the_reading_blocks_output_and_not_the_read_blocks():
@@ -396,7 +396,7 @@ def test_reads_changes_the_reading_blocks_output_and_not_the_read_blocks():
             p.normal_(0, 1.0)
 
     x = torch.randn(2, IN_STEPS * 4)                # widths (2, 1, 1)
-    fy.reset()
+    clear_state(stateful_blocks(fy))
     before = fy(x.clone())
 
     # Y is key-major and, within that key, time-major: two columns per
@@ -407,7 +407,7 @@ def test_reads_changes_the_reading_blocks_output_and_not_the_read_blocks():
     # Perturb "north T" — the read channel — across its whole history.
     nudged_north = x.clone()
     nudged_north[:, north_cols] += 5.0
-    fy.reset()
+    clear_state(stateful_blocks(fy))
     moved_from_north = (fy(nudged_north) - before).abs().max(0).values
     assert moved_from_north[0] > 0.0                 # north's own state moved
     assert moved_from_north[1] > 0.0                 # ...and power, which reads it
@@ -415,7 +415,7 @@ def test_reads_changes_the_reading_blocks_output_and_not_the_read_blocks():
     # Perturb "power" — power's own state, which north does not read.
     nudged_power = x.clone()
     nudged_power[:, power_cols] += 5.0
-    fy.reset()
+    clear_state(stateful_blocks(fy))
     moved_from_power = (fy(nudged_power) - before).abs().max(0).values
     assert moved_from_power[0] == 0.0                # north is unaffected
     assert moved_from_power[1] > 0.0
@@ -568,7 +568,7 @@ def test_a_declared_block_persists_its_stats_and_reloads_by_config():
     rebuilt.load_state_dict(state)
     x = torch.randn(2, IN_STEPS * 5)
     y, u, d = x[:, :IN_STEPS], x[:, IN_STEPS:IN_STEPS * 3], x[:, IN_STEPS * 3:]
-    system.nodes[0].callable.fy.reset(); rebuilt.nodes[0].callable.fy.reset()
+    clear_state(stateful_blocks(system)); clear_state(stateful_blocks(rebuilt))
     assert torch.equal(system.nodes[0].callable(y, u, d), rebuilt.nodes[0].callable(y, u, d))
 
 
@@ -609,7 +609,7 @@ def test_a_declared_block_still_differentiates_under_vmap():
 def test_the_reportcard_reads_the_branches_off_describe():
     info = make_declared_block().describe()["forcing"]
     assert info["ambient"]["column"] == "oat"
-    assert info["ambient"]["tau_h"] == pytest.approx(2.0, rel=1e-3)
+    assert list(info["ambient"]["tau_h"].values()) == pytest.approx([2.0], rel=1e-3)
     assert set(info["linear"]) == {"ahu fan"} and info["linear"]["ahu fan"]["k"] > 0
     assert set(info["saturating"]) == {"north sp"}
     assert 0 < info["saturating"]["north sp"]["slope_share"] < 1

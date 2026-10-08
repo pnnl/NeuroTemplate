@@ -280,6 +280,7 @@ def build_blocks(
         output — reading your own Y is automatic and needs no declaration.
       - an `inputs` or `ambient` declaration is malformed (see the module
         docstring); every problem in a block is listed in one message.
+      - a shared U column is declared `demand` by more than one block.
       - a block sets a key that is not one of `BLOCK_KEYS`.
     """
     y_cols, u_cols, d_cols = nm_mapping["Y"], nm_mapping["U"], nm_mapping["D"]
@@ -360,5 +361,24 @@ def build_blocks(
             name, tuple(y_idx), tuple(u_idx), tuple(y_names), tuple(d_idx),
             tuple(reads_idx), model, tuple(u_names), tuple(d_names), inputs, ambient,
         ))
+    _check_one_demand_per_column(blocks)
     return blocks
+
+
+def _check_one_demand_per_column(blocks: list[Block]) -> None:
+    """The pre-stack rewrites a demand column once, for every block that sees
+    it, so a shared column declared `demand` by two blocks can only mean one
+    of them — and which one would be decided by dict order, silently."""
+    declared_by: dict[str, list[str]] = {}
+    for block in blocks:
+        for column, entry in block.inputs.items():
+            if entry["kind"] == "demand":
+                declared_by.setdefault(column, []).append(block.name)
+    clashes = {column: names for column, names in declared_by.items() if len(names) > 1}
+    if clashes:
+        raise ValueError(
+            f"block_mapping: U column(s) declared `demand` by more than one "
+            f"block: {clashes}. A demand column is rewritten once against one "
+            "state for every block that sees it; declare it in one block only."
+        )
 

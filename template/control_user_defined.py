@@ -24,6 +24,7 @@ from typing import Optional
 import torch
 
 from neurotemplate._typing import beartype
+from neurotemplate.common.data_utils import NormStats
 from neurotemplate.control.scenarios import BandSpec
 
 
@@ -59,7 +60,7 @@ def regulated(
 @beartype
 def comfort_band_signal(
     nm_mapping: dict[str, list[str]],
-    norm_stats: dict[str, dict[str, float]],
+    norm_stats: NormStats,
     n_samples: int,
     nsteps: int,
     band: BandSpec,
@@ -76,7 +77,8 @@ def comfort_band_signal(
     producing `sub_samples - 1` step jumps; 1 gives a constant band.
 
     Rewrite only if your reference is not a randomly sampled interval — e.g.
-    a fixed occupancy schedule, or a band read from a column of your data.
+    a fixed occupancy schedule. The hook receives no data, so a band read
+    from a column of your dataset cannot be built here.
     """
     k = band.sub_samples
     if k < 1:
@@ -118,7 +120,7 @@ def comfort_band_signal(
 @beartype
 def actuation_bounds(
     nm_mapping: dict[str, list[str]],
-    norm_stats: dict[str, dict[str, float]],
+    norm_stats: NormStats,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Per-U-channel (umin, umax) in NORMALIZED space; the policy output is
@@ -191,7 +193,7 @@ def power_metric(
     U: torch.Tensor,
     D: torch.Tensor,
     nm_mapping: dict[str, list[str]],
-    norm_stats: dict[str, dict[str, float]],
+    norm_stats: NormStats,
 ) -> torch.Tensor:
     """
     Instantaneous power per timestep, shape [batch, time]: the signal that
@@ -228,7 +230,7 @@ def power_metric(
 
 
 def _denorm(x: torch.Tensor, col: str, nm_mapping: dict[str, list[str]],
-            norm_stats: dict[str, dict[str, float]], role: str = "Y"
+            norm_stats: NormStats, role: str = "Y"
             ) -> torch.Tensor:
     """Physical units for one channel of a [batch, time, n] trajectory."""
     s = norm_stats[col]
@@ -275,7 +277,7 @@ def _denorm(x: torch.Tensor, col: str, nm_mapping: dict[str, list[str]],
 #     ymax_now: torch.Tensor,    # [b, n_ctrl]
 #     d_now: torch.Tensor,       # [b, nd]     current disturbances, normalized
 #     nm_mapping: dict[str, list[str]],
-#     norm_stats: dict[str, dict[str, float]],
+#     norm_stats: NormStats,
 # ) -> torch.Tensor:             # [b, nu]     normalized U
 #     """Aim each setpoint at the middle of its channel's band."""
 #     regulated_cols, _ = regulated(nm_mapping)

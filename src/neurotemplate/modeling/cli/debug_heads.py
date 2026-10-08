@@ -27,6 +27,7 @@ import matplotlib.pyplot as plt
 import torch
 
 from neurotemplate.modeling.cli.load import load_trained_dynamics
+from neurotemplate.modeling.plotting import PLOT_STYLE
 
 # Force-disable TeX rendering: titles contain Unicode (β, ∂, σ) and channel
 # names contain underscores/brackets that LaTeX would have to be escaped to
@@ -214,12 +215,13 @@ def main():
         return
 
     n = len(plottable)
-    fig, axes = plt.subplots(n, 2, figsize=(13, 3.6 * n), squeeze=False)
-    for row, (name, head) in enumerate(plottable):
-        _PLOTTERS[head.kind](head, axes[row], name)
-    fig.tight_layout()
     out = Path(args.output)
-    fig.savefig(out, dpi=120)
+    with plt.rc_context(PLOT_STYLE):
+        fig, axes = plt.subplots(n, 2, figsize=(13, 3.6 * n), squeeze=False)
+        for row, (name, head) in enumerate(plottable):
+            _PLOTTERS[head.kind](head, axes[row], name)
+        fig.tight_layout()
+        fig.savefig(out, dpi=120)
     print(f"Wrote {out.resolve()}")
 
 

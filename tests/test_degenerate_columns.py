@@ -71,6 +71,20 @@ def test_the_fallback_leaves_the_column_in_raw_units():
     assert later == pytest.approx(6e8)
 
 
+@pytest.mark.parametrize("norm_type", ["min_max", "abs_max", "z_score"])
+def test_a_column_that_varies_on_a_tiny_scale_is_normalised_not_left_raw(norm_type):
+    """A µA current varies; it must be scaled by its own spread. Left raw it
+    reaches the model a million times smaller than its neighbours, and it is
+    not constant, so no warning would say so."""
+    df = pd.DataFrame({"current [A]": [-3e-7, -1e-7, 1e-7, 2e-7]})
+    stats = compute_norm_stats(df, norm_type=norm_type)
+    normalised = (df["current [A]"] - stats["current [A]"]["shift"]) / stats["current [A]"]["stretch"]
+    assert normalised.abs().max() >= 0.5
+    if norm_type != "z_score":
+        assert normalised.abs().max() <= 1.0     # abs_max scales by |min| here
+    assert degenerate_columns(stats) == []
+
+
 # ── The startup warning ──────────────────────────────────────────
 #
 # The reportcard only exists once the run has finished. The condition is

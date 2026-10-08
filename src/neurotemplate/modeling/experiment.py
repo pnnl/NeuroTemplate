@@ -20,7 +20,7 @@ from pandas import DataFrame
 
 from neurotemplate._typing import beartype
 
-from neurotemplate.common.data_utils import get_loader
+from neurotemplate.common.data_utils import NormStats, get_loader
 from neurotemplate.modeling.heads import HeadStack
 from neurotemplate.modeling.dynamics import get_dynamics
 from neurotemplate.modeling.loss import build_loss
@@ -48,7 +48,9 @@ def set_seeds(seed: int) -> int:
 @beartype
 def resolve_device(requested: Optional[str] = None) -> torch.device:
     """
-    Resolve the torch device to use.
+    Resolve the torch device to use, and make it torch's default device
+    (`torch.set_default_device`) for the rest of the process: tensors the
+    loaders and the rollout create without an explicit device land there.
 
     Raises RuntimeError if a specific device is requested but unavailable.
     """
@@ -60,7 +62,6 @@ def resolve_device(requested: Optional[str] = None) -> torch.device:
             raise RuntimeError("Requested MPS device, but MPS is unavailable.")
     elif torch.cuda.is_available():
         device = torch.device("cuda")
-        torch.backends.cudnn.conv.fp32_precision = 'tf32'
     else:
         device = torch.device("cpu")
     torch.set_default_device(device)
@@ -76,7 +77,7 @@ def build_trainer(
     dev_dfs: list[DataFrame],
     nm_mapping: dict[str, list[str]],
     grad_masks: dict[str, torch.Tensor],
-    norm_stats: dict[str, dict[str, float]],
+    norm_stats: NormStats,
     head_stack: Optional[HeadStack] = None,
     block_spec: Optional[dict[str, dict]] = None,
     logger: Optional[MLFlowLogger] = None,
@@ -119,8 +120,6 @@ def build_trainer(
         raw_model=raw_model,
         system=system,
         grad_masks=grad_masks,
-        nm_mapping=nm_mapping,
-        norm_stats=norm_stats,
         head_stack=head_stack,
     )
 
@@ -230,7 +229,7 @@ def train_with_curriculum(
     dev_dfs: list[DataFrame],
     nm_mapping: dict[str, list[str]],
     grad_masks: dict[str, torch.Tensor],
-    norm_stats: dict[str, dict[str, float]],
+    norm_stats: NormStats,
     head_stack: Optional[HeadStack] = None,
     block_spec: Optional[dict[str, dict]] = None,
     global_logger: Optional[MLFlowLogger] = None,
@@ -292,7 +291,6 @@ def train_with_curriculum(
     if (global_logger is not None) and (cfg.save_config == "last_step"):
         global_logger.log_artifacts({
             "best_model_state_dict.pth": trainer.best_model,
-            "best_model.pth": trainer.model,
         })
 
     return dyn_sys, trainer.get_devloss()

@@ -164,7 +164,7 @@ def _score(z: torch.Tensor, true_idx: torch.Tensor, thresholds: torch.Tensor,
     pred_shares = torch.bincount(pred_idx, minlength=n_levels).float() / pred_idx.numel()
     true_shares = torch.bincount(true_idx, minlength=n_levels).float() / true_idx.numel()
     error = (pred_shares - true_shares).abs().sum().item()
-    ba = level_metrics(pred_idx, true_idx, list(range(n_levels)), "").balanced_accuracy
+    ba = level_metrics(pred_idx, true_idx, [float(k) for k in range(n_levels)], "").balanced_accuracy
     return CalibrationStep(thresholds.tolist(), pred_shares.tolist(), error, ba)
 
 

@@ -413,7 +413,8 @@ def _fit_log_decay(t_hours: np.ndarray, gap: np.ndarray) -> Optional[tuple[float
     None when the window cannot support a fit:
 
       - the slope must be negative (the gap shrinking),
-      - the gap must never cross zero (log undefined),
+      - the gap must never touch zero (log undefined; `estimate_decay` has
+        already cut the run at its first crossing),
       - and the fitted tau must be short enough that this window could have
         resolved it (`MAX_TAU_PER_SPAN`).
 
@@ -437,6 +438,12 @@ def _fit_log_decay(t_hours: np.ndarray, gap: np.ndarray) -> Optional[tuple[float
     return tau_h, r_squared
 
 
+def _before_first_crossing(gap: np.ndarray) -> int:
+    """Length of the prefix of `gap` before it first reaches or changes sign."""
+    crossed = np.sign(gap) != np.sign(gap[0])
+    return int(np.argmax(crossed)) if crossed.any() else len(gap)
+
+
 def estimate_decay(
     t_hours: np.ndarray,
     state: np.ndarray,
@@ -448,10 +455,15 @@ def estimate_decay(
 
     `off` is a boolean mask (see `actuator_off_mask`), True where the plant
     is uncoupled. Within each run of at least `min_run_steps` consecutive
-    True samples, regress log|state - ref| on elapsed time; a run that is
-    not an exponential decay toward `ref` (flat, growing, crossing it, or
-    too short to resolve the tau it fits) contributes no window rather than
-    a bogus tau -- see `_fit_log_decay` for the three rejections.
+    True samples, regress log|state - ref| on elapsed time. A run is cut at
+    the gap's first sign change and only the part before it is fitted: the
+    reference is usually recorded ambient, which moves through the day, so a
+    genuine overnight decay often crosses it once the morning warms, and the
+    decay before the crossing is exactly the measurement wanted. A run whose
+    remaining prefix is shorter than `min_run_steps`, or that is not an
+    exponential decay toward `ref` (flat, growing, or too short to resolve
+    the tau it fits), contributes no window rather than a bogus tau -- see
+    `_fit_log_decay` for the rejections.
 
     Returns one `DecayWindow` per run that fits cleanly, in time order.
     Empty means no qualifying window was found in this data -- the prior then
@@ -460,6 +472,9 @@ def estimate_decay(
     gap = np.asarray(state, dtype=float) - np.asarray(ref, dtype=float)
     windows = []
     for start, stop in find_runs(np.asarray(off, dtype=bool), min_run_steps):
+        stop = start + _before_first_crossing(gap[start:stop])
+        if stop - start < min_run_steps:
+            continue
         t0 = t_hours[start:stop] - t_hours[start]
         fit = _fit_log_decay(t0, gap[start:stop])
         if fit is None:

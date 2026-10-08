@@ -31,6 +31,7 @@ from typing import Optional
 
 import torch
 
+from neurotemplate.common.data_utils import NormStats
 from neurotemplate.control.scenarios import scored_steps
 from neurotemplate._typing import beartype
 
@@ -268,7 +269,7 @@ def term_shapes(
     u_names: list[str],
     u_min: torch.Tensor,
     u_max: torch.Tensor,
-    norm_stats: dict[str, dict[str, float]],
+    norm_stats: NormStats,
     n_grid: int = SHAPE_GRID,
 ) -> list[TermShape]:
     """Sweep each control across its actuation box and record the term's shape.
@@ -314,15 +315,26 @@ def term_shapes(
 
 
 @beartype
-def balance_to_markdown(balance: ObjectiveBalance) -> str:
-    rows = ["| Term | Value | Share | vs. the rest | |",
-            "|---|---:|---:|---:|---|"]
+def balance_to_markdown(balance: ObjectiveBalance,
+                        trained: Optional[ObjectiveBalance] = None) -> str:
+    """One row per term. With `trained` (the same batch through the trained
+    policy), its value and share sit beside the pre-training ones."""
+    after = {} if trained is None else {t.name: t for t in trained.terms}
+    head = "| Term | Value | Share | vs. the rest | |"
+    rule = "|---|---:|---:|---:|---|"
+    if trained is not None:
+        head += " Value, trained | Share, trained |"
+        rule += "---:|---:|"
+    rows = [head, rule]
     for t in balance.terms:
         ratio = "∞" if t.ratio_to_rest == float("inf") else f"{t.ratio_to_rest:.2f}×"
         flag = "⚠️ dominates" if t.dominates() else ""
-        rows.append(
-            f"| {t.name} | {t.value:.4g} | {t.share * 100:.0f}% | {ratio} | {flag} |"
-        )
+        row = f"| {t.name} | {t.value:.4g} | {t.share * 100:.0f}% | {ratio} | {flag} |"
+        if trained is not None:
+            a = after.get(t.name)
+            row += (" n/a | n/a |" if a is None
+                    else f" {a.value:.4g} | {a.share * 100:.0f}% |")
+        rows.append(row)
     return "\n".join(rows)
 
 
@@ -375,16 +387,20 @@ def shapes_to_markdown(shapes: list[TermShape],
 def objective_to_dict(balance: ObjectiveBalance,
                       shapes: list[TermShape],
                       power: Optional[PowerDiagnostics] = None,
-                      notes: Optional[list[str]] = None) -> dict:
+                      notes: Optional[list[str]] = None,
+                      trained: Optional[ObjectiveBalance] = None) -> dict:
     """JSON-serializable objective diagnostics (for MLflow / disk)."""
+    def terms(b: ObjectiveBalance) -> dict:
+        return {t.name: {"value": t.value, "share": t.share,
+                         "ratio_to_rest": t.ratio_to_rest,
+                         "dominates": t.dominates()}
+                for t in b.terms}
+
     return {
         "total": balance.total,
-        "terms": {
-            t.name: {"value": t.value, "share": t.share,
-                     "ratio_to_rest": t.ratio_to_rest,
-                     "dominates": t.dominates()}
-            for t in balance.terms
-        },
+        "terms": terms(balance),
+        "trained_total": None if trained is None else trained.total,
+        "trained_terms": None if trained is None else terms(trained),
         "power_shape": {
             s.u_name: {"grid": s.grid, "values": s.values,
                        "flat": s.is_flat,

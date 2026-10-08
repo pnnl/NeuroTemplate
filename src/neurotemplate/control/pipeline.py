@@ -13,10 +13,11 @@ from time import perf_counter as tic
 from typing import Optional
 
 import torch
+from matplotlib import rc_context
 
 from neuromancer.trainer import Trainer
 
-from neurotemplate.common.data_utils import axis_label, to_physical
+from neurotemplate.common.data_utils import NormStats, axis_label, to_physical
 from neurotemplate.common.metrics import (
     ChannelMetrics,
     metric_key,
@@ -49,11 +50,13 @@ from neurotemplate.control.policy import (
 )
 from neurotemplate.control.scenarios import (
     build_window_dict_multi,
+    eval_pred_steps,
     horizons,
     price_scale,
     scored_steps,
 )
 from neurotemplate.hooks import load_control_hooks
+from neurotemplate.modeling.plotting import PLOT_STYLE, unique_day_dir
 
 from neurotemplate._typing import beartype
 
@@ -75,11 +78,6 @@ class ControlResults:
     energy: Optional[EnergyMetrics]    # None if power_metric not implemented
     eval_time_s: float
     residual: Optional[ResidualMetrics] = None   # None unless residual_delta
-
-    @property
-    def energy_proxy(self) -> Optional[float]:
-        """Mean power, or None when the use case meters no power."""
-        return None if self.energy is None else self.energy.mean_power
 
 
 # ── Train (policy only) ──────────────────────────────────────────
@@ -134,7 +132,7 @@ def evaluate_closed_loop(
     cl_system,
     test_dfs: list,
     nm_mapping: dict[str, list[str]],
-    norm_stats: dict[str, dict[str, float]],
+    norm_stats: NormStats,
 ) -> tuple[ControlResults, dict]:
     """Roll the trained closed loop on the test split; pooled physical metrics.
 
@@ -152,23 +150,17 @@ def evaluate_closed_loop(
     # realization and results are reproducible & comparable.
     eval_gen = torch.Generator(device=device)
     eval_gen.manual_seed(EVAL_BAND_SEED)
-    # test_window is the total window (matches sys-id); rollout = test_window - hmax.
-    eval_pred_steps = cfg.test_window - hmax
-    if eval_pred_steps <= 0:
-        raise ValueError(
-            f"test_window ({cfg.test_window}) must be > hmax ({hmax}); "
-            "otherwise there is no rollout after the warmup."
-        )
+    pred_steps = eval_pred_steps(cfg, hmax)
     data = build_window_dict_multi(
         test_dfs, cfg, sysid_cfg, nm_mapping, norm_stats,
-        P=eval_pred_steps, stride=cfg.test_stride,
+        P=pred_steps, stride=cfg.test_stride,
         band=cfg.test_band(), price_path=cfg.test_price_path, generator=eval_gen,
     )
     # source_idx is bookkeeping for plotting only; the closed-loop System
     # doesn't expect it among its inputs.
     source_idx = data.pop("source_idx")
 
-    cl_system.nsteps = eval_pred_steps
+    cl_system.nsteps = pred_steps
     t0 = tic()
     with torch.no_grad():
         out = cl_system(data)
@@ -340,7 +332,7 @@ def baseline_node(
     cfg,
     sysid_cfg,
     nm_mapping: dict[str, list[str]],
-    norm_stats: dict[str, dict[str, float]],
+    norm_stats: NormStats,
 ) -> Optional[object]:
     """The rule-based controller to score alongside the learned policy.
 
@@ -380,7 +372,7 @@ def evaluate_baseline(
     dyn_node,
     test_dfs: list,
     nm_mapping: dict[str, list[str]],
-    norm_stats: dict[str, dict[str, float]],
+    norm_stats: NormStats,
 ) -> Optional[ControlResults]:
     """Score the use case's rule-based controller on the same test rollouts.
 
@@ -426,13 +418,14 @@ def clears_reference(results: ControlResults,
     return results.comfort_mean_exceedance <= baseline.comfort_mean_exceedance
 
 
+@rc_context(PLOT_STYLE)
 @beartype
 def plot_closed_loop(
     cfg,
     sysid_cfg,
     out,
     nm_mapping: dict[str, list[str]],
-    norm_stats: dict[str, dict[str, float]],
+    norm_stats: NormStats,
     plot_dir: Path,
     origins: list,
 ) -> None:
@@ -450,8 +443,6 @@ def plot_closed_loop(
     """
     import matplotlib.pyplot as plt
     import pandas as pd
-
-    from neurotemplate.modeling.plotting import unique_day_dir
 
     hooks = load_control_hooks(cfg)
     _, _, hmax = horizons(cfg, sysid_cfg)
@@ -543,12 +534,18 @@ def plot_closed_loop(
             n_rows, 1, sharex=True, figsize=(10, 3 * n_rows),
         )
         ax0, ax1 = axes[0], axes[1]
-        for j, name in enumerate(regulated):
-            ax0.plot(steps, y[w, :, j], label=name, lw=1.0)
-        ax0.fill_between(
-            steps, ymin[w, :, 0], ymax[w, :, 0],
-            color="green", alpha=0.12, label="comfort band",
-        )
+        colors = [ax0.plot(steps, y[w, :, j], label=name, lw=1.0)[0].get_color()
+                  for j, name in enumerate(regulated)]
+        # One band when every regulated channel shares it (the template's
+        # sampler draws it that way); otherwise each channel's own band, in
+        # its line's colour.
+        shared = bool((ymin[w] == ymin[w, :, :1]).all()
+                      and (ymax[w] == ymax[w, :, :1]).all())
+        bands = ([(0, "green", "comfort band")] if shared else
+                 [(j, colors[j], f"{name} band") for j, name in enumerate(regulated)])
+        for j, color, label in bands:
+            ax0.fill_between(steps, ymin[w, :, j], ymax[w, :, j],
+                             color=color, alpha=0.12, label=label)
         for name, series in context.items():
             ax0.plot(steps, series[w], label=name, lw=0.9, linestyle="--")
         ax0.set_ylabel(axis_label(norm_stats, regulated, "Regulated"))

@@ -1,12 +1,15 @@
 """Hook discovery: a hooks file named by `user_hooks_path` runs once, can
-import its siblings, and never stands in for the canonical hooks module."""
+import its siblings, and never stands in for the canonical hooks module. And
+what `data_mapping` returns is checked by the library, not the hook."""
 
 import sys
 from types import SimpleNamespace
 
+import pandas as pd
 import pytest
 
 from neurotemplate.hooks import load_control_hooks, load_modeling_hooks
+from neurotemplate.modeling.pipeline import resolve_nm_mapping
 
 
 @pytest.fixture
@@ -44,3 +47,15 @@ def test_a_failing_hooks_file_is_not_left_half_imported(hooks_dir):
     with pytest.raises(RuntimeError, match="bad hooks"):
         load_modeling_hooks(cfg)
     assert "broken_hooks" not in sys.modules
+
+
+def test_the_library_checks_what_data_mapping_returns():
+    """A column in two roles builds a model that reads its own target as an
+    input, with no error anywhere downstream; the check must not depend on
+    the hook author having kept the template's."""
+    df = pd.DataFrame(columns=["zone", "sp", "oat", "sec_elapsed"])
+    hooks = SimpleNamespace(data_mapping=lambda df, cfg: {
+        "Y": ["zone"], "U": ["sp", "zone"], "D": ["oaat"], "t": ["sec_elapsed"]})
+    cfg = SimpleNamespace(exclude_columns=[])
+    with pytest.raises(ValueError, match=r"(?s)not in the dataframe: \['oaat'\].*more than one role.*\['zone'\]"):
+        resolve_nm_mapping(hooks, df, cfg)

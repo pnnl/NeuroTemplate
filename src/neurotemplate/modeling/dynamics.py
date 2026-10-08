@@ -107,10 +107,6 @@ class GRUBlock(nn.Module):
         )
         self._last_step_slices = windows.last_step(self.widths, in_steps)
 
-    def reset(self) -> None:
-        """Clear hidden state. Call before each new sequence."""
-        self.set_rollout_state(None)
-
     # The stateful-block protocol (see `neurotemplate.export.state`). nn.GRU
     # keeps its state layer-first, [num_layers, batch, hidden]; the protocol
     # is batch-first and flat, so the two methods own that reshape.
@@ -128,10 +124,6 @@ class GRUBlock(nn.Module):
             return
         layers, hidden = self.gru.num_layers, self.gru.hidden_size
         self._h = state.reshape(-1, layers, hidden).transpose(0, 1).contiguous()
-
-    def reg_error(self) -> torch.Tensor:
-        weights = [p.pow(2).mean() for p in self.gru.parameters() if p.dim() > 1]
-        return torch.mean(torch.stack(weights))
 
     def _to_sequence(self, x: torch.Tensor) -> torch.Tensor:
         """[..., in_steps*(ny+nu+nd)] -> [..., in_steps, ny+nu+nd], key-major
@@ -242,7 +234,6 @@ class BlockStack(nn.Module):
         super().__init__()
         ny = widths[0]
         self.block_specs = list(blocks)
-        self.block_names = [b.name for b in blocks]
         self.in_features = in_steps * sum(widths)
         self.out_features = ny
 
@@ -272,17 +263,6 @@ class BlockStack(nn.Module):
             ),
             persistent=False,
         )
-
-    def reset(self) -> None:
-        """Clear every stateful sub-block. No-op for stateless ones."""
-        for block in self.blocks:
-            reset = getattr(block, "reset", None)
-            if reset is not None:
-                reset()
-
-    def reg_error(self) -> torch.Tensor:
-        errors = [b.reg_error() for b in self.blocks if hasattr(b, "reg_error")]
-        return torch.mean(torch.stack(errors)) if errors else torch.zeros(())
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         dim = x.ndim - 1                    # the feature axis, batched or not
@@ -688,7 +668,8 @@ def describe_dynamics(dyn_sys: SystemPreview, cfg: ModelingConfig) -> dict:
     Describe the trained dynamics system for the reportcard.
 
     Returns a dict with:
-      - factory: cfg.model, the run-wide family name
+      - factory: the model family, or `mixed (a, b)` when the blocks of a
+        block spec use different families (each block line names its own)
       - separable: whether the SSM is separable (fy + fu + fd)
       - residual: whether y_{k+1} adds y_k as a residual base
       - in_steps: context length (cfg.in_steps) — see below
@@ -708,9 +689,16 @@ def describe_dynamics(dyn_sys: SystemPreview, cfg: ModelingConfig) -> dict:
         "fd": _describe_block(getattr(raw, "fd", None), cfg),
     }
 
+    # cfg.model is only the default family under a block spec; the blocks
+    # themselves say what was built.
+    fy = blocks_info["fy"]
+    families = (sorted({sub["model"] for sub in fy["blocks"].values()})
+                if fy is not None and "blocks" in fy else [cfg.model])
+    factory = families[0] if len(families) == 1 else f"mixed ({', '.join(families)})"
+
     pre_stack = getattr(raw, "pre_stack", None)
     return {
-        "factory": cfg.model,
+        "factory": factory,
         "separable": raw.fu is not None and raw.fd is not None,
         "residual": bool(raw.residual),
         "in_steps": int(raw.in_steps),

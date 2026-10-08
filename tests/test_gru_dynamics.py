@@ -110,7 +110,7 @@ def test_warm_consumption_equals_a_cold_pass_over_the_whole_history():
     data = make_batch(in_steps + extra + P)
 
     stepped = GRUBlock(NY, NU, ND, in_steps, outsize=NY, hidden_size=8, num_layers=2)
-    stepped.reset()
+    stepped.set_rollout_state(None)
     with torch.no_grad():
         for lo in range(extra + 1):
             warm = stepped(torch.cat(flat_window(data, lo, lo + in_steps), dim=-1))
@@ -119,7 +119,7 @@ def test_warm_consumption_equals_a_cold_pass_over_the_whole_history():
     cold = GRUBlock(NY, NU, ND, in_steps + extra, outsize=NY,
                     hidden_size=8, num_layers=2)
     cold.load_state_dict(stepped.state_dict())
-    cold.reset()
+    cold.set_rollout_state(None)
     with torch.no_grad():
         once = cold(torch.cat(flat_window(data, 0, in_steps + extra), dim=-1))
 
@@ -135,9 +135,9 @@ def test_manual_vmap_path_matches_the_fused_kernel():
     x = torch.randn(in_steps * (NY + NU + ND))
 
     with torch.no_grad():
-        block.reset()
+        block.set_rollout_state(None)
         manual = block(x)                  # 1D -> _manual_gru
-        block.reset()
+        block.set_rollout_state(None)
         fused = block(x.unsqueeze(0))      # 2D -> nn.GRU
 
     assert torch.allclose(manual, fused[0], atol=1e-6)
@@ -155,7 +155,7 @@ def test_rollout_enters_warmed_from_its_own_window(nm_mapping):
     out = system(dict(data))
 
     model = system.nodes[0].callable
-    model.fy.reset()
+    model.fy.set_rollout_state(None)
     with torch.no_grad():
         expected = model(*flat_window(data, 0, in_steps))
 
@@ -176,9 +176,9 @@ def test_history_actually_reaches_the_prediction(nm_mapping):
     )
 
     with torch.no_grad():
-        model.fy.reset()
+        model.fy.set_rollout_state(None)
         first = model(*flat_window(data, 0, in_steps))
-        model.fy.reset()
+        model.fy.set_rollout_state(None)
         second = model(*flat_window(other, 0, in_steps))
 
     assert not torch.allclose(first, second)
@@ -227,7 +227,7 @@ def test_in_steps_one_matches_a_hand_rolled_rollout(nm_mapping):
     out = system(dict(data))
 
     model = system.nodes[0].callable
-    model.fy.reset()
+    model.fy.set_rollout_state(None)
     y = data["yn"][:, 0, :]
     expected = [y]
     with torch.no_grad():

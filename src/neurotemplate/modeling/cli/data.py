@@ -33,7 +33,7 @@ from neurotemplate.common.data_utils import compute_norm_stats, get_data_splits,
 from neurotemplate.hooks import load_modeling_hooks
 from neurotemplate.modeling.config import ModelingConfig
 from neurotemplate.modeling.dynamics import family_by_channel
-from neurotemplate.modeling.pipeline import resolve_block_spec
+from neurotemplate.modeling.pipeline import resolve_block_spec, resolve_nm_mapping
 from neurotemplate.modeling.diagnostics import (
     K_MAX_DEFAULT,
     MIN_RUN_HOURS_DEFAULT,
@@ -70,7 +70,7 @@ def heads_main() -> None:
 
     hooks = load_modeling_hooks(cfg)
     train_raws, _dev_raws, _test_raws, _freq_s = get_data_splits(cfg)
-    nm_mapping = hooks.data_mapping(df=train_raws[0], cfg=cfg)
+    nm_mapping = resolve_nm_mapping(hooks, train_raws[0], cfg)
     train_pool = pool_dfs(train_raws)
 
     # Which family builds which channel, resolved exactly the way the trainer
@@ -122,7 +122,7 @@ def decay_main() -> None:
     hooks = load_modeling_hooks(cfg)
     train_raws, _dev_raws, _test_raws, freq_s = get_data_splits(cfg)
     cfg.steps_per_hour = 3600.0 / freq_s
-    nm_mapping = hooks.data_mapping(df=train_raws[0], cfg=cfg)
+    nm_mapping = resolve_nm_mapping(hooks, train_raws[0], cfg)
 
     known_columns = nm_mapping["Y"] + nm_mapping["U"] + nm_mapping["D"]
     for col in (args.state, args.ref):

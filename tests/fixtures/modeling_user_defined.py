@@ -12,13 +12,13 @@ bodies hold the dataset-specific decisions.
 import pandas as pd
 import os
 import json
-from copy import deepcopy
 from typing import Optional, Tuple
 
 from optuna import Trial
 from neurotemplate.modeling.config import ModelingConfig as Config
 import torch
 
+from neurotemplate.common.data_utils import NormStats
 from neurotemplate.modeling.heads import (
     HeadStack,
     OrdinalHead,
@@ -146,7 +146,7 @@ def data_mapping(
 @beartype
 def data_head_config(
     nm_mapping: dict[str, list[str]],
-    norm_stats: dict[str, dict[str, float]],
+    norm_stats: NormStats,
 ) -> HeadStack:
     """
     Return one Head per Y column, packaged as a HeadStack.
@@ -265,11 +265,9 @@ def synth_cfg(
 @beartype
 def hyper_args(
     trial: Trial,
-    base_cfg: Config,
+    cfg: Config,
 ) -> Config:
     """Suggest high-impact hyperparameters for Optuna trial."""
-    cfg = deepcopy(base_cfg)
-
     return cfg
 
 

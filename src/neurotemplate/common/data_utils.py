@@ -1,7 +1,7 @@
 import json
 import re
 import warnings
-from typing import Optional
+from typing import Optional, TypedDict
 
 import pandas as pd
 import torch
@@ -12,15 +12,34 @@ from neurotemplate.common.config import paths_as_list
 from neurotemplate._typing import beartype
 
 
+class ColumnStats(TypedDict):
+    """One column's entry in `norm_stats`; see `compute_norm_stats`."""
+    norm_type: str          # "min_max" | "abs_max" | "z_score" | "none"
+    shift: float
+    stretch: float
+    min: float
+    max: float
+    mean: float
+    stddev: float
+    median: float
+    unit: Optional[str]     # `parse_column_unit(name)`
+
+
+#: Per-column normalisation stats, keyed by column name. Computed once from
+#: the training split, persisted with the run as `norm_stats.json`.
+NormStats = dict[str, ColumnStats]
+
+
 # ---------------------- Data utilities ---------------------- #
 
 @beartype
 def get_data(path: str) -> tuple[pd.DataFrame, float]:
     """Load one CSV onto a regular DatetimeIndex, with a `sec_elapsed` column.
 
-    Returns `(df, timestep_seconds)`. The time column is auto-detected by name
-    and the sampling frequency inferred from it; gaps in the timestamps become
-    NaN rows (the caller decides whether that is an error).
+    Returns `(df, timestep_seconds)`. The time column is auto-detected by name.
+    The timestep is the most common spacing between rows, and every row must
+    keep it: the loader neither fills nor splits at a gap, so a missing or
+    out-of-order timestamp is refused with where it happens.
     """
     df = pd.read_csv(path)
 
@@ -48,25 +67,31 @@ def get_data(path: str) -> tuple[pd.DataFrame, float]:
     if t_col != "timestamp":
         df = df.drop(columns=t_col, axis=1)
 
-    df_freq = pd.infer_freq(df["timestamp"])
-    if df_freq is None:
-        raise ValueError("Could not infer frequency from 'timestamp' column.")
+    spacing = df["timestamp"].diff().iloc[1:]
+    if spacing.empty:
+        raise ValueError(f"{path}: need at least two rows to find the timestep.")
+    backwards = spacing[spacing <= pd.Timedelta(0)]
+    if not backwards.empty:
+        row = backwards.index[0]
+        raise ValueError(
+            f"{path}: timestamps must be strictly increasing; "
+            f"{df['timestamp'][row]} does not come after the row before it "
+            f"({len(backwards)} such row(s))."
+        )
+    step = spacing.mode().iloc[0]
+    off_step = spacing[spacing != step]
+    if not off_step.empty:
+        row = off_step.index[0]
+        raise ValueError(
+            f"{path}: timestamps are not evenly spaced. The timestep is {step}, "
+            f"but {len(off_step)} row(s) break it, the first at "
+            f"{df['timestamp'][row]} ({spacing[row]} after the row before). "
+            "Gaps are not filled or split automatically: repair the record, or "
+            "split the file at each gap and pass the pieces as a list of paths."
+        )
+    freq_seconds = step.total_seconds()
 
-    idx = pd.date_range(
-        df["timestamp"].min(), 
-        df["timestamp"].max(), 
-        freq=df_freq
-    )
-
-    df = df.set_index("timestamp").reindex(idx)
-
-    # Convert frequency to total seconds. `pd.infer_freq` returns bare
-    # abbreviations for unit-multiple frequencies ("h", "D", "min"), and
-    # `pd.to_timedelta` rejects those — go through the offset, which resolves
-    # both those and the multiplied forms ("5min", "15min", "2h").
-    freq_seconds = pd.tseries.frequencies.to_offset(df_freq).nanos / 1e9
-
-    assert freq_seconds > 0, f"Non-positive frequency inferred: {freq_seconds}"
+    df = df.set_index("timestamp")
 
     # get datetime in seconds from epoch
     # to undo this, run pd.to_datetime(1e9*df['time_sec'])+start_time
@@ -433,7 +458,7 @@ def get_loader(
 @beartype
 def to_df(
     data: dict,
-    norm_stats: dict[str, dict[str, float]],
+    norm_stats: NormStats,
     nm_mapping: dict[str, list[str]],
     unnorm: Optional[bool] = False,
 ):
@@ -504,7 +529,7 @@ def parse_column_unit(col: str) -> Optional[str]:
 
 
 @beartype
-def unit_of(norm_stats: dict[str, dict[str, float]], col: str) -> Optional[str]:
+def unit_of(norm_stats: NormStats, col: str) -> Optional[str]:
     """The unit for `col`, or None if there isn't one to report.
 
     Covers three cases the same way: `col` absent from `norm_stats`, its
@@ -517,7 +542,7 @@ def unit_of(norm_stats: dict[str, dict[str, float]], col: str) -> Optional[str]:
 
 @beartype
 def axis_label(
-    norm_stats: dict[str, dict[str, float]],
+    norm_stats: NormStats,
     cols: list[str],
     fallback: str,
 ) -> str:
@@ -550,13 +575,13 @@ def compute_norm_stats(
     df: pd.DataFrame,
     norm_type: Optional[str] = "z_score",
     column_overrides: Optional[dict[str, Optional[str]]] = None,
-) -> dict[str, dict[str, float]]:
+) -> NormStats:
     """
     Args:
         df: DataFrame used to compute per-column normalization stats.
         norm_type: Global normalization strategy:
             - "min_max": (x - min) / (max - min)  →  [0, 1]
-            - "abs_max": x / abs(max)              →  [-1, 1]
+            - "abs_max": x / max(|min|, |max|)     →  [-1, 1]
             - "z_score": (x - mean) / std          →  (-inf, +inf)
             - None:      no normalization (identity)
         column_overrides: Per-column norm_type overrides from
@@ -588,21 +613,6 @@ def compute_norm_stats(
             return column_overrides[col]
         return norm_type
 
-    # Safety wrapper: avoids dividing by zero for constant columns.
-    #
-    # The rescue is silent and has a sharp edge. `stretch = 1` makes
-    # normalization the identity for that column, so it stays in raw physical
-    # units. That is harmless while the column really is constant, but a column
-    # constant in *training* is not necessarily constant later: a furnace that
-    # never fires in the training excitation contributes a constant `Gas Energy
-    # [J]`, and when the evaluator's trajectory does fire it, 1.6e9 J reaches the
-    # model as an input of 1.5e9 rather than something near zero. Two of four
-    # measured surrogates diverged to 1e17 within 48 steps for exactly this
-    # reason. `degenerate_columns` below makes the condition visible instead of
-    # leaving it to be rediscovered from the wreckage.
-    def pos(x):
-        return x if x > 1e-6 else 1
-
     def col_stats(col):
         col_min = float(df[col].min())
         col_max = float(df[col].max())
@@ -614,13 +624,30 @@ def compute_norm_stats(
         if nt is None:
             shift, stretch = 0.0, 1.0
         elif nt == "min_max":
-            shift, stretch = col_min, pos(col_max - col_min)
+            shift, stretch = col_min, col_max - col_min
         elif nt == "abs_max":
-            shift, stretch = 0.0, pos(abs(col_max))
+            shift, stretch = 0.0, max(abs(col_min), abs(col_max))
         elif nt == "z_score":
-            shift, stretch = col_mean, pos(col_std)
+            shift, stretch = col_mean, col_std
         else:
             raise AssertionError(f"unhandled norm_type: {nt}")  # guarded above
+
+        # A constant column has no spread to divide by, so its stretch falls
+        # back to 1 and it stays in raw physical units. Any column that varies
+        # at all is normalised by its own spread, however small: an absolute
+        # floor would leave a µA current or a kg/m³ concentration raw and
+        # unflagged. The predicate is the one `degenerate_columns` uses, so
+        # every fallback is reported.
+        #
+        # The fallback is silent and has a sharp edge: a column constant in
+        # *training* is not necessarily constant later. A furnace that never
+        # fires in the training excitation contributes a constant `Gas Energy
+        # [J]`, and when the evaluator's trajectory does fire it, 1.6e9 J
+        # reaches the model as an input of 1.5e9 rather than something near
+        # zero. Two of four measured surrogates diverged to 1e17 within 48
+        # steps for exactly this reason.
+        if col_min == col_max:
+            stretch = 1.0
 
         return {
             "norm_type": nt if nt is not None else "none",
@@ -638,10 +665,10 @@ def compute_norm_stats(
 
 
 @beartype
-def degenerate_columns(norm_stats: dict[str, dict[str, float]]) -> list[str]:
+def degenerate_columns(norm_stats: NormStats) -> list[str]:
     """Columns that were constant in the data `norm_stats` was fitted on.
 
-    Their `stretch` fell back to 1 (see `pos` in `compute_norm_stats`), so
+    Their `stretch` fell back to 1 (see `compute_norm_stats`), so
     normalization is the identity and they carry raw physical units into the
     model. Any later data in which the column *does* vary is then wildly out of
     range — which is how a surrogate that scores 1.0 °C RMSE on its own test
@@ -655,7 +682,7 @@ def degenerate_columns(norm_stats: dict[str, dict[str, float]]) -> list[str]:
 
 @beartype
 def degenerate_mapped_columns(
-    norm_stats: dict[str, dict[str, float]],
+    norm_stats: NormStats,
     nm_mapping: dict[str, list[str]],
 ) -> list[str]:
     """`degenerate_columns` restricted to columns the model actually consumes.
@@ -669,7 +696,7 @@ def degenerate_mapped_columns(
 
 @beartype
 def warn_degenerate_columns(
-    norm_stats: dict[str, dict[str, float]],
+    norm_stats: NormStats,
     nm_mapping: dict[str, list[str]],
 ) -> list[str]:
     """Print a startup warning for constant columns; return the ones found.
@@ -698,7 +725,7 @@ def warn_degenerate_columns(
 @beartype
 def normalize_df(
     df: pd.DataFrame,
-    norm_stats: dict[str, dict[str, float]],
+    norm_stats: NormStats,
 ):
     """
     Args:
@@ -716,7 +743,7 @@ def normalize_df(
 def to_physical(
     x: torch.Tensor,
     cols: list[str],
-    norm_stats: dict[str, dict[str, float]],
+    norm_stats: NormStats,
 ) -> torch.Tensor:
     """Undo normalization on a tensor whose last axis is `cols`, any leading shape."""
     shift = torch.tensor([norm_stats[c]["shift"] for c in cols],
@@ -730,7 +757,7 @@ def to_physical(
 @beartype
 def unnormalize_df(
     df_norm: pd.DataFrame,
-    norm_stats: dict[str, dict[str, float]],
+    norm_stats: NormStats,
 ):
     """
     Args:

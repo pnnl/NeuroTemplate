@@ -11,6 +11,7 @@ it deliberately skips eval/plot/reportcard for speed.
 """
 
 import sys
+from copy import deepcopy
 from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
@@ -25,7 +26,7 @@ from pandas import DataFrame
 from neurotemplate._typing import beartype
 
 from neurotemplate.common.config import load_config_from_cli, MODEL_CONFIG_DIR
-from neurotemplate.common.data_utils import get_grad_masks
+from neurotemplate.common.data_utils import NormStats, get_grad_masks
 from neurotemplate.common.run_summary import write_run_summary
 from neurotemplate.common.tracking import tracked_run
 from neurotemplate.hooks import load_modeling_hooks
@@ -46,7 +47,7 @@ def objective(
     train_dfs: list[DataFrame],
     dev_dfs: list[DataFrame],
     nm_mapping: dict[str, list[str]],
-    norm_stats: dict[str, dict[str, float]],
+    norm_stats: NormStats,
     head_stack: Optional[HeadStack],
     block_spec: Optional[dict[str, dict]] = None,
 ) -> float:
@@ -56,7 +57,9 @@ def objective(
     `cfg.verbose` — free, since the losses are already in hand, and it says
     whether the search is discriminating between trials or chasing noise.
     """
-    trial_cfg = load_modeling_hooks(cfg).hyper_args(trial, cfg)
+    # The hook gets a copy, so the trial settings below (and anything the
+    # hook sets) never leak into the base config the phase-2 retrain uses.
+    trial_cfg = load_modeling_hooks(cfg).hyper_args(trial, deepcopy(cfg))
     trial_cfg.epochs = trial_cfg.trial_epochs
     trial_cfg.verbose = False
     trial_cfg.epoch_verbose = trial_cfg.epochs + 1

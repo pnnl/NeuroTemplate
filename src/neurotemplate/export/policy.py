@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import tempfile
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Optional
 
@@ -159,9 +159,11 @@ def export_policy(*, policy_node, cl_system, cfg, sysid_cfg,
     """
     check_package_name(package)
     # Export and verification run on the CPU. The evaluation rollout builds
-    # its data on `sysid_cfg.device`, so the configs move with the modules.
+    # its data on `sysid_cfg.device`, so the configs move with the modules —
+    # as copies, leaving the caller's configs as they were.
     cl_system.cpu().eval()
-    cfg.device = sysid_cfg.device = torch.device("cpu")
+    cpu = torch.device("cpu")
+    cfg, sysid_cfg = replace(cfg, device=cpu), replace(sysid_cfg, device=cpu)
     inputs = policy_inputs(policy_node, cfg, nm_mapping, norm_stats)
     graph = PolicyGraph(policy_node.callable, inputs, nm_mapping, norm_stats).eval()
 

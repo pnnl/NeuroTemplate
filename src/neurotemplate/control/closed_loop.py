@@ -26,6 +26,7 @@ from neuromancer.problem import Problem
 from neuromancer.constraint import variable
 from neuromancer.loss import PenaltyLoss
 
+from neurotemplate.common.data_utils import NormStats
 from neurotemplate.control.policy import regulated_channels
 from neurotemplate.control.scenarios import horizons, price_scale, scored_steps
 from neurotemplate.modeling.dynamics import make_reset_init
@@ -84,7 +85,7 @@ def resolve_du_weights(du_weight, u_cols: list[str]) -> list[float]:
 
 @beartype
 def power_term(cfg, nm_mapping: dict[str, list[str]],
-               norm_stats: dict[str, dict[str, float]]):
+               norm_stats: NormStats):
     """The per-step power signal as a plain callable, or None when unimplemented.
 
     Signature is `(yn, U, D) -> [batch, time]` over the *scored horizon*
@@ -118,7 +119,7 @@ def build_control_loss(
     cfg,
     sysid_cfg,
     nm_mapping: dict[str, list[str]],
-    norm_stats: dict[str, dict[str, float]],
+    norm_stats: NormStats,
 ) -> PenaltyLoss:
     """
     Build all control losses as scalar penalties, summed with flat weights.
@@ -239,9 +240,10 @@ def _power_objectives(cfg, nm_mapping, norm_stats, hmax, yn, u, d) -> list:
                 "Falling back to a flat price would silently turn the cost "
                 "term into a rescaled energy term."
             )
-        # Price is data: no gradient, non-negative. So the cost term is a
-        # per-timestep *reweighting* of the energy gradient — it cannot flip
-        # the sign of anything the energy term was already doing.
+        # Price is data, with no gradient, so the cost term is a per-timestep
+        # *reweighting* of the energy gradient. A negative price (which
+        # `build_price` allows) flips that gradient's sign for those steps:
+        # the policy is then paid to consume.
         price = variable("price")[:, scored_steps("price", hmax), 0]   # [b, P], scaled
         objectives.append(
             _penalty(cfg.cost_weight * torch.mean(power * price * scale),

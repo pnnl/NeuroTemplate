@@ -11,35 +11,6 @@ Both sides share a thin `common/` layer (YAML/CLI loader, CSV + sliding-window d
 
 NeuroTemplate is meant to be installed as a dependency in an application repo. You bring the data and the two user-defined hook files; the library brings everything else. New framework features land here once, get tagged, and downstream apps pick them up via a version bump.
 
-## Status
-
-Restructured from a flat script collection into an installable library. Phase A complete.
-
-- ✅ Package + install + console script wired (`uv add "NeuroTemplate @ file://..."` works)
-- ✅ YAML + CLI override machinery, multi-path data fields (`Union[str, list[str]]`)
-- ✅ Hook discovery via `neurotemplate.hooks` (CWD + `cfg.user_hooks_path` override)
-- ✅ Single `nt <group> <verb>` dispatcher (replaces the five flat console scripts)
-- ✅ Test suite green (`uv run pytest`)
-- ✅ Control-side parity with sysid: policy family registry (`mlp` / `linear`), comfort + energy metrics, sectioned reportcard, MLflow metric logging, optional rule-based baseline comparison
-- ☐ Phase B (scrub remaining HVAC vocabulary from library code; relocate runtime artifacts off CWD)
-  - ⚠️ **Breaking hook change:** `plot_closed_loop` no longer greps D columns for `"outdoor"`/`"dry-bulb"` and no longer reaches into a private `_power_channel_indices`. Apps must add `power_channels` and `plot_context_channels` to `control_user_defined.py`; `has_power_channels` is removed (it is now the truthiness of `power_channels`).
-- ☐ Phase C (ship an in-repo `examples/rtu_mall/`, README templates, end-to-end smoke test)
-  - ✅ [template/](template/) — copyable app skeleton: both hook files with every hook stubbed, both config dirs with every field annotated
-- ✅ `2r2c` grey-box thermal family and the per-zone model split (see [Model families](#model-families))
-
-### Upgrading: breaking changes from the v6 follow-up
-
-Four signatures moved. All four fail loudly — none of them degrade silently.
-
-| Was | Now | Why |
-|---|---|---|
-| `preview_config()` returning a `"price"` key | `price_preview` in the control config | the hook cannot see the config, so one config wanting a price preview forced price paths onto every config sharing the hook file |
-| `plot_closed_loop(..., plot_dir)` | `plot_closed_loop(..., plot_dir, origins=[df.index[0] for df in test_dfs])` | `t` is elapsed seconds, so without the files' wall-clock origins every plot was dated 1970 |
-| `objective.frac_power_zero(...) -> float` | `objective.power_diagnostics(...) -> PowerDiagnostics` | the forward zero count alone reports a correct "compressor off" prediction as a dead gradient |
-| `render_control_reportcard(..., frac_power_zero=)` | `render_control_reportcard(..., power=)` | carries the above |
-
-`ResidualMetrics.frac_at_cap` is now `Optional[float]` and is `None` at Δ = 0, where a zero-width box made it vacuously 1.0.
-
 Defects are tracked in [audit.md](audit.md), unfinished work in [issues.md](issues.md), and design direction in [generalization_report.md](generalization_report.md).
 
 ## Installing as a dependency
@@ -101,7 +72,7 @@ commands take the same standard flags (parsed by [common/config.py](src/neurotem
 ```
 my_app/
 ├── pyproject.toml              # depends on NeuroTemplate + the torch-harmonics override
-├── modeling_user_defined.py    # six modeling hooks
+├── modeling_user_defined.py    # the modeling hooks
 ├── control_user_defined.py     # the control hooks (only if you train policies)
 ├── model_configs/
 │   └── modeling.yaml
@@ -127,7 +98,7 @@ The library finds the hook files automatically: by default it looks for `modelin
 | `column_norm_config(nm_mapping) -> {col: norm_type \| None}` | must be defined; return `{}` for no overrides | per-column norm override |
 | `synth_cfg(nm_mapping, norm_stats) -> SynthSpec \| None` | must be defined; return `None` to disable | physics checks |
 | `sub_plot(df_true, col_name) -> tuple \| None` | must be defined; return `None` for default | per-column subplot guidance |
-| `hyper_args(trial, base_cfg) -> Config` | required only for `nt model optuna` | Optuna trial setup |
+| `hyper_args(trial, cfg) -> Config` | required only for `nt model optuna` | Optuna trial setup |
 | `block_mapping(nm_mapping, cfg) -> {block: {Y, U, D, reads, model, inputs, ambient}} \| None` | optional | split Y into independent sub-models, each with its own family, and declare what each input column is (see [Blocks](#blocks)) |
 
 The library imports each hook by attribute (no defaulting), so every row above except `hyper_args` and `block_mapping` must exist in `modeling_user_defined.py`, even when the body just returns a trivial value. `hyper_args` is only looked up on the code path that needs it; `block_mapping` is `hasattr`-gated and skipped when absent.
@@ -322,7 +293,7 @@ pre-block computed:
 ```
   - **block `zone` (2r2c):** `RCBlock`, params=486, in=48, out=1
     - Zone Air Temperature [°C]: tau_fast=0.78 h, tau_slow=104.00 h
-    - ambient: Ambient Temperature [°C], tau_ambient=20.10 h (learned)
+    - ambient: Ambient Temperature [°C], tau_ambient Zone Air Temperature [°C] 20.10 h (learned)
     - linear: GHI [W/m2], k=0.000105 °C/step per unit
     - saturating: Cooling Setpoint [°C], cap=0.77 °C/step, w=8.6 °C, slope_share=0.10
     - mlp: Occupancy
@@ -787,11 +758,11 @@ src/neurotemplate/
     └── templates/       # README / validate / example / pyproject
 ```
 
-Module names inside `modeling/` and `control/` are unprefixed (the directory disambiguates). Anything *outside* those subpackages that is specific to one side carries an explicit `modeling_*` / `control_*` prefix — the two hook files at the app root, and the five console scripts.
+Module names inside `modeling/` and `control/` are unprefixed (the directory disambiguates). Anything *outside* those subpackages that is specific to one side carries an explicit `modeling_*` / `control_*` prefix — the two hook files at the app root.
 
 ## Relationship to Neuromancer
 
-NeuroTemplate is a layer **on top of** Neuromancer, not a replacement. We reuse `Node`, `SystemPreview`, `SSM`, `Block` / `MLP` / `MLP_bounds`, `LitTrainer`, `LitProblem`, `PenaltyLoss`, `DictDataset`, and `MLFlowLogger` directly. What NeuroTemplate adds that Neuromancer does not ship:
+NeuroTemplate is a layer **on top of** Neuromancer, not a replacement. We reuse `Node`, `System` / `SystemPreview`, `Problem`, `Trainer`, `MLP` / `MLP_bounds`, `variable` / `Loss` / `PenaltyLoss`, `DictDataset`, and `MLFlowLogger` directly. What NeuroTemplate adds that Neuromancer does not ship:
 
 - `SSMGrad` plus a vmap-compatible `GRUBlock` (manual GRU unroll for `jacrev` / `vmap`)
 - `SampledGradientPenalty` — off-trajectory Jacobian sign sampling
@@ -808,6 +779,6 @@ If you find yourself shadowing a Neuromancer class, prefer the import.
 uv run pytest tests/
 ```
 
-All 377 pass today, against the current local Neuromancer checkout. The suite is deliberately small. It keeps the tests whose failure would mean a run silently trains on wrong numbers — normalization and windowing, the RC and GRU updates, loss alignment, gradient plumbing (what the optimizer can and cannot reach), head round-trips, calibration — plus the physics/objective/stability diagnostics that a reader acts on, and one end-to-end wiring pass per CLI sequence. It does not test report rendering (nothing downstream consumes a particular format yet), validation error messages beyond the checks that would otherwise let a run train silently on the wrong objective, or plots.
+Neuromancer is pinned to a git SHA in `pyproject.toml`; bump it deliberately. The suite is deliberately small. It keeps the tests whose failure would mean a run silently trains on wrong numbers — normalization and windowing, the RC and GRU updates, loss alignment, gradient plumbing (what the optimizer can and cannot reach), head round-trips, calibration — plus the physics/objective/stability diagnostics that a reader acts on, and one end-to-end wiring pass per CLI sequence. It does not test report rendering (nothing downstream consumes a particular format yet), validation error messages beyond the checks that would otherwise let a run train silently on the wrong objective, or plots.
 
 Cases that differ only in their input live in `pytest.mark.parametrize` tables rather than in one function each. Before adding a test, ask what silently goes wrong if the logic it covers breaks; if the answer is "a worse error message" or "a differently-worded report", leave it out.

@@ -42,7 +42,7 @@ def build(in_steps: int):
     system = get_dynamics(cfg, nm_mapping())
     loss = build_loss(
         cfg=cfg, raw_model=system.nodes[0].callable, system=system,
-        grad_masks={}, nm_mapping=nm_mapping(), norm_stats={},
+        grad_masks={},
     )
     return cfg, loss
 
