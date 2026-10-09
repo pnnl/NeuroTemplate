@@ -29,8 +29,7 @@ _PARAM_FIELDS = {
     "model": ("model", "epochs", "lr", "batch_size", "train_pred_steps",
               "in_steps", "test_window", "norm_type", "seed"),
     "control": ("epochs", "lr", "batch_size", "train_pred_steps", "in_steps",
-                "comfort_weight", "energy_weight", "cost_weight",
-                "peak_weight", "du_weight", "seed", "sysid_run_id"),
+                "losses", "gains", "seed", "sysid_run_id"),
 }
 
 

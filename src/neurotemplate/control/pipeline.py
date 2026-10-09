@@ -43,16 +43,13 @@ from neurotemplate.control.metrics import (
     response_to_dict,
 )
 from neurotemplate.control.closed_loop import build_closed_loop
-from neurotemplate.control.policy import (
-    build_reference_node,
-    reference_over_horizon,
-    regulated_channels,
-)
+from neurotemplate.control.losses import POWER, Objective, resolve_objective
+from neurotemplate.control.policy import build_reference_node, reference_over_horizon
 from neurotemplate.control.scenarios import (
     build_window_dict_multi,
     eval_pred_steps,
     horizons,
-    price_scale,
+    scored_series,
     scored_steps,
 )
 from neurotemplate.hooks import load_control_hooks
@@ -61,20 +58,15 @@ from neurotemplate.modeling.plotting import PLOT_STYLE, unique_day_dir
 from neurotemplate._typing import beartype
 
 
-# Fixed seed for the evaluation comfort-band realization. Keeps the headline
-# violation metric reproducible and comparable across configs/surrogates.
-EVAL_BAND_SEED = 12345
-
-
 @dataclass
 class ControlResults:
-    comfort_violation_rate: float      # pooled fraction of (zone, step) outside band
+    comfort_violation_rate: float      # pooled fraction of (channel, step) outside band
     comfort_mean_exceedance: float     # pooled mean excursion over ALL steps
-    comfort: list[ComfortMetrics]      # per-zone comfort detail
+    comfort: list[ComfortMetrics]      # per regulated channel
     mean_abs_du: float                 # mean |Δsetpoint| (physical units)
     actuation: list[ActuationMetrics]  # per-control effort + saturation
-    response: list[JumpResponse]       # reaction to reference-band jumps
-    tracking: list[ChannelMetrics]     # per-zone error vs band midpoint
+    response: list[JumpResponse]       # reaction to band jumps
+    tracking: list[ChannelMetrics]     # error vs band midpoint, two-sided bands
     energy: Optional[EnergyMetrics]    # None if power_metric not implemented
     eval_time_s: float
     residual: Optional[ResidualMetrics] = None   # None unless residual_delta
@@ -126,6 +118,34 @@ def train_policy(
 
 
 @beartype
+def band_trajectories(
+    objective: Objective,
+    out: dict,
+    hmax: int,
+    nm_mapping: dict[str, list[str]],
+    norm_stats: NormStats,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """(y, lower, upper) for the regulated channels over the scored horizon.
+
+    Each is [b, P, n_regulated] in physical units, in `objective.regulated`
+    order. A band with no lower (upper) bound reads -inf (+inf) there, so the
+    excursion arithmetic needs no special case.
+    """
+    def column(name):
+        return scored_series(objective, name, out, hmax, nm_mapping, norm_stats)
+
+    y = torch.stack([column(b.target) for b in objective.bands], dim=-1)
+
+    def edge(name, fill):
+        return (torch.full_like(y[..., 0], fill) if name is None
+                else column(name))
+
+    lower = torch.stack([edge(b.lower, -torch.inf) for b in objective.bands], dim=-1)
+    upper = torch.stack([edge(b.upper, torch.inf) for b in objective.bands], dim=-1)
+    return y, lower, upper
+
+
+@beartype
 def evaluate_closed_loop(
     cfg,
     sysid_cfg,
@@ -142,19 +162,15 @@ def evaluate_closed_loop(
     """
     hooks = load_control_hooks(cfg)
     _, _, hmax = horizons(cfg, sysid_cfg)
-    regulated, reg_idx = regulated_channels(hooks, nm_mapping)
+    objective = resolve_objective(cfg, nm_mapping)
+    regulated = objective.regulated
     device = sysid_cfg.device
 
-    # Deterministic comfort band for evaluation: a fixed seed (independent of
-    # cfg.seed) so every config/run is scored against the *same* band
-    # realization and results are reproducible & comparable.
-    eval_gen = torch.Generator(device=device)
-    eval_gen.manual_seed(EVAL_BAND_SEED)
+    # The test split's reference columns are fixed data, so every run — and
+    # the baseline beside it — is scored against the same references.
     pred_steps = eval_pred_steps(cfg, hmax)
     data = build_window_dict_multi(
-        test_dfs, cfg, sysid_cfg, nm_mapping, norm_stats,
-        P=pred_steps, stride=cfg.test_stride,
-        band=cfg.test_band(), price_path=cfg.test_price_path, generator=eval_gen,
+        test_dfs, cfg, sysid_cfg, nm_mapping, P=pred_steps, stride=cfg.test_stride,
     )
     # source_idx is bookkeeping for plotting only; the closed-loop System
     # doesn't expect it among its inputs.
@@ -168,23 +184,24 @@ def evaluate_closed_loop(
     # Plumb source_idx through `out` so plot_closed_loop can route per-batch.
     out["source_idx"] = source_idx
 
-    y_ctrl = to_physical(out["yn"][:, scored_steps("yn", hmax), reg_idx],
-                         regulated, norm_stats)  # [b,P,nc]
-    ymin = to_physical(data["ymin"][:, scored_steps("ymin", hmax), :], regulated, norm_stats)
-    ymax = to_physical(data["ymax"][:, scored_steps("ymax", hmax), :], regulated, norm_stats)
-
+    y_ctrl, lower, upper = band_trajectories(objective, out, hmax, nm_mapping,
+                                             norm_stats)
     step_hours = hours_per_step(out["t"][:, scored_steps("t", hmax), :])
-    comfort = comfort_metrics(y_ctrl, ymin, ymax, regulated, step_hours)
+    comfort = comfort_metrics(y_ctrl, lower, upper, regulated, step_hours)
     # Two pooled headline numbers across all regulated channels. The rate is
     # what an operator asks about; the exceedance is what to tune on, because a
     # threshold count saturates and, scored against a surrogate rather than the
     # plant, its argmin can select a substantially worse controller.
-    excursion = (ymin - y_ctrl).clamp_min(0.0) + (y_ctrl - ymax).clamp_min(0.0)
+    excursion = (lower - y_ctrl).clamp_min(0.0) + (y_ctrl - upper).clamp_min(0.0)
     violation_rate = (excursion > 0).float().mean().item()
     mean_exceedance = excursion.mean().item()
 
-    mid = 0.5 * (ymin + ymax)
-    tracking = per_channel_metrics(y_ctrl, mid, regulated)
+    # The midpoint exists only for a band with both edges.
+    two_sided = [j for j, b in enumerate(objective.bands)
+                 if b.lower is not None and b.upper is not None]
+    mid = 0.5 * (lower + upper)
+    tracking = per_channel_metrics(y_ctrl[..., two_sided], mid[..., two_sided],
+                                   [regulated[j] for j in two_sided])
 
     u_cols = nm_mapping["U"]
     U = to_physical(out["U"][:, scored_steps("U", hmax), :], u_cols, norm_stats)
@@ -198,7 +215,7 @@ def evaluate_closed_loop(
     u_hi = to_physical(umax_n.to(device), u_cols, norm_stats)
     actuation = actuation_metrics(U, u_cols, u_lo, u_hi)
     response = response_audit(
-        y_ctrl, ymin, ymax, U, regulated, u_cols, u_lo, u_hi,
+        y_ctrl, lower, upper, U, regulated, u_cols, u_lo, u_hi,
     )
 
     energy = None
@@ -209,11 +226,16 @@ def evaluate_closed_loop(
             out["D"][:, scored_steps("D", hmax), :],
             nm_mapping, norm_stats,
         )
-        # The tariff rides through the rollout untouched, so it is already
-        # co-indexed with the power it prices.
-        price = (None if "price" not in out else
-                 out["price"][:, scored_steps("price", hmax), 0] * price_scale(cfg))
-        energy = energy_metrics(power, step_hours, price)
+        # Each weight a power term carries (a tariff, a carbon series) rides
+        # through the rollout untouched, so it is co-indexed with the power it
+        # prices.
+        weights = {
+            term.weight: scored_series(objective, term.weight, out, hmax,
+                                       nm_mapping, norm_stats)
+            for term in objective.terms
+            if term.column == POWER and term.weight is not None
+        }
+        energy = energy_metrics(power, step_hours, weights)
 
     # How much of the ±Δ box a residual policy actually used. Replaying the
     # (memoryless) rule on the recorded trajectory gives the command it would
@@ -298,8 +320,8 @@ def _flat_control_metrics(results: ControlResults, prefix: str) -> dict:
         flat[f"{prefix}_total_energy"] = results.energy.total_energy
         flat[f"{prefix}_peak_power"] = results.energy.peak_power
         flat[f"{prefix}_mean_window_peak"] = results.energy.mean_window_peak
-        if results.energy.energy_cost is not None:
-            flat[f"{prefix}_energy_cost"] = results.energy.energy_cost
+        for name, value in results.energy.weighted_energy.items():
+            flat[f"{prefix}_{metric_key(name)}_weighted_energy"] = value
     if results.residual is not None:
         flat[f"{prefix}_residual_delta"] = results.residual.delta_cap
         flat[f"{prefix}_mean_abs_delta"] = results.residual.mean_abs_delta
@@ -376,10 +398,10 @@ def evaluate_baseline(
 ) -> Optional[ControlResults]:
     """Score the use case's rule-based controller on the same test rollouts.
 
-    The comparison is apples-to-apples because evaluate_closed_loop reseeds
-    the band from EVAL_BAND_SEED, so the baseline sees a byte-identical
-    comfort band on byte-identical test windows. The baseline is never
-    trained: it has no trainable parameters by construction.
+    The comparison is apples-to-apples because the test split's references
+    are fixed data, so the baseline sees byte-identical references on
+    byte-identical test windows. The baseline is never trained: it has no
+    trainable parameters by construction.
 
     With a residual policy this is also the δ = 0 score, which is what turns
     the residual's floor from rhetorical into something you can decide on —
@@ -409,7 +431,7 @@ def clears_reference(results: ControlResults,
     automatic. Neuromancer's Trainer checkpoints the best model after each
     epoch's optimizer steps, so the δ = 0 point is never itself a candidate —
     by the first evaluation δ is already non-zero. `evaluate_baseline` scores
-    that point explicitly on a byte-identical band; this is the decision rule
+    that point explicitly on byte-identical references; this is the decision rule
     that makes the score mean something. **A submission that does not clear
     its own reference should ship the reference.**
     """
@@ -430,8 +452,8 @@ def plot_closed_loop(
     origins: list,
 ) -> None:
     """
-    One figure per rollout window: regulated zone temps + comfort band,
-    setpoint(s), and (if present) fan/DX power. Each window goes in its own
+    One figure per rollout window: the regulated channels and their bands,
+    the commands, and (if present) metered power. Each window goes in its own
     day-stamped folder under `plot_dir` with the underlying trajectory CSV
     alongside, so restyling never requires re-running the rollout.
 
@@ -446,19 +468,16 @@ def plot_closed_loop(
 
     hooks = load_control_hooks(cfg)
     _, _, hmax = horizons(cfg, sysid_cfg)
-    regulated, reg_idx = regulated_channels(hooks, nm_mapping)
+    objective = resolve_objective(cfg, nm_mapping)
+    regulated = objective.regulated
     u_cols = nm_mapping["U"]
 
-    y = to_physical(out["yn"][:, scored_steps("yn", hmax), reg_idx],
-                    regulated, norm_stats).cpu()
-    ymin = to_physical(out["ymin"][:, scored_steps("ymin", hmax), :],
-                       regulated, norm_stats).cpu()
-    ymax = to_physical(out["ymax"][:, scored_steps("ymax", hmax), :],
-                       regulated, norm_stats).cpu()
+    y, lower, upper = (x.cpu() for x in band_trajectories(
+        objective, out, hmax, nm_mapping, norm_stats))
     # U[k] is the command that drove y[k] (see scored_steps).
     U = to_physical(out["U"][:, scored_steps("U", hmax), :], u_cols, norm_stats).cpu()
 
-    # Context traces overlaid on the temperature axis (denormalized), and the
+    # Context traces overlaid on the regulated axis (denormalized), and the
     # optional power row. Both come from the use case — the library has no
     # opinion about which columns are interesting.
     d_cols, y_cols = nm_mapping["D"], nm_mapping["Y"]
@@ -473,12 +492,14 @@ def plot_closed_loop(
         for name in hooks.power_channels(nm_mapping)
     }
 
-    # The tariff, in dollars, on its own axis. A price trace next to the power
-    # trace is how load shifting reads at a glance — and how a precool that
-    # never happened becomes obvious.
-    scale = price_scale(cfg)
-    price = (None if "price" not in out else
-             (out["price"][:, scored_steps("price", hmax), 0] * scale).cpu())
+    # Reference columns that are not a band edge — a tariff, a cap — on their
+    # own axis. A price trace next to the power trace is how load shifting
+    # reads at a glance, and how a precool that never happened becomes obvious.
+    edges = {name for b in objective.bands for name in (b.lower, b.upper)}
+    traces = {
+        name: scored_series(objective, name, out, hmax, nm_mapping, norm_stats).cpu()
+        for name in objective.r_columns if name not in edges
+    }
 
     # Per-step wall-clock timestamps. `t` is `sec_elapsed`, which `get_data`
     # rebases to zero at its file's first row, so it is elapsed seconds and
@@ -514,18 +535,17 @@ def plot_closed_loop(
         # Trajectory CSV alongside the figure so plots can be restyled
         # without re-running the rollout.
         csv_data = {}
-        for j, name in enumerate(regulated):
-            csv_data[name] = y[w, :, j].numpy()
-            csv_data[f"{name} ymin"] = ymin[w, :, j].numpy()
-            csv_data[f"{name} ymax"] = ymax[w, :, j].numpy()
+        for j, band in enumerate(objective.bands):
+            csv_data[band.target] = y[w, :, j].numpy()
+            if band.lower is not None:
+                csv_data[f"{band.target} lower"] = lower[w, :, j].numpy()
+            if band.upper is not None:
+                csv_data[f"{band.target} upper"] = upper[w, :, j].numpy()
         for j, name in enumerate(u_cols):
             csv_data[name] = U[w, :, j].numpy()
-        for name, series in context.items():
-            csv_data[name] = series[w].numpy()
-        for name, series in power.items():
-            csv_data[name] = series[w].numpy()
-        if price is not None:
-            csv_data["price"] = price[w].numpy()
+        for series in (context, power, traces):
+            for name, values in series.items():
+                csv_data[name] = values[w].numpy()
         pd.DataFrame(csv_data, index=ts).rename_axis("timestamp").to_csv(
             day_dir / f"closed_loop_{date_str}.csv"
         )
@@ -536,16 +556,22 @@ def plot_closed_loop(
         ax0, ax1 = axes[0], axes[1]
         colors = [ax0.plot(steps, y[w, :, j], label=name, lw=1.0)[0].get_color()
                   for j, name in enumerate(regulated)]
-        # One band when every regulated channel shares it (the template's
-        # sampler draws it that way); otherwise each channel's own band, in
-        # its line's colour.
-        shared = bool((ymin[w] == ymin[w, :, :1]).all()
-                      and (ymax[w] == ymax[w, :, :1]).all())
-        bands = ([(0, "green", "comfort band")] if shared else
+        # One band when every regulated channel shares it; otherwise each
+        # channel's own band, in its line's colour. A one-sided band is drawn
+        # as its edge.
+        shared = bool((lower[w] == lower[w, :, :1]).all()
+                      and (upper[w] == upper[w, :, :1]).all())
+        bands = ([(0, "green", "band")] if shared else
                  [(j, colors[j], f"{name} band") for j, name in enumerate(regulated)])
         for j, color, label in bands:
-            ax0.fill_between(steps, ymin[w, :, j], ymax[w, :, j],
-                             color=color, alpha=0.12, label=label)
+            lo, hi = lower[w, :, j], upper[w, :, j]
+            if torch.isfinite(lo).all() and torch.isfinite(hi).all():
+                ax0.fill_between(steps, lo, hi, color=color, alpha=0.12, label=label)
+                continue
+            for edge in (lo, hi):
+                if torch.isfinite(edge).all():
+                    ax0.plot(steps, edge, color=color, lw=0.8, linestyle=":",
+                             label=label)
         for name, series in context.items():
             ax0.plot(steps, series[w], label=name, lw=0.9, linestyle="--")
         ax0.set_ylabel(axis_label(norm_stats, regulated, "Regulated"))
@@ -564,12 +590,12 @@ def plot_closed_loop(
             bottom_ax = ax2
         else:
             bottom_ax = ax1
-        if price is not None:
-            ax_price = bottom_ax.twinx()
-            ax_price.plot(steps, price[w], color="grey", lw=0.9,
-                          linestyle=":", label="price")
-            ax_price.set_ylabel("Price [$/kWh]")
-            ax_price.legend(fontsize=6, loc="upper right")
+        if traces:
+            ax_ref = bottom_ax.twinx()
+            for name, values in traces.items():
+                ax_ref.plot(steps, values[w], lw=0.9, linestyle=":", label=name)
+            ax_ref.set_ylabel(axis_label(norm_stats, list(traces), "Reference"))
+            ax_ref.legend(fontsize=6, loc="upper right")
         bottom_ax.set_xlabel("Time [h]")
         bottom_ax.set_xticks(tick_steps)
         bottom_ax.set_xticklabels(tick_labels)

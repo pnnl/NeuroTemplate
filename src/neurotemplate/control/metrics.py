@@ -35,7 +35,8 @@ units and energy in `power·h`. An app metering Watts converts to kWh itself.
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+import math
+from dataclasses import asdict, dataclass, field
 from typing import Optional
 
 import torch
@@ -79,10 +80,11 @@ class EnergyMetrics:
     total_energy: float      # mean over windows of ∫power dt, in power·h
     peak_power: float        # worst instantaneous draw anywhere
     mean_window_peak: float  # mean of per-window maxima — demand-charge proxy
-    # Mean over windows of ∫price·power dt. None when no tariff is defined.
-    # Units are price·power·h, and the library converts nothing: a
-    # `power_metric` in Watts against a price_scale in $/kWh is off by 1000.
-    energy_cost: Optional[float] = None
+    # Mean over windows of ∫w·power dt, per weight column a power term carries
+    # (a tariff, a carbon series). Units are w·power·h, and the library
+    # converts nothing: a `power_metric` in Watts against a tariff in $/kWh
+    # is off by 1000.
+    weighted_energy: dict[str, float] = field(default_factory=dict)
 
 
 # A command within this share of the actuation range of a bound counts as
@@ -243,13 +245,14 @@ def comfort_metrics(
 
 @beartype
 def energy_metrics(power: torch.Tensor, step_hours: float,
-                   price: Optional[torch.Tensor] = None) -> EnergyMetrics:
+                   weights: Optional[dict[str, torch.Tensor]] = None
+                   ) -> EnergyMetrics:
     """
     Args:
         power: [batch, time] instantaneous power per rollout window.
         step_hours: rollout timestep in hours.
-        price: optional [batch, time] tariff in physical units, co-indexed
-            with `power`. None leaves `energy_cost` unset.
+        weights: {column: [batch, time]} per-step weights in physical units
+            (a tariff), co-indexed with `power`.
 
     Peak conventions, both reported because they answer different questions:
     `peak_power` is the worst instant anywhere in the evaluation, while
@@ -259,23 +262,26 @@ def energy_metrics(power: torch.Tensor, step_hours: float,
     """
     if power.ndim != 2:
         raise ValueError(f"Expected 2D [batch, time] power; got {power.ndim}D")
-    if price is not None and price.shape != power.shape:
-        raise ValueError(
-            f"price {tuple(price.shape)} must be co-indexed with power "
-            f"{tuple(power.shape)} — same windows, same steps."
-        )
+    weights = weights or {}
+    for name, weight in weights.items():
+        if weight.shape != power.shape:
+            raise ValueError(
+                f"weight {name!r} {tuple(weight.shape)} must be co-indexed with "
+                f"power {tuple(power.shape)} — same windows, same steps."
+            )
 
     power = power.detach().cpu()
     window_peaks = power.max(dim=1).values
-    cost = (None if price is None else
-            float((power * price.detach().cpu()).sum(dim=1).mean()) * step_hours)
 
     return EnergyMetrics(
         mean_power=float(power.mean()),
         total_energy=float(power.sum(dim=1).mean()) * step_hours,
         peak_power=float(power.max()),
         mean_window_peak=float(window_peaks.mean()),
-        energy_cost=cost,
+        weighted_energy={
+            name: float((power * weight.detach().cpu()).sum(dim=1).mean()) * step_hours
+            for name, weight in weights.items()
+        },
     )
 
 
@@ -381,9 +387,8 @@ def residual_metrics(
 def _band_jumps(lo: torch.Tensor, hi: torch.Tensor) -> list[int]:
     """Steps at which the band moved, for one (window, channel) pair.
 
-    Read off the band signal itself rather than reconstructed from
-    `BandSpec.sub_samples`, so a use case that overrides `comfort_band_signal`
-    with an occupancy schedule or a recorded column is audited just the same.
+    Read off the band itself, so a sampled band, an occupancy schedule and a
+    recorded setpoint are audited the same way.
 
     A band that changes at *every* step — a continuously varying reference
     rather than a piecewise-constant one — leaves no segment to score, and
@@ -461,9 +466,13 @@ def response_audit(
                 direction = "rise" if y_at < lo_i else "fall"
                 sign = 1.0 if direction == "rise" else -1.0
                 du = u[w, i, :] - u[w, i - 1, :]
+                # A one-sided band has no width to scale by; any move the
+                # right way counts.
+                width = hi_i - lo_i
+                move_tol = SATURATION_TOL * width if math.isfinite(width) else 0.0
                 hits.setdefault((name, direction), []).append({
                     "actuated": bool((du.abs() > du_tol).any()),
-                    "closed": sign * (y_end - y_at) > SATURATION_TOL * (hi_i - lo_i),
+                    "closed": sign * (y_end - y_at) > move_tol,
                     "resolved": (float(ymin[w, end, c]) <= y_end
                                  <= float(ymax[w, end, c])),
                     "move": y_end - y_at,

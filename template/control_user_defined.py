@@ -1,117 +1,31 @@
 """
 Control hooks — the glue between the DPC machinery and *your* plant.
 
-These answer: which states are held inside a reference band, what that band
-looks like, what the actuator limits are, and optionally what power costs
-and what rule a learned policy should be measured against. The Y/U/D roles
-and the normalization come from the frozen sys-id run.
+These answer: what the actuator limits are, and optionally what power costs
+and what rule a learned policy should be measured against. The objective —
+which outputs are held inside which band, what power is priced at — is not a
+hook: it is the `losses` table in control.yaml, over columns of the surrogate
+and of your reference files (see `make_references.py`). The Y/U/D roles and
+the normalization come from the frozen sys-id run.
 
 Everything returned "in normalized space" uses the surrogate's own
-per-column shift/stretch (norm_stats).
+per-column shift/stretch (norm_stats), which also carries an entry for every
+reference column the objective names.
 
 The file must be named `control_user_defined.py` and live in the directory
 you run `nt` from, or be pointed at by `user_hooks_path` in your YAML.
 
-Fill in REGULATED_COLUMNS first; every other required hook runs as written.
-Then consider `reference_control`: a learned policy is only worth shipping
-if it beats a simple rule, and this is how the reportcard knows the rule.
+Every required hook runs as written. Then consider `reference_control`: a
+learned policy is only worth shipping if it beats a simple rule, and this is
+how the reportcard knows the rule.
 """
 
 from __future__ import annotations
-
-from typing import Optional
 
 import torch
 
 from neurotemplate._typing import beartype
 from neurotemplate.common.data_utils import NormStats
-from neurotemplate.control.scenarios import BandSpec
-
-
-# ---------------------------------------------------------------------
-# Required: which Y channels the comfort band applies to
-# ---------------------------------------------------------------------
-# The states the policy is judged on — the OCP *regulated output*. Everything
-# else in Y is along for the ride. Names must match the surrogate's Y columns
-# exactly.
-REGULATED_COLUMNS: list[str] = [
-    # "Tank Temperature [degC]",
-]
-
-
-@beartype
-def regulated(
-    nm_mapping: dict[str, list[str]],
-) -> tuple[list[str], list[int]]:
-    """Return (column names, their integer indices into nm_mapping["Y"])."""
-    y_cols = nm_mapping["Y"]
-    missing = [c for c in REGULATED_COLUMNS if c not in y_cols]
-    if missing or not REGULATED_COLUMNS:
-        raise ValueError(
-            "REGULATED_COLUMNS must name columns present in the surrogate's "
-            f"Y. Missing: {missing or REGULATED_COLUMNS}; Y = {y_cols}"
-        )
-    return list(REGULATED_COLUMNS), [y_cols.index(c) for c in REGULATED_COLUMNS]
-
-
-# ---------------------------------------------------------------------
-# Required: the comfort band as a sampled time-varying signal
-# ---------------------------------------------------------------------
-@beartype
-def comfort_band_signal(
-    nm_mapping: dict[str, list[str]],
-    norm_stats: NormStats,
-    n_samples: int,
-    nsteps: int,
-    band: BandSpec,
-    generator: Optional[torch.Generator] = None,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """
-    Build (ymin, ymax) of shape [n_samples, nsteps, n_regulated] in
-    NORMALIZED space. The band knobs come from YAML via `band`.
-
-    The implementation below is plant-agnostic and needs no edits: per
-    window segment it draws a width ~ U[width_min, width_max] and a lower
-    bound ~ U[lo, hi - width], all in physical units, then normalizes.
-    `band.sub_samples` splits the window into that many contiguous segments,
-    producing `sub_samples - 1` step jumps; 1 gives a constant band.
-
-    Rewrite only if your reference is not a randomly sampled interval — e.g.
-    a fixed occupancy schedule. The hook receives no data, so a band read
-    from a column of your dataset cannot be built here.
-    """
-    k = band.sub_samples
-    if k < 1:
-        raise ValueError(f"band.sub_samples must be >= 1, got {k}")
-    if k > nsteps:
-        raise ValueError(f"band.sub_samples ({k}) cannot exceed nsteps ({nsteps})")
-
-    regulated_cols, _ = regulated(nm_mapping)
-    n_ctrl = len(regulated_cols)
-
-    # One (width, low) per (sample, segment); channels share the band.
-    widths = band.width_min + (band.width_max - band.width_min) * torch.rand(
-        n_samples, k, 1, generator=generator,
-    )
-    lows = band.lo + ((band.hi - widths) - band.lo) * torch.rand(
-        n_samples, k, 1, generator=generator,
-    )
-
-    # Spread the k segments across nsteps; the first (nsteps % k) segments
-    # are one step longer so the counts sum to nsteps.
-    base, rem = divmod(nsteps, k)
-    counts = torch.full((k,), base, dtype=torch.long)
-    counts[:rem] += 1
-    seg_widths = torch.repeat_interleave(widths, counts, dim=1)
-    seg_lows = torch.repeat_interleave(lows, counts, dim=1)
-
-    ymin_phys = seg_lows.expand(n_samples, nsteps, n_ctrl)
-    ymax_phys = (seg_lows + seg_widths).expand(n_samples, nsteps, n_ctrl)
-
-    shift = torch.tensor([norm_stats[c]["shift"] for c in regulated_cols])
-    stretch = torch.tensor([norm_stats[c]["stretch"] for c in regulated_cols])
-
-    return (ymin_phys - shift) / stretch, (ymax_phys - shift) / stretch
 
 
 # ---------------------------------------------------------------------
@@ -181,9 +95,9 @@ def plot_context_channels(nm_mapping: dict[str, list[str]]) -> list[str]:
 # ---------------------------------------------------------------------
 # Required when a power term is weighted: the signal they all reduce
 # ---------------------------------------------------------------------
-# Set to True once `power_metric` below is implemented. Until then any
-# energy_weight / cost_weight / peak_weight > 0 fails at problem build,
-# rather than silently optimizing something you did not write.
+# Set to True once `power_metric` below is implemented. Until then a loss
+# term naming `power` fails at problem build, rather than silently optimizing
+# something you did not write.
 POWER_METRIC_IMPLEMENTED = False
 
 
@@ -196,9 +110,9 @@ def power_metric(
     norm_stats: NormStats,
 ) -> torch.Tensor:
     """
-    Instantaneous power per timestep, shape [batch, time]: the signal that
-    energy_weight, cost_weight and peak_weight each reduce, and that the
-    reportcard integrates.
+    Instantaneous power per timestep, shape [batch, time]: what a loss term
+    naming `power` reduces (a mean for energy, a tariff-weighted mean for
+    cost, a power mean for a peak), and what the reportcard integrates.
 
     Inputs are the normalized trajectories: yn [batch, time, ny],
     U [batch, time, nu], D [batch, time, nd]. Denormalize what you use
@@ -223,8 +137,8 @@ def power_metric(
     actuation box, and its scale in the objective-share printout.
     """
     raise NotImplementedError(
-        "power_metric is not implemented. Keep energy_weight: 0.0 in the "
-        "control config, or implement this and set "
+        "power_metric is not implemented. Name no `power` in the control "
+        "config's losses, or implement this and set "
         "POWER_METRIC_IMPLEMENTED = True."
     )
 
@@ -238,58 +152,50 @@ def _denorm(x: torch.Tensor, col: str, nm_mapping: dict[str, list[str]],
 
 
 # ---------------------------------------------------------------------
-# Optional: the energy tariff, for the cost objective
-# ---------------------------------------------------------------------
-# No hook: the tariff is config (control.yaml's TARIFF section). Prefer a
-# real historical price series to a fixed time-of-use table: a tariff that
-# is a function of the clock can be learned as the clock, and the policy
-# never has to read the price. Price windows are sampled independently of
-# the plant windows, so put the price behaviour you want evaluated in the
-# test file. (No price data? PG&E's Hourly Flex Pricing history is public.)
-
-
-# ---------------------------------------------------------------------
 # Optional: the reference rule — baseline, and the residual policy's anchor
 # ---------------------------------------------------------------------
 # Defined, it does two jobs:
 #
 #   1. Baseline. `nt control train` rolls the rule out on the same test
-#      windows and band as the learned policy and adds a learned-vs-rule
-#      table to the reportcard — the only direct answer to "is the learned
-#      policy earning its keep?"
+#      windows and references as the learned policy and adds a
+#      learned-vs-rule table to the reportcard — the only direct answer to
+#      "is the learned policy earning its keep?"
 #   2. Anchor. With `residual_delta` set, the policy commands
 #      `reference_control(...) + δ`, |δ| <= residual_delta: the rule does the
 #      routine work and the policy only adjusts it, inside a bound you chose.
 #
 # Current step only, memoryless, normalized in and normalized U out — the
-# same space the learned policy emits. A rule that needs its own state goes
-# in `build_baseline_policy` below instead; define one or the other, never
-# both (the library raises).
+# same space the learned policy emits. `r_now` maps each reference column the
+# objective names to its current value, [b], normalized; `norm_stats` has an
+# entry for each, so `x * stretch + shift` gives physical units. A rule that
+# needs its own state goes in `build_baseline_policy` below instead; define
+# one or the other, never both (the library raises).
 #
-# Leave it commented out if you have no rule. The example below is for one
-# setpoint per regulated channel; `bracket_band` after it is a rule for the
-# common case of a heating/cooling setpoint pair holding one band.
+# Leave it commented out if you have no rule. The example below aims every
+# setpoint at the middle of one band; `bracket_band` after it is a rule for
+# the common case of a heating/cooling setpoint pair holding one band.
+#
+# BAND_LOW = "Comfort Low [°C]"      # the band's columns in your reference
+# BAND_HIGH = "Comfort High [°C]"    # files, as the losses table names them
 #
 # @beartype
 # def reference_control(
-#     yn_now: torch.Tensor,      # [b, ny]     current state, normalized
-#     ymin_now: torch.Tensor,    # [b, n_ctrl] current band, normalized
-#     ymax_now: torch.Tensor,    # [b, n_ctrl]
-#     d_now: torch.Tensor,       # [b, nd]     current disturbances, normalized
+#     y_now: torch.Tensor,               # [b, ny] current state, normalized
+#     r_now: dict[str, torch.Tensor],    # {reference column: [b]}, normalized
+#     d_now: torch.Tensor,               # [b, nd] current disturbances, normalized
 #     nm_mapping: dict[str, list[str]],
 #     norm_stats: NormStats,
-# ) -> torch.Tensor:             # [b, nu]     normalized U
-#     """Aim each setpoint at the middle of its channel's band."""
-#     regulated_cols, _ = regulated(nm_mapping)
-#     y_shift = torch.tensor([norm_stats[c]["shift"] for c in regulated_cols])
-#     y_stretch = torch.tensor([norm_stats[c]["stretch"] for c in regulated_cols])
-#     target = 0.5 * (ymin_now + ymax_now) * y_stretch + y_shift   # physical
+# ) -> torch.Tensor:                     # [b, nu] normalized U
+#     """Aim each setpoint at the middle of the band."""
+#     def physical(col):
+#         return r_now[col] * norm_stats[col]["stretch"] + norm_stats[col]["shift"]
 #
-#     u_cols = nm_mapping["U"]                       # one per regulated channel
+#     target = 0.5 * (physical(BAND_LOW) + physical(BAND_HIGH))   # [b], physical
+#     u_cols = nm_mapping["U"]
 #     u_shift = torch.tensor([norm_stats[c]["shift"] for c in u_cols])
 #     u_stretch = torch.tensor([norm_stats[c]["stretch"] for c in u_cols])
 #     umin, umax = actuation_bounds(nm_mapping, norm_stats)
-#     return torch.clamp((target - u_shift) / u_stretch, umin, umax)
+#     return torch.clamp((target[:, None] - u_shift) / u_stretch, umin, umax)
 
 
 @beartype
@@ -325,8 +231,9 @@ def bracket_band(
 
     Wired into `reference_control`, after denormalizing the band as above:
 
-        cool, heat = bracket_band(lo, hi, step=0.5, cool_inset=0.3)
-        phys = torch.cat([cool, heat], dim=-1)    # U order: [cooling, heating]
+        cool, heat = bracket_band(physical(BAND_LOW), physical(BAND_HIGH),
+                                  step=0.5, cool_inset=0.3)
+        phys = torch.stack([cool, heat], dim=-1)  # U order: [cooling, heating]
     """
     if step <= 0:
         raise ValueError(f"step must be > 0, got {step}")
@@ -348,28 +255,29 @@ def bracket_band(
 # ---------------------------------------------------------------------
 # For a rule that needs its own state (an integrator, an equipment timer).
 # Return a Neuromancer Node writing ["U"] with no trainable parameters,
-# reading any of "yn", "ymin", "ymax", "D". It is scored, never trained, and
-# cannot anchor a residual policy.
+# reading any of "yn", "D" and "R" (the reference columns, [b, n_ref] in
+# sorted name order). It is scored, never trained, and cannot anchor a
+# residual policy.
 #
 # def build_baseline_policy(cfg, sysid_cfg, nm_mapping, norm_stats):
 #     from neuromancer.system import Node
 #     umin, umax = actuation_bounds(nm_mapping, norm_stats)
 #     net = MyStatefulRule(umin.to(sysid_cfg.device), umax.to(sysid_cfg.device))
-#     return Node(net.to(sysid_cfg.device), ["ymin", "ymax"], ["U"],
+#     return Node(net.to(sysid_cfg.device), ["yn", "R"], ["U"],
 #                 name="Stateful baseline")
 
 
 # ---------------------------------------------------------------------
-# Optional: per-signal preview
+# Optional: per-column disturbance preview
 # ---------------------------------------------------------------------
 # Leave commented out unless you need it: if this function EXISTS it fully
 # replaces `d_preview` from the YAML, so even an empty stub disables preview.
 #
-# Keys are D column names or the literal "band" (future ymin/ymax); values
-# are step counts. Band preview helps when the dynamics lag, so the policy
-# can act before a band change rather than after it. The price preview is
-# `price_preview` in the YAML, not here.
+# Keys are D column names; values are step counts — how far ahead the policy
+# sees each forecast. A property of the plant, shared by every run against
+# it. A reference column's preview (the band ahead, the tariff ahead) is per
+# run, and is `reference_preview` in the YAML.
 #
 # @beartype
 # def preview_config(nm_mapping: dict[str, list[str]]) -> dict[str, int]:
-#     return {"band": 2, "Outdoor Temperature [degC]": 12}
+#     return {"Outdoor Temperature [degC]": 12}

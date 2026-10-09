@@ -4,14 +4,15 @@
 from $package import Policy
 
 policy = Policy("policy")
-u = policy.act(y, ymin, ymax, d)      # {u column: command}; add price= if it reads one
+u = policy.act(y, d, r)               # {u column: command}; r only if it reads one
 ```
 
 One stateless graph, one call per control step. Each argument is a
 `[steps, n]` window in physical units, oldest row first; `current row` is
 where the present step sits, and rows after it are the known future
-(forecast disturbances, the comfort schedule, the tariff). `ymin` / `ymax`
-are the comfort band on the regulated outputs. `act_batch` scores many
-windows at once.
+(forecast disturbances; the reference schedule). `r` holds the reference
+columns the policy was trained against — a comfort band, a setpoint
+schedule, a tariff — in the order the table below lists them. `act_batch`
+scores many windows at once.
 
 $contract

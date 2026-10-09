@@ -5,7 +5,7 @@ DPC control pipeline entry point.
       --set sysid_run_id=<mlflow run id>
 
 Loads a frozen sys-id surrogate, builds a closed loop (policy + frozen
-dynamics), trains the policy under a comfort-band objective, evaluates the
+dynamics), trains the policy under the declared objective, evaluates the
 closed loop, and writes a reportcard.
 """
 
@@ -19,7 +19,6 @@ from neurotemplate._typing import beartype
 import mlflow
 
 from neurotemplate.common.config import CONTROL_CONFIG_DIR, load_config_from_cli
-from neurotemplate.common.data_utils import get_data_splits, normalize_df
 from neurotemplate.common.run_summary import write_run_summary
 from neurotemplate.common.tracking import tracked_run
 from neurotemplate.modeling.dynamics import describe_dynamics
@@ -27,12 +26,11 @@ from neurotemplate.modeling.experiment import resolve_device, set_seeds
 
 from neurotemplate.control.config import ControlConfig
 from neurotemplate.control.load import load_frozen_dynamics
-from neurotemplate.control.scenarios import build_loaders, eval_pred_steps, horizons
-from neurotemplate.control.policy import (
-    build_policy,
-    describe_policy,
-    regulated_channels,
+from neurotemplate.control.losses import extend_norm_stats, resolve_objective
+from neurotemplate.control.scenarios import (
+    build_loaders, eval_pred_steps, horizons, load_control_splits,
 )
+from neurotemplate.control.policy import build_policy, describe_policy
 from neurotemplate.control.closed_loop import (
     build_closed_loop, build_control_loss, build_problem, power_term,
 )
@@ -47,7 +45,6 @@ from neurotemplate.control.objective import (
 )
 from neurotemplate.control.reportcard import render_control_reportcard
 from neurotemplate.control.pipeline import (
-    EVAL_BAND_SEED,
     clears_reference,
     train_policy,
     evaluate_baseline,
@@ -78,10 +75,14 @@ def main() -> None:
         print(f"Tracking URI: {cfg.location}")
         print(f"Loading frozen surrogate (run {cfg.sysid_run_id})...")
 
-    dyn_sys, dyn_node, sysid_cfg, nm_mapping, norm_stats = (
+    dyn_sys, dyn_node, sysid_cfg, nm_mapping, sysid_stats = (
         load_frozen_dynamics(cfg.sysid_run_id, cfg.run_dir, cfg.weights)
     )
     surrogate_arch = describe_dynamics(dyn_sys, sysid_cfg)
+    # The objective's names resolve against the surrogate's columns, so this
+    # is the first point a misnamed column can fail — before any data loads.
+    objective = resolve_objective(cfg, nm_mapping)
+    norm_stats = extend_norm_stats(objective, cfg, sysid_stats)
 
     h_sys, h_ctrl, hmax = horizons(cfg, sysid_cfg)
     eval_pred_steps(cfg, hmax)   # fail now, not after the policy has trained
@@ -90,25 +91,19 @@ def main() -> None:
               f"train_pred_steps={cfg.train_pred_steps}")
         print("Loading data...")
 
-    # get_data_splits returns one list per split (length >= 1). Each file
-    # is normalized independently and the resulting list flows through the
-    # control loaders, which window each file in isolation — no rollout
-    # spans two files.
-    train_raws, dev_raws, test_raws, _ = get_data_splits(cfg)
-    train_dfs = [normalize_df(r, norm_stats) for r in train_raws]
-    dev_dfs = [normalize_df(r, norm_stats) for r in dev_raws]
-    test_dfs = [normalize_df(r, norm_stats) for r in test_raws]
-
+    # One list per split (length >= 1), each plant file joined with its
+    # reference file and normalized; the loaders window each file in
+    # isolation — no rollout spans two files.
+    train_dfs, dev_dfs, test_dfs = load_control_splits(cfg, nm_mapping, norm_stats)
     train_loader, dev_loader = build_loaders(
-        cfg, sysid_cfg, nm_mapping, norm_stats, train_dfs, dev_dfs,
+        cfg, sysid_cfg, nm_mapping, train_dfs, dev_dfs,
     )
 
-    # Whether this band is reachable at all is a sys-id question, answered by
+    # Whether a band is reachable at all is a sys-id question, answered by
     # the reachability scenario on the surrogate's own reportcard. Read it
     # there before spending an hour training against a band nothing can hold.
     hooks = load_control_hooks(cfg)
     u_bounds = hooks.actuation_bounds(nm_mapping, norm_stats)
-    regulated, _ = regulated_channels(hooks, nm_mapping)
 
     if cfg.verbose:
         print("Building policy + closed loop + loss...")
@@ -125,33 +120,23 @@ def main() -> None:
     balance_out = run_objective_pass(problem, balance_batch)
     balance = objective_balance(loss, balance_out)
     power = power_term(cfg, nm_mapping, norm_stats)
-    power_weighted = (cfg.energy_weight > 0 or cfg.cost_weight > 0
-                      or cfg.peak_weight > 0)
-    if power is None or not power_weighted:
+    if power is None or not objective.reads_power:
         shapes, power_diag = [], None
     else:
-        # One sweep serves all three power-derived terms: cost and peak are
-        # reductions of the same signal, so sweeping them separately would
-        # just rescale this.
+        # One sweep serves every term on power: each is a reduction of the
+        # same signal, so sweeping them separately would just rescale this.
         shapes = term_shapes(power, balance_out, hmax, nm_mapping["U"],
                              *u_bounds, norm_stats)
         power_diag = power_diagnostics(power, balance_out, hmax)
-    notes = objective_notes(cfg, arch)
+    notes = objective_notes(objective, cfg)
     print(format_objective_report(balance, shapes, power_diag, notes))
 
     cfg.run = "DPC " + cfg.run
+    term_keys = [term.key for term in objective.terms]
     with tracked_run(
         cfg,
-        stdout=[
-            "train_loss", "dev_loss", "train_comfort_lower_loss",
-            "train_comfort_upper_loss", "train_du_loss", "train_energy_loss",
-            "train_cost_loss", "train_peak_loss",
-        ],
-        logout=[
-            "train_loss", "dev_loss", "time", "comfort_lower_loss",
-            "comfort_upper_loss", "du_loss", "energy_loss", "cost_loss",
-            "peak_loss",
-        ],
+        stdout=["train_loss", "dev_loss"] + [f"train_{k}" for k in term_keys],
+        logout=["train_loss", "dev_loss", "time"] + term_keys,
     ) as logger:
         if cfg.verbose:
             print("Training policy (dynamics frozen)...")
@@ -173,7 +158,7 @@ def main() -> None:
         )
 
         # Optional rule-based comparison. Scored on the same windows and the
-        # same fixed-seed band; None when the use case defines no baseline.
+        # same test references; None when the use case defines no baseline.
         baseline = evaluate_baseline(
             cfg, sysid_cfg, dyn_node, test_dfs, nm_mapping, norm_stats,
         )
@@ -197,8 +182,8 @@ def main() -> None:
             )
 
         md = render_control_reportcard(
-            cfg, sysid_cfg, arch, nm_mapping, regulated, results,
-            eval_band_seed=EVAL_BAND_SEED, surrogate_arch=surrogate_arch,
+            cfg, sysid_cfg, arch, nm_mapping, results,
+            surrogate_arch=surrogate_arch,
             baseline=baseline,
             clears_reference=clears, best_dev_loss=best_dev,
             train_time_s=train_time_s,

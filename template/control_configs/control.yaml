@@ -22,6 +22,24 @@ test_data_path: data/test.csv
 # Hooks file (path or dotted module). Unset = control_user_defined.py in CWD.
 # user_hooks_path: null
 
+# ── REFERENCES ───────────────────────────────────────────────────
+# The columns the objective names that are not the surrogate's: a comfort
+# band, a setpoint schedule, a tariff. One file per plant file, row-aligned
+# with it and carrying exactly its timestamps (make_references.py writes
+# them). Set all three or none. List one plant file several times against
+# several reference files to train on several draws of the reference.
+train_reference_path: data/train_reference.csv
+dev_reference_path: data/dev_reference.csv
+test_reference_path: data/test_reference.csv
+# The divisor for each reference column that bounds no Y column (a tariff),
+# so the policy sees an O(1) input. A band column needs none: it is scaled
+# like the column it bounds.
+# reference_scale: {"Tariff [$/kWh]": 0.30}
+# Future steps of each reference column the policy sees. Shifting load means
+# acting before the expensive hours, which a policy can only do if it sees
+# them coming; seeing a band change coming lets it move before the zone lags.
+# reference_preview: {"Tariff [$/kWh]": 48, "Comfort Low [°C]": 2}
+
 # ── HORIZON ──────────────────────────────────────────────────────
 # Closed-loop rollout length in training. It has to span the behaviour you
 # want learned — an action and the payoff it buys (a pre-cool and the coast
@@ -33,71 +51,29 @@ test_data_path: data/test.csv
 # preview_config hook exists — that hook replaces it entirely.
 # d_preview: 0
 
-# ── TARIFF (optional; required together for cost_weight > 0) ─────
-# One CSV per split: a timestamp column and a price column. Set all three
-# paths and price_scale, or none. Price reaches the policy and the objective
-# only; it is never a surrogate input.
-# train_price_path: null
-# dev_price_path: null
-# test_price_path: null
-# Only needed if a price CSV has more than one non-timestamp column.
-# price_column: null
-# Plant timesteps per price row (12 = hourly prices on 5-minute data).
-# price_repeat: 1
-# Divisor so the policy sees an O(1) price.
-# price_scale: null
-# Future price steps the policy sees. Shifting load means acting before the
-# expensive hours, which a policy can only do if it sees them coming.
-# price_preview: 0
-# Where each window's price slice comes from: `random` (any offset, so the
-# policy has to read the price) or `day` (same time of day as the plant
-# window — plots line up with the plant's clock, but a tariff that peaks at
-# the same hour daily becomes learnable as the clock instead).
-# price_align: random
-
-# ── COMFORT BAND ─────────────────────────────────────────────────
-# Required, in the physical units of the regulated channel. Per segment,
-# width ~ U[width_min, width_max] and lower edge ~ U[band_lo, band_hi - width].
-# Train over the range of bands the policy will be handed in service.
-band_lo: null
-band_hi: null
-# band_width_min: 0.5
-# band_width_max: 2.0
-# Segments per window: 1 = constant band, k > 1 = k-1 step changes.
-# train_band_sub_samples: 1
-# test_band_sub_samples: 4
-# A separate band for evaluation — set it to the band you will be judged
-# on, so the reportcard describes that case. Unset = the training values.
-# test_band_lo: null
-# test_band_hi: null
-# test_band_width_min: null
-# test_band_width_max: null
-
 # ── OBJECTIVE ────────────────────────────────────────────────────
-# Weights are scale factors between terms in different units, so they do
-# not port between plants. Before training, every run prints each term's
-# share of the objective and sweeps the power signal across the actuation
-# box; the trained run's reportcard repeats the shares. A term at ~0% of
-# the trained objective is not in the objective, whatever its weight says.
-#
-# Leaving the comfort band.
-# comfort_weight: 50.0
-# Step-to-step change in each actuator. A scalar, a list (one per U column,
-# in the surrogate's order), or a mapping keyed by column name:
-# du_weight: 10
-# du_weight: {"Actuator A": 10, "Actuator B": 50}
-#
-# The three terms below are reductions of control_user_defined.power_metric,
-# and each > 0 requires it (POWER_METRIC_IMPLEMENTED = True).
-# Mean power.
-# energy_weight: 0.0
-# Mean price × power; also requires the TARIFF fields.
-# cost_weight: 0.0
-# Per-window power mean M_q — 1 = plain mean, 2 = RMS, larger approaches the
-# peak. On its own it will happily raise total energy to flatten a profile,
-# so pair it with energy_weight or cost_weight.
-# peak_weight: 0.0
-# peak_q: 4
+# A table of terms, each read in one order: the operand `column − target`
+# (target optional), then `map` (relu = a lower bound, nrelu = an upper
+# bound, first_difference = step-to-step change), then `norm` (the power
+# mean per window: 1 = mean, 2 = RMS, larger approaches the max), with an
+# optional per-step `weight` column; then its gain. `column`, `target` and
+# `weight` name a Y, U or D column of the surrogate, a reference column, or
+# `power` (control_user_defined.power_metric). `units: physical` (default)
+# makes a gain per physical unit; `normalized` keeps the surrogate's scale.
+# Names below are examples: use your columns.
+losses:
+  comfort_lower: {column: "Comfort Low [°C]",  target: "Zone Air Temperature [°C]", map: relu,  norm: 2}
+  comfort_upper: {column: "Comfort High [°C]", target: "Zone Air Temperature [°C]", map: nrelu, norm: 2}
+  du:            {column: "Zone Cooling Setpoint [°C]", map: first_difference, norm: 1}
+  # energy: {column: power, norm: 1}
+  # cost:   {column: power, norm: 1, weight: "Tariff [$/kWh]"}
+  # peak:   {column: power, norm: 4}
+# One gain per term, in its own map so a sweep can --set it. Gains are scale
+# factors between terms in different units, so they do not port between
+# plants. Every run prints each term's share of the objective before and
+# after training: a term at ~0% of the trained objective is not in it,
+# whatever its gain says.
+gains: {comfort_lower: 5.0, comfort_upper: 5.0, du: 1.0}
 
 # ── POLICY ───────────────────────────────────────────────────────
 # mlp | linear. `linear` is one saturated affine law, u = sat(Kx + b): few

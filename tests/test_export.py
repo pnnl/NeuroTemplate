@@ -22,6 +22,7 @@ with the trained model being written anyway. And the shipped C++ runner,
 built and run against a package holding both a model and a policy.
 """
 
+import json
 import shutil
 import subprocess
 
@@ -192,25 +193,35 @@ def test_an_export_that_disagrees_is_not_written(tmp_path, monkeypatch):
 # ── policy ───────────────────────────────────────────────────────
 
 
+def _priced(**overrides):
+    """A policy reading the band and a tariff, each previewed differently."""
+    from control_fixtures import (
+        BAND_GAINS, BAND_LOSSES, LOW, POWER_LOSSES, TARIFF, TARIFF_SCALE,
+    )
+    return dict(losses={**BAND_LOSSES, "cost": POWER_LOSSES["cost"]},
+                gains={**BAND_GAINS, "cost": 1.0},
+                reference_scale={TARIFF: TARIFF_SCALE},
+                reference_preview={TARIFF: 3, LOW: 1}, **overrides)
+
+
 @pytest.mark.parametrize("overrides", [
     # Plain policy: its D window runs past the present (preview), and every
     # key has several columns, so a wrong window layout shows up.
     {"d_preview": 2},
     # Everything a policy can wrap around its net: the residual anchored to
-    # the reference rule, setpoint quantisation, and a tariff it reads.
-    {"residual_delta": 1.0, "setpoint_step": 0.5, "d_preview": 1, "price_preview": 3},
+    # the reference rule, setpoint quantisation, and a tariff it previews.
+    _priced(residual_delta=1.0, setpoint_step=0.5, d_preview=1),
 ], ids=["plain", "residual, quantised, priced"])
 def test_trained_policy_exports_as_the_trained_policy(tmp_path, overrides):
-    from control_fixtures import full_setup, install_price
+    from control_fixtures import full_setup
     from neurotemplate.control.closed_loop import build_closed_loop
+    from neurotemplate.control.losses import resolve_objective
     from neurotemplate.control.policy import build_policy
     from neurotemplate.export.policy import (
         PolicyGraph, closed_loop_windows, export_policy, policy_inputs,
     )
 
     s = full_setup(**overrides)
-    if "price_preview" in overrides:
-        install_price(s["cfg"], tmp_path)
     cfg, sysid_cfg, nm, ns = s["cfg"], s["sysid_cfg"], s["nm"], s["norm_stats"]
     policy = build_policy(cfg, sysid_cfg, nm, ns)
     closed_loop = build_closed_loop(s["dyn_node"], policy, cfg, sysid_cfg)
@@ -220,6 +231,10 @@ def test_trained_policy_exports_as_the_trained_policy(tmp_path, overrides):
         out_dir=tmp_path / "pkg", package="exported", exporter="legacy",
     )
     assert all(check.ok for check in check_reference(result.out_dir))
+    # The reference columns are named inputs, in the order the policy reads them.
+    spec = json.loads((result.out_dir / "policy" / "policy.json").read_text())
+    assert list(spec["inputs"]) == ["y", "d", "r"]
+    assert spec["inputs"]["r"]["columns"] == resolve_objective(cfg, nm).r_columns
 
     # The graph's physical windows are the closed loop's own windows: the
     # wrapper around the trained net must issue the net's own commands.
@@ -247,14 +262,13 @@ def test_cpp_runner_reproduces_the_reference(tmp_path, request):
     state and a priced policy in one package. This is what keeps
     runtime.hpp in step with the json and fixtures that runtime.py reads.
     The first run downloads onnxruntime; later runs reuse pytest's cache."""
-    from control_fixtures import full_setup, install_price
+    from control_fixtures import full_setup
     from neurotemplate.control.closed_loop import build_closed_loop
     from neurotemplate.control.policy import build_policy
     from neurotemplate.export.policy import export_policy
 
     package = export(tmp_path, make_cfg(), MAPPING, SPLIT).out_dir
-    s = full_setup(d_preview=1, price_preview=3)
-    install_price(s["cfg"], tmp_path)
+    s = full_setup(**_priced(d_preview=1))
     cfg, sysid_cfg, nm, ns = s["cfg"], s["sysid_cfg"], s["nm"], s["norm_stats"]
     policy = build_policy(cfg, sysid_cfg, nm, ns)
     export_policy(

@@ -15,9 +15,6 @@ from neurotemplate.common.config import (
 )
 from neurotemplate.modeling.config import IN_STEPS_WARN_THRESHOLD
 
-# How a window's slice of the price record is drawn. See `price_align`.
-PRICE_ALIGNMENTS = {"random", "day"}
-
 
 @dataclass
 class ControlConfig:
@@ -42,47 +39,27 @@ class ControlConfig:
     test_data_path: Union[str, list[str]] = ""
     batch_size: int = 256
 
-    # ── Energy tariff (all four required together, or none) ───────
-    # One CSV per split — a timestamp column plus one price column ($/kWh).
-    # Sampled independently of the weather windows (see control.scenarios),
-    # so a price record does not need to span the plant record, and the test
-    # file is where to put the price swings the eval should be judged on.
-    train_price_path: Optional[str] = None
-    dev_price_path: Optional[str] = None
-    test_price_path: Optional[str] = None
-    # Which CSV column carries price. Unset infers the sole non-timestamp
-    # column; set it when a file has more than one.
-    price_column: Optional[str] = None
-    # How many plant timesteps one price-file row spans (12 = hourly price
-    # over 5-minute plant data). 1 = price file is already at the plant's
-    # resolution.
-    price_repeat: int = 1
-    # The tariff arrives in physical units ($/kWh); the dict carries
-    # price / price_scale so the policy sees an O(1) input, and the cost
-    # term multiplies the scale back in. Deliberately a pure scaling with no
-    # shift, so a zero price stays a zero cost.
-    price_scale: Optional[float] = None
-    # How many future price steps the policy sees, on top of the current one.
-    # This is what separates load *shifting* from a slightly more expensive
-    # thermostat: precooling is an action taken before the expensive block, so
-    # a policy whose only price input is the current one can react but not
-    # shift. Cover the price cycle you want it to anticipate (48 steps = 4 h
-    # on 5-minute data). Lives here rather than in `preview_config` because
-    # it is a per-run tuning knob, while the disturbance previews are a
-    # structural property of the plant that every run shares.
-    price_preview: int = 0
-    # How each window's slice of the price record is drawn.
-    #   "random" — a uniformly random offset. The tariff's peak lands at a
-    #     random hour of the plant's day, which is what stops the policy
-    #     reading the price channel as a clock.
-    #   "day" — the offset is chosen so the tariff's time of day matches the
-    #     plant window's own, with the day still drawn at random. Use this
-    #     when the point is to SEE pre-cooling: an 8 pm peak is drawn at the
-    #     plant's 8 pm in every window and every plot. The cost is that a
-    #     series peaking at the same hour most days becomes learnable as that
-    #     hour, so confirm a price response by re-scoring the trained policy
-    #     against a tariff whose peak has been moved, not from the trace.
-    price_align: str = "random"
+    # ── Reference files (all three together, or none) ─────────────
+    # The columns the objective names that are not the surrogate's — a comfort
+    # band, a setpoint schedule, a tariff. One list per split, parallel to its
+    # data paths: the i-th reference file is row-aligned with the i-th plant
+    # file and must carry exactly its timestamps. Listing one plant file
+    # several times against several reference files ("draws") multiplies the
+    # training windows. The reference columns reach the policy and the loss,
+    # never the surrogate.
+    train_reference_path: Union[str, list[str], None] = None
+    dev_reference_path: Union[str, list[str], None] = None
+    test_reference_path: Union[str, list[str], None] = None
+    # Divisor per reference column that bounds no Y column (a tariff, a power
+    # cap), so the policy sees an O(1) input. Pure scaling, no shift, so a
+    # zero stays a zero. A column that bounds a Y column uses that column's
+    # normalisation instead, and must not be listed here.
+    reference_scale: dict[str, float] = field(default_factory=dict)
+    # Future steps of each reference column the policy sees, beyond the
+    # current one. Shifting load means acting before the expensive hours,
+    # which a policy can only do if it sees them coming. A per-run knob, so it
+    # lives here rather than in the hooks' `preview_config`.
+    reference_preview: dict[str, int] = field(default_factory=dict)
 
     # Optional path or dotted module name for the control hooks file.
     # If unset, the library looks for `control_user_defined.py` in CWD.
@@ -96,49 +73,12 @@ class ControlConfig:
     # Future-D steps the policy previews (0 = current only).
     d_preview: int = 0
 
-    # ── Comfort band (sampled time-varying signal, in the plant's physical
-    #    units) ─────────────────────────────────────────────────────────
-    # Per segment, width ~ U[band_width_min, band_width_max] and lower bound
-    # ~ U[band_lo, band_hi - width]. `*_band_sub_samples` controls how many
-    # equal-ish contiguous segments make up a window: 1 = constant band,
-    # k > 1 = (k-1) step-jumps inside the window. test_band_* (lo/hi/widths)
-    # default to the train values; set them to override at evaluation time.
-    #
-    # band_lo/band_hi have no default: they are physical-unit constants
-    # (°C for HVAC, volts for a battery, ...) specific to your plant, and
-    # `validate()` fails fast, naming both fields, if either is unset.
-    band_lo: Optional[float] = None
-    band_hi: Optional[float] = None
-    band_width_min: float = 0.5
-    band_width_max: float = 2.0
-    train_band_sub_samples: int = 1
-    test_band_sub_samples: int = 4
-    test_band_lo: Optional[float] = None
-    test_band_hi: Optional[float] = None
-    test_band_width_min: Optional[float] = None
-    test_band_width_max: Optional[float] = None
-
-    # ── Objective weights ────────────────────────────────────────
-    comfort_weight: float = 50.0
-    # Setpoint-smoothness weight. A scalar applies to every actuator; a list
-    # (one entry per U column, in nm_mapping order) or a dict keyed by column
-    # name weights them separately — worth doing as soon as two actuators
-    # differ in authority, since one pooled penalty is then necessarily
-    # mis-weighted for one of them.
-    du_weight: Union[float, list[float], dict[str, float]] = 10
-    # Effort/energy term weight. > 0 requires control_user_defined.power_metric
-    # to be implemented (fail-fast at problem build), so it defaults off like
-    # the other two power reductions below.
-    energy_weight: float = 0.0
-    # Energy-cost weight: multiplies mean_t(price * power), in $/h. > 0
-    # additionally requires the three price paths + price_scale above.
-    cost_weight: float = 0.0
-    # Peak-demand weight: multiplies the per-window power mean M_q(power),
-    # averaged over the batch. Same units as the energy term.
-    peak_weight: float = 0.0
-    # Exponent of that power mean. 1 = plain mean (no peak preference),
-    # 2 = RMS, larger = closer to a hard max. Must be >= 1.
-    peak_q: float = 4.0
+    # ── Objective ────────────────────────────────────────────────
+    # A table of loss terms over named columns, and one gain per term — see
+    # control.losses for how an entry is read. Two flat dicts, so a gain can be
+    # swept with --set without restating the table.
+    losses: dict[str, dict] = field(default_factory=dict)
+    gains: dict[str, float] = field(default_factory=dict)
 
     # ── Policy network ───────────────────────────────────────────
     # Network family (see control.policy.policy_catalog). "linear" ignores
@@ -194,8 +134,8 @@ class ControlConfig:
 
     def validate(self) -> None:
         # Deferred import: policy.py pulls in Neuromancer, and config is
-        # imported by the CLI before anything else. Same pattern as
-        # train_band()/test_band() below.
+        # imported by the CLI before anything else.
+        from neurotemplate.control.losses import parse_losses
         from neurotemplate.control.policy import (
             POLICY_BOUND_METHODS, POLICY_NONLIN, policy_catalog,
         )
@@ -228,78 +168,42 @@ class ControlConfig:
         for name in ("train_data_path", "dev_data_path", "test_data_path"):
             _check_paths_field(name, getattr(self, name))
 
-        price_paths = {
-            "train_price_path": self.train_price_path,
-            "dev_price_path": self.dev_price_path,
-            "test_price_path": self.test_price_path,
-        }
-        n_set = sum(v is not None for v in price_paths.values())
-        if 0 < n_set < 3:
-            missing = [k for k, v in price_paths.items() if v is None]
+        references = {name: getattr(self, name) for name in (
+            "train_reference_path", "dev_reference_path", "test_reference_path")}
+        unset = [name for name, value in references.items() if value is None]
+        if 0 < len(unset) < 3:
             raise ValueError(
-                f"train_price_path/dev_price_path/test_price_path must be set "
-                f"together or not at all (missing: {missing}). A tariff is "
-                "sampled per split, so a split with no price file would "
-                "silently see no cost term."
+                f"{', '.join(references)} must be set together or not at all "
+                f"(unset: {unset}). A split with no reference file would have "
+                "no value for a reference column the objective names."
             )
-        if n_set == 3 and self.price_scale is None:
-            raise ValueError(
-                "A price_*_path is set but price_scale is not. The tariff "
-                "arrives in physical $/kWh; price_scale is required so the "
-                "dict can carry price / price_scale as an O(1) policy input."
-            )
-        if n_set == 0 and self.price_scale is not None:
-            raise ValueError(
-                "price_scale is set but no train_price_path/dev_price_path/"
-                "test_price_path is. Set all three price paths to enable a "
-                "tariff, or unset price_scale."
-            )
-        if self.price_scale is not None and self.price_scale <= 0:
-            raise ValueError(
-                f"price_scale must be positive, got {self.price_scale}"
-            )
-        if self.price_preview < 0:
-            raise ValueError(
-                f"price_preview must be >= 0, got {self.price_preview}"
-            )
-        if self.price_align not in PRICE_ALIGNMENTS:
-            raise ValueError(
-                f"price_align must be one of {sorted(PRICE_ALIGNMENTS)}, got "
-                f"{self.price_align!r}"
-            )
-        if self.price_preview > 0 and n_set == 0:
-            raise ValueError(
-                f"price_preview is {self.price_preview} but no "
-                "train_price_path/dev_price_path/test_price_path is set, so "
-                "no tariff reaches the rollout and there is nothing to "
-                "preview. Set the three price paths + price_scale, or set "
-                "price_preview to 0."
-            )
+        for name, value in references.items():
+            if value is not None:
+                _check_paths_field(name, value)
+        for name, scale in self.reference_scale.items():
+            if not isinstance(scale, (int, float)) or scale <= 0:
+                raise ValueError(
+                    f"reference_scale[{name!r}] must be a positive number, "
+                    f"got {scale!r}")
+        for name, steps in self.reference_preview.items():
+            if not isinstance(steps, int) or steps < 0:
+                raise ValueError(
+                    f"reference_preview[{name!r}] must be a non-negative int, "
+                    f"got {steps!r}")
+        # Names are resolved against the surrogate's columns at load time
+        # (losses.resolve_objective); the table's own shape is checked now.
+        parse_losses(self.losses, self.gains)
 
         for name in [
             "batch_size", "train_pred_steps", "in_steps",
             "log2_policy_hidden", "policy_layers",
             "epochs", "epoch_verbose", "lr",
-            "test_window", "test_stride", "band_width_max",
-            "train_band_sub_samples", "test_band_sub_samples",
-            "price_repeat",
+            "test_window", "test_stride",
         ]:
             check_positive(self, name)
 
-        for name in [
-            "d_preview", "warmup", "patience",
-            "comfort_weight", "energy_weight", "cost_weight", "peak_weight",
-            "band_width_min", "setpoint_step",
-        ]:
+        for name in ["d_preview", "warmup", "patience", "setpoint_step"]:
             check_non_negative(self, name)
-
-        # q < 1 is not a peak preference at all: M_q below 1 rewards spiky
-        # profiles, so it would quietly optimise the opposite of the request.
-        if self.peak_q < 1:
-            raise ValueError(
-                f"peak_q must be >= 1, got {self.peak_q}. 1 is the plain mean; "
-                "larger values approach a hard max."
-            )
 
         if self.residual_delta is not None:
             if self.residual_delta < 0:
@@ -319,62 +223,6 @@ class ControlConfig:
                     "the reference rule. Raise it to at least one grid step, "
                     "or set setpoint_step: 0."
                 )
-
-        # du_weight is per-channel-capable, so it is checked by value rather
-        # than by field. Column names can only be resolved against the
-        # surrogate's U, which happens in closed_loop.resolve_du_weights.
-        weights = (self.du_weight.values() if isinstance(self.du_weight, dict)
-                   else self.du_weight if isinstance(self.du_weight, list)
-                   else [self.du_weight])
-        if any(w < 0 for w in weights):
-            raise ValueError(f"du_weight must be >= 0, got {self.du_weight}")
-
-        if self.band_lo is None or self.band_hi is None:
-            raise ValueError(
-                "band_lo and band_hi must both be set — the comfort band's "
-                "edges are in the plant's physical units (°C for HVAC, volts "
-                "for a battery, ...), so there is no library-wide default "
-                "for them."
-            )
-        # The band sampler draws a width in [width_min, width_max] and a lower
-        # edge in [lo, hi - width], so a width wider than hi - lo would put
-        # the lower edge below lo.
-        for prefix, band in (("band_", self.train_band()),
-                             ("resolved test_band_", self.test_band())):
-            if band.lo > band.hi:
-                raise ValueError(
-                    f"{prefix}lo ({band.lo}) must be <= {prefix}hi ({band.hi})")
-            if band.width_min > band.width_max:
-                raise ValueError(
-                    f"{prefix}width_min ({band.width_min}) must be <= "
-                    f"{prefix}width_max ({band.width_max})")
-            if band.width_max > band.hi - band.lo:
-                raise ValueError(
-                    f"{prefix}width_max ({band.width_max}) is wider than "
-                    f"{prefix}hi - {prefix}lo ({band.hi - band.lo}), so a "
-                    f"sampled band would leave [{band.lo}, {band.hi}]."
-                )
-
-    def train_band(self):
-        from neurotemplate.control.scenarios import BandSpec
-        return BandSpec(
-            lo=self.band_lo, hi=self.band_hi,
-            width_min=self.band_width_min, width_max=self.band_width_max,
-            sub_samples=self.train_band_sub_samples,
-        )
-
-    def test_band(self):
-        from neurotemplate.control.scenarios import BandSpec
-        lo = self.band_lo if self.test_band_lo is None else self.test_band_lo
-        hi = self.band_hi if self.test_band_hi is None else self.test_band_hi
-        wmin = (self.band_width_min if self.test_band_width_min is None
-                else self.test_band_width_min)
-        wmax = (self.band_width_max if self.test_band_width_max is None
-                else self.test_band_width_max)
-        return BandSpec(
-            lo=lo, hi=hi, width_min=wmin, width_max=wmax,
-            sub_samples=self.test_band_sub_samples,
-        )
 
     def asdict(self) -> dict:
         return asdict(self)

@@ -12,11 +12,17 @@ from neurotemplate.control.policy import build_policy
 from neurotemplate.control.closed_loop import build_closed_loop, build_control_loss, build_problem
 from control_fixtures import (
     ZONE, SETPT, DIST, Y_COLS,
-    full_setup, make_control_cfg, make_frozen_dynamics, make_nm_mapping,
-    make_norm_stats, make_raw_df, make_sysid_cfg,
+    full_setup, make_frozen_dynamics, make_sysid_cfg,
 )
-from neurotemplate.common.data_utils import normalize_df
 from neurotemplate.modeling.dynamics import get_dynamics
+
+
+def _windows(s, cfg=None, sysid_cfg=None):
+    cfg = cfg or s["cfg"]
+    return build_window_dict(
+        s["norm_df"], cfg, sysid_cfg or s["sysid_cfg"], s["nm"],
+        P=cfg.train_pred_steps, stride=cfg.in_steps,
+    )
 
 
 def test_closed_loop_rollout_shapes():
@@ -27,10 +33,7 @@ def test_closed_loop_rollout_shapes():
 
     policy = build_policy(cfg, sysid_cfg, nm, s["norm_stats"])
     cl = build_closed_loop(s["dyn_node"], policy, cfg, sysid_cfg)
-    data = build_window_dict(
-        s["norm_df"], cfg, sysid_cfg, nm, s["norm_stats"],
-        P=P, stride=cfg.in_steps,
-    )
+    data = _windows(s)
     out = cl(data)
     n = data["yn"].shape[0]
     # seed + P appended predictions / actions; U's seed is one shorter
@@ -51,18 +54,14 @@ def test_the_first_prediction_already_responds_to_the_policy():
 
     policy = build_policy(cfg, sysid_cfg, nm, s["norm_stats"])
     cl = build_closed_loop(s["dyn_node"], policy, cfg, sysid_cfg)
-    data = build_window_dict(
-        s["norm_df"], cfg, sysid_cfg, nm, s["norm_stats"],
-        P=cfg.train_pred_steps, stride=cfg.in_steps,
-    )
-    cl(data)["yn"][:, hmax, :].sum().backward()
+    cl(_windows(s))["yn"][:, hmax, :].sum().backward()
 
     grads = [p.grad for p in policy.callable.parameters() if p.requires_grad]
     assert any(g is not None and g.abs().sum() > 0 for g in grads)
 
 
 def test_gradients_only_reach_policy():
-    s = full_setup(comfort_weight=10.0, du_weight=0.0, energy_weight=0.0)
+    s = full_setup()
     cfg, sysid_cfg, nm = s["cfg"], s["sysid_cfg"], s["nm"]
 
     policy = build_policy(cfg, sysid_cfg, nm, s["norm_stats"])
@@ -70,9 +69,7 @@ def test_gradients_only_reach_policy():
     loss = build_control_loss(cfg, sysid_cfg, nm, s["norm_stats"])
     problem = build_problem(cl, loss)
 
-    train, _ = build_loaders(
-        cfg, sysid_cfg, nm, s["norm_stats"], [s["norm_df"]], [s["norm_df"]],
-    )
+    train, _ = build_loaders(cfg, sysid_cfg, nm, [s["norm_df"]], [s["norm_df"]])
     batch = next(iter(train))
     out = problem(batch)
     total = out[f'{batch["name"]}_loss']
@@ -93,28 +90,23 @@ def test_gradients_only_reach_policy():
 
 def _gru_setup():
     """full_setup, but with a stateful surrogate instead of an MLP."""
-    nm = make_nm_mapping()
-    raw = make_raw_df()
-    norm_stats = make_norm_stats(raw)
-    norm_df = normalize_df(raw, norm_stats)
+    s = full_setup()
     sysid_cfg = make_sysid_cfg(model="gru")
-    cfg = make_control_cfg()
-    _, dyn_node = make_frozen_dynamics(sysid_cfg, nm)
-    return nm, norm_df, norm_stats, sysid_cfg, cfg, dyn_node
+    _, dyn_node = make_frozen_dynamics(sysid_cfg, s["nm"])
+    return s, sysid_cfg, dyn_node
 
 
 def test_gru_surrogate_rolls_out_and_warms_up():
     """A stateful surrogate must keep the same shape contract, reset between
     forwards, and enter the rollout warmed over [hmax-h_sys, hmax-2]."""
-    nm, norm_df, norm_stats, sysid_cfg, cfg, dyn_node = _gru_setup()
+    s, sysid_cfg, dyn_node = _gru_setup()
+    cfg, nm = s["cfg"], s["nm"]
     h_sys, _, hmax = horizons(cfg, sysid_cfg)
     P = cfg.train_pred_steps
 
-    policy = build_policy(cfg, sysid_cfg, nm, norm_stats)
+    policy = build_policy(cfg, sysid_cfg, nm, s["norm_stats"])
     cl = build_closed_loop(dyn_node, policy, cfg, sysid_cfg)
-    data = build_window_dict(
-        norm_df, cfg, sysid_cfg, nm, norm_stats, P=P, stride=cfg.in_steps,
-    )
+    data = _windows(s, sysid_cfg=sysid_cfg)
 
     out = cl(dict(data))
     n = data["yn"].shape[0]
@@ -150,10 +142,8 @@ def test_frozen_param_count_is_zero_trainable():
 def _demand_setup():
     """full_setup, but the surrogate is a 2r2c zone with the setpoint
     declared as `demand`, the other channels an MLP block."""
-    nm = make_nm_mapping()
-    raw = make_raw_df()
-    norm_stats = make_norm_stats(raw)
-    norm_df = normalize_df(raw, norm_stats)
+    s = full_setup()
+    nm, norm_stats = s["nm"], s["norm_stats"]
     sysid_cfg = make_sysid_cfg(model="2r2c")
     sysid_cfg.steps_per_hour = 12.0
     spec = {
@@ -165,7 +155,7 @@ def _demand_setup():
     for p in dyn_sys.parameters():
         p.requires_grad_(False)
     dyn_sys.eval()
-    return nm, norm_df, norm_stats, sysid_cfg, make_control_cfg(), dyn_sys.nodes[0]
+    return s, sysid_cfg, dyn_sys.nodes[0]
 
 
 def test_a_policy_parked_on_the_inactive_side_still_gets_gradient():
@@ -174,9 +164,9 @@ def test_a_policy_parked_on_the_inactive_side_still_gets_gradient():
     is exactly zero and the plant would ignore it — and the raw U it emits
     keeps its width. A hard relu would hand it zero gradient forever; the
     soft clamp's backward lets it learn to start cooling from a coast."""
-    nm, norm_df, norm_stats, sysid_cfg, cfg, dyn_node = _demand_setup()
+    s, sysid_cfg, dyn_node = _demand_setup()
+    cfg, nm, norm_stats = s["cfg"], s["nm"], s["norm_stats"]
     _, _, hmax = horizons(cfg, sysid_cfg)
-    P = cfg.train_pred_steps
 
     policy = build_policy(cfg, sysid_cfg, nm, norm_stats)
     last = policy.callable.linear[-1]
@@ -187,9 +177,7 @@ def test_a_policy_parked_on_the_inactive_side_still_gets_gradient():
         last.bias.fill_(2.0)
 
     cl = build_closed_loop(dyn_node, policy, cfg, sysid_cfg)
-    data = build_window_dict(norm_df, cfg, sysid_cfg, nm, norm_stats,
-                             P=P, stride=cfg.in_steps)
-    out = cl(data)
+    out = cl(_windows(s, sysid_cfg=sysid_cfg))
     assert out["U"].shape[-1] == len(nm["U"])
 
     zone_i, sp = nm["Y"].index(ZONE), norm_stats[SETPT]

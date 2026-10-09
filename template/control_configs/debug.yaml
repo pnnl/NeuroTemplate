@@ -1,7 +1,8 @@
 # A 2-epoch run that exercises the whole control pipeline — hooks, closed
 # loop, reportcard — before you train for real:
 #   nt control train --config control_configs/debug.yaml --set sysid_run_id=<id>
-# Copy the band (and residual_delta, if you use one) from your real config.
+# Copy the references and the objective (and residual_delta, if you use
+# one) from your real config.
 
 sysid_run_id: ""
 
@@ -12,9 +13,14 @@ test_data_path: data/test.csv
 in_steps: 4
 train_pred_steps: 4
 
-# Required, in the physical units of the regulated channel.
-band_lo: null
-band_hi: null
+train_reference_path: data/train_reference.csv
+dev_reference_path: data/dev_reference.csv
+test_reference_path: data/test_reference.csv
+
+losses:
+  comfort_lower: {column: "Comfort Low [°C]",  target: "Zone Air Temperature [°C]", map: relu,  norm: 2}
+  comfort_upper: {column: "Comfort High [°C]", target: "Zone Air Temperature [°C]", map: nrelu, norm: 2}
+gains: {comfort_lower: 5.0, comfort_upper: 5.0}
 
 log2_policy_hidden: 3
 policy_layers: 1

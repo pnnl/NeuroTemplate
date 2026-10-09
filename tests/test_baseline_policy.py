@@ -2,8 +2,6 @@
 
 The rule the residual policy is anchored to is the same rule scored as the
 baseline — one definition, two consumers — so these tests cover both roles.
-The comparison is only meaningful if both controllers see the *same* comfort
-band realization, so that claim gets its own test.
 """
 
 import torch
@@ -14,10 +12,10 @@ from neurotemplate.control.pipeline import (
     evaluate_baseline,
     evaluate_closed_loop,
 )
-from neurotemplate.control.policy import build_policy, build_reference_node
+from neurotemplate.control.policy import build_reference_node
 from neurotemplate.control.scenarios import horizons, scored_steps
 from control_user_defined import actuation_bounds, reference_control
-from control_fixtures import full_setup
+from control_fixtures import HIGH, LOW, SETPT, full_setup
 
 
 def _setup(**overrides):
@@ -37,24 +35,27 @@ def test_reference_node_has_no_trainable_parameters():
     assert [p for p in node.parameters() if p.requires_grad] == []
 
 
-def test_reference_emits_band_midpoint_clamped_to_actuator_bounds():
+def test_reference_reads_the_band_by_name_and_clamps_to_actuator_bounds():
     s = _setup()
     nm, ns = s["nm"], s["norm_stats"]
     umin, umax = actuation_bounds(nm, ns)
+    sp = ns[SETPT]
 
-    def rule(ymin, ymax):
-        yn = torch.zeros(ymin.shape[0], len(nm["Y"]))
-        d = torch.zeros(ymin.shape[0], len(nm["D"]))
-        return reference_control(yn, ymin, ymax, d, nm, ns)
+    def rule(low_c, high_c):
+        """The rule's command, in °C, for a band given in °C."""
+        r_now = {name: torch.full((2,), (value - ns[name]["shift"]) / ns[name]["stretch"])
+                 for name, value in ((LOW, low_c), (HIGH, high_c))}
+        u = reference_control(torch.zeros(2, len(nm["Y"])), r_now,
+                              torch.zeros(2, len(nm["D"])), nm, ns)
+        return u * sp["stretch"] + sp["shift"]
 
-    # A band comfortably inside the actuator range comes through as its midpoint.
-    ymin = torch.full((2, 1), float(umin) + 0.1)
-    ymax = torch.full((2, 1), float(umax) - 0.1)
-    assert torch.allclose(rule(ymin, ymax), 0.5 * (ymin + ymax))
-
+    # A band inside the actuator range comes through as its midpoint.
+    assert torch.allclose(rule(sp["mean"] - 0.5, sp["mean"] + 0.3),
+                          torch.full((2, 1), sp["mean"] - 0.1), atol=1e-4)
     # A band above the actuator ceiling is clamped, not extrapolated.
-    high = torch.full((2, 1), float(umax) + 5.0)
-    assert torch.allclose(rule(high, high), umax.expand_as(high))
+    top = sp["max"] + 5.0
+    ceiling = umax * sp["stretch"] + sp["shift"]
+    assert torch.allclose(rule(top, top), ceiling.expand(2, 1), atol=1e-4)
 
 
 def test_reference_node_reads_the_current_step_in_the_closed_loop():
@@ -74,10 +75,13 @@ def test_reference_node_reads_the_current_step_in_the_closed_loop():
     _, _, hmax = horizons(cfg, sysid_cfg)
     commands = scored_steps("U", hmax)
     P = out["U"][:, commands].shape[1]
-    mid = 0.5 * (out["ymin"][:, commands, :] + out["ymax"][:, commands, :])[:, :P]
-    umin, umax = actuation_bounds(nm, ns)
-    assert torch.allclose(out["U"][:, commands, :], mid.clamp(umin, umax),
-                          atol=1e-5)
+    r = out["R"][:, commands][:, :P]
+    r_now = {HIGH: r[..., 0].reshape(-1), LOW: r[..., 1].reshape(-1)}
+    n = r_now[LOW].shape[0]
+    expected = reference_control(torch.zeros(n, len(nm["Y"])), r_now,
+                                 torch.zeros(n, len(nm["D"])), nm, ns)
+    expected = expected.reshape(out["U"][:, commands].shape)
+    assert torch.allclose(out["U"][:, commands, :], expected, atol=1e-5)
     assert 0.0 <= results.comfort_violation_rate <= 1.0
 
 
@@ -97,40 +101,6 @@ def test_no_rule_at_all_returns_none_rather_than_raising(monkeypatch):
 
 
 # ── The comparison itself ────────────────────────────────────────
-
-
-def test_baseline_and_learned_see_an_identical_comfort_band(monkeypatch):
-    """The whole comparison rests on this: both rollouts are scored against
-    the same fixed-seed band realization on the same windows."""
-    import neurotemplate.control.scenarios as scenarios
-    s = _setup()
-    cfg, sysid_cfg, nm, ns = s["cfg"], s["sysid_cfg"], s["nm"], s["norm_stats"]
-
-    seen = []
-    real = scenarios.build_window_dict_multi
-
-    def spy(*args, **kwargs):
-        data = real(*args, **kwargs)
-        seen.append((data["ymin"].clone(), data["ymax"].clone()))
-        return data
-
-    monkeypatch.setattr(
-        "neurotemplate.control.pipeline.build_window_dict_multi", spy
-    )
-
-    learned = build_policy(cfg, sysid_cfg, nm, ns)
-    evaluate_closed_loop(
-        cfg, sysid_cfg, build_closed_loop(s["dyn_node"], learned, cfg, sysid_cfg),
-        s["test_dfs"], nm, ns,
-    )
-    evaluate_baseline(
-        cfg, sysid_cfg, s["dyn_node"], s["test_dfs"], nm, ns,
-    )
-
-    assert len(seen) == 2
-    (ymin_a, ymax_a), (ymin_b, ymax_b) = seen
-    assert torch.equal(ymin_a, ymin_b)
-    assert torch.equal(ymax_a, ymax_b)
 
 
 def test_clears_reference_compares_mean_exceedance():

@@ -61,24 +61,32 @@ def _coerce_null(value: Any, field_type: Any) -> Any:
     return value
 
 
-def _coerce_float(value: Any, field_type: Any) -> Any:
-    """Normalize float-typed config values written in any float format.
-
-    PyYAML's `safe_load` only recognizes floats with a decimal point and a
-    signed exponent, so `1e5`, `1E5`, `1.0e5`, `1.0E5` all load as strings
-    and `10000` loads as an int. For fields declared `float` (or
-    `Optional[float]`) this coerces string/int inputs so every one of
-    `10000`, `10000.0`, `1e5`, `1E5`, `1.0e5`, `1.0E5` resolves to the same
-    float. Booleans are left alone (a `float` field never wants True/False).
-    """
-    if _unwrap_optional(field_type) is not float:
-        return value
+def _to_float(value: Any) -> Any:
     if isinstance(value, bool) or not isinstance(value, (int, str)):
         return value
     try:
         return float(value)
     except ValueError as exc:
         raise ConfigError(f"Expected a float value, got {value!r}") from exc
+
+
+def _coerce_float(value: Any, field_type: Any) -> Any:
+    """Normalize float-typed config values written in any float format.
+
+    PyYAML's `safe_load` only recognizes floats with a decimal point and a
+    signed exponent, so `1e5`, `1E5`, `1.0e5`, `1.0E5` all load as strings
+    and `10000` loads as an int. For fields declared `float` (or
+    `Optional[float]`), and for the values of a `dict[str, float]` field,
+    this coerces string/int inputs so every one of `10000`, `10000.0`, `1e5`,
+    `1E5`, `1.0e5`, `1.0E5` resolves to the same float. Booleans are left
+    alone (a `float` field never wants True/False).
+    """
+    tp = _unwrap_optional(field_type)
+    if get_origin(tp) is dict and get_args(tp)[1] is float and isinstance(value, dict):
+        return {k: _to_float(v) for k, v in value.items()}
+    if tp is not float:
+        return value
+    return _to_float(value)
 
 
 def dict_to_dataclass(data: dict, cls: Type[T], path: str = "") -> T:

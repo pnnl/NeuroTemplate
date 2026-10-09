@@ -2,8 +2,9 @@
 Domain bridge for the DPC controller (mirrors src/user_defined.py).
 
 These are the user-owned hooks that connect the generic control machinery to
-*this* building: which Y channels are comfort-controlled, what the comfort
-band is, what the actuator limits are, and how electrical power is computed.
+*this* building: what the actuator limits are, how electrical power is
+computed, and the rule a learned policy is measured against. The band itself
+is data — reference columns the objective names (see control_fixtures).
 
 Everything returned in "normalized space" uses the same per-column
 shift/stretch as the loaded sys-id run (norm_stats), so it is directly
@@ -19,12 +20,10 @@ Target dataset: single-zone Modelica RTU strip-mall (summer month).
 from __future__ import annotations
 
 import os
-from typing import Optional
 
 import torch
 
 from neurotemplate.common.data_utils import NormStats
-from neurotemplate.control.scenarios import BandSpec
 
 if os.environ.get("RUNTIME_TYPING", 0):
     from beartype import beartype
@@ -32,91 +31,9 @@ else:
     def beartype(fn): return fn
 
 
-# ---------------------------------------------------------------------
-# Required: which Y channels are comfort-controlled
-# ---------------------------------------------------------------------
-@beartype
-def regulated(
-    nm_mapping: dict[str, list[str]],
-) -> tuple[list[str], list[int]]:
-    """
-    Zone air-temperature column(s) (the signals the comfort band applies to)
-    and their integer indices into nm_mapping["Y"].
-
-    For the single-zone RTU dataset this is "Zone Air Temperature [°C]".
-    """
-    y_cols = nm_mapping["Y"]
-    controlled = [
-        c for c in y_cols
-        if ("zone" in c.lower()) and ("air temperature" in c.lower())
-    ]
-    if not controlled:
-        raise ValueError(
-            "No comfort-controlled channels found in Y. Expected zone air "
-            f"temperature columns; Y = {y_cols}"
-        )
-    idx = [y_cols.index(c) for c in controlled]
-    return controlled, idx
-
-
-# ---------------------------------------------------------------------
-# Required: comfort band as a sampled time-varying signal
-# ---------------------------------------------------------------------
-@beartype
-def comfort_band_signal(
-    nm_mapping: dict[str, list[str]],
-    norm_stats: NormStats,
-    n_samples: int,
-    nsteps: int,
-    band: BandSpec,
-    generator: Optional[torch.Generator] = None,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """
-    Build (ymin, ymax) comfort-band signals of shape
-    [n_samples, nsteps, n_ctrl] in NORMALIZED space.
-
-    `band.sub_samples` splits the window into that many equal-ish contiguous
-    segments. Each segment draws its own (width, lower-bound) the same way
-    a single-segment window does, so the result has `sub_samples - 1` step
-    jumps in both `ymin` and `ymax`. `sub_samples=1` reproduces the legacy
-    single-piece band.
-    """
-    k = band.sub_samples
-    if k < 1:
-        raise ValueError(f"band.sub_samples must be >= 1, got {k}")
-    if k > nsteps:
-        raise ValueError(
-            f"band.sub_samples ({k}) cannot exceed nsteps ({nsteps})"
-        )
-
-    controlled, _ = regulated(nm_mapping)
-    n_ctrl = len(controlled)
-
-    # One (width, low) per (sample, segment); channels share the band.
-    widths = band.width_min + (band.width_max - band.width_min) * torch.rand(
-        n_samples, k, 1, generator=generator,
-    )
-    lows = band.lo + ((band.hi - widths) - band.lo) * torch.rand(
-        n_samples, k, 1, generator=generator,
-    )
-
-    # Spread the k segments across nsteps. First (nsteps % k) segments are
-    # one step longer so the counts sum to nsteps.
-    base, rem = divmod(nsteps, k)
-    counts = torch.full((k,), base, dtype=torch.long)
-    counts[:rem] += 1
-    seg_widths = torch.repeat_interleave(widths, counts, dim=1)
-    seg_lows = torch.repeat_interleave(lows, counts, dim=1)
-
-    ymin_phys = seg_lows.expand(n_samples, nsteps, n_ctrl)
-    ymax_phys = (seg_lows + seg_widths).expand(n_samples, nsteps, n_ctrl)
-
-    shift = torch.tensor([norm_stats[c]["shift"] for c in controlled])
-    stretch = torch.tensor([norm_stats[c]["stretch"] for c in controlled])
-
-    ymin = (ymin_phys - shift) / stretch
-    ymax = (ymax_phys - shift) / stretch
-    return ymin, ymax
+# The comfort band's reference columns, as control_fixtures writes them.
+LOW = "Comfort Low [°C]"
+HIGH = "Comfort High [°C]"
 
 
 # ---------------------------------------------------------------------
@@ -166,9 +83,8 @@ POWER_METRIC_IMPLEMENTED = True
 # ---------------------------------------------------------------------
 @beartype
 def reference_control(
-    yn_now: torch.Tensor,
-    ymin_now: torch.Tensor,
-    ymax_now: torch.Tensor,
+    y_now: torch.Tensor,
+    r_now: dict[str, torch.Tensor],
     d_now: torch.Tensor,
     nm_mapping: dict[str, list[str]],
     norm_stats: NormStats,
@@ -184,19 +100,15 @@ def reference_control(
     Memoryless, current step only, normalized in and normalized U out — the
     same space the learned policy emits.
     """
-    controlled, _ = regulated(nm_mapping)
-    nu = len(nm_mapping["U"])
-    if len(controlled) != nu:
-        # One setpoint per comfort-controlled zone is the assumption this
-        # simple rule makes; say so rather than silently broadcasting wrong.
-        raise ValueError(
-            f"Band-midpoint rule needs one U per controlled channel: "
-            f"{len(controlled)} controlled channels vs {nu} U columns."
-        )
+    def physical(name):
+        return r_now[name] * norm_stats[name]["stretch"] + norm_stats[name]["shift"]
 
+    mid = 0.5 * (physical(LOW) + physical(HIGH))            # [b], °C
+    u_cols = nm_mapping["U"]
+    shift = torch.tensor([norm_stats[c]["shift"] for c in u_cols], device=mid.device)
+    stretch = torch.tensor([norm_stats[c]["stretch"] for c in u_cols], device=mid.device)
     umin, umax = actuation_bounds(nm_mapping, norm_stats)
-    midpoint = 0.5 * (ymin_now + ymax_now)
-    u = midpoint.expand(*midpoint.shape[:-1], nu)
+    u = (mid[:, None] - shift) / stretch                    # [b, nu]
     return torch.clamp(u, umin.to(u.device), umax.to(u.device))
 
 

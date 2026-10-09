@@ -12,6 +12,7 @@ You get:
 my_app/
 ├── modeling_user_defined.py    # modeling hooks — fill these in
 ├── control_user_defined.py     # control hooks — only if you train policies
+├── make_references.py          # writes a reference file (band, tariff) per plant file
 ├── model_configs/
 │   ├── modeling.yaml           # every ModelingConfig field, annotated
 │   └── debug.yaml              # 2-epoch smoke run
@@ -60,8 +61,10 @@ than from memory of another version.
    will take it.
 5. **`nt model train`** for real. Note the `Finished run: <run_id>` line —
    that id is how the control side finds the surrogate.
-6. **Control** — `REGULATED_COLUMNS` in `control_user_defined.py`, the band
-   in `control_configs/control.yaml` (physical units), and ideally
+6. **Control** — a reference file per plant file
+   (`python make_references.py data/train.csv data/train_reference.csv
+   --band 21 25`, and the same for dev and test), the `losses` and `gains`
+   in `control_configs/control.yaml` naming your columns, and ideally
    `reference_control`: a simple rule the reportcard scores the learned
    policy against. Then
    `nt control train --set sysid_run_id=<run_id>`.
@@ -74,14 +77,14 @@ nt model train --config model_configs/modeling.yaml --print-config
 
 ## Optional control capabilities
 
-Each is gated on a hook and off until you implement it — see
+Each is off until you ask for it — see
 [the framework README](../README.md#two-optional-control-capabilities).
 
-| Want | Implement | Then set |
+| Want | Implement | Then declare |
 |---|---|---|
-| an energy objective, and the energy section of the reportcard | `power_metric` + `POWER_METRIC_IMPLEMENTED` | `energy_weight` |
-| price-driven load shifting | `power_metric`, plus the TARIFF fields in control.yaml | `cost_weight`, `price_preview` |
-| peak shaving | `power_metric` | `peak_weight`, `peak_q` |
+| an energy objective, and the energy section of the reportcard | `power_metric` + `POWER_METRIC_IMPLEMENTED` | a `{column: power, norm: 1}` row |
+| price-driven load shifting | `power_metric`, and a tariff column in the reference files (`make_references.py --price`) | a `{column: power, norm: 1, weight: <tariff>}` row, `reference_scale`, `reference_preview` |
+| peak shaving | `power_metric` | a `{column: power, norm: 4}` row |
 | a rule-based baseline on the reportcard | `reference_control` | *(nothing)* |
 | a policy bounded to that rule | `reference_control` | `residual_delta` |
 

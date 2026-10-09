@@ -20,8 +20,9 @@ import argparse
 import sys
 from pathlib import Path
 
-from neurotemplate.common.data_utils import get_data, get_data_splits, normalize_df
+from neurotemplate.common.data_utils import get_data
 from neurotemplate.control.load import load_trained_policy
+from neurotemplate.control.scenarios import load_control_splits
 from neurotemplate.export.dynamics import export_model
 from neurotemplate.export.policy import export_policy
 from neurotemplate.export.trace import EXPORTERS
@@ -94,12 +95,11 @@ def policy_main() -> None:
     args = get_policy_args(sys.argv[1:])
     policy_node, cl_system, cfg, sysid_cfg, nm_mapping, norm_stats = (
         load_trained_policy(args.run_id, run_dir=args.run_dir))
-    _, _, test_raws, _ = get_data_splits(cfg)
+    _, _, test_dfs = load_control_splits(cfg, nm_mapping, norm_stats)
 
     result = export_policy(
         policy_node=policy_node, cl_system=cl_system, cfg=cfg, sysid_cfg=sysid_cfg,
-        nm_mapping=nm_mapping, norm_stats=norm_stats,
-        test_dfs=[normalize_df(raw, norm_stats) for raw in test_raws],
+        nm_mapping=nm_mapping, norm_stats=norm_stats, test_dfs=test_dfs,
         run_id=args.run_id, out_dir=Path(args.out), package=args.package,
         description=args.description, exporter=args.exporter,
         fixture_windows=args.fixture_windows, version=args.version,

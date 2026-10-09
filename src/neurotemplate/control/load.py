@@ -15,6 +15,7 @@ from neurotemplate.control.closed_loop import (
     build_closed_loop, build_control_loss, build_problem,
 )
 from neurotemplate.control.config import ControlConfig
+from neurotemplate.control.losses import extend_norm_stats, resolve_objective
 from neurotemplate.control.policy import build_policy
 from neurotemplate.modeling.cli.load import (
     _resolve_artifacts_dir, config_from_run_params, load_trained_dynamics,
@@ -65,12 +66,16 @@ def load_trained_policy(run_id: str, run_dir=None):
     `control_user_defined` hooks — and the checkpoint the trainer saved
     (`best_model_state_dict.pth`, the whole Problem) is loaded strictly, so a
     policy that does not rebuild to the trained shape fails here, loudly.
+    `norm_stats` carries the reference columns, rebuilt from the logged
+    config exactly as training built them.
     """
     cfg = config_from_run_params(run_id, ControlConfig)
     cfg.validate()
     cfg.device = resolve_device(cfg.device)
-    _, dyn_node, sysid_cfg, nm_mapping, norm_stats = load_frozen_dynamics(
+    _, dyn_node, sysid_cfg, nm_mapping, sysid_stats = load_frozen_dynamics(
         cfg.sysid_run_id, cfg.run_dir, cfg.weights)
+    norm_stats = extend_norm_stats(resolve_objective(cfg, nm_mapping), cfg,
+                                   sysid_stats)
 
     policy_node = build_policy(cfg, sysid_cfg, nm_mapping, norm_stats)
     cl_system = build_closed_loop(dyn_node, policy_node, cfg, sysid_cfg)

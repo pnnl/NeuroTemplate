@@ -5,7 +5,7 @@ A library of generic, time-series, data-driven black-box modeling and control bu
 The repo contains two sister subsystems:
 
 - **Modeling** — train a system-identification surrogate `y_{k+1} = f(y_k, u_k, d_k) [+ y_k]` from data, with an optional gradient-sign penalty, post-training physics assertions (equilibrium / step response / reachability / free decay), Optuna search, MLflow tracking. Model families: `mlp`, `nssm`, `lssm`, `gru` (black box) and `2r2c` (grey box — a thermal network with a hidden mass, for buildings whose storage matters). Families can be mixed in one graph, one per block of signals.
-- **Control** — train a differentiable predictive control (DPC) policy against a frozen surrogate. Closed-loop rollouts, comfort-band penalties, optional energy, cost and peak-demand objectives, setpoint quantization. Policy families: `mlp`, `linear` (a saturated affine feedback law). Optionally scores a rule-based baseline alongside the learned policy.
+- **Control** — train a differentiable predictive control (DPC) policy against a frozen surrogate. Closed-loop rollouts, a declared objective over named columns (comfort bands, tracked schedules, energy, cost and peak-demand terms), reference signals read from their own files, setpoint quantization. Policy families: `mlp`, `linear` (a saturated affine feedback law). Optionally scores a rule-based baseline alongside the learned policy.
 
 Both sides share a thin `common/` layer (YAML/CLI loader, CSV + sliding-window data utilities, per-channel metrics).
 
@@ -107,41 +107,55 @@ The library imports each hook by attribute (no defaulting), so every row above e
 
 | Function | Required | Used by |
 |---|---|---|
-| `regulated(nm_mapping) -> ([col], [idx])` | yes | comfort objective |
-| `comfort_band_signal(nm_mapping, norm_stats, n_samples, nsteps, band, generator) -> (ymin, ymax)` | yes | scenarios |
 | `actuation_bounds(nm_mapping, norm_stats) -> (umin, umax)` | yes | policy bounds |
-| `power_channels(nm_mapping) -> [col]` | must be defined; return `[]` when nothing is metered | closed-loop plot power row + energy metrics |
-| `plot_context_channels(nm_mapping) -> [col]` | must be defined; return `[]` for none | D traces overlaid on the closed-loop temperature axis |
-| `power_metric(yn, U, D, nm_mapping, norm_stats) -> Tensor` + `POWER_METRIC_IMPLEMENTED: bool` | required only when `energy_weight`, `cost_weight` or `peak_weight` > 0 | energy / cost / peak objectives + energy reportcard |
-| `reference_control(yn_now, ymin_now, ymax_now, d_now, nm_mapping, norm_stats) -> Tensor` | optional | rule-based baseline **and** the residual policy's anchor |
+| `power_channels(nm_mapping) -> [col]` | must be defined; return `[]` when nothing is metered | closed-loop plot power row |
+| `plot_context_channels(nm_mapping) -> [col]` | must be defined; return `[]` for none | D traces overlaid on the closed-loop plot |
+| `power_metric(yn, U, D, nm_mapping, norm_stats) -> Tensor` + `POWER_METRIC_IMPLEMENTED: bool` | required only when a loss term names `power` | power terms (energy, cost, peak) + energy reportcard |
+| `reference_control(y_now, r_now, d_now, nm_mapping, norm_stats) -> Tensor` | optional | rule-based baseline **and** the residual policy's anchor |
 | `build_baseline_policy(cfg, sysid_cfg, nm_mapping, norm_stats) -> Node \| None` | optional; mutually exclusive with `reference_control` | escape hatch for a baseline a memoryless rule cannot express |
-| `preview_config(nm_mapping) -> {signal: n_steps}` | optional | per-column disturbance and comfort-band preview widths (the tariff preview is `price_preview` in the config) |
+| `preview_config(nm_mapping) -> {D column: n_steps}` | optional | per-column disturbance preview (a reference column's preview is `reference_preview` in the config) |
 
-The energy tariff is config, not a hook: `train_price_path` / `dev_price_path` / `test_price_path` (one CSV per split) + `price_scale` + `price_preview` in `control.yaml`, required together only when `cost_weight > 0`.
+The objective is not a hook: it is the `losses` table in `control.yaml`, below.
 
 `power_metric` returns whatever units the use case meters; the library never converts, so the reportcard labels energy as `power·h`. Metered channels the surrogate already predicts are the best thing to return, because the energy numbers then mean something outside the run. An actuation proxy such as `(setpoint - ambient)²` is a fine alternative when nothing meters power — just read the energy section as relative rather than physical. What has actually cost campaigns here is the term's *scale*, not its shape: a proxy carried over from another dataset came out at 1.7× the entire comfort objective while every pooled metric looked fine. The objective-balance report and the shape sweep both print before training so that magnitude is on screen from the start.
 
-If `reference_control` is defined, `nt control train` rolls that rule out on the same test windows against the same fixed-seed comfort band, adds a learned-vs-baseline table to the reportcard, and states plainly whether the learned policy cleared its own reference on mean exceedance. **A policy that does not clear its reference should ship the reference** — training is scored against a surrogate whose held-out error is not the plant's, and the rule is the one controller here whose behaviour does not depend on that. Without a rule the comparison section just says so.
+`reference_control` is memoryless and works on the current step: `y_now` `[b, ny]` and `d_now` `[b, nd]` normalized, and `r_now`, each reference column the objective names by name, `[b]`, normalized — `norm_stats` carries an entry for each, so a rule denormalizes a band edge exactly as it does a zone temperature. If it is defined, `nt control train` rolls that rule out on the same test windows against the same test references, adds a learned-vs-baseline table to the reportcard, and states plainly whether the learned policy cleared its own reference on mean exceedance. **A policy that does not clear its reference should ship the reference** — training is scored against a surrogate whose held-out error is not the plant's, and the rule is the one controller here whose behaviour does not depend on that. Without a rule the comparison section just says so.
 
 The same hook is what `residual_delta` anchors to. Set it and the policy commands `reference_control(...) + δ` with `|δ| ≤ residual_delta` instead of commanding a setpoint outright: the rule keeps comfort, δ answers whatever else is being optimised, and the ±Δ box is a trust region on surrogate error rather than a claim about the network. The reportcard reports the box and the fraction of steps δ spent pinned at it — a cap that binds most of the time means either the rule is wrong for this plant or the optimizer is riding a surrogate artifact into the wall. Note Δ bounds the *action*, not the outcome: the commanded setpoint stays within Δ of the rule's, the zone temperature does not, because the plant is in between.
 
-`train_price_path`/`dev_price_path`/`test_price_path` are the switch for price-driven control — set all three (one CSV per split: a timestamp column plus one price column, in physical $/kWh) plus `price_scale`, and the library divides by `price_scale` so the policy sees an O(1) input and multiplies it back to report dollars. Price rides in the rollout dict rather than as a D column: a D column would need the frozen surrogate retrained, and would tell the dynamics model that electricity price drives zone temperature.
+### The control objective: a declared table over named columns
 
-**Point it at a real historical series, and do not derive it from the clock.** A tariff that is a deterministic function of hour-of-day is one the policy can learn *as* hour-of-day — D is strongly clock-correlated, so "read the price" and "read the time" collapse into the same task and you get a convincing load-shifting trace with no price responsiveness in it. Real day-to-day variation is what forces the policy to read the channel. (`t` would not help anyway: `sec_elapsed` counts from the first row of the file, not from midnight.) A per-split file also means the test file is where to put whatever price swings you want the eval judged on.
+```yaml
+losses:
+  comfort_lower: {column: "Comfort Low [°C]",  target: "Zone Air Temperature [°C]", map: relu,  norm: 2}
+  comfort_upper: {column: "Comfort High [°C]", target: "Zone Air Temperature [°C]", map: nrelu, norm: 2}
+  du:            {column: "Zone Cooling Setpoint [°C]", map: first_difference, norm: 1}
+  cost:          {column: power, norm: 1, weight: "Tariff [$/kWh]"}
+gains: {comfort_lower: 5.0, comfort_upper: 5.0, du: 1.0, cost: 1.0e-3}
+```
 
-The library draws its own window offsets out of each split's file, so price windows are deliberately independent of the weather windows they are scored beside — that removes the residual price↔weather correlation as a second route to the same shortcut, and it means the price record need not span the plant record. Reproducibility rides on the `generator` `build_price` is handed: `evaluate_closed_loop` reseeds it from `EVAL_BAND_SEED`, so the learned policy and the baseline are scored against a byte-identical tariff. Price is drawn after the band, so enabling it leaves band realizations unchanged.
+Each entry is read in one order: the operand `column − target` (`target` optional), then the `map`, then the `norm`, then `gains[name]`. Nothing else is in the objective.
 
-`price_align` chooses how those offsets are drawn, and the choice is a real trade-off:
-
-| | `random` (default) | `day` |
+| axis | values | notes |
 |---|---|---|
-| offset | any step | chosen so the tariff's time of day matches the window's |
-| the tariff's 8 pm peak | lands at a random hour of the plant's day | lands at the plant's 8 pm, in every window and every plot |
-| clock shortcut | closed | partly re-opened |
+| operand | `column`, optionally `− target` | `column` names a Y, U or D column of the surrogate, a reference column, or `power`; `target` a Y column or `power` |
+| `map` | *(none)*, `relu`, `nrelu`, `first_difference` | `relu` on `column − target` is a lower bound, `nrelu` an upper one, so the direction is in the map, not the name |
+| `norm` | `q ≥ 1` | the power mean `(mean_t w·|h|^q)^(1/q)` per window, averaged over the batch: 1 = mean, 2 = RMS, larger approaches the max |
+| `weight` | a reference or D column | per-step weighting in physical units; a tariff is the `weight` of a power term, not a kind of reference |
+| `units` | `physical` (default), `normalized` | `physical` denormalises `column` and `target` before the map, so a gain is per °C, per W; `power` is Watts either way |
 
-**Use `day` when the point is to see pre-cooling.** Under `random` a real evening peak is drawn at a different hour in every window, so the pre-cool it should provoke averages away and no plot shows it — v6 had to work around this by cutting the eval price file down to exactly one window long, leaving `randint` a single legal offset. `day` keeps the day random (so day-to-day price variation still forces the policy to read the channel) and pins only the time of day, read off the plant frame's own `DatetimeIndex`. The cost is that a series peaking at hour 19 on most days becomes that much more learnable *as* hour 19, so under `day` a load-shifting trace is not by itself evidence of price response: re-score the trained policy with the peak moved to a different hour and check the load moves with it.
+Every reduction is horizon-free and homogeneous of degree 1, so a gain tuned at `train_pred_steps: 48` means the same at 288, and switching a power metric from kW to W moves every power gain by the same factor. Two actuators that want different smoothing are two `first_difference` rows, each named on the reportcard. The terms appear in MLflow and on the objective-balance report as `<name>_loss`.
 
-`cost_weight` then weights `mean_t(price · power)`, and `peak_weight` weights the per-window power mean `M_q(power)` — all three power terms are reductions of one shared signal. Neither is solvable at the default `train_pred_steps: 48`; expect 144–288 steps, and expect `cost_weight` to need a price preview (`price_preview`) before it can shift load rather than merely react to it.
+**The regulated set is derived**: the Y targets of the `relu`/`nrelu` rows, each with at most one lower and one upper bound — a band, a one-sided limit, or (the same column on both sides) a tracked setpoint schedule. The reportcard scores comfort, band-jump response and the baseline against exactly those bands.
+
+**Reference columns are data, in their own files.** A name that is not a surrogate column or `power` is a reference column, read from `train_reference_path` / `dev_reference_path` / `test_reference_path` — one list per split, parallel to its plant files, each file row-aligned with its plant file and carrying exactly its timestamps (a mismatch is refused, naming both ranges). They reach the policy and the loss as one `R` key and never the surrogate, whose Node reads only `yn`, `U` and `D`. Several draws are several files: list the plant file once per draw. [template/make_references.py](template/make_references.py) samples a band and slices a tariff into such a file; it is example code to edit, not library behaviour.
+
+A reference column bounding a Y column is normalised with that column's stats; any other (a tariff, a cap on power) needs a `reference_scale` entry — a divisor, no shift, so a zero price stays a zero cost. `reference_preview` gives each reference column its own preview depth: a cost term needs one covering the price cycle before it can *shift* load rather than react to it. The policy's reference input is ordered by sorted column name, so reordering the YAML never moves an input.
+
+**What the library does not check about your references.** How a band or a tariff was prepared is the data's business. Two things are worth checking yourself:
+
+- **Draw the tariff from a real historical record, never from the clock.** A tariff that is a deterministic function of hour-of-day is one the policy can learn *as* hour-of-day — D is strongly clock-correlated, so "read the price" and "read the time" collapse into the same task and you get a convincing load-shifting trace with no price responsiveness in it. Real day-to-day variation is what forces the policy to read the column.
+- **Confirm a price response before believing it.** A reference file aligns the tariff with the weather row for row, so the price↔weather correlation is a second route to the same shortcut. `make_references.py` slices the tariff at a random offset by default, putting its peak at a random hour of the plant's day; `--price-align day` keeps the time of day, which is what makes a pre-cool visible in a plot and partly re-opens the shortcut. Either way, re-score the trained policy against a test reference with the peak moved to a different hour (same weather, same surrogate) and check the load moves with it.
 
 The tables above are the canonical hook contract. To start writing hooks, copy [template/](template/) — it has all of them stubbed with the right signatures. For worked-through implementations (including an ordinal/bounded `data_head_config`), read [tests/fixtures/modeling_user_defined.py](tests/fixtures/modeling_user_defined.py) and [tests/fixtures/control_user_defined.py](tests/fixtures/control_user_defined.py).
 
@@ -431,48 +445,44 @@ through their *states* is outside what this buys you.
 
 ## Two optional control capabilities
 
-Both are off by default and both fail fast rather than degrade, so a run that
-does not ask for them is unchanged.
+Both are off until asked for and both fail fast rather than degrade, so a run
+that does not ask for them is unchanged.
 
 ### Grid response: cost and peak-demand objectives
 
-`energy`, `cost` and `peak` are three *reductions of one power signal* —
-`mean_t(p)`, `mean_t(price·p)`, and the per-window power mean
-`M_q(p) = (mean_t p^q)^(1/q)` averaged over the batch. All three read the same
-`power_metric` output, so they cannot end up pricing different quantities.
+Energy, cost and peak are three rows over one signal — `power`, the
+`power_metric` hook's output — reduced three ways: a mean, a tariff-weighted
+mean, and a power mean with `q > 1`. All three read the same hook on the same
+steps, so they cannot end up pricing different quantities.
 
 To turn on price-driven control:
 
 1. **Implement `power_metric` and set `POWER_METRIC_IMPLEMENTED = True`.**
-   Nothing else here works without it.
-2. **Get a real price series, as a CSV per split** (timestamp + one price
-   column in $/kWh). Sample: `grid_response.ipynb` in Neuromancer's
+   Nothing here works without it.
+2. **Get a real price series** (timestamp + one price column in $/kWh).
+   Sample: `grid_response.ipynb` in Neuromancer's
    `examples/domain_examples/` downloads PG&E Hourly Flex Pricing from
    `https://raw.githubusercontent.com/EladMichael/small_example_datasets/main/hourly-flex-prices-historical-sample.xlsx`.
-   Convert it to CSV; no need to upsample it yourself.
-3. **Set `train_price_path`/`dev_price_path`/`test_price_path` + `price_scale`
-   in control.yaml**, and `price_repeat` if the file is coarser than your
-   plant data's timestep (12 for hourly price over 5-minute data — the
-   library upsamples it, so it needs a whole-number ratio, not the finer
-   resolution itself).
-   *Do not build a time-of-use table keyed on hour-of-day* — see the hook
-   contract above for why the policy will learn the clock instead of the price.
-4. **Give the policy a price preview**, or the cost term is not solvable —
-   pre-cooling happens *before* the expensive block, so a policy that only
-   sees the current price can react but never shift:
+3. **Write it into the reference files** with
+   `make_references.py --price price.csv` — it resamples a coarser price
+   record onto the plant's timestep and re-stamps it with the plant's
+   timestamps. *Do not build a time-of-use table keyed on hour-of-day* — see
+   the objective section above for why the policy will learn the clock
+   instead of the price.
+4. **Declare the terms, the tariff's scale and its preview** — pre-cooling
+   happens *before* the expensive block, so a policy that only sees the
+   current price can react but never shift:
 
    ```yaml
-   price_preview: 48       # 48 steps = 4 h at 5-minute data
-   ```
-
-5. **Set the weights and lengthen the rollout:**
-
-   ```yaml
-   energy_weight: 0.1      # keep one of these non-zero alongside peak_weight
-   cost_weight: 0.5
-   peak_weight: 0.1
-   peak_q: 4               # 1 = plain mean, 2 = RMS, larger -> hard max
-   train_pred_steps: 288   # 48 is 4 hours: too short to precool and coast
+   losses:
+     # ...the comfort rows...
+     energy: {column: power, norm: 1}
+     cost:   {column: power, norm: 1, weight: "Tariff [$/kWh]"}
+     peak:   {column: power, norm: 4}      # 1 = mean, 2 = RMS, larger -> hard max
+   gains: {comfort_lower: 5.0, comfort_upper: 5.0, energy: 1.0e-4, cost: 1.0e-3, peak: 1.0e-4}
+   reference_scale: {"Tariff [$/kWh]": 0.30}
+   reference_preview: {"Tariff [$/kWh]": 48}   # 48 steps = 4 h at 5-minute data
+   train_pred_steps: 288                       # 48 is 4 hours: too short to precool and coast
    ```
 
 `train_pred_steps` is the real cost — rollout memory grows roughly linearly.
@@ -482,9 +492,9 @@ To turn on price-driven control:
 Pre-cooling is load shifting you can point at: drive the zone down through the
 cheap block, then coast up through the expensive one on the building's own
 thermal mass. Four things have to be true at once or it will not appear, and
-three of them are not the weights:
+three of them are not the gains:
 
-- **`price_preview` covers the run-up to the peak.** Pre-cooling is by
+- **`reference_preview` covers the run-up to the peak.** Pre-cooling is by
   definition an action taken before the expensive block. A policy whose only
   price input is the current one can be cheap, but it cannot pre-cool.
 - **The comfort band is wide enough to store anything.** Load shifting *is*
@@ -493,20 +503,19 @@ three of them are not the weights:
   reasonable place to start.
 - **The rollout spans the cycle.** 288 steps (24 h at 5-minute data) covers a
   precool and the coast that pays for it; the default 48 covers neither.
-- **`cost_weight` carries the power side, not `energy_weight`.** They pull
-  different ways: `energy_weight` rewards using less power at *every* hour, so
-  the cheapest way to satisfy it is to stop cooling — load *shedding*, which
-  shows up as a big power cut with comfort going backwards. Only `cost_weight`
-  rewards moving power to the cheap hours. If pre-cooling is the goal, start
-  with `cost_weight` alone and a comfort weight high enough that the savings
-  have to be found rather than bought.
+- **The cost term carries the power side, not an energy term.** They pull
+  different ways: energy rewards using less power at *every* hour, so the
+  cheapest way to satisfy it is to stop cooling — load *shedding*, which shows
+  up as a big power cut with comfort going backwards. Only cost rewards moving
+  power to the cheap hours. If pre-cooling is the goal, start with cost alone
+  and a comfort gain high enough that the savings have to be found rather than
+  bought.
 
-Set `price_align: day` while you are looking for it, or the tariff's evening
-peak lands at a different hour in every window and the precool averages out of
-every plot. Then confirm it is the price and not the clock: re-score the
-trained policy with the peak moved to a different hour (holding the weather,
-the band and the surrogate fixed) and check the load follows. Pre-heating
-against an evening peak is the same recipe with the sign flipped.
+Write the references with `--price-align day` while you are looking for it, or
+the tariff's evening peak lands at a different hour in every window and the
+precool averages out of every plot. Then confirm it is the price and not the
+clock, as above. Pre-heating against an evening peak is the same recipe with
+the sign flipped.
 
 ### Residual control: bound the policy to a rule
 
@@ -516,7 +525,7 @@ not a claim about what networks find easy to learn: training's gradient *and*
 its model-selection criterion both come from a surrogate whose held-out score
 is not the plant's, and a ±Δ box caps what that error can cost you.
 
-1. **Implement `reference_control`** (see the template; `control.policy.bracket_band`
+1. **Implement `reference_control`** (see the template; its `bracket_band`
    does the hard part for a heating/cooling pair). Delete
    `build_baseline_policy` if you have one — defining both raises.
 2. **Set `residual_delta`**, in physical units:
@@ -528,7 +537,7 @@ is not the plant's, and a ±Δ box caps what that error can cost you.
    ```
 
 3. **Read the verdict.** The reportcard scores the rule on the same windows
-   against the same fixed-seed band and states whether the learned policy
+   against the same test references and states whether the learned policy
    cleared it on mean exceedance. It does not always. **A policy that does not
    clear its reference should ship the reference** — that call is the reason
    δ = 0 is worth scoring at all, because the Trainer checkpoints after each
@@ -541,20 +550,8 @@ of the rule's, the zone temperature does not, because the plant is in between.
 
 This is the case the residual design is really for — the rule keeps comfort,
 δ answers the incentive, and Δ is an operator-legible knob ("how far from the
-comfort rule am I willing to move for money"):
-
-```yaml
-residual_delta: 1.0
-cost_weight: 0.5
-peak_weight: 0.1
-energy_weight: 0.1
-train_pred_steps: 288
-```
-
-One caveat if you deploy: a policy that reads price gains a fifth key
-(`"price"`) on its Node's `input_keys`. The residual alone leaves the Node
-signature untouched — that is why the rule is composed *inside* the policy's
-callable — but residual-plus-price needs the evaluator rebuilt.
+comfort rule am I willing to move for money"): `residual_delta: 1.0` beside the
+cost and peak rows above, with `train_pred_steps: 288`.
 
 ## Diagnostics that run whether you ask or not
 
@@ -612,9 +609,8 @@ mass sits and flags a level under 5%.
   the one that asserts something: a term carried over from another dataset once
   came out at 1.7× the whole comfort objective.
 - **Power term shape** — the power signal swept across each actuation box, so
-  its magnitude and shape sit next to the weights you are choosing. One sweep
-  serves all three power-derived terms, since cost and peak are reductions of
-  the same signal. Reported without a verdict: an honest power metric is
+  its magnitude and shape sit next to the gains you are choosing. One sweep
+  serves every term on `power`, since each is a reduction of the same signal. Reported without a verdict: an honest power metric is
   monotone in actuator effort, and the interior optimum belongs to the summed
   objective, not to this term alone.
 - **Power clamped to zero** — the share of scored steps where the power signal
@@ -623,9 +619,9 @@ mass sits and flags a level under 5%.
   disproportionately the cheap hours load is supposed to move *into*. A large
   figure is a surrogate problem, not a weight.
 - **Objective notes** — configurations that are legal but cannot do what they
-  were switched on for: `cost_weight` with no price preview (reactive, not
-  shifting), and `peak_weight` as the only power term (minimisable by *adding*
-  off-peak load).
+  were switched on for: a term weighted by a reference column the policy does
+  not preview (reactive, not shifting), and power terms that are all peaks
+  (minimisable by *adding* off-peak load).
 
 **After the closed-loop evaluation:**
 
@@ -633,8 +629,8 @@ mass sits and flags a level under 5%.
   spent against each bound. Reported, not judged: a setpoint parked at its
   least-aggressive limit while nothing is demanded of it looks identical to one
   that is stuck. The band-jump audit below is what tells them apart.
-- **Band-jump response** — every step change in the reference band that left a
-  controlled channel out of band, scored on whether any control moved, whether
+- **Band-jump response** — every step change in a band that left a
+  regulated channel out of band, scored on whether any control moved, whether
   the channel followed, and whether it got back in band. Two controllers
   measured at 16.6% and 17.9% pooled violation reacted to 0% and 75% of their
   cooling-demand jumps respectively; the pooled metric ranked them backwards.
@@ -644,8 +640,8 @@ mass sits and flags a level under 5%.
   either the rule is wrong for this plant or the optimizer is riding a surrogate
   artifact into the wall. Read it before the comfort number.
 - **Baseline comparison and the ship/don't-ship call** — the same headline
-  numbers for the learned policy and the rule, on identical windows and an
-  identical band, plus an explicit verdict. For a residual policy this is also
+  numbers for the learned policy and the rule, on identical windows and
+  identical references, plus an explicit verdict. For a residual policy this is also
   the δ = 0 score, which is what turns its floor from rhetorical into a
   decision: the Trainer checkpoints after each epoch's optimizer steps, so
   δ = 0 is never itself a candidate and has to be scored on purpose.
@@ -736,9 +732,10 @@ src/neurotemplate/
 └── control/
     ├── config.py        # ControlConfig
     ├── policy.py        # policy_catalog (MLP/linear), build_policy, describe_policy, STEQuantize, residual policy
+    ├── losses.py        # the declared objective: parse, resolve names, power_mean
     ├── closed_loop.py   # build_closed_loop, build_control_loss, power_term
     ├── objective.py     # term balance + power-signal shape sweep
-    ├── scenarios.py     # BandSpec, build_window_dict, build_loaders, build_price
+    ├── scenarios.py     # load_control_splits (plant + reference files), build_window_dict, build_loaders
     ├── metrics.py       # ComfortMetrics, EnergyMetrics, ActuationMetrics, JumpResponse, ResidualMetrics
     ├── pipeline.py      # train_policy, evaluate_closed_loop, evaluate_baseline, clears_reference
     ├── reportcard.py    # render_control_reportcard
@@ -769,7 +766,7 @@ NeuroTemplate is a layer **on top of** Neuromancer, not a replacement. We reuse 
 - Synthetic physics assertions (equilibrium / step response / reachability / free decay)
 - `HeadStack` per-channel output heads (regression / binary / bounded / ordinal)
 - Per-channel metrics + markdown reportcards
-- Control-side: `STEQuantize`, `BandSpec` + comfort-band penalties, closed-loop assembly
+- Control-side: `STEQuantize`, a declared objective over named columns, closed-loop assembly
 
 If you find yourself shadowing a Neuromancer class, prefer the import.
 

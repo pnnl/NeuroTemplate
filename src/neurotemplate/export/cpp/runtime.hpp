@@ -9,7 +9,7 @@
 //
 //     model/warm_start.onnx   (y, u, d)          -> (y_next[, state])
 //     model/step.onnx         (y, u, d[, state]) -> (y_next[, state])
-//     policy/policy.onnx      (y, ymin, ymax, d[, price]) -> u
+//     policy/policy.onnx      (y, d[, r]) -> u
 //
 // Every window is a flat, row-major `[steps, n]` array of float32 in physical
 // units, oldest row first, with its columns in the order the json lists them.

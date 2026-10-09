@@ -2,7 +2,7 @@
 Export a trained DPC policy into `<out>/policy/`.
 
     policy/
-      policy.onnx           (y, ymin, ymax, d[, price]) -> u, physical units
+      policy.onnx           (y, d[, r]) -> u, physical units
       policy.json           each input's columns, window length and alignment
       reference/
         inputs.csv          real closed-loop windows the trained policy saw,
@@ -14,7 +14,8 @@ A trained policy is an explicit network, fixed after training, with no
 state: one graph, not two, and none of the state lifting the dynamics
 export needs. Its windows are read off the policy Node's own `input_map`
 (past / future per key), so whatever preview the policy was built with —
-band, per-column disturbance, tariff — is exactly what the graph expects.
+per-column disturbance, per-column reference — is exactly what the graph
+expects.
 
 Verification runs the trained closed loop over the control run's test split
 (the same `evaluate_closed_loop` the run was scored with) and collects every
@@ -35,9 +36,9 @@ import pandas as pd
 import torch
 import torch.nn as nn
 
+from neurotemplate.control.losses import resolve_objective
 from neurotemplate.control.pipeline import evaluate_closed_loop
-from neurotemplate.control.policy import describe_policy, regulated_channels
-from neurotemplate.control.scenarios import price_scale
+from neurotemplate.control.policy import describe_policy
 from neurotemplate.export.package import (
     FLOAT_FORMAT, check_package_name, install, provenance, stamp, write_json,
 )
@@ -45,13 +46,12 @@ from neurotemplate.export.runtime import Policy, window_columns
 from neurotemplate.export.spec import FORMAT
 from neurotemplate.export.trace import OPSET, export_graph
 from neurotemplate.export.verify import AGREEMENT_TOL, REPRODUCE_TOL
-from neurotemplate.hooks import load_control_hooks
 
-#: The policy Node's inputs, in the order `build_policy` gives them; a
-#: tariff-reading policy appends "price".
-POLICY_KEYS = ["yn", "ymin", "ymax", "D"]
+#: The policy Node's inputs, in the order `build_policy` gives them; a policy
+#: whose objective names reference columns appends "R".
+POLICY_KEYS = ["yn", "D"]
 #: Policy Node input key -> graph input name.
-GRAPH_NAMES = {"yn": "y", "ymin": "ymin", "ymax": "ymax", "D": "d", "price": "price"}
+GRAPH_NAMES = {"yn": "y", "D": "d", "R": "r"}
 
 
 @dataclass(frozen=True)
@@ -67,23 +67,21 @@ class PolicyInput:
 
 def policy_inputs(policy_node, cfg, nm_mapping: dict[str, list[str]],
                   norm_stats: dict[str, dict]) -> list[PolicyInput]:
-    """Every input the policy reads, in the order its Node passes them."""
-    regulated, _ = regulated_channels(load_control_hooks(cfg), nm_mapping)
-    scale = price_scale(cfg)
-    columns = {"yn": nm_mapping["Y"], "ymin": regulated, "ymax": regulated,
-               "D": nm_mapping["D"], "price": ["price"]}
+    """Every input the policy reads, in the order its Node passes them.
+
+    `norm_stats` carries the reference columns (`losses.extend_norm_stats`),
+    so every input denormalises the same way.
+    """
+    columns = {"yn": nm_mapping["Y"], "D": nm_mapping["D"],
+               "R": resolve_objective(cfg, nm_mapping).r_columns}
     inputs = []
     for key in policy_node.input_keys:
         window = policy_node.input_map.get(key, {"past": 0, "future": 0})
         cols = columns[key]
-        if key == "price":
-            # The window dict carries price / price_scale, with no shift.
-            shift, stretch = [0.0], [float(scale)]
-        else:
-            shift = [float(norm_stats[c]["shift"]) for c in cols]
-            stretch = [float(norm_stats[c]["stretch"]) for c in cols]
-        inputs.append(PolicyInput(key, cols, window["past"] + 1 + window["future"],
-                                  window["past"], shift, stretch))
+        inputs.append(PolicyInput(
+            key, cols, window["past"] + 1 + window["future"], window["past"],
+            [float(norm_stats[c]["shift"]) for c in cols],
+            [float(norm_stats[c]["stretch"]) for c in cols]))
     return inputs
 
 
@@ -101,10 +99,12 @@ class PolicyGraph(nn.Module):
         self.policy = policy
         self.keys = [spec.key for spec in inputs]
         # build_policy fixes this order; forward's signature spells it out
-        # because torch.export cannot map dynamic shapes onto `*args`.
-        if self.keys not in (POLICY_KEYS, POLICY_KEYS + ["price"]):
+        # because torch.export cannot map dynamic shapes onto `*args`. The
+        # reference columns are one tensor for the same reason: their count is
+        # config-dependent, an argument count cannot be.
+        if self.keys not in (POLICY_KEYS, POLICY_KEYS + ["R"]):
             raise ValueError(f"unexpected policy inputs {self.keys}; expected "
-                             f"{POLICY_KEYS} plus optionally 'price'.")
+                             f"{POLICY_KEYS} plus optionally 'R'.")
         for spec in inputs:
             self.register_buffer(f"{spec.key}_shift", torch.tensor(spec.shift))
             self.register_buffer(f"{spec.key}_stretch", torch.tensor(spec.stretch))
@@ -112,9 +112,9 @@ class PolicyGraph(nn.Module):
         self.register_buffer("u_shift", torch.tensor([norm_stats[c]["shift"] for c in u]))
         self.register_buffer("u_stretch", torch.tensor([norm_stats[c]["stretch"] for c in u]))
 
-    def forward(self, y: torch.Tensor, ymin: torch.Tensor, ymax: torch.Tensor,
-                d: torch.Tensor, price: torch.Tensor | None = None) -> torch.Tensor:
-        windows = [y, ymin, ymax, d] + ([price] if price is not None else [])
+    def forward(self, y: torch.Tensor, d: torch.Tensor,
+                r: torch.Tensor | None = None) -> torch.Tensor:
+        windows = [y, d] + ([r] if r is not None else [])
         flat = [((x - getattr(self, f"{key}_shift")) / getattr(self, f"{key}_stretch"))
                 .reshape(x.shape[0], -1) for key, x in zip(self.keys, windows)]
         return self.policy(*flat) * self.u_stretch + self.u_shift

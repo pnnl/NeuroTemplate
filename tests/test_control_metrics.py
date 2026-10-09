@@ -111,24 +111,22 @@ def test_energy_single_spike_moves_peak_but_barely_moves_window_peak():
     )
 
 
-def test_energy_cost_integrates_price_against_power():
+def test_a_weight_integrates_against_power():
     # One window, 4 steps of 0.5 h: 100 kW at $0.10 then 200 kW at $0.40.
     power = torch.tensor([[100.0, 100.0, 200.0, 200.0]])
     price = torch.tensor([[0.10, 0.10, 0.40, 0.40]])
-    e = energy_metrics(power, step_hours=0.5, price=price)
+    e = energy_metrics(power, step_hours=0.5, weights={"tariff": price})
     expected = (100 * 0.10 + 100 * 0.10 + 200 * 0.40 + 200 * 0.40) * 0.5
-    assert e.energy_cost == pytest.approx(expected)
+    assert e.weighted_energy["tariff"] == pytest.approx(expected)
 
 
-def test_energy_cost_prefers_the_cheap_hours_at_equal_energy():
+def test_a_weight_prefers_the_cheap_hours_at_equal_energy():
     """The number the whole feature exists to move: same kWh, different bill."""
-    price = torch.tensor([[0.10, 0.10, 0.40, 0.40]])
-    early = torch.tensor([[200.0, 200.0, 100.0, 100.0]])
-    late = torch.tensor([[100.0, 100.0, 200.0, 200.0]])
-    assert (energy_metrics(early, 0.5, price).total_energy
-            == pytest.approx(energy_metrics(late, 0.5, price).total_energy))
-    assert (energy_metrics(early, 0.5, price).energy_cost
-            < energy_metrics(late, 0.5, price).energy_cost)
+    price = {"tariff": torch.tensor([[0.10, 0.10, 0.40, 0.40]])}
+    early = energy_metrics(torch.tensor([[200.0, 200.0, 100.0, 100.0]]), 0.5, price)
+    late = energy_metrics(torch.tensor([[100.0, 100.0, 200.0, 200.0]]), 0.5, price)
+    assert early.total_energy == pytest.approx(late.total_energy)
+    assert early.weighted_energy["tariff"] < late.weighted_energy["tariff"]
 
 
 # ── MLflow logging ───────────────────────────────────────────────

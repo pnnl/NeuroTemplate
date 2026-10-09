@@ -39,8 +39,8 @@ def test_a_real_string_is_not_coerced():
 
 
 def test_an_optional_float_keeps_both_readings():
-    assert dict_to_dataclass({"test_band_lo": "1e1"}, ControlConfig).test_band_lo == 10.0
-    assert dict_to_dataclass({"test_band_lo": "none"}, ControlConfig).test_band_lo is None
+    assert dict_to_dataclass({"residual_delta": "1e1"}, ControlConfig).residual_delta == 10.0
+    assert dict_to_dataclass({"residual_delta": "none"}, ControlConfig).residual_delta is None
 
 
 # ── Float formats ────────────────────────────────────────────────

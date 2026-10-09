@@ -13,7 +13,7 @@ Sections (in order):
                              mappings, ...); reuses modeling/reportcard.py's
                              renderer so the two cards never drift apart
    3. Policy architecture  — from control.policy.describe_policy
-   4. Scenario             — horizons, controlled channels, bands, weights
+   4. Scenario             — horizons, regulated channels, the objective table
    5. Objective balance    — which term was actually being optimised, and the
                              magnitude and shape of the power signal
    6. Closed-loop performance — comfort table, actuation, energy
@@ -23,7 +23,7 @@ Sections (in order):
   10. Tracking error       — per-channel error vs. the comfort-band midpoint
   11. Hyperparameters      — the knobs that produced this run
 
-Whether the configured band is reachable at all is answered on the sys-id side,
+Whether a band is reachable at all is answered on the sys-id side,
 by the reachability scenario in modeling/scenarios.py, against a declared
 equilibrium rather than whatever weather a test file happened to contain.
 
@@ -59,6 +59,7 @@ from neurotemplate.control.objective import (
     is_inert,
     shapes_to_markdown,
 )
+from neurotemplate.control.losses import Objective, resolve_objective
 from neurotemplate.control.scenarios import horizons
 
 from neurotemplate._typing import beartype
@@ -85,21 +86,20 @@ def _summary_section(
     return _section("Summary", "\n".join(rows))
 
 
-def _d_preview_rows(depths: dict[str, int]) -> list[str]:
-    """Per-column D preview depths, or nothing when no column declares one.
+def _preview_rows(label: str, depths: dict[str, int],
+                  always: bool = False) -> list[str]:
+    """Per-column preview depths, or nothing when no column declares one.
 
-    The input-width line can only carry the shared window width, which is the
-    max across columns -- so a run declaring 2 steps on outdoor temperature
-    and none on irradiance reads there exactly like one declaring 2 on both.
-    Since `preview_config` started honoring per-column depths those are
-    different policies, and this is the line that tells them apart.
+    The input-width line cannot carry them, and a run previewing 2 steps of
+    outdoor temperature and none of irradiance is a different policy from one
+    previewing 2 of both — this is the line that tells them apart. Reference
+    columns are listed even at depth 0 (`always`), because each is a policy
+    input in its own right.
     """
-    if not any(depths.values()):
+    if not depths or not (always or any(depths.values())):
         return []
-    return [
-        "- **D preview (per column):**",
-        *(f"  - `{col}`: {depth}" for col, depth in depths.items()),
-    ]
+    return [f"- **{label}:**",
+            *(f"  - `{col}`: {depth}" for col, depth in depths.items())]
 
 
 def _policy_section(arch: dict) -> str:
@@ -120,13 +120,10 @@ def _policy_section(arch: dict) -> str:
         f"- **Bound method:** `{arch['bound_method']}`",
         f"- **Hidden sizes:** {hsizes}",
         f"- **Trainable params:** {arch['param_count']:,}",
-        f"- **Input width:** {arch['insize']} "
-        f"(H_ctrl={arch['h_ctrl']}, D window={arch['d_preview']}, "
-        f"band preview={arch['band_preview']}"
-        + (f", price preview={arch['price_preview']}" if arch["reads_price"]
-           else "")
-        + ")",
-        *_d_preview_rows(arch["d_preview_by_column"]),
+        f"- **Input width:** {arch['insize']} (H_ctrl={arch['h_ctrl']})",
+        *_preview_rows("D preview (per column)", arch["d_preview_by_column"]),
+        *_preview_rows("Reference columns (preview steps)",
+                       arch["r_preview_by_column"], always=True),
         f"- **Output width:** {arch['outsize']}",
         f"- **Observation:** Policy observes all {arch['ny']} Y channels — "
         "no measurement restriction.",
@@ -145,32 +142,35 @@ def _policy_section(arch: dict) -> str:
     return _section("Policy architecture", "\n".join(rows))
 
 
-def _band_line(label: str, band) -> str:
-    return (
-        f"- **{label}:** lo ~ U[{band.lo}, {band.hi}], "
-        f"width ~ U[{band.width_min}, {band.width_max}], "
-        f"segments={band.sub_samples}"
-    )
+def _objective_table(objective: Objective) -> str:
+    rows = ["| Term | Operand | Map | Norm | Weight | Units | Gain |",
+            "|---|---|---|---:|---|---|---:|"]
+    for t in objective.terms:
+        operand = f"`{t.column}`" + ("" if t.target is None else f" − `{t.target}`")
+        rows.append(
+            f"| {t.name} | {operand} | {t.map or '—'} | {t.norm:g} | "
+            f"{'—' if t.weight is None else f'`{t.weight}`'} | {t.units} | "
+            f"{t.gain:g} |"
+        )
+    return "\n".join(rows)
 
 
-def _scenario_section(cfg, sysid_cfg, nm_mapping: dict, controlled: list[str],
-                      eval_band_seed: int) -> str:
+def _scenario_section(cfg, sysid_cfg, nm_mapping: dict,
+                      objective: Objective) -> str:
     h_sys, h_ctrl, _ = horizons(cfg, sysid_cfg)
     rows = [
         f"- **Horizons:** H_sys={h_sys}, H_ctrl={h_ctrl}, "
         f"train_pred_steps={cfg.train_pred_steps}, "
         f"test_window={cfg.test_window}",
-        f"- **Controlled channels ({len(controlled)}):** "
-        + ", ".join(f"`{c}`" for c in controlled),
+        f"- **Regulated channels ({len(objective.regulated)}):** "
+        + ", ".join(f"`{c}`" for c in objective.regulated)
+        + " *(the Y targets of the bound terms)*",
         f"- **Control U ({len(nm_mapping['U'])}):** "
         + ", ".join(f"`{c}`" for c in nm_mapping["U"]),
-        _band_line("Train band", cfg.train_band()),
-        _band_line("Test band", cfg.test_band()),
-        f"- **Objective weights:** comfort={cfg.comfort_weight}, "
-        f"du={cfg.du_weight}, energy={cfg.energy_weight}, "
-        f"cost={cfg.cost_weight}, peak={cfg.peak_weight} (q={cfg.peak_q:g})",
-        f"- **Eval band seed:** {eval_band_seed} "
-        "*(fixed, so runs are scored against the same band realization)*",
+        "- **Objective:** each term is `gain · power-mean(map(operand))` per "
+        "window, averaged over the batch; `physical` units denormalise the "
+        "operand before the map.\n",
+        _objective_table(objective),
     ]
     return _section("Scenario", "\n".join(rows))
 
@@ -264,18 +264,17 @@ def _energy_lines(energy) -> list[str]:
         f"  - Peak power (worst instant): {energy.peak_power:.4g}",
         f"  - Mean per-window peak: {energy.mean_window_peak:.4g}",
     ]
-    if energy.energy_cost is not None:
+    for name, value in energy.weighted_energy.items():
         lines.append(
-            f"  - Cost per window: {energy.energy_cost:.4g} "
-            "*(∫price·power dt; price·power·h, unconverted — Watts against "
-            "$/kWh is off by 1000)*"
+            f"  - ∫`{name}`·power dt per window: {value:.4g} *(unconverted — "
+            "Watts against $/kWh is off by 1000)*"
         )
     return lines
 
 
 def _performance_section(results) -> str:
     body = [
-        "Comfort, per controlled channel. Excursions and degree-hours are in "
+        "Comfort, per regulated channel. Excursions and degree-hours are in "
         "the physical units of each channel.\n",
         comfort_to_markdown(results.comfort),
         "",
@@ -355,12 +354,12 @@ def _response_section(results, u_names: list[str]) -> str:
     if not results.response:
         return _section(
             "Band-jump response",
-            "*(no band jumps left a controlled channel outside its band, so "
-            "there was nothing to audit — raise `test_band_sub_samples` or "
-            "widen the band range to exercise the controller.)*",
+            "*(no band jumps left a regulated channel outside its band, so "
+            "there was nothing to audit — a test reference file whose bounds "
+            "step is what exercises the controller.)*",
         )
     body = [
-        "Every step change in the reference band that left a controlled "
+        "Every step change in a band that left a regulated "
         "channel outside the new band, scored over the segment until the next "
         "jump. **Actuated** is whether any control moved on the same step; "
         "**moved right way** and **back in band** are whether the channel "
@@ -383,18 +382,22 @@ def _response_section(results, u_names: list[str]) -> str:
     return _section("Band-jump response", "\n".join(body))
 
 
-def _comparison_values(results) -> list[Optional[float]]:
-    """The seven headline numbers, in table order. None renders as n/a."""
+def _comparison_columns(results) -> list[tuple[str, Optional[float]]]:
+    """The headline numbers as (column header, value), in table order. None
+    renders as n/a."""
     energy = results.energy
-    return [
-        results.comfort_mean_exceedance,
-        results.comfort_violation_rate * 100.0,
-        sum(m.degree_hours for m in results.comfort),
-        results.mean_abs_du,
-        None if energy is None else energy.mean_power,
-        None if energy is None else energy.peak_power,
-        None if energy is None else energy.energy_cost,
+    columns = [
+        ("Mean exceedance", results.comfort_mean_exceedance),
+        ("Violation rate (%)", results.comfort_violation_rate * 100.0),
+        ("Degree-hours", sum(m.degree_hours for m in results.comfort)),
+        (r"Mean \|Δu\|", results.mean_abs_du),
+        ("Mean power", None if energy is None else energy.mean_power),
+        ("Peak power", None if energy is None else energy.peak_power),
     ]
+    if energy is not None:
+        columns += [(f"∫`{name}`·power", value)
+                    for name, value in energy.weighted_energy.items()]
+    return columns
 
 
 def _comparison_row(label: str, values: list[Optional[float]],
@@ -414,8 +417,9 @@ def _baseline_section(results, baseline, clears: Optional[bool] = None) -> str:
             "controller to compare against.)*",
         )
 
-    learned = _comparison_values(results)
-    rule = _comparison_values(baseline)
+    columns = _comparison_columns(results)
+    learned = [value for _, value in columns]
+    rule = [value for _, value in _comparison_columns(baseline)]
     delta = [
         None if (a is None or b is None) else a - b
         for a, b in zip(learned, rule)
@@ -423,13 +427,12 @@ def _baseline_section(results, baseline, clears: Optional[bool] = None) -> str:
 
     body = [
         "Both controllers were rolled out on the same test windows against "
-        "the same fixed-seed comfort band, so these numbers are directly "
-        "comparable. Degree-hours is summed across controlled channels. "
+        "the same test references, so these numbers are directly "
+        "comparable. Degree-hours is summed across regulated channels. "
         "Lower is better in every column, so a negative Δ favours the "
         "learned policy.\n",
-        r"| Controller | Mean exceedance | Violation rate (%) | Degree-hours "
-        r"| Mean \|Δu\| | Mean power | Peak power | Cost per window |",
-        "|---|---:|---:|---:|---:|---:|---:|---:|",
+        "| Controller | " + " | ".join(header for header, _ in columns) + " |",
+        "|---|" + "---:|" * len(columns),
         _comparison_row("Learned policy", learned),
         _comparison_row("Baseline", rule),
         _comparison_row("Δ (learned − baseline)", delta, signed=True),
@@ -466,12 +469,13 @@ def _baseline_section(results, baseline, clears: Optional[bool] = None) -> str:
 
 def _tracking_section(results) -> str:
     body = (
-        "Error of each controlled channel against the midpoint of its comfort "
-        "band, in physical units. Tracking the midpoint is not the objective — "
-        "staying inside the band is — so treat this as a shape diagnostic.\n\n"
+        "Error of each regulated channel with a two-sided band against the "
+        "band's midpoint, in physical units. Tracking the midpoint is not the "
+        "objective — staying inside the band is — so treat this as a shape "
+        "diagnostic.\n\n"
         + metrics_to_markdown(results.tracking)
     )
-    return _section("Tracking error vs. comfort-band midpoint", body)
+    return _section("Tracking error vs. band midpoint", body)
 
 
 def _hyperparameters_section(cfg) -> str:
@@ -492,10 +496,8 @@ def render_control_reportcard(
     sysid_cfg,
     arch: dict,
     nm_mapping: dict[str, list[str]],
-    controlled: list[str],
     results,
     *,
-    eval_band_seed: int,
     surrogate_arch: Optional[dict] = None,
     baseline: Optional[object] = None,
     clears_reference: Optional[bool] = None,
@@ -514,9 +516,7 @@ def render_control_reportcard(
 
     Args:
         arch:        Output of control.policy.describe_policy(...).
-        controlled:  Regulated channel names (the `regulated` hook).
         results:     ControlResults for the learned policy.
-        eval_band_seed: The fixed seed the evaluation band was drawn with.
         surrogate_arch: Optional output of modeling.dynamics.describe_dynamics
                      for the frozen sys-id model this policy was trained
                      against (num_layers, hidden size, RC forcing maps, ...).
@@ -551,8 +551,8 @@ def render_control_reportcard(
         parts.append(_architecture_section(surrogate_arch, "Surrogate architecture"))
     parts += [
         _policy_section(arch),
-        _scenario_section(cfg, sysid_cfg, nm_mapping, controlled,
-                          eval_band_seed),
+        _scenario_section(cfg, sysid_cfg, nm_mapping,
+                          resolve_objective(cfg, nm_mapping)),
     ]
     if balance is not None:
         parts.append(_objective_section(balance, shapes or [],

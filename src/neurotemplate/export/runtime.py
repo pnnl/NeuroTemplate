@@ -11,7 +11,7 @@ physical values in and out of them.
     model/warm_start.onnx   (y, u, d)          -> (y_next[, state])
     model/step.onnx         (y, u, d[, state]) -> (y_next[, state])
     model/model.json        columns, units, history length, state width
-    policy/policy.onnx      (y, ymin, ymax, d[, price]) -> u
+    policy/policy.onnx      (y, d[, r]) -> u
     policy/policy.json      each input's columns and window length
 
 Every window is `[batch, steps, n]` in physical units, oldest row first. For
@@ -208,11 +208,11 @@ class Policy:
     """An exported control policy. `Policy("policy")` loads a policy directory.
 
     Stateless: one graph, one call per control step. Each input is a window
-    of physical values, oldest row first, whose length and alignment
-    `policy.json` states (`inputs.<name>.steps` / `.current_row`): `y` and
-    `d` end at the current step, and `d`, `ymin`, `ymax` and `price` may run
-    past it into the known future (forecast weather, the comfort schedule,
-    the tariff).
+    of physical values, oldest row first, whose length, columns and alignment
+    `policy.json` states (`inputs.<name>.steps` / `.columns` /
+    `.current_row`): `y` and `d` end at the current step, and `d` and `r` may
+    run past it into the known future (forecast weather; the reference
+    columns — a comfort band, a setpoint schedule, a tariff).
     """
 
     def __init__(self, policy_dir: str | Path = "policy"):
@@ -222,13 +222,13 @@ class Policy:
         self.u_columns: list[str] = self.spec["u_columns"]
         self._session = _session(policy_dir / "policy.onnx", self.spec)
 
-    def act(self, y, ymin, ymax, d, price=None) -> dict[str, float]:
+    def act(self, y, d, r=None) -> dict[str, float]:
         """The command for one step: `{u column: value}`.
 
         Each argument is `[steps, n]` for that input (see `self.inputs`);
-        `price` only for a policy trained against a tariff.
+        `r` only for a policy whose objective names reference columns.
         """
-        windows = {"y": y, "ymin": ymin, "ymax": ymax, "d": d, "price": price}
+        windows = {"y": y, "d": d, "r": r}
         u = self.act_batch({name: None if windows[name] is None
                             else np.asarray(windows[name])[None]
                             for name in self.inputs})[0]

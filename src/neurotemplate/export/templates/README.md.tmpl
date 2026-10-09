@@ -47,7 +47,7 @@ state = model.step(state, u_now, d_now);    // [nu], [nd] -> a new State
 state.outputs;                              // [ny], in model.y_columns order
 
 nt::Policy policy("policy");
-std::vector<float> command = policy.act({{"y", y}, {"ymin", ymin}, {"ymax", ymax}, {"d", d}});
+std::vector<float> command = policy.act({{"y", y}, {"d", d}, {"r", r}});
 ```
 
 Every array is a flat `std::vector<float>` in physical units. Its columns

@@ -16,6 +16,7 @@ from neurotemplate.modeling.config import ModelingConfig as Config
 from neurotemplate.common.data_utils import compute_norm_stats, normalize_df
 from neurotemplate.modeling.dynamics import get_dynamics
 from neurotemplate.control.config import ControlConfig
+from neurotemplate.control.losses import extend_norm_stats, resolve_objective
 
 # Single-zone Modelica RTU strip-mall dataset. Y is one zone temp plus the
 # RTU thermal/flow state plus the two metered RTU power channels; U is a
@@ -85,14 +86,58 @@ def make_sysid_cfg(in_steps: int = 4, model: str = "mlp") -> Config:
     return cfg
 
 
+# The reference columns: a comfort band on the zone, and a tariff.
+LOW = "Comfort Low [°C]"
+HIGH = "Comfort High [°C]"
+TARIFF = "Tariff [$/kWh]"
+TARIFF_SCALE = 0.30
+CHEAP, EXPENSIVE = 0.12, 0.48
+
+#: The comfort band and setpoint smoothing — what every control test trains
+#: against unless it says otherwise.
+BAND_LOSSES = {
+    "comfort_lower": {"column": LOW, "target": ZONE, "map": "relu", "norm": 2},
+    "comfort_upper": {"column": HIGH, "target": ZONE, "map": "nrelu", "norm": 2},
+    "du": {"column": SETPT, "map": "first_difference", "norm": 1},
+}
+BAND_GAINS = {"comfort_lower": 50.0, "comfort_upper": 50.0, "du": 10.0}
+
+#: The three reductions of power, for the grid-response tests.
+POWER_LOSSES = {
+    "energy": {"column": "power", "norm": 1},
+    "cost": {"column": "power", "norm": 1, "weight": TARIFF},
+    "peak": {"column": "power", "norm": 4},
+}
+
+
+def make_reference_df(plant: pd.DataFrame, segment: int = 6,
+                      seed: int = 0) -> pd.DataFrame:
+    """A reference record for `plant`: same timestamps, a piecewise-constant
+    comfort band (a new width and floor every `segment` steps, inside
+    [23, 27] °C), and a tariff alternating every step, so a one-step
+    misalignment between price and power changes the cost."""
+    rng = np.random.default_rng(seed)
+    n = len(plant)
+    n_seg = -(-n // segment)
+    widths = rng.uniform(0.5, 2.0, n_seg)
+    lows = 23.0 + (4.0 - widths) * rng.uniform(0.0, 1.0, n_seg)
+    low = np.repeat(lows, segment)[:n]
+    high = np.repeat(lows + widths, segment)[:n]
+    tariff = np.where(np.arange(n) % 2 == 0, CHEAP, EXPENSIVE)
+    return pd.DataFrame({LOW: low, HIGH: high, TARIFF: tariff}, index=plant.index)
+
+
 def make_control_cfg(**overrides) -> ControlConfig:
     cfg = ControlConfig()
     cfg.sysid_run_id = "test-run"
-    # band_lo/band_hi have no library default (they are physical-unit
-    # constants); every test needs a comfort band, so the fixture supplies
-    # one plant's plausible values here rather than in every test.
-    cfg.band_lo = 23.0
-    cfg.band_hi = 27.0
+    cfg.losses = {k: dict(v) for k, v in BAND_LOSSES.items()}
+    cfg.gains = dict(BAND_GAINS)
+    # Placeholders: unit tests build frames in memory and never read these;
+    # `write_splits` points them at real files.
+    cfg.train_data_path = cfg.dev_data_path = cfg.test_data_path = "plant.csv"
+    cfg.train_reference_path = "reference.csv"
+    cfg.dev_reference_path = "reference.csv"
+    cfg.test_reference_path = "reference.csv"
     cfg.in_steps = 3
     cfg.train_pred_steps = 6
     # hmax = max(sysid_cfg.in_steps=4, cfg.in_steps=3) = 4; test_window includes warmup.
@@ -118,99 +163,39 @@ def make_frozen_dynamics(sysid_cfg: Config, nm_mapping: dict):
     return dyn_sys, dyn_sys.nodes[0]
 
 
-# Tariff used by the price/cost/peak tests. A stand-in for a real historical
-# record: an evening peak whose height varies day to day, so a window's price
-# is NOT a function of its position in the day alone — which is the property
-# that stops a policy from learning the clock instead of the price.
-PRICE_SCALE = 0.30
-CHEAP, EXPENSIVE = 0.12, 0.48
-PRICE_STEPS_PER_HOUR = 12
-PRICE_DAYS = 30
+def write_splits(cfg, tmp_path, plant: pd.DataFrame,
+                 references: list[pd.DataFrame]) -> None:
+    """Write `plant` once and each reference as its own file, and point every
+    split at them: the plant file listed once per reference draw."""
+    plant_path = tmp_path / "plant.csv"
+    plant.drop(columns="sec_elapsed").rename_axis("timestamp").to_csv(plant_path)
+    ref_paths = []
+    for i, ref in enumerate(references):
+        path = tmp_path / f"reference_{i}.csv"
+        ref.rename_axis("timestamp").to_csv(path)
+        ref_paths.append(str(path))
+    for split in ("train", "dev", "test"):
+        setattr(cfg, f"{split}_data_path", [str(plant_path)] * len(ref_paths))
+        setattr(cfg, f"{split}_reference_path", ref_paths)
 
 
-def _price_series() -> torch.Tensor:
-    """[T, 1] deterministic $/kWh series, upsampled to a 5-minute grid."""
-    hours = torch.arange(PRICE_DAYS * 24, dtype=torch.float32)
-    on_peak = ((hours % 24) >= 16) & ((hours % 24) < 21)
-    # Peak height cycles across days with an irrational-ish period, so no two
-    # consecutive days share a price profile.
-    height = CHEAP + (EXPENSIVE - CHEAP) * (
-        0.5 + 0.5 * torch.cos(hours // 24 * 1.1)
-    )
-    dollars = torch.where(on_peak, height, torch.full_like(hours, CHEAP))
-    return dollars.repeat_interleave(PRICE_STEPS_PER_HOUR)[:, None]
+def full_setup(reference: pd.DataFrame | None = None, **control_overrides):
+    """One-call bundle used by most tests.
 
-
-PRICE_SERIES = _price_series()
-
-
-def flat_price(value, length: int = PRICE_SERIES.shape[0]) -> torch.Tensor:
-    """A constant [length, 1] tariff, for tests that want a hand-computable cost."""
-    return torch.full((length, 1), float(value))
-
-
-def alternating_price(length: int = PRICE_SERIES.shape[0]) -> torch.Tensor:
-    """A [length, 1] tariff that changes every step, so a one-step shift is
-    detectable."""
-    steps = (torch.arange(length, dtype=torch.float32) % 2) * EXPENSIVE + CHEAP
-    return steps[:, None]
-
-
-MIDNIGHT = "2026-01-01"
-PRICE_STEPS_PER_DAY = 24 * PRICE_STEPS_PER_HOUR
-
-
-def _write_price_csv(path, series: torch.Tensor, freq: str = "5min",
-                     start: str = MIDNIGHT) -> None:
-    """Write a [T, 1] price series to a CSV `get_data` can parse: a timestamp
-    column plus one price column. `start` defaults to a midnight boundary."""
-    idx = pd.date_range(start, periods=series.shape[0], freq=freq)
-    pd.DataFrame({"timestamp": idx, "price": series[:, 0].numpy()}).to_csv(
-        path, index=False,
-    )
-
-
-def time_of_day_price(days: int = 10, start_step: int = 0) -> torch.Tensor:
-    """A [days * steps_per_day, 1] series whose value *is* the step of day.
-
-    So a window drawn on a day boundary starts at 0, and one drawn anywhere
-    else does not — which is what `price_align` has to get right.
-    `start_step` is where the file's first row sits within its own day.
+    `norm_stats` carries the reference columns and `norm_df` is the plant
+    frame with its reference columns joined, normalized — what
+    `load_control_splits` hands the loaders.
     """
-    n = days * PRICE_STEPS_PER_DAY
-    steps = (torch.arange(n, dtype=torch.float32) + start_step)
-    return (steps % PRICE_STEPS_PER_DAY)[:, None]
-
-
-def install_price(cfg, tmp_path, series=PRICE_SERIES, scale=PRICE_SCALE,
-                  repeat=1, start=MIDNIGHT):
-    """Point `cfg` at a real price CSV — the fixture stand-in for a plant's
-    historical tariff record. The same file is used for all three splits,
-    which is a valid config (nothing requires them to differ).
-
-    Price plumbing is off by default (`train_price_path` unset), which is
-    what keeps every other test a regression guard on "a run without a
-    tariff is unchanged".
-    """
-    path = str(tmp_path / "price.csv")
-    _write_price_csv(path, series, start=start)
-    cfg.train_price_path = path
-    cfg.dev_price_path = path
-    cfg.test_price_path = path
-    cfg.price_scale = scale
-    cfg.price_repeat = repeat
-
-
-def full_setup(**control_overrides):
-    """One-call bundle used by most tests."""
     nm = make_nm_mapping()
-    raw = make_raw_df()
-    norm_stats = make_norm_stats(raw)
-    norm_df = normalize_df(raw, norm_stats)
+    plant = make_raw_df()
     sysid_cfg = make_sysid_cfg()
     cfg = make_control_cfg(**control_overrides)
+    norm_stats = extend_norm_stats(resolve_objective(cfg, nm), cfg,
+                                   make_norm_stats(plant))
+    raw = plant.join(make_reference_df(plant) if reference is None else reference)
     dyn_sys, dyn_node = make_frozen_dynamics(sysid_cfg, nm)
     return dict(
-        nm=nm, raw=raw, norm_stats=norm_stats, norm_df=norm_df,
+        nm=nm, plant=plant, raw=raw, norm_stats=norm_stats,
+        norm_df=normalize_df(raw, norm_stats),
         sysid_cfg=sysid_cfg, cfg=cfg, dyn_sys=dyn_sys, dyn_node=dyn_node,
     )

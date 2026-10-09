@@ -22,15 +22,17 @@ from neurotemplate.control.scenarios import build_window_dict, horizons, scored_
 from control_fixtures import full_setup
 
 
+def _windows(s):
+    cfg = s["cfg"]
+    return build_window_dict(s["norm_df"], cfg, s["sysid_cfg"], s["nm"],
+                              P=cfg.train_pred_steps, stride=cfg.in_steps)
+
+
 def _rollout(s):
     cfg, sysid_cfg, nm, ns = s["cfg"], s["sysid_cfg"], s["nm"], s["norm_stats"]
     policy = build_policy(cfg, sysid_cfg, nm, ns)
     cl = build_closed_loop(s["dyn_node"], policy, cfg, sysid_cfg)
-    data = build_window_dict(
-        s["norm_df"], cfg, sysid_cfg, nm, ns,
-        P=cfg.train_pred_steps, stride=cfg.in_steps,
-    )
-    return policy, cl(data)
+    return policy, cl(_windows(s))
 
 
 # ── Wiring ───────────────────────────────────────────────────────
@@ -91,10 +93,7 @@ def test_a_zero_width_box_pins_the_policy_to_the_rule_forever():
             p.add_(torch.randn_like(p) * 5.0)
 
     cl = build_closed_loop(s["dyn_node"], policy, cfg, sysid_cfg)
-    out = cl(build_window_dict(
-        s["norm_df"], cfg, sysid_cfg, nm, ns,
-        P=cfg.train_pred_steps, stride=cfg.in_steps,
-    ))
+    out = cl(_windows(s))
     u_ref = reference_over_horizon(cfg, out, hmax, nm, ns)
     assert torch.allclose(out["U"][:, scored_steps("U", hmax), :], u_ref, atol=1e-6)
 
@@ -113,10 +112,7 @@ def test_a_trained_residual_never_leaves_the_box():
             p.add_(torch.randn_like(p) * 20.0)
 
     cl = build_closed_loop(s["dyn_node"], policy, cfg, sysid_cfg)
-    out = cl(build_window_dict(
-        s["norm_df"], cfg, sysid_cfg, nm, ns,
-        P=cfg.train_pred_steps, stride=cfg.in_steps,
-    ))
+    out = cl(_windows(s))
     u_ref = reference_over_horizon(cfg, out, hmax, nm, ns)
     stretch = torch.tensor([ns[c]["stretch"] for c in nm["U"]])
     delta_phys = ((out["U"][:, scored_steps("U", hmax), :] - u_ref) * stretch).abs().detach()
@@ -125,16 +121,13 @@ def test_a_trained_residual_never_leaves_the_box():
 
 def test_the_residual_still_learns():
     """A zero start is only useful if the gradient is alive there."""
-    s = full_setup(residual_delta=1.0, setpoint_step=0.0, comfort_weight=1.0)
+    s = full_setup(residual_delta=1.0, setpoint_step=0.0)
     cfg, sysid_cfg, nm, ns = s["cfg"], s["sysid_cfg"], s["nm"], s["norm_stats"]
     _, _, hmax = horizons(cfg, sysid_cfg)
 
     policy = build_policy(cfg, sysid_cfg, nm, ns)
     cl = build_closed_loop(s["dyn_node"], policy, cfg, sysid_cfg)
-    out = cl(build_window_dict(
-        s["norm_df"], cfg, sysid_cfg, nm, ns,
-        P=cfg.train_pred_steps, stride=cfg.in_steps,
-    ))
+    out = cl(_windows(s))
     out["U"][:, scored_steps("U", hmax), :].pow(2).mean().backward()
     grads = [p.grad for p in policy.parameters() if p.grad is not None]
     assert any(float(g.abs().sum()) > 0 for g in grads)
@@ -146,11 +139,11 @@ def test_the_residual_still_learns():
 def test_the_in_rollout_current_step_matches_the_bare_node_call():
     """The rule inside the policy and the rule as a standalone Node must see
     the same current step, or the residual is measured against a fiction."""
-    s = full_setup(residual_delta=1.0, setpoint_step=0.0)
+    s = full_setup(residual_delta=1.0, setpoint_step=0.0,
+                   reference_preview={"Comfort Low [°C]": 2})
     cfg, sysid_cfg, nm, ns = s["cfg"], s["sysid_cfg"], s["nm"], s["norm_stats"]
     _, h_ctrl, hmax = horizons(cfg, sysid_cfg)
-    ny, nd = len(nm["Y"]), len(nm["D"])
-    n_ctrl = 1
+    ny, nd, n_ref = len(nm["Y"]), len(nm["D"]), 2
 
     policy = build_policy(cfg, sysid_cfg, nm, ns)
     rule_in_policy = policy.callable.reference
@@ -159,12 +152,12 @@ def test_the_in_rollout_current_step_matches_the_bare_node_call():
     b = 3
     yn_win = torch.randn(b, ny * h_ctrl)
     d_win = torch.randn(b, nd * h_ctrl)
-    ymin, ymax = torch.zeros(b, n_ctrl), torch.ones(b, n_ctrl)
+    r_win = torch.randn(b, n_ref * 3)       # current step + 2 previewed
 
-    windowed = rule_in_policy(yn_win, ymin, ymax, d_win)
+    windowed = rule_in_policy(yn_win, d_win, r_win)
     # The deploy path hands the bare Node the current step of each signal:
-    # the LAST block of the yn/D history, the only block of the band.
-    current = bare(yn_win[:, -ny:], ymin, ymax, d_win[:, -nd:])
+    # the LAST block of the yn/D history, the FIRST block of the reference.
+    current = bare(yn_win[:, -ny:], d_win[:, -nd:], r_win[:, :n_ref])
     assert torch.allclose(windowed, current)
 
 
@@ -224,8 +217,8 @@ def test_a_grid_aligned_reference_leaves_no_snapping_floor(monkeypatch):
 
     midpoint = cud.reference_control
 
-    def grid_aligned(yn, ymin, ymax, d, nm_mapping, norm_stats):
-        phys = midpoint(yn, ymin, ymax, d, nm_mapping, norm_stats) * stretch + shift
+    def grid_aligned(yn, r, d, nm_mapping, norm_stats):
+        phys = midpoint(yn, r, d, nm_mapping, norm_stats) * stretch + shift
         return ((phys / 0.5).round() * 0.5 - shift) / stretch
 
     monkeypatch.setattr(cud, "reference_control", grid_aligned)

@@ -1,9 +1,8 @@
 """
 Objective diagnostics: how big is each term, and what does it look like?
 
-`build_control_loss` sums comfort, du and three power-derived terms with
-user-supplied weights,
-and nothing checks that a weight suits the magnitude of what it multiplies.
+`build_control_loss` sums the declared loss terms, each scaled by its gain,
+and nothing checks that a gain suits the magnitude of what it multiplies.
 That is the highest-frequency failure in this library's record — four campaigns
 out of four — and it is a *scale* problem: the term has the right shape but the
 wrong magnitude, so it dominates the objective or vanishes from it.
@@ -32,6 +31,7 @@ from typing import Optional
 import torch
 
 from neurotemplate.common.data_utils import NormStats
+from neurotemplate.control.losses import POWER, Objective
 from neurotemplate.control.scenarios import scored_steps
 from neurotemplate._typing import beartype
 
@@ -236,7 +236,7 @@ def power_diagnostics(term_fn, out: dict, hmax: int) -> PowerDiagnostics:
 
 
 @beartype
-def objective_notes(cfg, arch: dict) -> list[str]:
+def objective_notes(objective: Objective, cfg) -> list[str]:
     """Objective diagnostics that need the config, not a forward pass.
 
     Both are the same kind of failure: a term that is switched on but cannot
@@ -244,19 +244,25 @@ def objective_notes(cfg, arch: dict) -> list[str]:
     because both configurations are legal and occasionally deliberate.
     """
     notes = []
-    if cfg.cost_weight > 0 and arch["price_preview"] == 0:
+    for term in objective.terms:
+        if (term.gain > 0 and term.weight is not None
+                and objective.roles[term.weight] == "R"
+                and cfg.reference_preview.get(term.weight, 0) == 0):
+            notes.append(
+                f"`{term.name}` is weighted by `{term.weight}`, but the policy "
+                "previews 0 future steps of it, so it can react to the current "
+                "value and cannot act ahead of it — shifting load into a "
+                "cheaper hour needs `reference_preview` to cover the cycle "
+                "(48 steps = 4 h on 5-minute data)."
+            )
+    power_terms = [t for t in objective.terms
+                   if t.gain > 0 and t.column == POWER and t.target is None]
+    if power_terms and all(t.norm > 1 for t in power_terms):
         notes.append(
-            "`cost_weight` > 0 but the policy previews 0 future price steps, "
-            "so it can react to the current tariff and cannot shift load into "
-            "a cheaper hour. Set `price_preview` to cover the price cycle "
-            "(48 steps = 4 h on 5-minute data)."
-        )
-    if cfg.peak_weight > 0 and cfg.energy_weight == 0 and cfg.cost_weight == 0:
-        notes.append(
-            "`peak_weight` is the only power term. Flattening a profile by "
-            "*adding* off-peak load is a valid solution to min M_q(p) and a "
-            "bad outcome — carry a non-zero `energy_weight` or `cost_weight` "
-            "alongside it."
+            "Every term on `power` has a norm above 1 (a peak). Flattening a "
+            "profile by *adding* off-peak load is a valid solution to "
+            "min M_q(p) and a bad outcome — carry a `norm: 1` power term "
+            "(energy or cost) alongside it."
         )
     return notes
 
