@@ -83,7 +83,9 @@ my_app/
 
 `nt model train` looks for configs in `model_configs/`; `nt control train` looks in `control_configs/`. Keep them separate so each folder only contains the configs relevant to that subsystem.
 
-The library finds the hook files automatically: by default it looks for `modeling_user_defined.py` / `control_user_defined.py` in the current working directory. If you'd rather keep them elsewhere, set `user_hooks_path` in your YAML (a file path or dotted module name). A hooks file named by path is imported once per run under its own file name, and can import the modules beside it — including the canonical `modeling_user_defined`, so a variant hooks file can reuse most of the main one.
+The library finds the hook files automatically: by default it looks for `modeling_user_defined.py` / `control_user_defined.py` in the current working directory. If you'd rather keep them elsewhere, set `user_hooks_path` in your YAML (a file path or dotted module name). A hooks file named by path is imported once per run, under a name of its own.
+
+**A trained run carries its hooks file.** Training logs a copy of the hooks file to the run, and everything that rebuilds the run — `nt model load`, `nt control train` reading its surrogate, `nt export`, `load_trained_policy` — imports that copy, never the working directory's file: a reference rule, a preview depth or an actuation bound has no weights, so editing the file after training would otherwise silently change what the trained run is. The copy is one file, so training refuses a hooks file that imports a module from beside it (another hooks file included); keep shared code in the hooks file itself, or install it as a package.
 
 [template/](template/) *is* that tree, ready to copy: `cp -r template/. my_app/`. Both hook files carry every hook with the right signature — dataset-specific ones stubbed with a comment on what belongs there, the rest with working defaults — and both config directories carry every field annotated with its default, plus a `debug.yaml` smoke run per side. See [template/README.md](template/README.md) for the fill-in order.
 

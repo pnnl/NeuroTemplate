@@ -29,7 +29,7 @@ from neurotemplate.common.config import load_config_from_cli, MODEL_CONFIG_DIR
 from neurotemplate.common.data_utils import NormStats, get_grad_masks
 from neurotemplate.common.run_summary import write_run_summary
 from neurotemplate.common.tracking import tracked_run
-from neurotemplate.hooks import load_modeling_hooks
+from neurotemplate.hooks import MODELING_SNAPSHOT, load_modeling_hooks, snapshot_hooks
 from neurotemplate.modeling.cli.train import LOGGED_METRICS, print_finished
 from neurotemplate.modeling.config import ModelingConfig
 from neurotemplate.modeling.experiment import resolve_device, set_seeds, train_with_curriculum
@@ -182,6 +182,7 @@ def main() -> None:
 
     with tracked_run(cfg, stdout=["train_loss", "dev_loss"],
                      logout=LOGGED_METRICS) as logger:
+        snapshot_hooks(hooks, MODELING_SNAPSHOT, logger)
         logger.log_dict(study.best_params, name="best_params.json")
         result = train_and_evaluate(
             cfg, logger=logger, extra_metrics={"search_time": search_time_s},

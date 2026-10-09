@@ -16,8 +16,9 @@ from neurotemplate.modeling.pipeline import resolve_nm_mapping
 def hooks_dir(tmp_path, monkeypatch):
     monkeypatch.setattr(sys, "path", list(sys.path))
     yield tmp_path
-    for name in ("site_hooks", "site_helpers", "broken_hooks"):
-        sys.modules.pop(name, None)
+    for name in list(sys.modules):
+        if name.startswith(("site_hooks", "site_helpers", "broken_hooks")):
+            del sys.modules[name]
 
 
 def test_a_hooks_file_runs_once_and_imports_its_siblings(hooks_dir):
@@ -46,7 +47,7 @@ def test_a_failing_hooks_file_is_not_left_half_imported(hooks_dir):
     cfg = SimpleNamespace(user_hooks_path=str(hooks_dir / "broken_hooks.py"))
     with pytest.raises(RuntimeError, match="bad hooks"):
         load_modeling_hooks(cfg)
-    assert "broken_hooks" not in sys.modules
+    assert not any(name.startswith("broken_hooks") for name in sys.modules)
 
 
 def test_the_library_checks_what_data_mapping_returns():

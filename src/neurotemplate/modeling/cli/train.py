@@ -18,7 +18,7 @@ from neurotemplate._typing import beartype
 from neurotemplate.common.config import load_config_from_cli, MODEL_CONFIG_DIR
 from neurotemplate.common.run_summary import write_run_summary
 from neurotemplate.common.tracking import tracked_run
-from neurotemplate.hooks import load_modeling_hooks
+from neurotemplate.hooks import MODELING_SNAPSHOT, load_modeling_hooks, snapshot_hooks
 from neurotemplate.modeling.config import ModelingConfig
 from neurotemplate.modeling.experiment import resolve_device, set_seeds
 from neurotemplate.modeling.pipeline import (
@@ -71,6 +71,7 @@ def main() -> None:
 
     with tracked_run(cfg, stdout=STDOUT_METRICS, logout=LOGGED_METRICS,
                      run_name=run_name) as logger:
+        snapshot_hooks(hooks, MODELING_SNAPSHOT, logger)
         result = train_and_evaluate(cfg, logger=logger, **vars(data))
         write_run_summary(
             logger, stage="model", config_path=cli.config, cfg=cfg,

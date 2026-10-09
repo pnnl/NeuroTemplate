@@ -15,11 +15,21 @@ does `from modeling_user_defined import ...` directly. Resolution order:
 Either way the module is imported once per process and reused: a run looks
 its hooks up many times, and a hooks file's top level must not re-run on
 every lookup.
+
+A trained run carries the hooks file it was trained with (`snapshot_hooks`),
+and every reload points `cfg.user_hooks_path` at that copy
+(`run_hooks_path`), never at the working directory: a rebuild reads hooks
+that no checkpoint records — a reference rule, a preview depth, actuation
+bounds — so editing the file after training would otherwise silently change
+what a trained run means.
 """
 from __future__ import annotations
 
+import ast
+import hashlib
 import importlib
 import importlib.util
+import shutil
 import sys
 from pathlib import Path
 from types import ModuleType
@@ -27,21 +37,27 @@ from types import ModuleType
 _MODELING_MODULE = "modeling_user_defined"
 _CONTROL_MODULE = "control_user_defined"
 
+#: What each stage's hooks file is logged as in its run.
+MODELING_SNAPSHOT = f"{_MODELING_MODULE}.py"
+CONTROL_SNAPSHOT = f"{_CONTROL_MODULE}.py"
+
 
 def _import_from_file(path: Path) -> ModuleType:
-    """Import a hooks file as a module named after its own stem.
+    """Import a hooks file as a module named after its own path.
 
-    Named after the file, not the canonical hooks name, so a hooks file that
-    itself imports `modeling_user_defined` gets the real one rather than a
-    half-initialised copy of itself. Its directory goes on sys.path, as it
-    would for a script, so it can import its siblings.
+    Not the canonical hooks name, so a hooks file that itself imports
+    `modeling_user_defined` gets the real one rather than a half-initialised
+    copy of itself; and unique to the path, so a run's snapshot never
+    replaces the working directory's file of the same name, or the reverse.
+    Its directory goes on sys.path, as it would for a script, so it can
+    import its siblings.
     """
     path = path.resolve()
     if not path.exists():
         raise RuntimeError(f"Hooks file not found at {path}")
-    name = path.stem
+    name = f"{path.stem}_{hashlib.sha1(str(path).encode()).hexdigest()[:8]}"
     loaded = sys.modules.get(name)
-    if loaded is not None and getattr(loaded, "__file__", None) == str(path):
+    if loaded is not None:
         return loaded
 
     if str(path.parent) not in sys.path:
@@ -96,3 +112,53 @@ def load_control_hooks(cfg) -> ModuleType:
     if cfg.user_hooks_path:
         return _import_from_path_or_dotted(cfg.user_hooks_path)
     return _import_from_cwd(_CONTROL_MODULE)
+
+
+# ── A run's own copy ─────────────────────────────────────────────
+
+
+def snapshot_hooks(hooks: ModuleType, name: str, logger) -> None:
+    """Log the file `hooks` was imported from to the run as `name`.
+
+    Called as a run opens, so the copy is the file training reads. It is one
+    file: a hooks file importing a module beside it is refused, since the
+    run would not carry that module.
+    """
+    path = Path(hooks.__file__)
+    siblings = _sibling_imports(path)
+    if siblings:
+        raise RuntimeError(
+            f"{path.name} imports {siblings} from beside it. A run keeps a "
+            "copy of its hooks file to reload with, and that copy is one "
+            f"file. Move that code into {path.name}, or install it as a "
+            "package."
+        )
+    shutil.copyfile(path, Path(logger.savedir) / name)
+    logger.log_artifacts({})
+
+
+def run_hooks_path(artifacts_dir: Path, name: str) -> str:
+    """The hooks file a run was trained with, for `cfg.user_hooks_path`."""
+    path = Path(artifacts_dir) / name
+    if not path.exists():
+        raise FileNotFoundError(
+            f"{name} is missing from the run's artifacts ({artifacts_dir}); "
+            "every run trains with a copy of its hooks file. A run without "
+            "one was trained by an older version: retrain it."
+        )
+    return str(path)
+
+
+def _sibling_imports(path: Path) -> list[str]:
+    """Modules `path` imports that live beside it (or relatively)."""
+    found = set()
+    for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+        if isinstance(node, ast.Import):
+            found |= {alias.name.split(".")[0] for alias in node.names}
+        elif isinstance(node, ast.ImportFrom):
+            found.add("." * node.level + (node.module or "").split(".")[0])
+    return sorted(
+        name for name in found
+        if name.startswith(".") or (path.parent / f"{name}.py").exists()
+        or (path.parent / name / "__init__.py").exists()
+    )

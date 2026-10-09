@@ -51,7 +51,7 @@ from neurotemplate.control.pipeline import (
     write_reportcard,
     plot_closed_loop,
 )
-from neurotemplate.hooks import load_control_hooks
+from neurotemplate.hooks import CONTROL_SNAPSHOT, load_control_hooks, snapshot_hooks
 
 
 @beartype
@@ -136,6 +136,7 @@ def main() -> None:
         stdout=["train_loss", "dev_loss"] + [f"train_{k}" for k in term_keys],
         logout=["train_loss", "dev_loss", "time"] + term_keys,
     ) as logger:
+        snapshot_hooks(hooks, CONTROL_SNAPSHOT, logger)
         if cfg.verbose:
             print("Training policy (dynamics frozen)...")
         cl_system, best_dev, train_time_s = train_policy(

@@ -25,7 +25,7 @@ from neurotemplate.modeling.gradient_sampling import SampledGradientPenalty
 from neurotemplate.modeling.heads import HeadStack
 from neurotemplate.modeling.dynamics import get_dynamics
 from neurotemplate.modeling.pipeline import evaluate_and_plot, render_reportcard, write_reportcard
-from neurotemplate.hooks import load_modeling_hooks
+from neurotemplate.hooks import MODELING_SNAPSHOT, load_modeling_hooks, run_hooks_path
 
 from neurotemplate._typing import beartype
 
@@ -133,10 +133,12 @@ def load_trained_dynamics(
     `weights` overrides the run's own `best_model_state_dict.pth`; it must be
     a checkpoint in the same format.
 
-    cfg.device is resolved here so the returned system is on a valid device.
+    cfg.device is resolved here so the returned system is on a valid device,
+    and cfg.user_hooks_path points at the hooks file the run trained with.
     """
     artifacts_dir = _resolve_artifacts_dir(run_dir, run_id)
     cfg = config_from_run_params(run_id)
+    cfg.user_hooks_path = run_hooks_path(artifacts_dir, MODELING_SNAPSHOT)
     cfg.validate()
     cfg.device = resolve_device(cfg.device)
 

@@ -18,6 +18,7 @@ from neurotemplate.control.closed_loop import (
 from neurotemplate.control.config import ControlConfig
 from neurotemplate.control.losses import extend_norm_stats, resolve_objective
 from neurotemplate.control.policy import build_policy
+from neurotemplate.hooks import CONTROL_SNAPSHOT, run_hooks_path
 from neurotemplate.modeling.cli.load import (
     _resolve_artifacts_dir, config_from_run_params, load_trained_dynamics,
 )
@@ -63,14 +64,16 @@ def load_trained_policy(run_id: str, run_dir=None):
     Returns (policy_node, cl_system, cfg, sysid_cfg, nm_mapping, norm_stats).
 
     The closed loop is assembled exactly as `nt control train` assembled it —
-    same builders, from the run's own logged config and the use case's
-    `control_user_defined` hooks — and the checkpoint the trainer saved
+    same builders, from the run's own logged config and the copy of the
+    hooks file it trained with — and the checkpoint the trainer saved
     (`best_model_state_dict.pth`, the whole Problem) is loaded strictly, so a
     policy that does not rebuild to the trained shape fails here, loudly.
     `norm_stats` carries the reference columns, rebuilt from the logged
     config exactly as training built them.
     """
     cfg = config_from_run_params(run_id, ControlConfig)
+    artifacts_dir = _resolve_artifacts_dir(run_dir, run_id)
+    cfg.user_hooks_path = run_hooks_path(artifacts_dir, CONTROL_SNAPSHOT)
     cfg.validate()
     cfg.device = resolve_device(cfg.device)
     _, dyn_node, sysid_cfg, nm_mapping, sysid_stats = load_frozen_dynamics(
@@ -83,7 +86,7 @@ def load_trained_policy(run_id: str, run_dir=None):
     problem = build_problem(
         cl_system, build_control_loss(cfg, sysid_cfg, nm_mapping, norm_stats),
     ).to(cfg.device)
-    weights = _resolve_artifacts_dir(run_dir, run_id) / CHECKPOINT
+    weights = artifacts_dir / CHECKPOINT
     problem.load_state_dict(torch.load(weights, map_location=cfg.device))
     problem.eval()
     return policy_node, cl_system, cfg, sysid_cfg, nm_mapping, norm_stats
