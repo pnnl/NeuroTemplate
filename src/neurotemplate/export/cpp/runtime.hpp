@@ -25,6 +25,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <iostream>
 #include <map>
 #include <sstream>
 #include <stdexcept>
@@ -38,7 +39,14 @@ namespace fs = std::filesystem;
 using Json = nlohmann::ordered_json;
 
 // The json layout this runtime reads. Must match runtime.py's FORMAT.
-inline constexpr int FORMAT = 1;
+inline constexpr int FORMAT = 2;
+
+// Said on loading, and by validate, for a model exported unverified. Must
+// match runtime.py's UNVERIFIED.
+inline const char* const UNVERIFIED =
+    "model/ was exported UNVERIFIED: the trained model blew up on the "
+    "verification data, so these graphs were never checked against it and no "
+    "reference/ ships.";
 
 inline Json read_json(const fs::path& path) {
     std::ifstream file(path);
@@ -184,14 +192,18 @@ public:
           history_steps(spec.at("history_steps").get<int>()),
           timestep_seconds(spec.at("timestep_seconds").get<double>()),
           state_width(spec.at("state").at("width").get<int>()),
+          verified(spec.at("verified").get<bool>()),
           warm_start_(dir / "warm_start.onnx", spec),
-          step_(dir / "step.onnx", spec) {}
+          step_(dir / "step.onnx", spec) {
+        if (!verified) std::cerr << "warning: " << UNVERIFIED << "\n";
+    }
 
     const Json spec;
     const std::vector<std::string> y_columns, u_columns, d_columns;
     const int history_steps;
     const double timestep_seconds;
     const int state_width;
+    const bool verified;
 
     // A State from the last `history_steps` rows of recent measurements, each
     // `[history_steps, n]`. The final u and d rows are not used: they are the

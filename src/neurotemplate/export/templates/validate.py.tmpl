@@ -3,7 +3,8 @@
 The generic check reproduces every */reference/ fixture, which the *trained*
 model wrote at export time, with this machine's onnxruntime. Passing means
 the whole chain reproduces the model: trained model -> export -> this
-runtime -> this platform.
+runtime -> this platform. A model exported unverified has no fixture; the
+check says so instead.
 
 This file is written once and never overwritten by a re-export, so add
 project-specific checks (accuracy against a model card, step responses) at
@@ -33,7 +34,8 @@ if Path("policy").is_dir():
 print("\n2. reproducing the trained model's own answers")
 for result in check_reference("."):
     print(result.report())
-    check(f"{result.name} matches {result.name}/reference/", result.ok)
+    if result.verified:
+        check(f"{result.name} matches {result.name}/reference/", result.ok)
 
 # ── project-specific checks go here ──────────────────────────────
 

@@ -6,7 +6,8 @@ import numpy as np
 
 from $package import Model, Policy, read_csv, read_windows
 
-if Path("model").is_dir():
+# Runs on the shipped reference data, which a model exported unverified lacks.
+if Path("model/reference").is_dir():
     model = Model("model")
     print(model.describe())
 

@@ -7,7 +7,8 @@ Export trained models as a standalone ONNX package.
 
 `model` exports a dynamics model: it rolls both the trained system and the
 exported package out over every row of `--data` (a held-out split) and
-refuses to write unless they agree. `policy` exports a trained DPC policy: it
+refuses to write unless they agree — unless the trained model's own rollout
+blows up there, when it asks whether to export unverified (no terminal: no). `policy` exports a trained DPC policy: it
 runs the trained closed loop over the control run's own test split and
 refuses to write unless the exported policy issues the same commands on
 every window it saw. Both may target the same `--out`; see
@@ -81,13 +82,17 @@ def model_main() -> None:
         fixture_steps=args.fixture_steps, version=args.version,
     )
 
-    worst = max(result.agreement.y_error, key=result.agreement.y_error.get)
     print(f"exported run {args.run_id} ({cfg.model}) with the {args.exporter} exporter")
-    print(f"  verified {result.steps_verified} open-loop steps against the trained "
-          f"model: worst output {worst} {result.agreement.y_error[worst]:.2e}, "
-          f"hidden state (width {result.state_width}) "
-          f"{result.agreement.state_error:.2e}")
-    print(f"  shipped {result.steps_shipped} steps as the reference fixture")
+    if result.agreement is None:
+        print("  UNVERIFIED: the trained model blew up on --data; the package "
+              "says so (model.json `verified: false`) and ships no fixture")
+    else:
+        worst = max(result.agreement.y_error, key=result.agreement.y_error.get)
+        print(f"  verified {result.steps_verified} open-loop steps against the "
+              f"trained model: worst output {worst} "
+              f"{result.agreement.y_error[worst]:.2e}, hidden state (width "
+              f"{result.state_width}) {result.agreement.state_error:.2e}")
+        print(f"  shipped {result.steps_shipped} steps as the reference fixture")
     _report_kept(result.kept, result.out_dir)
 
 

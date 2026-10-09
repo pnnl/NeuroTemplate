@@ -39,6 +39,12 @@ AGREEMENT_TOL = 1e-4
 #: absorbs runtime *and* platform float differences, and cross-platform
 #: reproducibility has not been measured, so it keeps 10x headroom.
 REPRODUCE_TOL = 1e-3
+#: How far, in stretches from its columns' means, the trained model's own
+#: rollout may reach before the export calls it blown up. A rollout that grows
+#: without bound amplifies float32 round-off until no agreement check can
+#: pass, though the export is correct; one that stays within a hundred
+#: stretches of its data is not that.
+REACH_LIMIT = 100.0
 
 
 @dataclass(frozen=True)
@@ -121,10 +127,22 @@ def compare(reference: Rollout, exported: Rollout, y_columns: list[str],
                for i, c in enumerate(y_columns)}
     state_error = (float(np.abs(exported.state - reference.state).max())
                    if reference.state.size else 0.0)
+    return Agreement(y_error=y_error, state_error=state_error,
+                     reach=reach(reference, y_columns, norm_stats))
+
+
+def reach(rollout: Rollout, y_columns: list[str],
+          norm_stats: dict[str, dict]) -> float:
+    """The largest |y - shift| / stretch a rollout hit; nan or inf when it
+    went non-finite."""
     shift = np.array([norm_stats[c]["shift"] for c in y_columns])
     stretch = np.array([norm_stats[c]["stretch"] for c in y_columns])
-    reach = float((np.abs(reference.y - shift) / stretch).max())
-    return Agreement(y_error=y_error, state_error=state_error, reach=reach)
+    return float((np.abs(rollout.y - shift) / stretch).max())
+
+
+def blew_up(reach: float) -> bool:
+    """Did a rollout with this `reach` diverge (see `REACH_LIMIT`)?"""
+    return not np.isfinite(reach) or reach > REACH_LIMIT
 
 
 def require_agreement(agreement: Agreement, norm_stats: dict[str, dict]) -> None:

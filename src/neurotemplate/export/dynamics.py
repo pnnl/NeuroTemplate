@@ -13,16 +13,23 @@ Export a trained dynamics model into `<out>/model/`.
 The graphs are verified against the trained system over every row of the
 split before anything is written (see `verify`); the reference fixture is
 the first rows of that same torch rollout.
+
+One exception, and only on the user's say-so: when the trained model's own
+rollout blows up on the split (`verify.blew_up`), no agreement check can
+pass and a fixture would hold NaN, so the exporter asks whether to export
+anyway. On yes the package is written with `verified: false` in `model.json`
+and no `reference/`; the runtimes warn on load and `validate` says so.
 """
 
 from __future__ import annotations
 
 import io
+import sys
 import tempfile
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 import pandas as pd
 import torch
@@ -35,19 +42,27 @@ from neurotemplate.export.spec import build_spec
 from neurotemplate.export.state import StateSlot, probe_state_slots
 from neurotemplate.export.trace import export_graph
 from neurotemplate.export.verify import (
-    AGREEMENT_TOL, Agreement, Rollout, compare, onnx_rollout, require_agreement,
-    tolerances, torch_rollout,
+    AGREEMENT_TOL, Agreement, Rollout, blew_up, compare, onnx_rollout, reach,
+    require_agreement, tolerances, torch_rollout,
 )
 
 
 @dataclass(frozen=True)
 class ModelExport:
     out_dir: Path
-    agreement: Agreement
+    agreement: Optional[Agreement]   # None when exported unverified
     steps_verified: int
     steps_shipped: int
     state_width: int
     kept: list[str]     # project-owned files left as they were
+
+
+def ask_on_terminal(question: str) -> bool:
+    """Ask a y/n question on the terminal. With no terminal, the answer is no."""
+    if not sys.stdin.isatty():
+        print(f"{question}\n(no terminal to answer on: no)")
+        return False
+    return input(f"{question} [y/n] ").strip().lower() in ("y", "yes")
 
 
 def export_model(*, dyn_sys, cfg, nm_mapping: dict[str, list[str]],
@@ -55,12 +70,15 @@ def export_model(*, dyn_sys, cfg, nm_mapping: dict[str, list[str]],
                  timestep_seconds: float, run_id: str, out_dir: Path,
                  package: str, description: Optional[str] = None,
                  exporter: str = "dynamo", fixture_steps: Optional[int] = None,
-                 version: str = "0.1.0") -> ModelExport:
+                 version: str = "0.1.0",
+                 ask: Callable[[str], bool] = ask_on_terminal) -> ModelExport:
     """Export, verify over every row of `frame`, and install into `out_dir`.
 
     `frame` is a held-out split in physical units, indexed by timestamp. The
     agreement check covers all of it; the shipped fixture is its first
-    `in_steps + fixture_steps` rows (all of it by default).
+    `in_steps + fixture_steps` rows (all of it by default). When the trained
+    model's own rollout blows up on `frame`, `ask` decides whether to export
+    it unverified (see the module docstring).
     """
     check_package_name(package)
     columns = nm_mapping["Y"] + nm_mapping["U"] + nm_mapping["D"]
@@ -72,7 +90,20 @@ def export_model(*, dyn_sys, cfg, nm_mapping: dict[str, list[str]],
                          f"ship a fixture of {shipped}.")
 
     dyn_sys = dyn_sys.cpu().eval()
+    reference = torch_rollout(dyn_sys, nm_mapping, norm_stats, frame)
+    reached = reach(reference, nm_mapping["Y"], norm_stats)
+    verified = not blew_up(reached)
+    if not verified and not ask(
+            f"Model blew up on the verification fixture data (its rollout "
+            f"reached {reached:.3g} stretches from its columns' means). "
+            "Continue with export? Verification will be skipped."):
+        raise RuntimeError(
+            "REFUSING TO WRITE: the trained model's own rollout blows up on "
+            "this split, so the export cannot be verified, and exporting it "
+            "unverified was declined.")
+
     export_id = uuid.uuid4().hex
+    agreement = None
     with tempfile.TemporaryDirectory() as tmp:
         model_dir = Path(tmp) / "model"
         slots = _write_graphs(model_dir, dyn_sys, cfg, nm_mapping, norm_stats,
@@ -81,29 +112,30 @@ def export_model(*, dyn_sys, cfg, nm_mapping: dict[str, list[str]],
             export_id=export_id, run_id=run_id, cfg=cfg, dyn_sys=dyn_sys,
             nm_mapping=nm_mapping, norm_stats=norm_stats,
             timestep_seconds=timestep_seconds, slots=slots,
-            description=description))
+            description=description, verified=verified))
 
-        reference = torch_rollout(dyn_sys, nm_mapping, norm_stats, frame)
-        agreement = compare(reference, onnx_rollout(model_dir, frame),
-                            nm_mapping["Y"], norm_stats)
-        require_agreement(agreement, norm_stats)
-
-        _write_reference(model_dir / "reference", frame.iloc[:cfg.in_steps + shipped],
-                         reference, slots, cfg.in_steps, {
-                             "export_id": export_id, "run_id": run_id,
-                             "tolerance": tolerances(nm_mapping["Y"], norm_stats),
-                             "agreement_at_export": {
-                                 "steps": steps,
-                                 "tolerance_fraction_of_stretch": AGREEMENT_TOL,
-                                 "y_max_abs": agreement.y_error,
-                                 "state_max_abs": agreement.state_error,
-                             },
-                             "exported_on": provenance(exporter),
-                         }, nm_mapping["Y"])
+        if verified:
+            agreement = compare(reference, onnx_rollout(model_dir, frame),
+                                nm_mapping["Y"], norm_stats)
+            require_agreement(agreement, norm_stats)
+            _write_reference(
+                model_dir / "reference", frame.iloc[:cfg.in_steps + shipped],
+                reference, slots, cfg.in_steps, {
+                    "export_id": export_id, "run_id": run_id,
+                    "tolerance": tolerances(nm_mapping["Y"], norm_stats),
+                    "agreement_at_export": {
+                        "steps": steps,
+                        "tolerance_fraction_of_stretch": AGREEMENT_TOL,
+                        "y_max_abs": agreement.y_error,
+                        "state_max_abs": agreement.state_error,
+                    },
+                    "exported_on": provenance(exporter),
+                }, nm_mapping["Y"])
         kept = install(Path(tmp), Path(out_dir), "model", package, version)
 
     return ModelExport(out_dir=Path(out_dir), agreement=agreement,
-                       steps_verified=steps, steps_shipped=shipped,
+                       steps_verified=steps if verified else 0,
+                       steps_shipped=shipped if verified else 0,
                        state_width=sum(slot.width for slot in slots), kept=kept)
 
 

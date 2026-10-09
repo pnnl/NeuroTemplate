@@ -82,7 +82,9 @@ static void run_policy() {
 
 int main() {
     try {
-        if (nt::fs::is_directory("model")) run_model();
+        // Runs on the shipped reference data, which a model exported
+        // unverified lacks.
+        if (nt::fs::is_directory("model/reference")) run_model();
         if (nt::fs::is_directory("policy")) run_policy();
     } catch (const std::exception& error) {
         std::fprintf(stderr, "example: %s\n", error.what());

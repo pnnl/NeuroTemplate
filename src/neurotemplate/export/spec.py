@@ -3,7 +3,8 @@
 human needs to trust them.
 
 The runtime reads only the contract fields: `format`, `export_id`, `opset`,
-the column lists, `history_steps`, `timestep_seconds` and `state.width`.
+`verified`, the column lists, `history_steps`, `timestep_seconds` and
+`state.width`.
 Everything under `architecture` is documentation the runtime never reads —
 above all the 2R2C time constants from `RCBlock.describe()`, which are the
 reason a grey-box model is worth trusting and which a graph hides. Do not
@@ -20,19 +21,23 @@ from neurotemplate.export.trace import OPSET
 from neurotemplate.modeling.dynamics import describe_dynamics
 
 #: Must match `runtime.FORMAT`; the runtime refuses any other value.
-FORMAT = 1
+FORMAT = 2
 
 
 def build_spec(*, export_id: str, run_id: str, cfg, dyn_sys,
                nm_mapping: dict[str, list[str]], norm_stats: dict[str, dict],
                timestep_seconds: float, slots: list[StateSlot],
-               description: Optional[str]) -> dict:
+               description: Optional[str], verified: bool) -> dict:
     """The `model.json` document for one export."""
     columns = nm_mapping["Y"] + nm_mapping["U"] + nm_mapping["D"]
     return {
         "format": FORMAT,
         "export_id": export_id,
         "opset": OPSET,
+        # False only when the trained model blew up on the verification data
+        # and the user chose to export anyway: the graphs were never checked
+        # against it, and no reference/ ships.
+        "verified": verified,
         "description": description,
         "y_columns": nm_mapping["Y"],
         "u_columns": nm_mapping["U"],

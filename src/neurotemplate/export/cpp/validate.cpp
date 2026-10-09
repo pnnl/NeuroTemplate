@@ -5,7 +5,8 @@
 // The C++ twin of validate.py. It reproduces every */reference/ fixture,
 // which the *trained* model wrote at export time, through runtime.hpp and
 // this machine's onnxruntime. Passing means the whole chain reproduces the
-// model: trained model -> export -> this runtime -> this platform. Exits
+// model: trained model -> export -> this runtime -> this platform. A model
+// exported unverified has no fixture; the check says so instead. Exits
 // non-zero if any check fails.
 
 #include "runtime.hpp"
@@ -18,10 +19,12 @@
 namespace {
 
 // This machine's answers against the trained model's own, per column.
+// `verified` is false for a model exported unverified: nothing to reproduce.
 struct Check {
     std::string name;   // "model" or "policy"
     std::map<std::string, double> error, tolerance;
     double state_error = 0.0, state_tolerance = 0.0;
+    bool verified = true;
 
     bool ok() const {
         for (const auto& [column, err] : error) {
@@ -31,6 +34,10 @@ struct Check {
     }
 
     void report() const {
+        if (!verified) {
+            std::printf("  %s: %s\n", name.c_str(), nt::UNVERIFIED);
+            return;
+        }
         std::string worst;
         double worst_ratio = -1.0;
         for (const auto& [column, err] : error) {
@@ -75,9 +82,14 @@ std::map<std::string, double> column_errors(const std::vector<float>& got, const
 }
 
 Check check_model(const nt::fs::path& model_dir) {
+    nt::Model model(model_dir);
+    if (!model.verified) {
+        Check unverified{"model", {}, {}};
+        unverified.verified = false;
+        return unverified;
+    }
     const nt::fs::path reference = model_dir / "reference";
     nt::Json document = nt::read_json(reference / "REFERENCE.json");
-    nt::Model model(model_dir);
     nt::Table frame = nt::read_csv(reference / "example_input.csv");
     nt::Table expected = nt::read_csv(reference / "expected_output.csv");
     const int steps = static_cast<int>(expected.rows.size());
@@ -128,6 +140,7 @@ int main(int argc, char** argv) {
     int failures = 0;
     for (const Check& check : checks) {
         check.report();
+        if (!check.verified) continue;
         std::printf("  [%s] %s matches %s/reference/\n", check.ok() ? "PASS" : "FAIL",
                     check.name.c_str(), check.name.c_str());
         failures += !check.ok();

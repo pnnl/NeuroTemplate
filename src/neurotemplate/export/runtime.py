@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import csv
 import json
+import warnings
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Mapping, Optional
@@ -32,7 +33,13 @@ import numpy as np
 import onnxruntime as ort
 
 #: The `model.json` layout this runtime reads. Bumped on any change to it.
-FORMAT = 1
+FORMAT = 2
+
+
+#: Said on loading, and by `validate`, for a model exported unverified.
+UNVERIFIED = ("model/ was exported UNVERIFIED: the trained model blew up on "
+              "the verification data, so these graphs were never checked "
+              "against it and no reference/ ships.")
 
 
 @dataclass(frozen=True)
@@ -97,8 +104,11 @@ class Model:
         self.history_steps: int = self.spec["history_steps"]
         self.timestep_seconds: float = self.spec["timestep_seconds"]
         self.state_width: int = self.spec["state"]["width"]
+        self.verified: bool = self.spec["verified"]
         self._warm_start = _session(model_dir / "warm_start.onnx", self.spec)
         self._step = _session(model_dir / "step.onnx", self.spec)
+        if not self.verified:
+            warnings.warn(UNVERIFIED, stacklevel=2)
 
     # ── one step ─────────────────────────────────────────────────
 
@@ -201,6 +211,7 @@ class Model:
             f"{len(self.d_columns)} disturbances\n"
             f"  timestep {self.timestep_seconds:g} s, warm-up {self.history_steps} "
             f"steps ({minutes:g} min), hidden state width {self.state_width}"
+            + ("" if self.verified else "\n  " + UNVERIFIED)
         )
 
 
@@ -285,12 +296,17 @@ def read_windows(path: str | Path, inputs: Mapping[str, Mapping]) -> dict[str, n
 
 @dataclass(frozen=True)
 class ReferenceCheck:
-    """This machine's answers against the trained model's own, per column."""
+    """This machine's answers against the trained model's own, per column.
+
+    `verified` is False for a model exported unverified: there is nothing to
+    reproduce, so the check is empty and says so rather than failing.
+    """
     name: str                     # "model" or "policy"
     error: dict[str, float]
     tolerance: dict[str, float]
     state_error: float = 0.0
     state_tolerance: float = 0.0
+    verified: bool = True
 
     @property
     def ok(self) -> bool:
@@ -298,6 +314,8 @@ class ReferenceCheck:
                 and self.state_error <= self.state_tolerance)
 
     def report(self) -> str:
+        if not self.verified:
+            return f"  {self.name}: {UNVERIFIED}"
         worst = max(self.error, key=lambda c: self.error[c] / self.tolerance[c])
         lines = [f"  {self.name}: worst column {worst}: {self.error[worst]:.2e} "
                  f"(tolerance {self.tolerance[worst]:.0e})"]
@@ -333,8 +351,12 @@ def check_reference(root: str | Path = ".") -> list[ReferenceCheck]:
 
 
 def _check_model(model_dir: Path) -> ReferenceCheck:
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")    # the check reports it instead
+        model = Model(model_dir)
+    if not model.verified:
+        return ReferenceCheck("model", {}, {}, verified=False)
     reference = json.loads((model_dir / "reference" / "REFERENCE.json").read_text(encoding="utf-8"))
-    model = Model(model_dir)
     _, frame = read_csv(model_dir / "reference" / "example_input.csv")
     _, expected = read_csv(model_dir / "reference" / "expected_output.csv")
     steps = len(next(iter(expected.values())))

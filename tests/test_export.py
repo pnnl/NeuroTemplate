@@ -18,8 +18,10 @@ which traces the same forward code.
 
 Plus two failure modes that would ship a wrong model silently: a step graph
 with its hidden state baked in as a constant, and an export that disagrees
-with the trained model being written anyway. And the shipped C++ runner,
-built and run against a package holding both a model and a policy.
+with the trained model being written anyway; and a model that blows up on
+the split, which exports unverified only when the user says so. And the
+shipped C++ runner, built and run against a package holding both a model and
+a policy, then an unverified model.
 """
 
 import json
@@ -106,7 +108,8 @@ def split(mapping) -> tuple[pd.DataFrame, dict]:
     return frame, stats
 
 
-def export(tmp_path, cfg, mapping, block_spec=None, heads=None, exporter="legacy"):
+def export(tmp_path, cfg, mapping, block_spec=None, heads=None, exporter="legacy",
+           **options):
     frame, stats = split(mapping)
     torch.manual_seed(0)
     head_stack = HeadStack(heads, mapping["Y"]) if heads else None
@@ -115,7 +118,7 @@ def export(tmp_path, cfg, mapping, block_spec=None, heads=None, exporter="legacy
     return export_model(
         dyn_sys=dyn_sys, cfg=cfg, nm_mapping=mapping, norm_stats=stats,
         frame=frame, timestep_seconds=300.0, run_id="0" * 32,
-        out_dir=tmp_path / "pkg", package="exported", exporter=exporter,
+        out_dir=tmp_path / "pkg", package="exported", exporter=exporter, **options,
     )
 
 
@@ -193,6 +196,44 @@ def test_an_export_that_disagrees_is_not_written(tmp_path, monkeypatch):
     assert not (tmp_path / "pkg").exists()
 
 
+def _blow_up(monkeypatch):
+    """Make the trained model's own rollout go non-finite, as a diverging
+    model's does."""
+    real = export_dynamics.torch_rollout
+
+    def diverging(*args):
+        reference = real(*args)
+        y = reference.y.copy()
+        y[-1] = np.nan
+        return Rollout(y=y, state=reference.state)
+
+    monkeypatch.setattr(export_dynamics, "torch_rollout", diverging)
+
+
+def test_a_model_that_blows_up_exports_unverified_only_when_asked(tmp_path, monkeypatch):
+    import io
+    import sys
+    _blow_up(monkeypatch)
+    # No terminal to ask on: the answer is no, and nothing is written.
+    monkeypatch.setattr(sys, "stdin", io.StringIO())
+    with pytest.raises(RuntimeError, match="REFUSING TO WRITE"):
+        export(tmp_path, make_cfg(), MAPPING, RC_SPLIT)
+    assert not (tmp_path / "pkg").exists()
+
+    asked = []
+    result = export(tmp_path, make_cfg(), MAPPING, RC_SPLIT,
+                    ask=lambda question: asked.append(question) or True)
+    assert "blew up" in asked[0]
+    model_dir = result.out_dir / "model"
+    assert json.loads((model_dir / "model.json").read_text())["verified"] is False
+    assert not (model_dir / "reference").exists()
+    with pytest.warns(UserWarning, match="UNVERIFIED"):
+        Model(model_dir)
+    (check,) = check_reference(result.out_dir)
+    assert not check.verified and check.ok
+    assert "UNVERIFIED" in check.report()
+
+
 # ── policy ───────────────────────────────────────────────────────
 
 
@@ -257,11 +298,12 @@ def test_trained_policy_exports_as_the_trained_policy(tmp_path, overrides):
 
 
 @pytest.mark.skipif(shutil.which("cmake") is None, reason="needs cmake and a C++17 compiler")
-def test_cpp_runner_reproduces_the_reference(tmp_path, request):
+def test_cpp_runner_reproduces_the_reference(tmp_path, request, monkeypatch):
     """Build the package's cpp/ and run its `validate` on a model with hidden
-    state and a priced policy in one package. This is what keeps
-    runtime.hpp in step with the json and fixtures that runtime.py reads.
-    The first run downloads onnxruntime; later runs reuse pytest's cache."""
+    state and a priced policy in one package, then again once the model is
+    re-exported unverified. This is what keeps runtime.hpp in step with the
+    json and fixtures that runtime.py reads. The first run downloads
+    onnxruntime; later runs reuse pytest's cache."""
     from control_fixtures import full_setup
     from neurotemplate.control.closed_loop import build_closed_loop
     from neurotemplate.control.policy import build_policy
@@ -288,3 +330,11 @@ def test_cpp_runner_reproduces_the_reference(tmp_path, request):
                             capture_output=True, text=True)
     assert result.returncode == 0, result.stdout + result.stderr
     assert "[PASS] model" in result.stdout and "[PASS] policy" in result.stdout
+
+    _blow_up(monkeypatch)
+    export(tmp_path, make_cfg(), MAPPING, RC_SPLIT, ask=lambda question: True)
+    result = subprocess.run([str(build / "validate")], cwd=package,
+                            capture_output=True, text=True)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "UNVERIFIED" in result.stdout and "UNVERIFIED" in result.stderr
+    assert "[PASS] model" not in result.stdout and "[PASS] policy" in result.stdout

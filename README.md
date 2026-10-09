@@ -673,8 +673,17 @@ held-out split (for a policy: the trained closed loop over its test split)
 and refuses to write unless they agree. The shipped `reference/` fixtures come
 from the trained torch model, so `python validate.py` on any machine checks
 the whole chain. `validate.py` and `example.py` are written once and then
-belong to the project; re-exports never overwrite them. What has and has not
-been verified (one platform so far) is in [issues.md](issues.md#8-export-platforms-diverging-models).
+belong to the project; re-exports never overwrite them. Linux (aarch64,
+x86-64) and macOS arm64 have been verified; other platforms have not.
+
+A model whose own rollout blows up on `--data` (non-finite, or more than
+100 stretches from its columns' means) cannot be verified: float round-off
+grows with it. The exporter then asks whether to export anyway, and with no
+terminal to ask on the answer is no. On yes, `model.json` says
+`verified: false`, no `model/reference/` ships, `Model(...)` warns on load,
+and both `validate`s report the model as unverified instead of checking it.
+A model that diverges on held-out data is the thing to be worried about, so
+the export does not loosen its check to fit one.
 
 From C++, `cmake -S cpp -B build && cmake --build build && build/validate`
 in the package directory checks the same fixtures through `cpp/runtime.hpp`.
