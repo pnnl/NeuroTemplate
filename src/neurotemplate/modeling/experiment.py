@@ -21,7 +21,7 @@ from pandas import DataFrame
 from neurotemplate._typing import beartype
 
 from neurotemplate.common.data_utils import NormStats, get_loader
-from neurotemplate.common.tracking import save_checkpoint
+from neurotemplate.common.tracking import RunLog, RunLogger, save_checkpoint
 from neurotemplate.modeling.heads import HeadStack
 from neurotemplate.modeling.dynamics import get_dynamics
 from neurotemplate.modeling.loss import build_loss
@@ -31,7 +31,6 @@ from neurotemplate.modeling.config import ModelingConfig
 from neuromancer.problem import Problem
 from neuromancer.trainer import Trainer
 from neuromancer.system import System
-from neuromancer.loggers import MLFlowLogger
 
 
 # ── Seed / Device helpers ────────────────────────────────────────
@@ -81,7 +80,7 @@ def build_trainer(
     norm_stats: NormStats,
     head_stack: Optional[HeadStack] = None,
     block_spec: Optional[dict[str, dict]] = None,
-    logger: Optional[MLFlowLogger] = None,
+    logger: Optional[RunLog] = None,
 ) -> Trainer:
     """
     Construct a Neuromancer Trainer with a standard Problem.
@@ -188,17 +187,17 @@ def _parameter_groups(problem: Problem, cfg: ModelingConfig) -> list[dict]:
 @beartype
 def create_child_logger(
     cfg: ModelingConfig,
-    global_logger: MLFlowLogger,
+    global_logger: RunLogger,
     pred_steps: int,
     curriculum_step: int,
-) -> MLFlowLogger:
+) -> RunLogger:
     """Create a nested MLflow child run for a curriculum stage.
 
     The child logs the stage's own config — its rollout length and run name —
     built as a copy, so the caller's `cfg` is never touched.
     """
     child_savedir = f"{cfg.savedir}/pred_steps_{pred_steps}"
-    # MLFlowLogger.clean_up() unconditionally rmtree's savedir, but never
+    # The logger's clean_up() unconditionally rmtree's savedir, but never
     # creates it; for a curriculum stage that writes no local artifact the
     # dir is absent and clean_up() raises FileNotFoundError. Create it up
     # front so the stage tears down cleanly.
@@ -206,7 +205,7 @@ def create_child_logger(
 
     stage_cfg = replace(cfg, train_pred_steps=pred_steps,
                         run=f"Curriculum Step {curriculum_step}")
-    child_logger = MLFlowLogger(
+    child_logger = RunLogger(
         stage_cfg,
         savedir=child_savedir,
         stdout=global_logger.stdout,
@@ -216,7 +215,7 @@ def create_child_logger(
         save_weights=False,
     )
 
-    child_logger._mlflow.log_param("curriculum_step", curriculum_step)
+    child_logger.log_param("curriculum_step", curriculum_step)
     return child_logger
 
 
@@ -232,7 +231,7 @@ def train_with_curriculum(
     norm_stats: NormStats,
     head_stack: Optional[HeadStack] = None,
     block_spec: Optional[dict[str, dict]] = None,
-    global_logger: Optional[MLFlowLogger] = None,
+    global_logger: Optional[RunLog] = None,
 ) -> tuple[System, float]:
     """
     Train with curriculum learning: progressively increase train_pred_steps.

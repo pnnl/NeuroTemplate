@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Optional
 
 from neurotemplate.common.data_utils import axis_label
+from neurotemplate.common.tracking import RunLog
 from neurotemplate.hooks import load_modeling_hooks
 
 from neurotemplate._typing import beartype
@@ -57,17 +58,13 @@ def plot_predictions(
     df_true: pd.DataFrame,
     df_pred: pd.DataFrame,
     run_dir: str,
-    logger: Optional[object] = None,
+    logger: Optional[RunLog] = None,
 ) -> None:
     sub_plot = load_modeling_hooks(cfg).sub_plot
 
     def log_artifact(path: str, artifact_path: Optional[str] = None) -> None:
-        if logger is None or not hasattr(logger, "_mlflow"):
-            return
-        if artifact_path is None:
-            logger._mlflow.log_artifact(path)
-        else:
-            logger._mlflow.log_artifact(path, artifact_path=artifact_path)
+        if logger is not None:
+            logger.log_artifact(path, artifact_path=artifact_path)
 
     if not run_dir:
         raise ValueError("run_dir must be provided for plot outputs.")

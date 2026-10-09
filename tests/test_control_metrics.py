@@ -14,6 +14,7 @@ from neurotemplate.control.metrics import (
     energy_metrics,
     hours_per_step,
 )
+from fake_logger import FakeLogger
 
 
 # ── hours_per_step ───────────────────────────────────────────────
@@ -132,18 +133,6 @@ def test_a_weight_prefers_the_cheap_hours_at_equal_energy():
 # ── MLflow logging ───────────────────────────────────────────────
 
 
-class _FakeLogger:
-    def __init__(self):
-        self.metrics = {}
-        self.dicts = {}
-
-    def log_metrics(self, flat):
-        self.metrics.update(flat)
-
-    def log_dict(self, payload, name):
-        self.dicts[name] = payload
-
-
 def _results(violation_rate=0.5, power=1000.0):
     from neurotemplate.common.metrics import per_channel_metrics
     from neurotemplate.control.pipeline import ControlResults
@@ -170,7 +159,7 @@ def _results(violation_rate=0.5, power=1000.0):
 def test_log_control_results_flattens_metrics():
     from neurotemplate.control.pipeline import log_control_results
 
-    logger = _FakeLogger()
+    logger = FakeLogger()
     log_control_results(logger, _results())
 
     assert logger.metrics["control_violation_rate"] == pytest.approx(0.5)

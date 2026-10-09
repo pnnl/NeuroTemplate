@@ -33,12 +33,12 @@ def write_reportcard(
     Write the reportcard to <out_dir>/<filename> and to MLflow.
 
     The on-disk copy is convenient for local inspection but may be removed
-    by MLFlowLogger.clean_up() (which rmtrees savedir at end of a run);
+    by the logger's clean_up() (which rmtrees savedir at end of a run);
     the MLflow copy via log_text is the durable one.
     """
     out_dir.mkdir(parents=True, exist_ok=True)
     path = out_dir / filename
     path.write_text(markdown, encoding="utf-8")
-    if logger is not None and hasattr(logger, "_mlflow"):
-        logger._mlflow.log_text(markdown, filename)
+    if logger is not None:
+        logger.log_text(markdown, filename)
     return path

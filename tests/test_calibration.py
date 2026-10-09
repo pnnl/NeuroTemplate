@@ -35,6 +35,7 @@ from neurotemplate.modeling.heads import HeadStack, OrdinalHead, RegressionHead
 from control_fixtures import (
     STAGE, make_nm_mapping, make_norm_stats, make_raw_df, make_sysid_cfg,
 )
+from fake_logger import FakeLogger
 
 
 def _fake_dyn_sys(head_stack):
@@ -284,26 +285,6 @@ def test_a_level_dev_never_visits_leaves_the_thresholds_alone_with_a_warning():
 
 # ── Through train_and_evaluate ────────────────────────────────────
 
-class _RecordingLogger:
-    """Duck-typed MLFlowLogger that keeps what was logged as a dict."""
-    save_weights = False
-
-    def __init__(self):
-        self.dicts = {}
-
-    def log_weights(self, *a, **kw):
-        pass
-
-    def log_metrics(self, *a, **kw):
-        pass
-
-    def log_dict(self, d, name):
-        self.dicts[name] = d
-
-    def log_artifacts(self, *a, **kw):
-        pass
-
-
 def _staged_run(tmp_path, **over):
     """A tiny real run whose one Y channel is a 20%-positive two-level stage."""
     import numpy as np
@@ -338,7 +319,7 @@ def _staged_run(tmp_path, **over):
     levels = torch.tensor([(v - stats["shift"]) / stats["stretch"] for v in (0.0, 1.0)])
     stack = HeadStack([OrdinalHead(n_levels=2, level_values=levels)], ["stage"])
     balance_level_weights(stack, dfs)
-    logger = _RecordingLogger()
+    logger = FakeLogger()
     result = train_and_evaluate(
         cfg=cfg, train_dfs=dfs, dev_dfs=dfs, test_dfs=dfs,
         nm_mapping=nm, norm_stats=norm_stats, grad_masks={}, synth_cfg=None,

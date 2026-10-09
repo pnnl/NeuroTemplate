@@ -24,17 +24,7 @@ from control_fixtures import (
 )
 from neurotemplate.common.data_utils import normalize_df
 import modeling_user_defined as hooks
-
-
-class _FakeLogger:
-    def __init__(self):
-        self.metrics, self.dicts = {}, {}
-
-    def log_metrics(self, d):
-        self.metrics.update(d)
-
-    def log_dict(self, d, name):
-        self.dicts[name] = d
+from fake_logger import FakeLogger
 
 
 def _evaluate(tmp_path, synth: bool = True):
@@ -86,7 +76,7 @@ def test_everything_logged_is_json_serializable(tmp_path):
     import json
 
     results, _, nm, _ = _evaluate(tmp_path)
-    logger = _FakeLogger()
+    logger = FakeLogger()
     log_test_results(logger, results, nm)
 
     for payload in logger.dicts.values():
@@ -161,7 +151,7 @@ def test_a_staged_channel_is_scored_as_a_classifier_and_against_persistence(tmp_
     # predicted shares are whatever the seeds were — but it is a real number.
     assert 0.0 <= results.persistence_levels[0].balanced_accuracy <= 1.0
 
-    logger = _FakeLogger()
+    logger = FakeLogger()
     log_test_results(logger, results, nm)
     assert "level_metrics.json" in logger.dicts
     assert "persistence_metrics.json" in logger.dicts

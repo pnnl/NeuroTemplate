@@ -15,24 +15,10 @@ from neurotemplate.common.run_summary import (
 )
 from neurotemplate.modeling.config import ModelingConfig
 from control_fixtures import make_control_cfg
+from fake_logger import FakeLogger
 
 _NM = {"Y": ["zone [°C]"], "U": ["setpoint [°C]"], "D": ["outdoor [°C]"],
        "t": ["sec_elapsed"]}
-
-
-class _FakeLogger:
-    """Stands in for MLFlowLogger: a run id and a dict sink."""
-
-    class _Run:
-        class info:
-            run_id = "3f2a1c"
-
-    def __init__(self):
-        self.run = self._Run()
-        self.logged = {}
-
-    def log_dict(self, data, name):
-        self.logged[name] = data
 
 
 def _mlflow_params(cfg) -> dict:
@@ -66,13 +52,13 @@ def test_control_params_are_the_params_mlflow_logged():
 
 
 def test_write_logs_a_json_parseable_artifact_under_the_run():
-    logger = _FakeLogger()
+    logger = FakeLogger(run_id="3f2a1c")
     written = write_run_summary(
         logger, stage="model", config_path="model_configs/modeling.yaml",
         cfg=ModelingConfig(), metrics={"test_rmse": 0.63,
                                        "worst_channel_r2": 0.71},
         mapping=_NM,
     )
-    assert logger.logged[RUN_SUMMARY_NAME] == written
+    assert logger.dicts[RUN_SUMMARY_NAME] == written
     assert json.loads(json.dumps(written))["run_id"] == "3f2a1c"
 

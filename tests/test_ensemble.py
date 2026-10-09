@@ -24,27 +24,9 @@ import torch
 from neurotemplate.common.data_utils import compute_norm_stats, normalize_df
 from neurotemplate.modeling.config import ModelingConfig as Config
 from neurotemplate.modeling.pipeline import train_and_evaluate
+from fake_logger import FakeLogger
 
 NM_MAPPING = {"Y": ["y0"], "U": ["u0"], "D": ["d0"], "t": ["sec_elapsed"]}
-
-
-class _StubLogger:
-    """Duck-typed MLFlowLogger: every call is a no-op, so a real (tiny)
-    train_and_evaluate run needs no MLflow backend. `save_weights = False`
-    keeps Trainer's end-of-run artifact write a no-op too."""
-    save_weights = False
-
-    def log_weights(self, *a, **kw):
-        pass
-
-    def log_metrics(self, *a, **kw):
-        pass
-
-    def log_dict(self, *a, **kw):
-        pass
-
-    def log_artifacts(self, *a, **kw):
-        pass
 
 
 def _synthetic_df(n: int = 80) -> pd.DataFrame:
@@ -92,7 +74,7 @@ def _run(cfg: Config) -> dict:
         train_dfs=dfs, dev_dfs=dfs, test_dfs=dfs,
         nm_mapping=NM_MAPPING, norm_stats=norm_stats,
         grad_masks={}, synth_cfg=None, freq_s=300.0,
-        logger=_StubLogger(),
+        logger=FakeLogger(),
     )
 
 

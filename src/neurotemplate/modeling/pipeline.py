@@ -455,8 +455,8 @@ def _run_physics_checks(
             run_dir=str(synth_dir), norm_stats=norm_stats,
             freq_s=freq_s, n_plot=cfg.synth_n_plot, verbose=cfg.verbose,
         )
-        if logger is not None and hasattr(logger, "_mlflow"):
-            logger._mlflow.log_artifact(str(synth_dir), artifact_path="plots")
+        if logger is not None:
+            logger.log_artifact(synth_dir, artifact_path="plots")
 
     return outcome
 
