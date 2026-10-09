@@ -30,7 +30,13 @@ class SampledGradientPenalty:
       1. Samples n_samples random points in the normalized input space
       2. Computes Jacobians of the full dynamics step via jacrev + vmap
       3. Sums each Jacobian over the in_steps lags and returns the mean sign
-         violation of that sum (unweighted scalar)
+         violation of that sum per constrained (output, input) pair
+         (unweighted scalar)
+
+    The mean is over the constrained entries only, not the whole `ny × nx`
+    sign matrix, so the same constraints weigh the same however many
+    unconstrained channels a system has, and `grad_gain` ports between
+    systems.
 
     The Jacobian is of `model.pre_activation` — the learned map plus the
     residual, applied per channel exactly as in a rollout — so it is
@@ -79,6 +85,8 @@ class SampledGradientPenalty:
         self.signs = {key: mask[0, 0].to(device=device, dtype=torch.float32)
                       for key, mask in grad_mapping.items()}
         self.n_samples = n_samples
+        self.n_constrained = max(
+            sum(int((m != 0).sum()) for m in self.signs.values()), 1)
         self.device = device
         self.norm_type = cfg.norm_type
 
@@ -107,7 +115,8 @@ class SampledGradientPenalty:
 
     def compute(self):
         """
-        Sample random inputs, compute Jacobians, return mean sign violation.
+        Sample random inputs, compute Jacobians, return the mean sign
+        violation per sample and constrained entry.
 
         Returns:
             Scalar tensor (differentiable w.r.t. model parameters via
@@ -148,6 +157,6 @@ class SampledGradientPenalty:
             #   mask=-1 → penalize positive Jacobian entries
             #   mask= 0 → no penalty (relu of 0 is 0)
             violations = relu(-j_sustained * m)  # [n_samples, ny, nx]
-            total = total + violations.mean()
+            total = total + violations.sum()
 
-        return total
+        return total / (self.n_samples * self.n_constrained)

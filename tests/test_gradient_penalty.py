@@ -1,5 +1,6 @@
 """The sampled gradient sign penalty scores each declared sign against its own
-(output, input) pair and nothing else, summed over the in_steps lags."""
+(output, input) pair and nothing else, summed over the in_steps lags, and
+averaged over the declared pairs only."""
 
 import torch
 
@@ -57,3 +58,13 @@ def test_a_sum_over_lags_that_violates_the_sign_is_penalised():
     # Newest lag alone obeys +1, but the older lag drags the sum negative.
     weights = torch.tensor([[[-3.0]], [[1.0]]])
     assert _penalty(weights, _mask(1, 1, {(0, 0): 1})) > 0.0
+
+
+def test_unconstrained_channels_do_not_dilute_the_penalty():
+    # One violated sign (-2 against +1); adding outputs and inputs that carry
+    # no sign leaves the penalty where it was: the mean violation per
+    # declared pair, here exactly 2.
+    one = _penalty(torch.tensor([[-2.0]]), _mask(1, 1, {(0, 0): 1}))
+    many = _penalty(torch.tensor([[-2.0, 1.0, 1.0], [4.0, -1.0, 0.0]]),
+                    _mask(2, 3, {(0, 0): 1}))
+    assert one == many == 2.0
