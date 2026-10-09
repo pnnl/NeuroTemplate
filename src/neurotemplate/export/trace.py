@@ -33,8 +33,9 @@ EXPORTERS = ("dynamo", "legacy")
 #: all families, heads, the prestack and the policy. Extend it deliberately:
 #: a new entry is a new requirement on every consumer's runtime.
 ALLOWED_OPS = frozenset({
-    "Add", "Cast", "Clip", "Concat", "Constant", "ConstantOfShape", "Div",
-    "Equal", "Erf", "Exp", "Expand", "GRU", "Gather", "GatherND", "Gemm", "Greater",
+    "Add", "Cast", "Ceil", "Clip", "Concat", "Constant", "ConstantOfShape", "Div",
+    "Equal", "Erf", "Exp", "Expand", "Floor", "GRU", "Gather", "GatherND", "Gemm",
+    "Greater",
     "Identity", "Max", "Min", "Mul", "Neg", "Range", "Reciprocal", "ReduceMean",
     "ReduceSum", "Relu", "Reshape", "Round", "ScatterND", "Shape", "Sigmoid", "Slice",
     "Softplus", "Split", "Squeeze", "Sub", "Tanh", "Transpose", "Unsqueeze",
