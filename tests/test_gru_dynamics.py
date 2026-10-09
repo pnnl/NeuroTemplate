@@ -19,6 +19,7 @@ import torch
 from neurotemplate.common.data_utils import get_sw_dict
 from neurotemplate.modeling.config import ModelingConfig as Config
 from neurotemplate.modeling.dynamics import GRUBlock, get_dynamics
+from model_fixtures import model_cfg
 
 NY, NU, ND = 2, 1, 1
 P = 5  # rollout steps past the history
@@ -43,15 +44,7 @@ def synthetic_df():
 
 
 def make_cfg(model: str, in_steps: int) -> Config:
-    cfg = Config()
-    cfg.model = model
-    cfg.in_steps = in_steps
-    cfg.train_pred_steps = P
-    cfg.log2_hidden_size = 3
-    cfg.num_layers = 2
-    cfg.device = torch.device("cpu")
-    cfg.verbose = False
-    return cfg
+    return model_cfg(model=model, in_steps=in_steps, train_pred_steps=P, num_layers=2)
 
 
 def make_batch(in_steps: int, batch: int = 3) -> dict:

@@ -12,23 +12,15 @@ import torch
 from neurotemplate.modeling.config import ModelingConfig as Config
 from neurotemplate.modeling.dynamics import get_dynamics
 from neurotemplate.modeling.loss import build_loss
+from model_fixtures import model_cfg
 
 NY, NU, ND = 2, 1, 1
 P = 6
 
 
 def make_cfg(in_steps: int) -> Config:
-    cfg = Config()
-    cfg.model = "mlp"
-    cfg.in_steps = in_steps
-    cfg.train_pred_steps = P
-    cfg.log2_hidden_size = 3
-    cfg.num_layers = 1
-    cfg.ref_gain = 1.0
-    cfg.grad_gain = 0.0
-    cfg.device = torch.device("cpu")
-    cfg.verbose = False
-    return cfg
+    return model_cfg(model="mlp", in_steps=in_steps, train_pred_steps=P,
+                     ref_gain=1.0, grad_gain=0.0)
 
 
 def nm_mapping() -> dict[str, list[str]]:

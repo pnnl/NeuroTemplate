@@ -46,6 +46,7 @@ from neurotemplate.modeling.dynamics import get_dynamics
 from neurotemplate.modeling.heads import (
     BinaryHead, BoundedHead, HeadStack, OrdinalHead, RegressionHead,
 )
+from model_fixtures import model_cfg
 
 IN_STEPS = 4
 ROWS = 60
@@ -81,17 +82,8 @@ MIXED = {
 
 
 def make_cfg(**over) -> Config:
-    cfg = Config()
-    cfg.model = "2r2c"
-    cfg.in_steps = IN_STEPS
-    cfg.log2_hidden_size = 3
-    cfg.num_layers = 1
-    cfg.steps_per_hour = 12.0
-    cfg.device = torch.device("cpu")
-    cfg.verbose = False
-    for key, value in over.items():
-        setattr(cfg, key, value)
-    return cfg
+    return model_cfg(**{"model": "2r2c", "in_steps": IN_STEPS, "steps_per_hour": 12.0,
+                        **over})
 
 
 def split(mapping) -> tuple[pd.DataFrame, dict]:

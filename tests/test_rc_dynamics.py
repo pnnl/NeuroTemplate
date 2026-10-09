@@ -42,6 +42,7 @@ from neurotemplate.modeling.rc import (
     MIN_TAU_STEPS, RCBlock, SaturatingTerm, mode_taus, physical_parameters,
     time_constant_boxes,
 )
+from model_fixtures import model_cfg
 
 SPH = 12.0            # 5-minute data
 IN_STEPS = 6
@@ -105,17 +106,8 @@ DECLARED_MAPPING = {
 
 
 def make_cfg(**over) -> Config:
-    cfg = Config()
-    cfg.model = "2r2c"
-    cfg.in_steps = IN_STEPS
-    cfg.log2_hidden_size = 4
-    cfg.num_layers = 1
-    cfg.steps_per_hour = SPH
-    cfg.device = torch.device("cpu")
-    cfg.verbose = False
-    for key, value in over.items():
-        setattr(cfg, key, value)
-    return cfg
+    return model_cfg(**{"model": "2r2c", "in_steps": IN_STEPS, "log2_hidden_size": 4,
+                        "steps_per_hour": SPH, **over})
 
 
 def make_block(ny=1, nu=1, nd=1, params=PINNED, **over) -> RCBlock:

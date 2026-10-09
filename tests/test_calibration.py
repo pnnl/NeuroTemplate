@@ -289,7 +289,7 @@ def _staged_run(tmp_path, **over):
     """A tiny real run whose one Y channel is a 20%-positive two-level stage."""
     import numpy as np
     from neurotemplate.common.data_utils import compute_norm_stats
-    from neurotemplate.modeling.config import ModelingConfig as Config
+    from model_fixtures import trainable_cfg
     from neurotemplate.modeling.pipeline import train_and_evaluate
 
     rng = np.random.default_rng(0)
@@ -302,16 +302,7 @@ def _staged_run(tmp_path, **over):
         "sec_elapsed": np.arange(n) * 300.0,
     })
     nm = {"Y": ["stage"], "U": ["u0"], "D": ["d0"], "t": ["sec_elapsed"]}
-    cfg = Config()
-    cfg.model, cfg.in_steps, cfg.log2_hidden_size, cfg.num_layers = "mlp", 4, 2, 1
-    cfg.epochs, cfg.warmup, cfg.patience = 2, 0, 5
-    cfg.train_pred_steps = cfg.dev_pred_steps = 4
-    cfg.test_window = cfg.test_stride = 10
-    cfg.batch_size, cfg.norm_type = 8, "min_max"
-    cfg.plot, cfg.verbose, cfg.device, cfg.seed = False, False, torch.device("cpu"), 7
-    cfg.savedir = str(tmp_path)
-    for key, value in over.items():
-        setattr(cfg, key, value)
+    cfg = trainable_cfg(tmp_path, **over)
 
     norm_stats = compute_norm_stats(df, norm_type=cfg.norm_type)
     dfs = [normalize_df(df, norm_stats)]

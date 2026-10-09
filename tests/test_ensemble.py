@@ -25,6 +25,7 @@ from neurotemplate.common.data_utils import compute_norm_stats, normalize_df
 from neurotemplate.modeling.config import ModelingConfig as Config
 from neurotemplate.modeling.pipeline import train_and_evaluate
 from fake_logger import FakeLogger
+from model_fixtures import trainable_cfg
 
 NM_MAPPING = {"Y": ["y0"], "U": ["u0"], "D": ["d0"], "t": ["sec_elapsed"]}
 
@@ -40,29 +41,7 @@ def _synthetic_df(n: int = 80) -> pd.DataFrame:
 
 
 def _make_cfg(savedir, **over) -> Config:
-    """A config small and fast enough to actually train, twice, in a test."""
-    cfg = Config()
-    cfg.model = "mlp"
-    cfg.in_steps = 4
-    cfg.log2_hidden_size = 2
-    cfg.num_layers = 1
-    cfg.epochs = 2
-    cfg.warmup = 0
-    cfg.patience = 5
-    cfg.train_pred_steps = 4
-    cfg.dev_pred_steps = 4
-    cfg.test_window = 10
-    cfg.test_stride = 10
-    cfg.batch_size = 8
-    cfg.norm_type = "min_max"
-    cfg.plot = False
-    cfg.verbose = False
-    cfg.device = torch.device("cpu")
-    cfg.seed = 123
-    cfg.savedir = str(savedir)
-    for key, value in over.items():
-        setattr(cfg, key, value)
-    return cfg
+    return trainable_cfg(savedir, **{"seed": 123, **over})
 
 
 def _run(cfg: Config) -> dict:

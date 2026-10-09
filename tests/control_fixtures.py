@@ -17,6 +17,7 @@ from neurotemplate.common.data_utils import compute_norm_stats, normalize_df
 from neurotemplate.modeling.dynamics import get_dynamics
 from neurotemplate.control.config import ControlConfig
 from neurotemplate.control.losses import extend_norm_stats, resolve_objective
+from model_fixtures import model_cfg
 
 # Single-zone Modelica RTU strip-mall dataset. Y is one zone temp plus the
 # RTU thermal/flow state plus the two metered RTU power channels; U is a
@@ -76,14 +77,7 @@ def make_norm_stats(raw_df: pd.DataFrame) -> dict:
 
 
 def make_sysid_cfg(in_steps: int = 4, model: str = "mlp") -> Config:
-    cfg = Config()
-    cfg.model = model
-    cfg.in_steps = in_steps
-    cfg.log2_hidden_size = 3
-    cfg.num_layers = 1
-    cfg.residual = True
-    cfg.device = torch.device("cpu")
-    return cfg
+    return model_cfg(model=model, in_steps=in_steps, residual=True)
 
 
 # The reference columns: a comfort band on the zone, and a tariff.
