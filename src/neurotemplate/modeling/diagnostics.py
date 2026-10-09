@@ -4,8 +4,8 @@ recommendation. No training, no pipeline wiring, no extension point.
 
 Two decisions in this library are made by hand today, from the column's
 *name* rather than its data: which head a Y channel gets (`data_head_config`)
-and the 2R2C storage prior (`rc_tau_ambient_h`). Both are questions the data
-can answer, so this module answers them:
+and the 2R2C storage prior (a block's `tau_slow_h` box). Both are questions
+the data can answer, so this module answers them:
 
   recommend_head   — 1-D k-means over a Y column's values; recommends
                      RegressionHead / BinaryHead / OrdinalHead / BoundedHead
@@ -466,8 +466,8 @@ def estimate_decay(
     `_fit_log_decay` for the rejections.
 
     Returns one `DecayWindow` per run that fits cleanly, in time order.
-    Empty means no qualifying window was found in this data -- the prior then
-    has to come from an Optuna sweep over `rc_tau_ambient_h`, not a guess.
+    Empty means no qualifying window was found in this data -- the `tau_slow_h`
+    box then has to come from what is known about the building, held wide.
     """
     gap = np.asarray(state, dtype=float) - np.asarray(ref, dtype=float)
     windows = []

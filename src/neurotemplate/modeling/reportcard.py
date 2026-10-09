@@ -52,6 +52,7 @@ from typing import Optional
 import pandas as pd
 
 from neurotemplate.common.data_utils import degenerate_mapped_columns
+from neurotemplate.modeling.bounded import edge_note
 from neurotemplate.modeling.config import ModelingConfig
 from neurotemplate.modeling.calibration import Calibration
 from neurotemplate.modeling.heads import BoundedHead, HeadStack, OrdinalHead
@@ -217,9 +218,10 @@ def _block_lines(name: str, info: Optional[dict], indent: str = "") -> list[str]
 
     A per-block stack (BlockStack) nests one bullet per block, labelled with
     its family — the interesting fact once a spec can mix families in one
-    graph. A 2R2C block adds the time constants it learned. `tau_slow` is
-    the storage number — how long a temperature difference survives — so it
-    is worth reading against what you know about the building.
+    graph. A 2R2C block adds the time constants it learned, and any block
+    its bounded parameters. `tau_slow` is the storage number — how long a
+    temperature difference survives — so it is worth reading against what
+    you know about the building.
     """
     if info is None:
         return []
@@ -239,12 +241,34 @@ def _block_lines(name: str, info: Optional[dict], indent: str = "") -> list[str]
     for channel, taus in info.get("time_constants_h", {}).items():
         lines.append(f"{indent}  - {channel}: tau_fast={taus['fast']:.2f} h, "
                      f"tau_slow={taus['slow']:.2f} h")
+    lines += _bounded_lines(info.get("bounded", {}), indent + "  ")
     lines += _forcing_lines(info.get("forcing"), indent + "  ")
     for block_name, sub in info.get("blocks", {}).items():
         label = f"block `{block_name}`"
         if sub is not None and sub.get("model"):
             label += f" ({sub['model']})"
         lines += _block_lines(label, sub, indent + "  ")
+    return lines
+
+
+def _bounded_lines(bounded: dict, indent: str) -> list[str]:
+    """Each bounded parameter's box and where the fit landed in it.
+
+    A parameter pressed against a bound is the diagnostic: the box stopped
+    the fit, which says the data (or the seed) disagrees with the prior.
+    """
+    lines = []
+    for name, b in bounded.items():
+        if b["pinned"]:
+            lines.append(f"{indent}- {name}: pinned at {b['low']:g}")
+            continue
+        for label, value in b["value"].items():
+            fraction = b["fraction"][label]
+            note = edge_note(name, fraction)
+            lines.append(
+                f"{indent}- {name} ({label}): {value:.3g} in [{b['low']:g}, "
+                f"{b['high']:g}], {fraction * 100:.0f}% of the way up"
+                + ("" if note is None else f" — ⚠️ {note}"))
     return lines
 
 
@@ -259,10 +283,7 @@ def _forcing_lines(forcing: Optional[dict], indent: str) -> list[str]:
         return []
     lines = []
     if forcing.get("ambient"):
-        ambient = forcing["ambient"]
-        taus = ", ".join(f"{channel} {tau:.2f} h" for channel, tau in ambient["tau_h"].items())
-        lines.append(f"{indent}- ambient: {ambient['column']}, "
-                     f"tau_ambient {taus} (learned)")
+        lines.append(f"{indent}- ambient: {forcing['ambient']['column']}")
     for column, term in forcing.get("linear", {}).items():
         lines.append(f"{indent}- linear: {column}, k={term['k']:.4g} °C/step per unit")
     for column, term in forcing.get("saturating", {}).items():

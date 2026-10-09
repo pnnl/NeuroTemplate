@@ -262,41 +262,51 @@ pays for that in test RMSE (0.54 against 0.41–0.44), which is the trade the
 family exists to make: rollout RMSE cannot see the storage, and load
 shifting cannot live without it.
 
-**The time constants are a prior, not a fit**, and they default to frozen.
-The mass temperature is unobserved, so every rollout has to seed it from an
-`in_steps` window an hour long at most, against a state that lags by many
-hours. Left trainable, the optimizer discovers that shortening the slow mode
-is a cheaper way to absorb that wrong seed than fixing the forcing — on
-synthetic data from a known 31.6 h building, seeded truthfully training moves
-`tau_slow` 13.4 → 16.5 h, and seeded the way a real rollout must, the same
-training drives it to 8.7 h. Letting the window choose its own seed does not
-help; an hour of zone temperature carries no information about a ten-hour
-state. So set the prior from what you know — a free-decay episode gives it
-directly — and read back what you built:
+**The time constants are a prior, held in a box.** Each `2r2c` block declares
+three, in hours, in its `block_mapping` entry's `params` — a scalar pins one,
+`[min, max]` lets training move it inside that box:
 
-```yaml
-model: 2r2c
-rc_tau_ambient_h: 2.0     # zone <-> ambient
-rc_tau_zone_mass_h: 1.0   # zone <-> mass, from the zone's side
-rc_tau_mass_zone_h: 4.0   # mass <-> zone, from the mass's side
-# rc_train_taus: false    # only with a rollout long enough to identify them
+```python
+"zone": {"Y": ["Zone Air Temperature [°C]"], "model": "2r2c",
+         "params": {"tau_fast_h": [0.3, 1.0],      # the air settling after an HVAC step
+                    "tau_ambient_h": [2.0, 8.0],   # the initial slope of an HVAC-off drift
+                    "tau_slow_h": [20.0, 60.0]}},  # that drift after its first hour
 ```
 
-If you have no free-decay episode to read the prior off, `nt model optuna` can
-choose it on held-out dev loss like any other hyperparameter — put
-`cfg.rc_tau_ambient_h = trial.suggest_float(...)` in `hyper_args`. That is a
-different claim from identifying it (dev loss is not the storage either), but
-it does at least pick the prior the data prefers rather than the one we shipped.
+These are the two modes and the ambient rate — what one measures, so where
+priors are actually held — rather than the network's component rates.
+`tau_slow` is what `nt data decay` fits, and its range is the natural
+`tau_slow_h` box. The boxes must be disjoint in the order fast < ambient <
+slow; every point inside them is then a valid building, so training cannot
+leave the feasible set, and `tau_fast` may not start below two timesteps of
+the data, the stability guarantee's floor. There is no default: a block
+missing one is refused, and so is `model: 2r2c` with no `block_mapping` hook,
+because there is nowhere to declare them.
 
-Those three are components, not modes. The modes they produce on 5-minute
-data — `tau_fast = 0.60 h`, `tau_slow = 13.40 h` — are what the reportcard
-prints, per block and per channel — alongside each block's family, which is
-the interesting fact once families are mixed:
+A box, not a free fit, because the slow mode is not identifiable from a
+training rollout. The mass temperature is unobserved, so every rollout has to
+seed it from an `in_steps` window an hour long at most, against a state that
+lags by many hours. Left free, the optimizer discovers that shortening the
+slow mode is a cheaper way to absorb that wrong seed than fixing the forcing —
+on synthetic data from a known 31.6 h building, seeded truthfully training
+moves `tau_slow` 13.4 → 16.5 h, and seeded the way a real rollout must, the
+same training drives it to 8.7 h. A box stops that rather than curing it: the
+seed still pulls `tau_slow`, now to its lower bound, and the reportcard says
+so — *"tau_slow at 97% of the way to its lower bound — the data (or the seed)
+disagrees with the prior"* — per parameter, with the seed ensemble showing
+whether every seed does it.
+
+The reportcard prints the modes per block and per channel, each bounded
+parameter's box and where its fit landed, and the block's family — the
+interesting fact once families are mixed:
 
 ```
 - **fy:** `BlockStack`, params=3,493, in=60, out=2
-  - **block `zone` (2r2c):** `RCBlock`, params=1,220, in=48, out=1
-    - Zone Air Temperature [°C]: tau_fast=0.60 h, tau_slow=13.40 h
+  - **block `zone` (2r2c):** `RCBlock`, params=1,223, in=48, out=1
+    - Zone Air Temperature [°C]: tau_fast=0.55 h, tau_slow=20.66 h
+    - tau_fast (Zone Air Temperature [°C]): 0.548 in [0.3, 1], 50% of the way up
+    - tau_ambient: pinned at 2
+    - tau_slow (Zone Air Temperature [°C]): 20.7 in [20, 60], 3% of the way up — ⚠️ tau_slow at 97% of the way to its lower bound — the data (or the seed) disagrees with the prior
   - **block `power` (mlp):** `MLP`, params=2,273, in=36, out=1
 ```
 
@@ -307,7 +317,7 @@ pre-block computed:
 ```
   - **block `zone` (2r2c):** `RCBlock`, params=486, in=48, out=1
     - Zone Air Temperature [°C]: tau_fast=0.78 h, tau_slow=104.00 h
-    - ambient: Ambient Temperature [°C], tau_ambient Zone Air Temperature [°C] 20.10 h (learned)
+    - ambient: Ambient Temperature [°C]
     - linear: GHI [W/m2], k=0.000105 °C/step per unit
     - saturating: Cooling Setpoint [°C], cap=0.77 °C/step, w=8.6 °C, slope_share=0.10
     - mlp: Occupancy
@@ -400,7 +410,7 @@ is the block-level key shown above, not an `inputs` kind):
 |---|---|---|
 | `demand` | every family | replaces the setpoint with the thermostat's clamped error against the block's own state, `relu(zone − setpoint)` for cooling (`sign = -1`) and the mirror for heating, computed in physical units from the model's *own* predicted zone during a rollout. Raising the setpoint above the zone is then free on the surrogate the way it is on the plant. Pairing with another block's state is refused — that is `reads`. |
 | `linear` | `2r2c` | one sign-fixed coefficient times the physical value: measured power removes heat, irradiance adds it. |
-| `ambient` | `2r2c` | the explicit conduction `a_o (T_ambient − zone)`, and the column leaves the residual MLP's input. Declaring it unfreezes `a_o` (start: `rc_tau_ambient_h`) — the term has no hidden state behind it, so it is identifiable, and a frozen guess that is wrong by a few-fold would otherwise be cancelled by a fictitious constant heat gain. The learned `tau_ambient` prints beside the column. |
+| `ambient` | `2r2c` | the explicit conduction `a_o (T_ambient − zone)` at the block's `tau_ambient_h` rate, and the column leaves the residual MLP's input. Give `tau_ambient_h` a box wide enough to hold the truth: with the column declared, a wrong rate would otherwise be cancelled by a fictitious constant heat gain. |
 
 Inside a `2r2c` block a `demand` column becomes a *saturating* branch,
 `cap · tanh(x / w)` — a staged coil's response, bounded in value and in
@@ -431,10 +441,9 @@ constant moving 2 h to 20 h, a coil capacity crossing an order of magnitude —
 where a network weight moves in thousandths, and Adam steps a raw parameter
 by about `lr` per update. At `lr` they stall within a few percent of where
 they started, which reads on the reportcard as a branch that "learned" its
-initial value. Every 2r2c block's storage rates (if `rc_train_taus` unfreezes
-them), `tau_ambient`, `k`, `cap` and `w` are in that group, and every time
-constant is parameterized in log-space so hours-to-days is a few units of
-raw travel rather than hundreds.
+initial value. Every 2r2c block's bounded time constants, `k`, `cap` and `w`
+are in that group, and every time constant moves in log-space inside its box,
+so hours-to-days is a few units of raw travel rather than hundreds.
 
 The one-step test NRMSE is not expected to improve with a declaration; the
 closed-loop and physics readouts are what it is for.

@@ -45,20 +45,10 @@ test_data_path: data/test.csv
 # per_block: false
 
 # ── 2R2C ─────────────────────────────────────────────────────────
-# Read by any 2r2c block. The storage prior, in hours: zone<->ambient,
-# zone<->mass from the zone's side, mass<->zone from the mass's side. The mass
-# is unobserved, so training cannot identify these — set them from what you
-# know (`nt data decay` fits the envelope constant from free-decay episodes)
-# and check the resulting modes on the reportcard. Once a block declares
-# `ambient`, rc_tau_ambient_h is only the starting value of a learned rate.
-# rc_tau_ambient_h: 2.0
-# rc_tau_zone_mass_h: 1.0
-# rc_tau_mass_zone_h: 4.0
-# Let training move the three above. Only with rollouts long enough to excite
-# the slow mode; otherwise it shortens the slow mode to hide a bad guess.
-# rc_train_taus: false
-# Learning rate for 2r2c's physical scalars (declared-branch coefficients,
-# and the storage rates when trainable). At `lr` they barely leave their start.
+# A 2r2c block's time constants are declared per block, in block_mapping's
+# `params` (modeling_user_defined.py). Here only the learning rate for its
+# physical scalars — bounded time constants, declared-branch coefficients.
+# At `lr` they barely leave their start.
 # rc_branch_lr: 0.05
 
 # ── TRAIN ────────────────────────────────────────────────────────

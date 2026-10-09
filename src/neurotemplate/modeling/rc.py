@@ -57,15 +57,12 @@ genuinely unknown.
                `a_o (T_oa - z)` with `T_oa` read from the column rather than
                left for `g` to re-form, and the column leaves `g`'s input:
                anything else `g` could learn from it would be a
-               weather-correlated bias, not conduction. Declaring it also
-               unfreezes `a_o`, with `rc_tau_ambient_h` as its start: the
-               term is now load-bearing and has no hidden state behind it,
-               so it is identifiable in a way the mass rates are not (see
-               "The storage is a prior"), and a frozen guess that is wrong
-               by a few-fold cannot be absorbed by `g` any more — whatever
-               free term is left would learn a constant heat gain of several
-               °C/h to cancel it, which holds on the training distribution
-               and nowhere else.
+               weather-correlated bias, not conduction. A `tau_ambient` box
+               wide enough to hold the truth matters most here: with the
+               column declared, a wrong `a_o` cannot be absorbed by `g` any
+               more — whatever free term is left would learn a constant heat
+               gain of several °C/h to cancel it, which holds on the
+               training distribution and nowhere else.
   linear       a U or D column entering as one sign-fixed coefficient times
                its physical value: measured power removes heat (`sign = -1`),
                solar irradiance adds it (`+1`). No bias — a constant heat gain
@@ -94,11 +91,12 @@ this family over `lssm`:
 
 **Unconditional stability.** `g` reads inputs only — never `z`, never `m` —
 so the state matrix is fixed by three positive rates whatever the MLP does.
-Rates are parameterized as `1 / (MIN_TAU_STEPS + exp(log_tau))`, so each is
-below `1/MIN_TAU_STEPS = 0.5` and their sum below 2, which is exactly the
-condition for the discrete update's eigenvalues to sit inside the unit
-circle (see `mode_taus`). A 2R2C rollout cannot diverge, at any horizon,
-under any input — including the adversarial inputs a DPC policy will find.
+The rates come from the two modes and the ambient time constant (see
+`RCBlock.rates`), each held inside a declared box with `tau_fast` at least
+`MIN_TAU_STEPS` steps, so every rate is below `1/MIN_TAU_STEPS = 0.5` and
+the update's eigenvalues, `1 - 1/tau_fast` and `1 - 1/tau_slow`, sit inside
+the unit circle. A 2R2C rollout cannot diverge, at any horizon, under any
+input — including the adversarial inputs a DPC policy will find.
 
 The declared branches keep that guarantee. `ambient` and `linear` are
 linear in *inputs*, not state, and do not touch the state matrix. The
@@ -116,26 +114,39 @@ that only acts when the zone is warm can only lower the spectral radius.
 reportcard. `tau_slow` is the number pre-cooling lives on, and you can check
 it against the building instead of taking the surrogate's word for it.
 
-The storage is a prior, not a fit
-================================
+The storage is a prior, held in a box
+=====================================
 
-The three rates default to **frozen** (`cfg.rc_train_taus`). That is not
-timidity, it is what the data supports. The mass temperature is unobserved,
-so every rollout has to seed it from the `in_steps` window — an hour at
-most, against a mass that lags by many. The seed is therefore wrong, and
-the optimizer has two ways to reduce the damage: fix the forcing, or
-shorten the slow mode so the wrong seed matters less. It picks the second.
-Measured on synthetic data from a known 31.6 h building, seeded with the
-true mass, training moves tau_slow the right way (13.4 h -> 16.5 h); seeded
-the way a real rollout must seed it, the same training drives it to 8.7 h.
-Letting the window's own history choose the seed does not help, because an
-hour of zone temperature carries no information about a ten-hour state.
+Each block declares three time constants in hours, in its `block_mapping`
+entry's `params` — a scalar pins one, `[min, max]` lets training move it
+inside that box:
 
-So `tau_slow` is something you assert and the reportcard reads back, not
-something the fit discovers. Set it from what you know — a free-decay
-episode gives it directly — and let training learn the heat input around
-it. Unfreeze only when the rollout is long relative to the slow mode and
-the data actually excites it.
+  tau_fast     the zone air settling after a push, against structure and
+               outdoors at once — the quick swing right after an HVAC step
+  tau_ambient  the air leaking to the outdoors while the structure sits at
+               the air's temperature — the initial slope of an HVAC-off drift
+  tau_slow     the building, air and structure together, relaxing to the
+               outdoors with nothing running — the drift after its first
+               hour, what `nt data decay` fits
+
+These three rather than the component rates because they are what one
+measures, so they are where priors are actually held. All three rates are
+positive exactly when `tau_fast < tau_ambient < tau_slow`, so the boxes must
+be disjoint in that order; every point inside them is then a valid building,
+and training cannot leave the feasible set. There is no default: a prior
+about a building is the user's to state.
+
+A box, not a free fit, because the slow mode is not identifiable from a
+training rollout. The mass temperature is unobserved, so every rollout seeds
+it from the `in_steps` window — an hour at most, against a mass that lags by
+many. The seed is therefore wrong, and the optimizer has two ways to reduce
+the damage: fix the forcing, or shorten the slow mode so the wrong seed
+matters less. It picks the second. Measured on synthetic data from a known
+31.6 h building, seeded with the true mass, training moves tau_slow the
+right way (13.4 h -> 16.5 h); seeded the way a real rollout must seed it,
+the same training drives it to 8.7 h. A box does not cure that — it stops
+it, and the reportcard says when a time constant is pressed against a bound:
+the data (or the seed) disagreeing with the prior is the finding.
 
 What it gives up
 ================
@@ -152,7 +163,6 @@ stability argument admits. What the block still cannot do is let a
 
 from __future__ import annotations
 
-import math
 from typing import Optional
 
 import torch
@@ -161,29 +171,19 @@ import torch.nn.functional as F
 from neuromancer.modules import blocks
 
 from neurotemplate.modeling import windows
+from neurotemplate.modeling.bounded import BoundedParameter, bounded_parameters, parse_box
 from neurotemplate.modeling.heads import demand_scale
 
-#: Fastest exchange the parameterization allows, in timesteps. Its reciprocal
-#: bounds every rate, and rates summing below 2 is what keeps the discrete
-#: update inside the unit circle — so this is the stability guarantee's one
-#: knob, not a tuning parameter. A two-step time constant is already a zone
-#: with essentially no thermal inertia.
+#: Fastest time constant the parameterization allows, in timesteps. Its
+#: reciprocal bounds every rate, and that is what keeps the discrete update
+#: inside the unit circle — so this is the stability guarantee's one knob,
+#: not a tuning parameter. A two-step time constant is already a zone with
+#: essentially no thermal inertia.
 MIN_TAU_STEPS = 2.0
 
-#: Default *component* time constants in hours: zone<->ambient, zone<->mass
-#: from the zone's side, and mass<->zone from the mass's side. The last two
-#: differ by the capacitance ratio C_m / C_z = a_m / a_c, so 1 h against 4 h
-#: makes the mass four times heavier than the air. Override per run with
-#: `cfg.rc_tau_ambient_h` and friends.
-#:
-#: These three are not the numbers you read off the model. The *modes* are,
-#: and they are neither of the three: at a 5-minute timestep this triple
-#: gives tau_fast = 0.6 h and tau_slow = 13.4 h — an ordinary commercial
-#: building. `mode_taus` is the conversion, and the reportcard prints it, so
-#: set these, train, and read back what you actually built.
-DEFAULT_TAU_AMBIENT_H = 2.0
-DEFAULT_TAU_ZONE_MASS_H = 1.0
-DEFAULT_TAU_MASS_ZONE_H = 4.0
+#: A 2r2c block's `params`: its three time constants in hours, in the order
+#: they must be — `tau_fast < tau_ambient < tau_slow`.
+TAU_KEYS = ("tau_fast_h", "tau_ambient_h", "tau_slow_h")
 
 #: Raw parameter behind every learned branch coefficient at construction:
 #: `softplus(-4) ≈ 0.018`, so a fresh block starts as near-pure free decay
@@ -193,27 +193,47 @@ DEFAULT_TAU_MASS_ZONE_H = 4.0
 _NEAR_ZERO_THETA = -4.0
 
 
-def _log_tau_init(tau_hours: float, steps_per_hour: float) -> float:
-    """Raw parameter whose `_rate` reading is `tau_hours`.
+def time_constant_boxes(params: dict, steps_per_hour: float,
+                        block: str) -> dict[str, tuple[float, float]]:
+    """A 2r2c block's `params`, validated: `{tau key: (min_h, max_h)}`.
 
-    Inverts `tau = MIN_TAU_STEPS + exp(log_tau)`. Coarse data can make a
-    requested time constant unrepresentable — at an hourly timestep the
-    1 h zone<->mass default is below the two-step floor — so the request is
-    clamped rather than allowed to produce a NaN. The reportcard prints what
-    the clamp settled on.
-
-    Log-space rather than `softplus`: a rate that trains has hours to days
-    to cover, and Adam moves a raw parameter by about `lr` per update. In
-    log-space that is a few units of travel; in a space linear in the time
-    constant it is hundreds, and the rate stalls where it started.
+    Refuses, naming every problem at once: a missing or unknown key; boxes
+    that overlap or are out of order (the rates are positive exactly when
+    `tau_fast < tau_ambient < tau_slow`); and a `tau_fast` floor under
+    `MIN_TAU_STEPS` steps of this data, which the stability guarantee needs.
     """
-    excess = max(tau_hours * steps_per_hour - MIN_TAU_STEPS, 1.0)
-    return math.log(excess)
-
-
-def _rate(log_tau: torch.Tensor) -> torch.Tensor:
-    """Per-step exchange rate, in (0, 1/MIN_TAU_STEPS)."""
-    return 1.0 / (MIN_TAU_STEPS + torch.exp(log_tau))
+    problems = []
+    missing = [k for k in TAU_KEYS if k not in params]
+    unknown = sorted(set(params) - set(TAU_KEYS))
+    if missing:
+        problems.append(f"missing {missing}; a 2r2c block declares all three time "
+                        "constants, in hours, as a scalar or [min, max]")
+    if unknown:
+        problems.append(f"unknown key(s) {unknown}; a 2r2c block reads {list(TAU_KEYS)}")
+    boxes = {}
+    for key in TAU_KEYS:
+        if key in params:
+            try:
+                boxes[key] = parse_box(key, params[key])
+            except ValueError as error:
+                problems.append(str(error))
+    if len(boxes) == len(TAU_KEYS):
+        for lower, upper in zip(TAU_KEYS, TAU_KEYS[1:]):
+            if not boxes[lower][1] < boxes[upper][0]:
+                problems.append(
+                    f"{lower} {list(boxes[lower])} must lie wholly below {upper} "
+                    f"{list(boxes[upper])}: the rates are positive only when "
+                    "tau_fast < tau_ambient < tau_slow")
+        floor_h = MIN_TAU_STEPS / steps_per_hour
+        if boxes["tau_fast_h"][0] < floor_h:
+            problems.append(
+                f"tau_fast_h starts at {boxes['tau_fast_h'][0]:g} h, under the "
+                f"{MIN_TAU_STEPS:g}-step floor of this data's timestep "
+                f"({floor_h:g} h) that keeps the rollout stable")
+    if problems:
+        raise ValueError(f"2r2c block {block!r} has invalid `params`:\n  - "
+                         + "\n  - ".join(problems))
+    return boxes
 
 
 def mode_taus(a_ambient, a_zone_mass, a_mass_zone):
@@ -261,27 +281,22 @@ def _buffer(module: nn.Module, name: str, value) -> None:
 class AmbientTerm(nn.Module):
     """`a_o (T_oa - z)`: conduction to the declared outdoor temperature.
 
-    Owns the ambient rate, which trains from the block's `tau_hours[0]`.
+    The rate `a_o` belongs to the block (it is one of its time constants) and
+    is handed in each step, the way `SaturatingTerm` is handed its headroom.
     """
 
-    def __init__(self, column: dict, zone_shift: list[float], zone_stretch: list[float],
-                 tau_hours: float, steps_per_hour: float):
+    def __init__(self, column: dict, zone_shift: list[float], zone_stretch: list[float]):
         super().__init__()
-        self.log_tau = nn.Parameter(
-            torch.full((len(zone_shift),), _log_tau_init(tau_hours, steps_per_hour)))
         _buffer(self, "shift", column["shift"])
         _buffer(self, "stretch", column["stretch"])
         _buffer(self, "zone_shift", zone_shift)
         _buffer(self, "zone_stretch", zone_stretch)
 
-    def rate(self) -> torch.Tensor:
-        """`a_o`, per channel."""
-        return _rate(self.log_tau)
-
-    def forward(self, zone: torch.Tensor, outdoor: torch.Tensor) -> torch.Tensor:
+    def forward(self, zone: torch.Tensor, outdoor: torch.Tensor,
+                rate: torch.Tensor) -> torch.Tensor:
         zone_phys = zone * self.zone_stretch + self.zone_shift
         outdoor_phys = outdoor * self.stretch + self.shift
-        return self.rate() * (outdoor_phys - zone_phys) / self.zone_stretch
+        return rate * (outdoor_phys - zone_phys) / self.zone_stretch
 
 
 class LinearTerm(nn.Module):
@@ -345,19 +360,18 @@ class SaturatingTerm(nn.Module):
 
 
 def physical_parameters(module: nn.Module) -> list[nn.Parameter]:
-    """Every 2R2C physical scalar under `module`: the storage rates and the
-    declared branches' coefficients.
+    """Every grey-box physical scalar under `module`: the bounded time
+    constants and the declared branches' coefficients.
 
     A grey-box fit steps these at their own learning rate
     (`cfg.rc_branch_lr`): Adam moves a raw parameter by about `lr` per
     update, and a coil capacity or a time constant has units of travel to
-    cover where a network weight has thousandths. Frozen rates are included
-    too; Adam skips a parameter with no gradient.
+    cover where a network weight has thousandths. A pinned time constant is
+    included too; its gradient is zero, so Adam leaves it where it is.
     """
-    terms = (AmbientTerm, LinearTerm, SaturatingTerm)
+    terms = (LinearTerm, SaturatingTerm)
     params = [p for m in module.modules() if isinstance(m, terms) for p in m.parameters()]
-    params += [p for m in module.modules() if isinstance(m, RCBlock)
-               for p in m._log_tau.parameters()]
+    params += [b.theta for b in bounded_parameters(module)]
     return params
 
 
@@ -387,13 +401,12 @@ class RCBlock(nn.Module):
     Args:
         ny / nu / nd: channel counts for this block's own slice of Y, U, D.
         in_steps: history window length.
-        steps_per_hour: timesteps per hour. Only ever used to convert time
-            constants between hours and steps — on the way in for
-            `tau_hours`, on the way out for `describe`.
+        steps_per_hour: timesteps per hour. Only ever used to convert the
+            time constants from hours to steps.
         hidden_size / num_layers: size of the learned heat-input MLP.
-        tau_hours: the storage prior, `(ambient, zone_mass, mass_zone)`.
-        train_taus: let the optimizer move that prior. Off by default; the
-            module docstring explains why.
+        taus: the storage prior, `{tau key: (min_h, max_h)}` for every key in
+            `TAU_KEYS`, as `time_constant_boxes` validates it. Every channel
+            of the block fits its own values inside the same boxes.
         channel_names: Y column names, for labelling `describe`.
         u_names / d_names: this block's U and D column names, in the order
             its window carries them; what `inputs` and `ambient` refer to.
@@ -403,17 +416,13 @@ class RCBlock(nn.Module):
             cost of the stability bound — a `linear` one a `LinearTerm`;
             the rest feed the MLP.
         ambient: the D column read by the explicit conduction term, or None
-            for conduction to a zero ambient. Declaring one makes the
-            ambient rate trainable.
+            for conduction to a zero ambient.
         norm_stats: per-column norm stats, needed for any declared branch.
     """
 
     def __init__(self, ny: int, nu: int, nd: int, in_steps: int,
                  steps_per_hour: float, hidden_size: int, num_layers: int,
-                 tau_hours: tuple[float, float, float] = (
-                     DEFAULT_TAU_AMBIENT_H, DEFAULT_TAU_ZONE_MASS_H,
-                     DEFAULT_TAU_MASS_ZONE_H),
-                 train_taus: bool = False,
+                 taus: dict[str, tuple[float, float]],
                  channel_names: tuple[str, ...] = (),
                  u_names: tuple[str, ...] = (),
                  d_names: tuple[str, ...] = (),
@@ -434,16 +443,9 @@ class RCBlock(nn.Module):
         self._y_steps = windows.per_step(y_block, ny, in_steps)
         _, self._u_last, self._d_last = windows.last_step(self.widths, in_steps)
 
-        # A declared `AmbientTerm` owns the ambient rate (and trains it); the
-        # module docstring says why that is not true of the mass rates.
-        self._log_tau = nn.ParameterDict({
-            name: nn.Parameter(
-                torch.full((ny,), _log_tau_init(hours, steps_per_hour)),
-                requires_grad=train_taus,
-            )
-            for name, hours in zip(("ambient", "zone_mass", "mass_zone"), tau_hours)
-            if name != "ambient" or ambient is None
-        })
+        self.tau_fast, self.tau_ambient, self.tau_slow = (
+            BoundedParameter(key[:-2], *taus[key], self.channel_names)
+            for key in TAU_KEYS)
 
         # Each declared column is a position into the drive vector
         # `cat([u_last, d_last])`: U columns first, then D.
@@ -460,10 +462,8 @@ class RCBlock(nn.Module):
 
         self.ambient_name = ambient
         self._ambient_pos = drive_names.index(ambient) if ambient else None
-        self.ambient = (
-            AmbientTerm(norm_stats[ambient], zone_shift, zone_stretch,
-                        tau_hours[0], steps_per_hour)
-            if ambient else None)
+        self.ambient = (AmbientTerm(norm_stats[ambient], zone_shift, zone_stretch)
+                        if ambient else None)
 
         self.linear_names = [c for c, e in inputs.items() if e["kind"] == "linear"]
         self._linear_pos = [drive_names.index(c) for c in self.linear_names]
@@ -521,10 +521,20 @@ class RCBlock(nn.Module):
     # ── parameters ──────────────────────────────────────────────
 
     def rates(self) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """The three per-step exchange rates, each in (0, 1/MIN_TAU_STEPS)."""
-        a_ambient = (self.ambient.rate() if self.ambient is not None
-                     else _rate(self._log_tau["ambient"]))
-        return a_ambient, _rate(self._log_tau["zone_mass"]), _rate(self._log_tau["mass_zone"])
+        """`(a_ambient, a_zone_mass, a_mass_zone)` per step, from the time
+        constants.
+
+        With `λ = 1/tau` in steps: `a_o = λ_ambient`, `a_c = λ_fast·λ_slow/a_o`
+        and `a_m = λ_fast + λ_slow − a_o − a_c` — the rates whose state matrix
+        has exactly the modes `tau_fast` and `tau_slow` (`mode_taus` inverts
+        this). All three are positive because the boxes are disjoint in the
+        order `tau_fast < tau_ambient < tau_slow`, and each is below
+        `λ_fast <= 1/MIN_TAU_STEPS`.
+        """
+        fast, ambient, slow = (1 / (tau.value() * self.steps_per_hour)
+                               for tau in (self.tau_fast, self.tau_ambient, self.tau_slow))
+        a_mass_zone = fast * slow / ambient
+        return ambient, fast + slow - ambient - a_mass_zone, a_mass_zone
 
     # The stateful-block protocol (see `neurotemplate.export.state`): the
     # hidden state as one [batch, width] tensor, so an exporter can lift it
@@ -575,7 +585,8 @@ class RCBlock(nn.Module):
         if self.ambient is None:
             conduction = -a_ambient * zone
         else:
-            conduction = self.ambient(zone, self._column(drive, self._ambient_pos))
+            conduction = self.ambient(zone, self._column(drive, self._ambient_pos),
+                                      a_ambient)
         increment = (a_zone_mass * (mass - zone) + conduction
                      + self._heat_input(drive, headroom=1 - a_zone_mass - a_ambient))
         if batched:
@@ -607,26 +618,21 @@ class RCBlock(nn.Module):
 
         `tau_slow` is the storage number: how long a temperature difference
         put into this zone survives. It is the one figure worth checking
-        against the real building. `forcing` lists which column feeds which
-        branch and what each learned: `k` in zone units per step per
-        physical unit for `linear`; `cap` (°C/step), `w` (°C of demand) and
-        `slope_share` (the fraction of the stability budget the slope uses)
-        for `saturating`. `demand_in_mlp` names the demand columns routed
-        into `g` by declaration, for which the stability bound does not hold.
+        against the real building; the three time constants' boxes and where
+        each fit landed in its box are reported with every bounded parameter
+        (see `bounded`). `forcing` lists which column feeds which branch and
+        what each learned: `k` in zone units per step per physical unit for
+        `linear`; `cap` (°C/step), `w` (°C of demand) and `slope_share` (the
+        fraction of the stability budget the slope uses) for `saturating`.
+        `demand_in_mlp` names the demand columns routed into `g` by
+        declaration, for which the stability bound does not hold.
         """
         with torch.no_grad():
             a_ambient, a_zone_mass, _ = self.rates()
-            tau_fast, tau_slow = mode_taus(*self.rates())
             headroom = 1 - a_zone_mass - a_ambient
+            fast, slow = self.tau_fast.value(), self.tau_slow.value()
             forcing = {
-                # One learned conduction rate per Y channel.
-                "ambient": None if self.ambient is None else {
-                    "column": self.ambient_name,
-                    "tau_h": {
-                        name: round(float(1 / a) / self.steps_per_hour, 3)
-                        for name, a in zip(self.channel_names, a_ambient)
-                    },
-                },
+                "ambient": None if self.ambient is None else {"column": self.ambient_name},
                 "linear": {
                     name: {"k": round(float(term.coefficient()), 6)}
                     for name, term in zip(self.linear_names, self.linear)
@@ -648,12 +654,10 @@ class RCBlock(nn.Module):
                 ),
                 "demand_in_mlp": list(self.demand_in_mlp),
             }
-        per_hour = self.steps_per_hour
         return {
             "time_constants_h": {
-                name: {"fast": round(float(fast) / per_hour, 3),
-                       "slow": round(float(slow) / per_hour, 3)}
-                for name, fast, slow in zip(self.channel_names, tau_fast, tau_slow)
+                name: {"fast": round(float(f), 3), "slow": round(float(sl), 3)}
+                for name, f, sl in zip(self.channel_names, fast, slow)
             },
             "forcing": forcing,
         }

@@ -58,6 +58,9 @@ SPLIT = {
     "north": {"Y": ["north T"], "U": ["north sp"]},
     "south": {"Y": ["south T"], "U": ["south sp"]},
 }
+#: A 2r2c block's time constants, boxed so the graph carries the bound.
+TAUS = {"tau_fast_h": [0.3, 1.0], "tau_ambient_h": [2.0, 8.0], "tau_slow_h": [10.0, 40.0]}
+RC_SPLIT = {name: {**spec, "params": TAUS} for name, spec in SPLIT.items()}
 MIXED_MAPPING = {
     "Y": ["north T", "power"],
     "U": ["north sp", "ahu fan"],
@@ -67,7 +70,7 @@ MIXED_MAPPING = {
 MIXED = {
     "north": {
         "Y": ["north T"], "U": ["north sp", "ahu fan"], "model": "2r2c",
-        "ambient": "oat",
+        "ambient": "oat", "params": TAUS,
         "inputs": {"north sp": {"kind": "demand", "sign": -1, "state": "north T"},
                    "ahu fan": {"kind": "linear", "sign": +1}},
     },
@@ -117,7 +120,7 @@ def export(tmp_path, cfg, mapping, block_spec=None, heads=None, exporter="legacy
 
 
 CASES = {
-    "2r2c": (make_cfg(), MAPPING, SPLIT, None),
+    "2r2c": (make_cfg(), MAPPING, RC_SPLIT, None),
     "nssm": (make_cfg(model="nssm"), MAPPING, None, None),
     "mlp": (make_cfg(model="mlp"), MAPPING, None, None),
     "lssm": (make_cfg(model="lssm"), MAPPING, None, None),
@@ -186,7 +189,7 @@ def test_an_export_that_disagrees_is_not_written(tmp_path, monkeypatch):
 
     monkeypatch.setattr(export_dynamics, "torch_rollout", off_by_a_degree)
     with pytest.raises(RuntimeError, match="REFUSING TO WRITE"):
-        export(tmp_path, make_cfg(), MAPPING, SPLIT)
+        export(tmp_path, make_cfg(), MAPPING, RC_SPLIT)
     assert not (tmp_path / "pkg").exists()
 
 
@@ -267,7 +270,7 @@ def test_cpp_runner_reproduces_the_reference(tmp_path, request):
     from neurotemplate.control.policy import build_policy
     from neurotemplate.export.policy import export_policy
 
-    package = export(tmp_path, make_cfg(), MAPPING, SPLIT).out_dir
+    package = export(tmp_path, make_cfg(), MAPPING, RC_SPLIT).out_dir
     s = full_setup(**_priced(d_preview=1))
     cfg, sysid_cfg, nm, ns = s["cfg"], s["sysid_cfg"], s["nm"], s["norm_stats"]
     policy = build_policy(cfg, sysid_cfg, nm, ns)

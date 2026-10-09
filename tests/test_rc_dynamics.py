@@ -7,11 +7,12 @@ only hope for, so the tests are that list of claims:
   - the update is the RC network's, arithmetic and all, not something
     approximately like it;
   - the reported time constants are the update's real eigenvalues;
-  - a rollout cannot diverge, whatever the inputs and wherever the rates
-    sit inside their allowed range;
+  - a rollout cannot diverge, whatever the inputs and wherever the time
+    constants sit inside their boxes;
   - the hidden mass remembers past `in_steps`, which is the point;
-  - the time constants are a frozen prior unless asked otherwise, so the
-    number on the reportcard is the number you set;
+  - the time constants are the declared prior — pinned where a scalar says
+    so, inside the box where `[min, max]` does — and every point of the
+    boxes is a valid building;
   - each block is genuinely independent of the others, except for an
     explicit `reads` declaration — and `2r2c` refuses that declaration,
     because its stability guarantee depends on never reading state;
@@ -23,9 +24,10 @@ only hope for, so the tests are that list of claims:
     leaves the MLP's input.
 
 Anything that would silently produce a wrong model instead fails loudly:
-2r2c without residual, without a timestep, under a head that will not add
-the state back, with `reads`, or a block naming a family with no per-block
-builder.
+2r2c without residual, without a timestep, without declared time
+constants, with boxes that overlap or reach below the stability floor, under
+a head that will not add the state back, with `reads`, or a block naming a
+family with no per-block builder.
 """
 
 import pytest
@@ -35,8 +37,10 @@ from neurotemplate.modeling.config import ModelingConfig as Config
 from neurotemplate.export.state import clear_state
 from neurotemplate.modeling.dynamics import BlockStack, get_dynamics, stateful_blocks
 from neurotemplate.modeling.heads import BinaryHead, HeadStack, RegressionHead
+from neurotemplate.modeling.bounded import edge_note
 from neurotemplate.modeling.rc import (
     MIN_TAU_STEPS, RCBlock, SaturatingTerm, mode_taus, physical_parameters,
+    time_constant_boxes,
 )
 
 SPH = 12.0            # 5-minute data
@@ -48,9 +52,16 @@ MAPPING = {
     "D": ["oat", "ghi"],
     "t": ["sec_elapsed"],
 }
+#: An ordinary commercial building, pinned: the modes the old component
+#: defaults produced at 5-minute data.
+PINNED = {"tau_fast_h": 0.6, "tau_ambient_h": 2.0, "tau_slow_h": 13.4}
+#: The same building held in boxes, the fast floor at the stability bound.
+BOXED = {"tau_fast_h": [MIN_TAU_STEPS / SPH, 1.0], "tau_ambient_h": [2.0, 8.0],
+         "tau_slow_h": [10.0, 40.0]}
+
 SPLIT = {
-    "north": {"Y": ["north T"], "U": ["north sp"]},
-    "south": {"Y": ["south T"], "U": ["south sp"]},
+    "north": {"Y": ["north T"], "U": ["north sp"], "params": PINNED},
+    "south": {"Y": ["south T"], "U": ["south sp"], "params": PINNED},
 }
 
 # A second mapping with a mixed family: one thermal state (2r2c) and one
@@ -62,7 +73,7 @@ MIXED_MAPPING = {
     "t": ["sec_elapsed"],
 }
 MIXED_SPLIT = {
-    "north": {"Y": ["north T"], "U": ["north sp"], "model": "2r2c"},
+    "north": {"Y": ["north T"], "U": ["north sp"], "model": "2r2c", "params": PINNED},
     "power": {"Y": ["power"], "reads": ["north T"], "model": "mlp"},
 }
 
@@ -80,7 +91,7 @@ STATS = {
 DECLARED = {
     "north": {
         "Y": ["north T"], "U": ["north sp", "ahu fan"], "D": ["oat", "ghi"],
-        "model": "2r2c", "ambient": "oat",
+        "model": "2r2c", "ambient": "oat", "params": PINNED,
         "inputs": {
             "north sp": {"kind": "demand", "sign": -1, "state": "north T"},
             "ahu fan": {"kind": "linear", "sign": +1},
@@ -107,9 +118,18 @@ def make_cfg(**over) -> Config:
     return cfg
 
 
-def make_block(ny=1, nu=1, nd=1, **over) -> RCBlock:
+def make_block(ny=1, nu=1, nd=1, params=PINNED, **over) -> RCBlock:
     torch.manual_seed(0)
-    return RCBlock(ny, nu, nd, IN_STEPS, SPH, hidden_size=8, num_layers=1, **over)
+    return RCBlock(ny, nu, nd, IN_STEPS, SPH, hidden_size=8, num_layers=1,
+                   taus=time_constant_boxes(params, SPH, "b"), **over)
+
+
+def set_thetas(block: RCBlock, value: float) -> None:
+    """Every time constant to the same position in its box: -20 is the
+    bottom of each (the fastest rates), +20 the top."""
+    with torch.no_grad():
+        for tau in (block.tau_fast, block.tau_ambient, block.tau_slow):
+            tau.theta.fill_(value)
 
 
 def make_declared_block() -> RCBlock:
@@ -163,51 +183,59 @@ def test_the_step_is_the_rc_equation_to_the_last_digit():
         assert torch.allclose(block(x), expected, atol=1e-6)
 
 
-def test_the_reported_time_constants_are_the_updates_eigenvalues():
-    """`mode_taus` is an algebraic shortcut; check it against the matrix."""
-    block = make_block()
-    a_o, a_m, a_c = (r[0] for r in block.rates())
+@pytest.mark.parametrize("theta", [-20.0, 0.0, 20.0])
+def test_the_rates_have_exactly_the_declared_modes(theta):
+    """The update's eigenvalues are the time constants the block holds,
+    wherever in their boxes they sit — checked against the matrix itself,
+    not just `mode_taus`'s algebra — and the ambient rate is its own."""
+    block = make_block(params=BOXED)
+    set_thetas(block, theta)
+    with torch.no_grad():
+        a_o, a_m, a_c = (r[0] for r in block.rates())
+        fast = block.tau_fast.value()[0] * SPH
+        slow = block.tau_slow.value()[0] * SPH
+        ambient = block.tau_ambient.value()[0] * SPH
     update = torch.tensor([[1 - a_m - a_o, a_m], [a_c, 1 - a_c]])
     eig = torch.linalg.eigvals(update).real.sort(descending=True).values
-    fast, slow = mode_taus(a_o, a_m, a_c)
     # tau = 1/lambda for the continuous rate lambda = 1 - eigenvalue.
     assert torch.allclose(1 / (1 - eig[0]), slow, rtol=1e-4)
     assert torch.allclose(1 / (1 - eig[1]), fast, rtol=1e-4)
+    assert torch.allclose(torch.stack(mode_taus(a_o, a_m, a_c)), torch.stack([fast, slow]),
+                          rtol=1e-4)
+    assert (1 / a_o).item() == pytest.approx(ambient.item(), rel=1e-5)
 
 
-def test_the_prior_is_what_the_config_asked_for():
-    slow_building = make_block(tau_hours=(8.0, 1.0, 4.0))
-    fast_building = make_block(tau_hours=(0.5, 1.0, 4.0))
-    assert (slow_building.describe()["time_constants_h"]["y0"]["slow"]
-            > 4 * fast_building.describe()["time_constants_h"]["y0"]["slow"])
+def test_a_pinned_prior_is_what_the_block_reports():
+    taus = make_block().describe()["time_constants_h"]["y0"]
+    assert taus == {"fast": pytest.approx(0.6, rel=1e-3),
+                    "slow": pytest.approx(13.4, rel=1e-3)}
 
 
 # ── Stability is structural, not empirical ───────────────────────
 
-@pytest.mark.parametrize("log_tau", [-20.0, 0.0, 20.0])
-def test_no_rate_can_leave_the_stable_range(log_tau):
-    """Rates are capped at 1/MIN_TAU_STEPS, so the three of them sum below 2
-    — the condition for the update's eigenvalues to sit inside the unit
-    circle. The cap is a supremum the parameterization approaches but never
-    passes; float32 rounds onto it, which is why this is `<=`."""
-    block = make_block()
-    with torch.no_grad():
-        for name in block._log_tau:
-            block._log_tau[name].fill_(log_tau)
+@pytest.mark.parametrize("theta", [-20.0, 0.0, 20.0])
+def test_no_rate_can_leave_the_stable_range(theta):
+    """Every point of disjoint boxes is a valid building: three positive
+    rates, each below 1/MIN_TAU_STEPS — the fast floor is exactly the
+    stability bound here — so the update's eigenvalues sit inside the unit
+    circle."""
+    block = make_block(params=BOXED)
+    set_thetas(block, theta)
     rates = torch.stack([r[0] for r in block.rates()])
-    assert (rates > 0).all() and (rates <= 1 / MIN_TAU_STEPS).all()
-    assert rates.sum() < 2.0
+    assert (rates > 0).all()
+    assert (rates <= 1 / MIN_TAU_STEPS + 1e-6).all()
+    assert rates.sum() < 1.0
 
 
 def test_a_week_of_adversarial_input_does_not_diverge():
     """The forcing never reads the state, so no input can make the loop
     run away — which is what a DPC policy searching for exploits needs."""
     torch.manual_seed(0)
-    system = get_dynamics(make_cfg(), MAPPING)
+    boxed = {name: {**spec, "params": BOXED} for name, spec in SPLIT.items()}
+    system = get_dynamics(make_cfg(), MAPPING, block_spec=boxed)
     for block in system.nodes[0].callable.fy.blocks:
+        set_thetas(block, -20.0)                  # fastest allowed rates
         with torch.no_grad():
-            for name in block._log_tau:            # fastest allowed rates
-                block._log_tau[name].fill_(-20.0)
             for p in block.gain.parameters():
                 p.normal_(0, 1.0)
     steps = int(SPH) * 24 * 7
@@ -223,7 +251,7 @@ def test_a_week_of_adversarial_input_does_not_diverge():
 def test_a_head_start_outlives_the_history_window():
     """A difference in initial temperature has to survive far longer than
     `in_steps`, or the family has bought nothing over a windowed MLP."""
-    system = get_dynamics(make_cfg(), MAPPING)
+    system = get_dynamics(make_cfg(), MAPPING, block_spec=SPLIT)
     steps = int(SPH) * 24
     warm = rollout(system, 2.0, steps)[0, :, 0]
     cold = rollout(system, 0.0, steps)[0, :, 0]
@@ -254,7 +282,7 @@ def test_the_mass_carries_state_across_calls_until_reset():
 def test_the_gradient_penalty_can_still_differentiate_the_block():
     """The sampled gradient penalty runs jacrev under vmap, where there is
     no batch dimension and no state to keep."""
-    system = get_dynamics(make_cfg(), MAPPING)
+    system = get_dynamics(make_cfg(), MAPPING, block_spec=SPLIT)
     raw = system.nodes[0].callable
     x = torch.randn(4, IN_STEPS * 7)
     jac = torch.vmap(torch.func.jacrev(raw.compute_output, argnums=(0, 1, 2)))(
@@ -278,19 +306,34 @@ def test_the_gradient_penalty_still_works_on_a_mixed_family_block():
     assert jac[0].shape == (4, 2, IN_STEPS * 2)
 
 
-# ── The prior stays put unless asked ─────────────────────────────
+# ── The prior holds where it is declared ─────────────────────────
 
-def test_the_time_constants_are_frozen_by_default():
-    """A training rollout cannot identify them (see the module docstring),
-    so they must not quietly drift away from what the config asserted."""
-    block = make_block()
-    assert all(not p.requires_grad for p in block._log_tau.parameters())
-    assert any(p.requires_grad for p in block.gain.parameters())
+def test_a_pinned_time_constant_cannot_move_and_a_boxed_one_stays_in_its_box():
+    """A scalar pins: its gradient is zero. A box lets training move the
+    value — even an enormous step lands inside it."""
+    params = {**BOXED, "tau_ambient_h": 3.0}
+    block = make_block(params=params)
+    optimizer = torch.optim.SGD([b.theta for b in (block.tau_fast, block.tau_ambient,
+                                                   block.tau_slow)], lr=1e4)
+    torch.stack(block.rates()).sum().backward()
+    assert float(block.tau_ambient.theta.grad.abs().sum()) == 0.0
+    optimizer.step()
+    with torch.no_grad():
+        assert block.tau_ambient.value().item() == pytest.approx(3.0, rel=1e-6)
+        slow = block.tau_slow.value().item()
+    assert 10.0 <= slow <= 40.0 and slow != pytest.approx(20.0, rel=1e-3)
 
 
-def test_the_time_constants_train_when_asked():
-    block = make_block(train_taus=True)
-    assert all(p.requires_grad for p in block._log_tau.parameters())
+def test_a_time_constant_pressed_against_its_bound_says_so():
+    """The box stops the fit; the report is that it did."""
+    block = make_block(params=BOXED)
+    with torch.no_grad():
+        block.tau_slow.theta.fill_(-3.5)
+    info = block.tau_slow.describe()
+    assert info["value"]["y0"] < 10.5
+    note = edge_note("tau_slow", info["fraction"]["y0"])
+    assert note is not None and "97% of the way to its lower bound" in note
+    assert edge_note("tau_fast", block.tau_fast.describe()["fraction"]["y0"]) is None
 
 
 def test_the_forcing_starts_at_zero():
@@ -324,8 +367,7 @@ def test_one_blocks_input_cannot_move_another_blocks_state():
 def test_outputs_come_back_in_the_mappings_channel_order():
     """Blocks may be declared in any order and hold their states in any
     order; the loss and the feedback loop both assume nm_mapping's."""
-    reordered = {"south": {"Y": ["south T"], "U": ["south sp"]},
-                 "north": {"Y": ["north T"], "U": ["north sp"]}}
+    reordered = {"south": SPLIT["south"], "north": SPLIT["north"]}
     system = get_dynamics(make_cfg(), MAPPING, block_spec=reordered)
     fy = system.nodes[0].callable.fy
     assert fy._to_y_order.tolist() == [1, 0]
@@ -353,8 +395,10 @@ def test_reset_reaches_every_block():
 
 def test_per_block_wraps_any_family_the_flag_allows():
     """`per_block` is a split, not a family: an MLP gets the same treatment."""
+    split = {name: {k: v for k, v in spec.items() if k != "params"}
+             for name, spec in SPLIT.items()}
     system = get_dynamics(make_cfg(model="mlp", per_block=True), MAPPING,
-                          block_spec=SPLIT)
+                          block_spec=split)
     fy = system.nodes[0].callable.fy
     assert isinstance(fy, BlockStack)
     assert fy(torch.randn(2, IN_STEPS * 7)).shape == (2, 2)
@@ -444,11 +488,12 @@ def test_a_per_block_d_subset_narrows_only_that_blocks_input_width():
 # ── Declared forcing: every claim survives the branches ──────────
 
 def test_an_undeclared_block_has_the_classical_state_dict():
-    """No branch registers anything unless declared. The rates live under
-    `_log_tau`, not the old `_theta`: a checkpoint from the softplus-space
-    parameterization must fail to load rather than be misread as log-space."""
-    assert set(make_block().state_dict()) == {
-        "_log_tau.ambient", "_log_tau.zone_mass", "_log_tau.mass_zone",
+    """No branch registers anything unless declared, and the time constants
+    carry their boxes: a checkpoint from another parameterization must fail
+    to load rather than be misread."""
+    taus = {f"{t}.{k}" for t in ("tau_fast", "tau_ambient", "tau_slow")
+            for k in ("theta", "log_low", "log_high")}
+    assert set(make_block().state_dict()) == taus | {
         "gain.linear.0.weight", "gain.linear.0.bias",
         "gain.linear.1.weight", "gain.linear.1.bias",
     }
@@ -501,32 +546,17 @@ def test_an_ambient_column_leaves_the_mlps_input():
     assert block.ambient_name == "oat"
 
 
-def test_a_declared_ambient_term_owns_a_trainable_rate():
-    """Explicit conduction makes `a_o` identifiable, so the term owns it and
-    trains it from the prior; the mass rates keep the frozen prior the module
-    docstring argues for, and an undeclared block keeps all three frozen."""
-    block = make_declared_block()
-    assert "ambient" not in block._log_tau
-    assert block.ambient.log_tau.requires_grad
-    assert not any(p.requires_grad for p in block._log_tau.parameters())
-    a_o, _, _ = block.rates()
-    assert a_o.item() == pytest.approx(1 / (2.0 * SPH), rel=1e-4)
-    assert not any(p.requires_grad for p in make_block()._log_tau.parameters())
-
-
-def test_physical_parameters_are_the_rates_and_the_declared_scalars():
-    """The storage rates belong in the `rc_branch_lr` group too: unfrozen
-    at the network `lr` they would stall where they started, and the
-    reportcard would read that as a fit."""
+def test_physical_parameters_are_the_time_constants_and_the_declared_scalars():
+    """The time constants belong in the `rc_branch_lr` group too: at the
+    network `lr` they would stall where they started, and the reportcard
+    would read that as a fit."""
     def names(block):
         return {n for n, p in block.named_parameters()
                 if any(p is q for q in physical_parameters(block))}
-    assert names(make_declared_block()) == {
-        "_log_tau.zone_mass", "_log_tau.mass_zone",
-        "ambient.log_tau", "linear.0.theta",
-        "saturating.0.theta_cap", "saturating.0.theta_slope"}
-    assert names(make_block()) == {
-        "_log_tau.ambient", "_log_tau.zone_mass", "_log_tau.mass_zone"}
+    taus = {"tau_fast.theta", "tau_ambient.theta", "tau_slow.theta"}
+    assert names(make_declared_block()) == taus | {
+        "linear.0.theta", "saturating.0.theta_cap", "saturating.0.theta_slope"}
+    assert names(make_block()) == taus
 
 
 def test_a_linear_sign_is_a_constraint_not_a_hint():
@@ -549,8 +579,8 @@ def test_the_ambient_term_is_conduction_to_the_declared_column():
         zone = torch.full((1, 1), normalised("north T", 24.0))
         same = torch.full((1, 1), normalised("oat", 24.0))
         hotter = torch.full((1, 1), normalised("oat", 30.0))
-        assert torch.allclose(block.ambient(zone, same), torch.zeros(1, 1), atol=1e-6)
-        assert torch.allclose(block.ambient(zone, hotter),
+        assert torch.allclose(block.ambient(zone, same, a_o), torch.zeros(1, 1), atol=1e-6)
+        assert torch.allclose(block.ambient(zone, hotter, a_o),
                               a_o * 6.0 / STATS["north T"]["stretch"])
 
 
@@ -580,10 +610,8 @@ def test_a_week_of_adversarial_setpoints_does_not_diverge_with_demand_on():
     system = get_dynamics(make_cfg(), DECLARED_MAPPING, block_spec=DECLARED,
                           norm_stats=STATS)
     block = system.nodes[0].callable.fy.blocks[0]
+    set_thetas(block, -20.0)                          # the fastest rates
     with torch.no_grad():
-        for name in block._log_tau:
-            block._log_tau[name].fill_(-20.0)
-        block.ambient.log_tau.fill_(-20.0)            # fastest ambient rate too
         block.saturating[0].theta_cap.fill_(5.0)
         block.saturating[0].theta_slope.fill_(20.0)   # the whole headroom
         for p in block.gain.parameters():
@@ -609,7 +637,6 @@ def test_a_declared_block_still_differentiates_under_vmap():
 def test_the_reportcard_reads_the_branches_off_describe():
     info = make_declared_block().describe()["forcing"]
     assert info["ambient"]["column"] == "oat"
-    assert list(info["ambient"]["tau_h"].values()) == pytest.approx([2.0], rel=1e-3)
     assert set(info["linear"]) == {"ahu fan"} and info["linear"]["ahu fan"]["k"] > 0
     assert set(info["saturating"]) == {"north sp"}
     assert 0 < info["saturating"]["north sp"]["slope_share"] < 1
@@ -629,7 +656,35 @@ def test_a_demand_declaration_needs_norm_stats():
 ])
 def test_a_2r2c_that_would_be_wrong_is_refused(over, message):
     with pytest.raises(ValueError, match=message):
-        get_dynamics(make_cfg(**over), MAPPING)
+        get_dynamics(make_cfg(**over), MAPPING, block_spec=SPLIT)
+
+
+@pytest.mark.parametrize("params,message", [
+    # No library default for a building: every key is declared.
+    ({}, "declares no time constants"),
+    ({"tau_fast_h": 0.6, "tau_slow_h": 13.4}, r"missing \['tau_ambient_h'\]"),
+    ({**PINNED, "tau_mass_h": 4.0}, r"unknown key\(s\) \['tau_mass_h'\]"),
+    # Overlapping boxes contain buildings with a negative rate.
+    ({**BOXED, "tau_ambient_h": [0.8, 8.0]}, "must lie wholly below tau_ambient_h"),
+    # Under two steps the rollout is not guaranteed stable: today's silent
+    # clamp, made a refusal.
+    ({**BOXED, "tau_fast_h": [0.1, 1.0]}, "under the 2-step floor"),
+])
+def test_time_constants_that_would_be_wrong_are_refused(params, message):
+    spec = {name: {**block, "params": params} for name, block in SPLIT.items()}
+    with pytest.raises(ValueError, match=message):
+        get_dynamics(make_cfg(), MAPPING, block_spec=spec)
+
+
+def test_2r2c_without_a_block_mapping_has_nowhere_to_declare_its_prior():
+    with pytest.raises(ValueError, match="needs one"):
+        get_dynamics(make_cfg(), MAPPING)
+
+
+def test_params_on_a_family_that_reads_none_are_refused():
+    spec = {"all": {"Y": MAPPING["Y"], "params": PINNED}}
+    with pytest.raises(ValueError, match="only a 2r2c block reads"):
+        get_dynamics(make_cfg(model="mlp"), MAPPING, block_spec=spec)
 
 
 def test_a_head_that_will_not_add_the_state_back_is_refused():
@@ -637,17 +692,7 @@ def test_a_head_that_will_not_add_the_state_back_is_refused():
     would read that increment as an absolute temperature."""
     stack = HeadStack([RegressionHead(), BinaryHead()], MAPPING["Y"])
     with pytest.raises(ValueError, match="residual-compatible"):
-        get_dynamics(make_cfg(), MAPPING, head_stack=stack)
-
-
-@pytest.mark.parametrize("tau_hours", [0.5, 13.4, 200.0])
-def test_the_rates_read_back_the_prior(tau_hours):
-    """Above the two-step floor, whatever went in as a component time
-    constant comes back out of `rates()`, to float32 precision, however
-    long it is."""
-    block = make_block(tau_hours=(tau_hours, 1.0, 4.0))
-    a_o, _, _ = block.rates()
-    assert (1 / a_o[0] / SPH).item() == pytest.approx(tau_hours, rel=1e-5)
+        get_dynamics(make_cfg(), MAPPING, head_stack=stack, block_spec=SPLIT)
 
 
 def test_2r2c_with_reads_is_refused():

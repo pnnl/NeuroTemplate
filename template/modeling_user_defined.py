@@ -182,13 +182,16 @@ def block_mapping(
     learn that the cross-couplings are ~zero, and short records rarely
     teach it; separate blocks get that for free.
 
+        taus = {"tau_fast_h": [0.3, 1.0],      # air settling after a push
+                "tau_ambient_h": [2.0, 8.0],   # air leaking to outdoors
+                "tau_slow_h": [20.0, 60.0]}    # whole building, HVAC off
         return {
             "zone_a": {"Y": ["Zone A Temp [degC]"],
                        "U": ["Zone A Setpoint [degC]"],
-                       "model": "2r2c"},
+                       "model": "2r2c", "params": taus},
             "zone_b": {"Y": ["Zone B Temp [degC]"],
                        "U": ["Zone B Setpoint [degC]"],
-                       "model": "2r2c"},
+                       "model": "2r2c", "params": taus},
             "meter":  {"Y": ["Total Power [kW]"],
                        "reads": ["Zone A Temp [degC]", "Zone B Temp [degC]"],
                        "model": "mlp"},
@@ -200,8 +203,13 @@ def block_mapping(
     other blocks' Y as an ordinary input (not allowed in `2r2c`, whose
     stability guarantee depends on never reading state). `model` omitted
     means `cfg.model`; under `mlp`/`gru` the split then needs
-    `per_block: true`. `2r2c` gives every Y channel its own network even
-    without this hook — the hook is how you say which actuator drives which.
+    `per_block: true`. `2r2c` gives every Y channel its own network, and
+    needs this hook: each `2r2c` block declares its storage prior in
+    `params` — `tau_fast_h`, `tau_ambient_h` and `tau_slow_h`, in hours, each
+    a scalar (pinned) or [min, max] (fitted inside), in that order with no
+    overlap. `nt data decay` measures `tau_slow`; its range is the natural
+    `tau_slow_h` box. There is no default: a prior about a building is yours
+    to state, and the reportcard says where each fit landed in its box.
 
     A block may also declare what each column *is*, which changes the
     physics rather than the shapes:
@@ -226,8 +234,8 @@ def block_mapping(
       linear   one sign-fixed coefficient times the physical value: metered
                heat or power delivered, irradiance. An actuator that is a
                power rather than a setpoint is `linear`, never `demand`.
-      ambient  the outdoor-temperature column, as explicit conduction with a
-               learned rate (starting from `rc_tau_ambient_h`).
+      ambient  the outdoor-temperature column, as explicit conduction at the
+               block's `tau_ambient_h` rate.
 
     `linear` and `ambient` act only inside `2r2c`; other families see those
     columns as ordinary inputs, with a build-time warning. Undeclared

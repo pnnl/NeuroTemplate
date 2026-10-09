@@ -148,6 +148,7 @@ def _demand_setup():
     sysid_cfg.steps_per_hour = 12.0
     spec = {
         "zone": {"Y": [ZONE], "U": [SETPT], "model": "2r2c", "ambient": DIST[0],
+                 "params": {"tau_fast_h": 0.6, "tau_ambient_h": 2.0, "tau_slow_h": 13.4},
                  "inputs": {SETPT: {"kind": "demand", "sign": -1, "state": ZONE}}},
         "rtu": {"Y": [c for c in Y_COLS if c != ZONE], "model": "mlp"},
     }

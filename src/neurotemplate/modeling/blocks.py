@@ -34,6 +34,10 @@ What a block owns
          the one D column that is the outdoor temperature, if any. Only
          `2r2c` acts on it (the explicit conduction term); other families
          see the column as an ordinary input either way.
+  params the block's physical priors, read by its family's builder. Today
+         only `2r2c` reads any: its three time constants, in hours —
+         `{"tau_fast_h": [0.3, 1.0], "tau_ambient_h": [2.0, 8.0],
+         "tau_slow_h": [20.0, 60.0]}`, a scalar pinning one (see `rc`).
 
 Declaring what a column is
 ==========================
@@ -93,6 +97,10 @@ built from the same family shares cfg's hyperparameters. CLAUDE.md's YAGNI
 rule is the reason: nothing today needs a north zone with a bigger MLP
 than the south zone, and adding the knob before something does would be
 exactly the speculative extension point the rules warn against.
+
+Time constants are the exception, and `params` is where they go: they are
+a property of the zone, not a hyperparameter. Two zones with different
+envelopes have different priors, and the block is where a zone is declared.
 """
 
 from __future__ import annotations
@@ -136,6 +144,9 @@ class Block:
     #: ordinary input.
     inputs: dict[str, dict] = field(default_factory=dict)
     ambient: Optional[str] = None
+    #: The block's physical priors, `{name: value}`, JSON-safe; validated by
+    #: the family's builder, which is the one that knows the names.
+    params: dict = field(default_factory=dict)
 
     @property
     def ny(self) -> int:
@@ -199,7 +210,8 @@ def _resolve(columns: list[str], names: list[str], block: str, key: str,
 #: Every key a block spec may set. Anything else is a typo: the declaration
 #: keys change what the block fits without changing its shape, so a
 #: misspelled one has no other way of announcing itself.
-BLOCK_KEYS = frozenset({"Y", "U", "D", "reads", "model", "inputs", "ambient"})
+BLOCK_KEYS = frozenset({"Y", "U", "D", "reads", "model", "inputs", "ambient",
+                        "params"})
 
 INPUT_KINDS = ("demand", "linear")
 DEMAND_BRANCHES = ("saturating", "mlp")
@@ -264,7 +276,8 @@ def build_blocks(
     """Turn a `block_mapping` hook result into validated index slices.
 
     `block_spec` is `{block_name: {"Y": [...], "U": [...], "D": [...],
-    "reads": [...], "model": "...", "inputs": {...}, "ambient": "..."}}`.
+    "reads": [...], "model": "...", "inputs": {...}, "ambient": "...",
+    "params": {...}}}`.
     Passing None (no hook) gives one block holding every Y and U channel
     and reading every D column.
 
@@ -357,9 +370,14 @@ def build_blocks(
         u_names = [u_cols[i] for i in u_idx]
         d_names = [d_cols[i] for i in d_idx]
         inputs, ambient = _resolve_inputs(spec, name, y_names, u_names, d_names)
+        params = spec.get("params", {})
+        if not isinstance(params, dict):
+            raise ValueError(f"block_mapping: block {name!r} has `params` "
+                             f"{params!r}; expected a mapping.")
         blocks.append(Block(
             name, tuple(y_idx), tuple(u_idx), tuple(y_names), tuple(d_idx),
             tuple(reads_idx), model, tuple(u_names), tuple(d_names), inputs, ambient,
+            dict(params),
         ))
     _check_one_demand_per_column(blocks)
     return blocks

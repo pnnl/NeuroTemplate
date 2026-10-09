@@ -54,7 +54,8 @@ from neuromancer.modules import blocks as nm_blocks
 
 from neurotemplate.modeling import windows
 from neurotemplate.modeling.heads import HeadStack, PreStack
-from neurotemplate.modeling.rc import RCBlock
+from neurotemplate.modeling.bounded import bounded_parameters
+from neurotemplate.modeling.rc import TAU_KEYS, RCBlock, time_constant_boxes
 from neurotemplate.modeling.blocks import Block, build_blocks
 
 
@@ -498,14 +499,21 @@ def _2r2c_block(cfg: ModelingConfig, block: Block, norm_stats: Optional[dict]) -
             "state-dependence the guarantee forbids. Use a different family "
             "for this block if it needs to see another block's state."
         )
+    if not block.params:
+        raise ValueError(
+            f"2r2c block {block.name!r} declares no time constants. Give its "
+            f"block_mapping entry `params` with {list(TAU_KEYS)}, in hours — a "
+            "scalar pins one, [min, max] bounds it. They are this zone's "
+            "storage prior, and there is no library default for a building. "
+            "With no block_mapping hook there is nowhere to declare them: "
+            "`model: 2r2c` needs one."
+        )
     return RCBlock(
         block.ny, block.nu, block.nd, cfg.in_steps,
         steps_per_hour=cfg.steps_per_hour,
         hidden_size=(2**cfg.log2_hidden_size),
         num_layers=cfg.num_layers,
-        tau_hours=(cfg.rc_tau_ambient_h, cfg.rc_tau_zone_mass_h,
-                   cfg.rc_tau_mass_zone_h),
-        train_taus=cfg.rc_train_taus,
+        taus=time_constant_boxes(block.params, cfg.steps_per_hour, block.name),
         channel_names=block.y_names,
         u_names=block.u_names, d_names=block.d_names,
         inputs=block.inputs, ambient=block.ambient, norm_stats=norm_stats,
@@ -659,6 +667,12 @@ def _describe_block(block: Optional[nn.Module], cfg: ModelingConfig) -> Optional
     # RCBlock reports the time constants it learned — says it here.
     if hasattr(block, "describe"):
         info.update(block.describe())
+    # Every bounded parameter it owns, generically: its box and where the
+    # fit landed in it. A stack's live in its blocks' own entries.
+    if not isinstance(block, BlockStack):
+        bounded = {b.name: b.describe() for b in bounded_parameters(block)}
+        if bounded:
+            info["bounded"] = bounded
     return info
 
 
@@ -878,6 +892,13 @@ def get_dynamics(
     families = [_resolve_family(cfg, b) for b in blocks]
 
     _warn_ignored_declarations(blocks, families)
+    unread = [b.name for b, family in zip(blocks, families)
+              if b.params and family != "2r2c"]
+    if unread:
+        raise ValueError(
+            f"block(s) {unread} declare `params`, but only a 2r2c block reads "
+            "any; the declaration would sit inert."
+        )
     if _uses_per_block(cfg, blocks, families):
         model = _build_per_block_model(cfg, nm_mapping, blocks, families, norm_stats)
     else:

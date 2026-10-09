@@ -6,10 +6,13 @@ numbers to the pure functions in `modeling/diagnostics.py`; this file is
 only argument parsing and printing.
 
 Neither is wired into `nt model train`. `heads` prints a snippet the user
-pastes into `data_head_config`; `decay` prints a number to compare against
-the asserted `rc_tau_ambient_h` prior. Both require judgment the pipeline
-does not have (is this multimodality really staged equipment; is this run
-really a free decay), so neither substitutes a measurement automatically.
+pastes into `data_head_config`; `decay` measures `tau_slow`, whose range is
+the natural `tau_slow_h` box of a 2r2c block's `params`. Both require
+judgment the pipeline does not have (is this multimodality really staged
+equipment; is this run really a free decay), so neither substitutes a
+measurement automatically. `decay` reads only the train split, matching how
+`nt model train` pools data; a free-decay episode that lives only in dev or
+test needs `train_data_path` pointed at it.
 
 Usage:
     nt data heads --config model_configs/modeling.yaml
@@ -173,9 +176,9 @@ def decay_main() -> None:
         print(
             "  No free-decay episode found in this data -- the plant is "
             "never uncoupled for long enough at these off values. The "
-            "rc_tau_ambient_h prior then has to come from an Optuna sweep "
-            "instead: it is an ordinary hyperparameter there, not something "
-            "this script can measure for you."
+            "tau_slow_h box then has to come from what you know about the "
+            "building: hold it wide, and read on the reportcard whether the "
+            "fit presses against an edge."
         )
         return
 
@@ -189,7 +192,7 @@ def decay_main() -> None:
     print(f"  half-life at the median = {median * math.log(2):.2f}h")
     print(
         "  Report the range, not just the median -- the spread across "
-        "windows IS the honest uncertainty on this estimate. Compare it "
-        "against rc_tau_ambient_h before training, then read tau_slow back "
-        "off the reportcard."
+        "windows IS the honest uncertainty on this estimate. It measures "
+        "tau_slow: the range is the natural `tau_slow_h` box in the block's "
+        "params, then read back off the reportcard where the fit landed in it."
     )

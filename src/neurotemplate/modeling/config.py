@@ -67,30 +67,13 @@ class ModelingConfig:
     steps_per_hour: Optional[float] = None
 
     # ---- 2R2C ----------------------------------------------------------------
-    # The RC network's three component time constants, in hours: zone<->ambient,
-    # zone<->mass from the zone's side, and mass<->zone from the mass's side.
-    # These are the storage *prior*, and the reportcard prints the two modes
-    # they produce (0.6 h and 13.4 h at these defaults on 5-minute data).
-    #
-    # They are a prior rather than a fitted parameter because a training
-    # rollout cannot identify them: the mass temperature is unobserved, every
-    # rollout has to guess it from an in_steps window that is far shorter than
-    # the mass lags, and a wrong guess is cheaper to absorb by shortening the
-    # slow mode than by fixing the forcing. Left trainable, the optimizer does
-    # exactly that. Set these from what you know about the building — a
-    # measured free-decay time constant is the number tau_slow should match.
-    rc_tau_ambient_h: float = 2.0
-    rc_tau_zone_mass_h: float = 1.0
-    rc_tau_mass_zone_h: float = 4.0
-    # Let training move the three above. Only worth it when the rollout is
-    # long relative to the slow mode AND the data excites it; otherwise it
-    # drags tau_slow down and the reportcard's number stops being checkable.
-    rc_train_taus: bool = False
-    # Learning rate for a 2r2c block's physical scalars: the three storage
-    # rates (when `rc_train_taus` unfreezes them), the ambient rate, linear
-    # coefficients, coil capacity and ramp. Adam moves a raw parameter by
-    # about `lr` per update, and these have units of travel to cover where a
-    # network weight has thousandths; at `lr` they stall near their start.
+    # A 2r2c block's time constants are a property of the zone, so they are
+    # declared per block, in the block_mapping hook's `params` (see
+    # modeling.rc). Here: the learning rate for its physical scalars — the
+    # bounded time constants, linear coefficients, coil capacity and ramp.
+    # Adam moves a raw parameter by about `lr` per update, and these have
+    # units of travel to cover where a network weight has thousandths; at
+    # `lr` they stall near their start.
     rc_branch_lr: float = 0.05
 
     # ---- TRAIN ---------------------------------------------------------------
@@ -189,9 +172,7 @@ class ModelingConfig:
         ]:
             check_non_negative(self, name)
 
-        for name in ["rc_tau_ambient_h", "rc_tau_zone_mass_h", "rc_tau_mass_zone_h",
-                     "rc_branch_lr"]:
-            check_positive(self, name)
+        check_positive(self, "rc_branch_lr")
 
         # Imported here rather than at module scope: dynamics imports this
         # config module, so a top-level import would be circular.
