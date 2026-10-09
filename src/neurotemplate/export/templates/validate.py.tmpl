@@ -16,11 +16,12 @@ from pathlib import Path
 
 from $package import Model, Policy, check_reference
 
-failures = []
+failures, checked = [], []
 
 
 def check(name, ok, detail=""):
     print(f"  [{'PASS' if ok else 'FAIL'}] {name}{'  ' + detail if detail else ''}")
+    checked.append(name)
     if not ok:
         failures.append(name)
 
@@ -43,4 +44,4 @@ print()
 if failures:
     print(f"FAILED {len(failures)} check(s): {', '.join(failures)}")
     sys.exit(1)
-print("All checks passed.")
+print(f"All {len(checked)} check(s) passed." if checked else "Nothing was checked.")

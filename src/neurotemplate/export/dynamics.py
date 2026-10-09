@@ -62,7 +62,11 @@ def ask_on_terminal(question: str) -> bool:
     if not sys.stdin.isatty():
         print(f"{question}\n(no terminal to answer on: no)")
         return False
-    return input(f"{question} [y/n] ").strip().lower() in ("y", "yes")
+    try:
+        answer = input(f"{question} [y/n] ")
+    except EOFError:        # the terminal closed without an answer
+        return False
+    return answer.strip().lower() in ("y", "yes")
 
 
 def export_model(*, dyn_sys, cfg, nm_mapping: dict[str, list[str]],

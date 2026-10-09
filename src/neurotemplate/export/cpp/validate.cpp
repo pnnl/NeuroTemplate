@@ -137,15 +137,17 @@ int main(int argc, char** argv) {
 
     std::cout << "reproducing the trained model's own answers (C++, onnxruntime "
               << Ort::GetVersionString() << ")\n";
-    int failures = 0;
+    int failures = 0, checked = 0;
     for (const Check& check : checks) {
         check.report();
         if (!check.verified) continue;
+        ++checked;
         std::printf("  [%s] %s matches %s/reference/\n", check.ok() ? "PASS" : "FAIL",
                     check.name.c_str(), check.name.c_str());
         failures += !check.ok();
     }
-    std::cout << (failures ? "FAILED " + std::to_string(failures) + " check(s)\n"
-                           : "All checks passed.\n");
+    std::cout << (failures  ? "FAILED " + std::to_string(failures) + " check(s)\n"
+                  : checked ? "All " + std::to_string(checked) + " check(s) passed.\n"
+                            : std::string("Nothing was checked.\n"));
     return failures ? 1 : 0;
 }

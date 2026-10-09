@@ -27,6 +27,7 @@ from __future__ import annotations
 import json
 import platform
 import shutil
+import sys
 from datetime import datetime, timezone
 from importlib import metadata
 from pathlib import Path
@@ -56,6 +57,11 @@ WRITE_ONCE = ("validate.py", "example.py")
 def check_package_name(package: str) -> None:
     if not package.isidentifier():
         raise ValueError(f"package name {package!r} is not a Python identifier.")
+    if package in sys.stdlib_module_names:
+        # The standard library wins the import, so the shipped validate.py
+        # and example.py would import it instead of the runtime.
+        raise ValueError(f"package name {package!r} is a standard-library "
+                         "module; choose another.")
 
 
 def stamp(proto: onnx.ModelProto, path: Path, export_id: str, run_id: str) -> None:
