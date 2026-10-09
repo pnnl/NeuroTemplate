@@ -49,7 +49,7 @@ Declaring what a column is
 
 `demand` turns a setpoint into the thermostat's clamped error against one
 of the block's *own* Y channels, `relu(sign · (setpoint − state))`, before
-any family sees it — see `heads.Demand`. `sign` is the direction the state
+any family sees it — see `prestack.Demand`. `sign` is the direction the state
 moves while the demand is active (-1 cooling, +1 heating). Pairing with
 another block's channel is refused: that is what `reads` is for. A block
 with a `demand` entry has exactly one Y channel. Inside a `2r2c` block the

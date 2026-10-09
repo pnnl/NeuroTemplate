@@ -756,6 +756,7 @@ src/neurotemplate/
 │   ├── diagnostics.py   # nt data heads / nt data decay — pre-training advice
 │   ├── windows.py       # positions inside the flattened history window
 │   ├── heads.py         # HeadStack (regression / binary / bounded / ordinal)
+│   ├── prestack.py      # PreStack / Demand — derived inputs computed inside the rollout
 │   ├── calibration.py   # balanced level weights, calibrated decision thresholds
 │   ├── loss.py          # build_loss
 │   ├── gradient_sampling.py  # SampledGradientPenalty

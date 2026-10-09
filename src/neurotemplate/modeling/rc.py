@@ -74,7 +74,7 @@ genuinely unknown.
                outdoor gap.
   saturating   what a `demand`-declared setpoint becomes here. The
                pre-stack has already replaced the column with the
-               thermostat's clamped error (see `heads.Demand`); this branch
+               thermostat's clamped error (see `prestack.Demand`); this branch
                turns it into a staged coil's response, `cap · tanh(x / w)`:
                `cap` is °C per step at full stage and `w` the °C of demand
                over which it ramps from off to full. `tanh` is bounded in
@@ -172,7 +172,7 @@ from neuromancer.modules import blocks
 
 from neurotemplate.modeling import windows
 from neurotemplate.modeling.bounded import BoundedParameter, bounded_parameters, parse_box
-from neurotemplate.modeling.heads import demand_scale
+from neurotemplate.modeling.prestack import demand_scale
 
 #: Fastest time constant the parameterization allows, in timesteps. Its
 #: reciprocal bounds every rate, and that is what keeps the discrete update

@@ -53,7 +53,8 @@ from neuromancer.system import Node, SystemPreview
 from neuromancer.modules import blocks as nm_blocks
 
 from neurotemplate.modeling import windows
-from neurotemplate.modeling.heads import HeadStack, PreStack
+from neurotemplate.modeling.heads import HeadStack
+from neurotemplate.modeling.prestack import PreStack
 from neurotemplate.modeling.bounded import bounded_parameters
 from neurotemplate.modeling.gru import GRUBlock
 from neurotemplate.modeling.rc import TAU_KEYS, RCBlock, time_constant_boxes
@@ -146,7 +147,7 @@ class SSMGrad(nn.Module):
     This is a pure predictor — no Jacobians computed here. The sampled
     gradient penalty differentiates `pre_activation` externally via jacrev.
 
-    An optional `pre_stack` (see `heads.PreStack`) rewrites declared U
+    An optional `pre_stack` (see `prestack.PreStack`) rewrites declared U
     columns from the U and Y windows before `compute_output` sees them, so
     every family consumes the derived feature and none the raw column. It
     runs inside the autoregressive loop: the Y it reads is recorded data in

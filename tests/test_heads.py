@@ -30,18 +30,16 @@ import pytest
 import torch
 import torch.nn as nn
 
+from neurotemplate.modeling.prestack import Demand, PreStack, soft_clamp_min
 from neurotemplate.modeling.heads import (
     BinaryHead,
     BoundedHead,
-    Demand,
     HeadStack,
     OrdinalHead,
-    PreStack,
     RegressionHead,
     bounds_from_norm,
     inverse_sqrt_frequency_weights,
     project_physical_to_norm,
-    soft_clamp_min,
 )
 
 INF = float("inf")

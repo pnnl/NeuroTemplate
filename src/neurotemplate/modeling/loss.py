@@ -12,7 +12,6 @@ points on every call, so scoring it in eval would make dev_loss (and so
 early stopping) noisy without measuring anything about the fit.
 """
 
-import warnings
 from typing import Optional
 
 import torch
@@ -103,21 +102,10 @@ def build_loss(
     # read from the data dict — it generates its own synthetic inputs.
 
     if grad_masks and cfg.grad_gain > 0:
-        # Linear models have a constant Jacobian; sampling more than one input
-        # point is wasted compute.
-        n_samples = cfg.grad_n_samples
-        if cfg.model == "lssm" and n_samples != 1:
-            warnings.warn(
-                f"Linear model (lssm) has a constant Jacobian; pinning "
-                f"grad_n_samples to 1 (was {n_samples}).",
-                stacklevel=2,
-            )
-            n_samples = 1
-
         penalty = SampledGradientPenalty(
             model=raw_model,
             grad_mapping=grad_masks,
-            n_samples=n_samples,
+            n_samples=cfg.grad_n_samples,
             device=cfg.device,
             cfg=cfg,
         )
