@@ -83,14 +83,15 @@ class ControlConfig:
     # ── Policy network ───────────────────────────────────────────
     # Network family (see control.policy.policy_catalog). "linear" ignores
     # policy_layers / log2_policy_hidden / policy_nonlin and produces a single
-    # saturated affine feedback law.
-    policy: str = "mlp"
+    # saturated affine feedback law: the default, because it has little it
+    # can learn from the surrogate that the plant does not share.
+    policy: str = "linear"
     policy_nonlin: str = "gelu"
     # How the network output is squashed into [umin, umax]: "sigmoid_scale"
     # (smooth, never exactly reaches the limits) or "relu_clamp" (hard clip).
     policy_bound_method: str = "sigmoid_scale"
-    log2_policy_hidden: int = 6
-    policy_layers: int = 2
+    log2_policy_hidden: int = 3
+    policy_layers: int = 1
     # The residual, per U column: {column: [below, above]} in that column's
     # physical units. A column named here commands
     # clamp(reference_control(...)[column] + δ, umin, umax) with

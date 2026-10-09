@@ -30,42 +30,65 @@ want them elsewhere; the config directories are fixed.)
 Add the dependency to your `pyproject.toml` and `uv sync` — see the install
 section of the [framework README](../README.md) — and `nt` lands on your PATH.
 
-Each hook's docstring is its specification. Read them in your copy rather
-than from memory of another version.
+## Working with it
+
+- **Fill the hooks in place, and read each docstring in your copy.** Each
+  docstring is that hook's specification for the version you have
+  installed; a hook file rewritten from memory of another version gets
+  import paths and signatures wrong.
+- **The examples are syntax.** Column names and numbers in comments come
+  from some plant that is not yours, and gains in particular do not port.
+  Where a value has to be sized, the comment beside it says how.
+- **Smoke-run first** with each side's `debug.yaml`. A wrong column name or
+  unset path costs seconds there and an hour in a real run.
+- **One change per run, a numbered config per run.** Two to four model
+  iterations, each decided from the reportcard, is usually the useful
+  budget. Change structure and priors before width.
+- **Expect some trial and error.** The readouts below are instruments:
+  read each against something — the previous run, the rule, persistence —
+  and expect a couple of attempts before a number means what you think.
+- **If the library itself raises an error you cannot trace to your hooks
+  or config, report it** rather than patching the installed package.
 
 ## Fill-in order
 
 1. **Column roles** — `Y_COLUMNS` / `U_COLUMNS` / `D_COLUMNS` in
    `modeling_user_defined.py`. `D` is only what you could know without the
    plant (weather, schedules): a policy is fed `D` from a forecast, and
-   nothing forecasts a meter. Put in `Y` only what you need predicted.
+   nothing forecasts a meter. Put in `Y` only what a controller or its
+   objective needs. Drop any column constant in the training split
+   (training warns about each).
 2. **Data paths** in `model_configs/*.yaml`, then a smoke run:
-   `nt model train --config model_configs/debug.yaml`.
-3. **Model structure** — the decisions that matter more than any
-   hyperparameter:
-   - *Family* (`model` in the YAML). `2r2c` is a grey-box thermal network,
-     stable under any input and with storage you can read off; it is the
-     family for a temperature a controller will plan against. The black
-     boxes (`nssm`, `mlp`, `gru`, `lssm`) often fit better and are fine for
-     prediction you won't steer by.
-   - *Blocks* (`block_mapping`). If the plant is several parts that
-     interact mainly through shared inputs — several zones, a zone and a
-     meter — give each its own sub-model, and its own family if it wants
-     one.
-   - *Declared columns* (`block_mapping` again). Say which column is a
-     setpoint (`demand`), a delivered power or irradiance (`linear`), the
-     outdoor temperature (`ambient`), and the model gets that physics
-     instead of having to learn it.
-4. **Physics checks** — `synth_cfg`. A few lines; the reportcard then tests
+   `nt model train --config model_configs/debug.yaml`. If the record has
+   gaps or a ragged timestamp, the loader refuses it; `neurotemplate.prep`
+   has tools to fix that yourself.
+3. **Check the data covers where the controller will go.** A surrogate
+   only knows the inputs its data visited, and the policy's actuation box
+   defaults to that range. If the targets you will hold need commands the
+   data never issued, collect data that does before anything else.
+4. **Model structure** — the decisions that matter more than any
+   hyperparameter, all in `block_mapping`:
+   - *Family.* `2r2c` is a grey-box thermal network, stable under any input
+     and with storage you can read off; try it for a temperature a
+     controller will plan against. The black boxes (`nssm`, `mlp`, `gru`,
+     `lssm`) often fit better and are fine for prediction you won't steer
+     by.
+   - *Blocks.* If the plant is several parts that interact mainly through
+     shared inputs, give each its own sub-model.
+   - *Declared columns.* Say which column is a setpoint (`demand`), a
+     delivered power or irradiance (`linear`), the outdoor temperature
+     (`ambient`), and the model gets that physics instead of having to
+     learn it.
+5. **Physics checks** — `synth_cfg`. A few lines; the reportcard then tests
    the model in states the data never visits, which is where a controller
    will take it.
-5. **`nt model train`** for real. Note the `Finished run: <run_id>` line —
-   that id is how the control side finds the surrogate.
-6. **Control** — a reference file per plant file
-   (`python make_references.py data/train.csv data/train_reference.csv
-   --band 21 25`, and the same for dev and test), the `losses` and `gains`
-   in `control_configs/control.yaml` naming your columns, and ideally
-   `reference_control`: a rule you trust, which `residual_delta` then
+6. **`nt model train`** for real. Note the `Finished run: <run_id>` line —
+   that id is how the control side finds the surrogate. Before comparing
+   two model configs, set `ensemble_seeds` to a few: one seed is one draw.
+7. **Control** — a reference file per plant file (`python
+   make_references.py --help`), the `losses` and `gains` in
+   `control_configs/control.yaml` naming your columns, and, where you have
+   one, `reference_control`: a rule you trust, which `residual_delta` then
    anchors the policy to. Then
    `nt control train --set sysid_run_id=<run_id>`.
 
@@ -74,6 +97,25 @@ Check any config without running anything:
 ```bash
 nt model train --config model_configs/modeling.yaml --print-config
 ```
+
+## A controller, one step at a time
+
+Each run is read against the one before it.
+
+1. **The rule** — `reference_control` with every `residual_delta` box
+   `[0, 0]`. This scores your rule on your surrogate. It is also the
+   cheapest check of the surrogate there is: if the surrogate says a rule
+   cannot hold a band the plant holds easily, the surrogate is wrong about
+   the actuators, and every policy trained on it will optimise against
+   that error.
+2. **The band terms only**, boxes open. This should not come out much
+   worse than the rule. If it does, a model iteration is worth more than
+   any gain.
+3. **The full objective** — cost, peak, whatever you are after.
+4. **Its blind twin** — the same config with the price gain at 0 and
+   nothing else changed (keep the price references so the draws match).
+   A cost number alone is mostly a fact about the test week; the
+   difference from the twin is the result.
 
 ## Optional control capabilities
 
@@ -93,11 +135,26 @@ Each is off until you ask for it — see
 - **Sys-id:** `reportcard.md` in the run's artifacts — the physics checks,
   rollout stability, and (under `2r2c`) the time constants and declared
   branches in physical units. `test_metrics.json` has per-channel errors in
-  physical units; the headline `test_rmse` is one number in normalized space.
-- **Control:** `control_reportcard.md` — the objective balance (a term near
-  0% of the trained objective is not doing anything), time pinned at each
-  actuator bound, and how much of each residual box the policy used.
-  Look at the closed-loop plots before the numbers.
+  physical units; the headline `test_rmse` is one number in normalized
+  space. Test error is measured on your data's excitation, not where a
+  controller will drive the plant; the stability and physics sections are
+  the better guide to a surrogate for control.
+- **Control:** look at the closed-loop plots before any number. Does the
+  action come *before* the expensive period and the relief through it?
+  Does the policy sit still when nothing is asked of it? One value for the
+  whole rollout is saturation, usually the surrogate's doing; a command
+  pinned at one edge all day, jitter, or two actuators crossing are each a
+  finding. Then `control_reportcard.md`: the objective balance (a term
+  near 0% of the trained objective is not doing anything), time pinned at
+  each actuator bound, and how much of each residual box was used.
+- **Never decide what to ship on the surrogate's band number.** The
+  surrogate's violation rate is a fact about the surrogate, and it has been
+  wrong by several times in both directions. Compare controllers on the
+  same surrogate, against the rule; judge the winner on the plant.
+- **Split a saving into offset and shape.** Offset is the mean difference
+  from the rule — doing less overall, legitimate but unremarkable. Shape is
+  doing it at different times: the difference in the expensive hours minus
+  the difference in the cheap ones.
 
 ## Things that bite silently
 
@@ -106,12 +163,15 @@ Each is off until you ask for it — see
   reportcard's branch lines.
 - **The actuation box is the training data's range** by default
   (`actuation_bounds`). If the data never drove an actuator somewhere, the
-  policy cannot go there either.
+  policy cannot go there either, and the plots look plausible regardless.
 - **`preview_config` replaces `d_preview` if it merely exists**, so it is
   commented out in the template. Define it fully or not at all.
 - **`grad_path` and `demand`:** the gradient penalty differentiates a
   `demand` column as the demand feature, so its sign in the mapping is the
   declared `sign`, not the raw setpoint's.
+- **A trained run reloads with the hooks file it trained with**, not the
+  one in your working directory. Editing a hook changes the next run, never
+  a finished one.
 
 ## Worked examples
 

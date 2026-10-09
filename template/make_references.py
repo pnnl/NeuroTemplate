@@ -3,9 +3,9 @@ Write a reference file for one plant file: the comfort band (and, optionally,
 a tariff) that the control objective names, on the plant file's timestamps.
 
     python make_references.py data/train.csv data/train_reference.csv \
-        --band 21 25 --width 0.5 2.0 --segment-hours 6 --seed 0
+        --band LO HI --width MIN MAX --segment-hours H --seed 0
     python make_references.py data/train.csv data/train_reference.csv \
-        --band 21 25 --price data/price.csv --price-align day
+        --band LO HI --width MIN MAX --segment-hours H --price data/price.csv
 
 Example code, not library behaviour: what it means to randomise a band or a
 tariff is a data decision, so it lives here where you can read and change it.
@@ -19,17 +19,26 @@ then list the plant file once per draw in control.yaml:
     train_reference_path: [data/train_ref_0.csv, data/train_ref_1.csv, data/train_ref_2.csv]
 
 Train over the range of bands the policy will be handed in service, and make
-the test file the reference you want it judged on.
+the test file the reference you want it judged on. Sizing the band:
+
+- `--width`: a band is the room a controller has to work in. Storing
+  anything (pre-conditioning ahead of an expensive period) needs a band wide
+  enough to store it in; a very narrow band leaves a policy nothing to do
+  but track.
+- `--segment-hours`: how long one band holds. A band that changes inside a
+  training rollout teaches the policy to follow changes; one that holds for
+  the whole rollout teaches it to work within a band. Choose by what the
+  policy will face.
 
 On the tariff: draw it from a real historical record, never from the clock —
 a tariff that is a function of hour-of-day is one a policy can learn *as* the
-clock. `--price-align random` (the default) slices it at a random offset, so
-its peak lands at a random hour of the plant's day and the policy has to
-read the price. `day` keeps the time of day and draws only the day, which is
-what makes a pre-cool visible in a plot; a load-shifting trace under `day`
-then needs confirming against a tariff with the peak moved (same weather,
-different hour), because a peak at the same hour every day is learnable as
-that hour.
+clock. Train on `--price-align random` (the default): it slices the record at
+a random offset, so the peak lands at a random hour of the plant's day and
+the policy has to read the price. `day` keeps the time of day and draws only
+the day, which lines the peaks up so a response is visible in a plot: use it
+for the test reference you plot. To confirm a response is to the price and
+not the clock, write a second test reference with the peak at another hour
+(same plant file) and evaluate the trained policy on both.
 """
 
 from __future__ import annotations
@@ -93,9 +102,10 @@ def main() -> None:
     parser.add_argument("out", help="Reference CSV to write.")
     parser.add_argument("--band", nargs=2, type=float, required=True,
                         metavar=("LO", "HI"), help="Range the band is drawn in.")
-    parser.add_argument("--width", nargs=2, type=float, default=(0.5, 2.0),
-                        metavar=("MIN", "MAX"), help="Band width range.")
-    parser.add_argument("--segment-hours", type=float, default=6.0,
+    parser.add_argument("--width", nargs=2, type=float, required=True,
+                        metavar=("MIN", "MAX"),
+                        help="Band width range (see the module docstring).")
+    parser.add_argument("--segment-hours", type=float, required=True,
                         help="How long each band holds before the next draw.")
     parser.add_argument("--low-column", default="Comfort Low [°C]")
     parser.add_argument("--high-column", default="Comfort High [°C]")

@@ -6,13 +6,17 @@ roles, output heads, model structure, physics checks) and knows nothing else
 about your data. Each docstring is that hook's specification.
 
 The file must be named `modeling_user_defined.py` and live in the directory
-you run `nt` from, or be pointed at by `user_hooks_path` in your YAML.
+you run `nt` from, or be pointed at by `user_hooks_path` in your YAML. Fill
+the hooks in here, in place: each docstring is that hook's specification
+for the library version you have installed. A trained run keeps a copy of
+this file, and everything that reloads the run uses the copy.
 
 Every function here except `hyper_args` and `block_mapping` must exist, even
 when its body is a trivial return. Fill in the column lists first; every
 other hook runs as written. Then decide on model structure (`block_mapping`)
 and the physics checks (`synth_cfg`) — those two shape what you get more
-than any hyperparameter.
+than any hyperparameter. The examples in comments are syntax: the column
+names, and any number in them, belong to some other plant.
 """
 
 from __future__ import annotations
@@ -47,8 +51,14 @@ from neurotemplate.modeling.scenarios import (  # noqa: F401  — cited in synth
 # D = exogenous inputs: things you could know without the plant (weather, a
 #     schedule). Anything the plant itself produces — a meter, a temperature
 #     the plant affects — is Y or dropped, never D: a policy can only be fed
-#     a D it has a forecast for.
-# Predict only what you need: every extra Y channel costs model capacity.
+#     a D it has a forecast for. A price is not D either: the surrogate
+#     would learn that price drives the plant. Prices go in reference files.
+# Put in Y what a controller or its objective needs, and nothing else:
+# every extra channel costs capacity, and a cumulative counter (an energy
+# total) is an unbounded ramp no scaler can normalize.
+# A column that is constant in the training split cannot be normalized and
+# reaches the model in raw units; training warns about each one. Drop it:
+# if it ever varies later, the rollout diverges from its first step.
 # Any column not listed is dropped.
 Y_COLUMNS: list[str] = [
     # "Tank Temperature [degC]",
@@ -110,8 +120,10 @@ def data_head_config(
                                         K ordered levels at given values
 
     Levelled heads are rebalanced and threshold-calibrated for you
-    (`balance_levels`, `calibrate_thresholds`); judge them by the
-    reportcard's level metrics, not NRMSE. Pin either by hand with
+    (`balance_levels`, `calibrate_thresholds`). Judge them by the
+    reportcard's level metrics against its persistence row, not by NRMSE:
+    a regression head on staged equipment fits near the mean and can score
+    well while never predicting the equipment on. Pin either by hand with
     `level_weights=` / `decision_thresholds=` and the flag off.
 
     Bounds and level values live in head-space, i.e. AFTER normalization.
@@ -174,26 +186,24 @@ def block_mapping(
     """
     Model structure: split Y into blocks, each its own sub-model with its own
     parameters, family (`model`) and hidden state. Return None (or delete
-    this function) for one block holding every channel.
+    this function) for one block holding every channel. The framework
+    README's "Blocks" and "Declaring what a column is" sections explain each
+    choice at length; this is the contract.
 
     Worth doing whenever the plant is several parts that interact mainly
-    through shared inputs — zones on common weather, each with its own
-    actuator; a zone and a meter that responds to it. A joint model has to
-    learn that the cross-couplings are ~zero, and short records rarely
-    teach it; separate blocks get that for free.
+    through shared inputs. A joint model has to learn that the
+    cross-couplings are ~zero, and short records rarely teach it; separate
+    blocks get that for free.
 
-        taus = {"tau_fast_h": [0.3, 1.0],      # air settling after a push
-                "tau_ambient_h": [2.0, 8.0],   # air leaking to outdoors
-                "tau_slow_h": [20.0, 60.0]}    # whole building, HVAC off
         return {
             "zone_a": {"Y": ["Zone A Temp [degC]"],
                        "U": ["Zone A Setpoint [degC]"],
-                       "model": "2r2c", "params": taus},
-            "zone_b": {"Y": ["Zone B Temp [degC]"],
-                       "U": ["Zone B Setpoint [degC]"],
-                       "model": "2r2c", "params": taus},
+                       "model": "2r2c", "params": {
+                           "tau_fast_h": [lo, hi],      # see below
+                           "tau_ambient_h": [lo, hi],
+                           "tau_slow_h": [lo, hi]}},
             "meter":  {"Y": ["Total Power [kW]"],
-                       "reads": ["Zone A Temp [degC]", "Zone B Temp [degC]"],
+                       "reads": ["Zone A Temp [degC]"],
                        "model": "mlp"},
         }
 
@@ -201,15 +211,24 @@ def block_mapping(
     own; a U no block claims is shared by all. D is all of D unless a block
     names a subset, and blocks may overlap on it. `reads` lets a block see
     other blocks' Y as an ordinary input (not allowed in `2r2c`, whose
-    stability guarantee depends on never reading state). `model` omitted
-    means `cfg.model`; under `mlp`/`gru` the split then needs
-    `per_block: true`. `2r2c` gives every Y channel its own network, and
-    needs this hook: each `2r2c` block declares its storage prior in
-    `params` — `tau_fast_h`, `tau_ambient_h` and `tau_slow_h`, in hours, each
-    a scalar (pinned) or [min, max] (fitted inside), in that order with no
-    overlap. `nt data decay` measures `tau_slow`; its range is the natural
-    `tau_slow_h` box. There is no default: a prior about a building is yours
-    to state, and the reportcard says where each fit landed in its box.
+    stability guarantee depends on never reading state through a learned
+    map). `model` omitted means `cfg.model`; under `mlp`/`gru` the split
+    then needs `per_block: true`.
+
+    `2r2c` is a thermal network: a state, a hidden mass, conduction to
+    ambient. It cannot diverge under any input, and its storage reads off in
+    hours, which is why it is the family to try for a temperature a
+    controller will plan against. Each `2r2c` block states its storage prior
+    in `params`, in hours, each a scalar (pinned) or [lo, hi] (fitted
+    inside), in the order fast < ambient < slow with no overlap:
+      tau_fast_h     how fast the state settles after a step of its actuator
+      tau_ambient_h  the initial rate of a drift toward ambient, actuators off
+      tau_slow_h     the same drift, once the mass is involved; `nt data
+                     decay` estimates it from free-float periods, if the
+                     data has any
+    There is no default: a prior about a building is yours to state, held
+    wide when you are unsure, and the reportcard says where each fit landed
+    in its box. A fit pressed against an edge is the data disagreeing.
 
     A block may also declare what each column *is*, which changes the
     physics rather than the shapes:
@@ -227,10 +246,13 @@ def block_mapping(
       demand   a setpoint, replaced for every family by the thermostat's
                clamped error against the block's own predicted state —
                relu(state − setpoint) for cooling (sign -1), the mirror for
-               heating — so a setpoint beyond the state commands nothing,
-               as on a real thermostat. In `2r2c` it drives a bounded,
-               saturating heat input (`"branch": "mlp"` routes it into the
-               learned residual instead, losing the stability bound).
+               heating — so a setpoint past the state commands nothing, as
+               on a real thermostat. Without it a model renders a setpoint
+               as a smooth, always-active push, and a controller trained on
+               it inherits that. Declare every setpoint that drives the
+               block. In `2r2c` it drives a bounded, saturating heat input
+               (`"branch": "mlp"` routes it into the learned residual
+               instead, losing the stability bound).
       linear   one sign-fixed coefficient times the physical value: metered
                heat or power delivered, irradiance. An actuator that is a
                power rather than a setpoint is `linear`, never `demand`.
@@ -239,10 +261,13 @@ def block_mapping(
 
     `linear` and `ambient` act only inside `2r2c`; other families see those
     columns as ordinary inputs, with a build-time warning. Undeclared
-    columns feed the block's learned residual. A `2r2c` block that declares
-    every column has no residual, and so no free constant heat gain — the
-    most constrained model, and a fair test of whether the declared physics
-    explains the data. The reportcard prints each branch in physical units.
+    columns feed the block's learned residual, a small MLP (it maps only
+    those columns to a heat flow, so it rarely needs width). A `2r2c` block
+    that declares every column has no residual and no free constant heat
+    gain: the most constrained model. Declaring only the setpoints leaves
+    the rest to the residual. Which is better for your plant is a model
+    iteration, decided by the physics checks and the rollout readouts, not
+    by test NRMSE, which declarations are not expected to improve.
     """
     return None
 
@@ -260,26 +285,26 @@ def synth_cfg(
     drives them), step response (each actuator moves each state the declared
     way), reachability, and free decay (states relax toward ambient with the
     actuators off). They put the surrogate in states the recorded data never
-    visits — which is where a controller will take it — so they answer what
-    no test split can. A surrogate that fails step response is not one to
-    plan against, whatever its fit. Return None to skip them.
+    visits — which is where a controller will take it — and they are the
+    readout most likely to tell you a surrogate is wrong for control when
+    test error says it is fine. Returning None skips them, and you lose that.
 
       states   Y channels that hold at rest and relax toward `ambient`
                (temperatures, typically). Not meters: an equilibrium value
                written into a power channel is meaningless.
       off      the physical value of each U column when it asks for
                nothing. Not guessable — a cooling setpoint is off at its
-               *maximum* — so required for every U. Pick a value that is
-               off across the whole `states` range, since equilibria are
-               sampled from all of it. Other columns default to their
-               recorded minimum ("no forcing" for solar, occupancy, flow).
+               *maximum*, a heating setpoint at its *minimum* — so required
+               for every U. Pick a value that is off across the whole
+               `states` range, since equilibria are sampled from all of it.
+               Other columns default to their recorded minimum ("no forcing"
+               for irradiance, occupancy, flow); give an `off` for any
+               column where the minimum is not "nothing".
       responds `{state: {control: +1 | -1}}`: the direction each state moves
                as that control INCREASES, from a state where the control is
                live. Required for every U. A `demand` declaration in
                `block_mapping` does not change these signs — they describe
                the column, not the feature built from it.
-
-        from neurotemplate.modeling.scenarios import SynthSpec
 
         cool_sp = "Zone Cooling Setpoint [degC]"
         zone = "Zone Air Temperature [degC]"
@@ -294,6 +319,15 @@ def synth_cfg(
 
     All values are PHYSICAL units; the library normalizes them, and validates
     the whole spec against the column mapping before anything runs.
+
+    The checks are instruments, not gates. Read a failure as a diagnosis:
+    a step that barely moves the state means its forcing is too weak; an
+    equilibrium that drifts means something is integrated that should not be
+    (a wrong ambient prior with a residual cancelling it, or an `off` value
+    that is not off everywhere); a free decay far faster or slower than the
+    plant could manage means the conduction is wrong. A surrogate that fails
+    step response is not one to plan against. A small equilibrium drift
+    after an honest attempt or two is worth noting and moving past.
     """
     return None
 
@@ -327,7 +361,9 @@ def sub_plot(
 def hyper_args(trial, cfg: Config) -> Config:
     """
     Set the fields this trial should vary on `cfg` (a copy) and return it.
-    Any ModelingConfig field is fair game; keep the space small.
+    Any ModelingConfig field is fair game; keep the space small. Optuna
+    selects on dev loss, which measures fit on the data you have — not how
+    the model behaves where a controller will drive it.
     """
     # cfg.lr = trial.suggest_float("lr", 1e-4, 1e-2, log=True)
     # cfg.log2_hidden_size = trial.suggest_int("log2_hidden_size", 3, 6)

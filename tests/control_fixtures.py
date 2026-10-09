@@ -139,8 +139,7 @@ def make_control_cfg(**overrides) -> ControlConfig:
     cfg.test_stride = 5
     cfg.batch_size = 4
     cfg.epochs = 1
-    cfg.log2_policy_hidden = 3
-    cfg.policy_layers = 1
+    cfg.policy = "mlp"      # the family with more to get wrong; linear is tested on its own
     cfg.seed = 0
     cfg.device = torch.device("cpu")
     for k, v in overrides.items():

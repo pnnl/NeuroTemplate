@@ -2,22 +2,24 @@
 Control hooks — the glue between the DPC machinery and *your* plant.
 
 These answer: what the actuator limits are, and optionally what power costs
-and what rule a residual policy is anchored to. The objective —
-which outputs are held inside which band, what power is priced at — is not a
-hook: it is the `losses` table in control.yaml, over columns of the surrogate
-and of your reference files (see `make_references.py`). The Y/U/D roles and
-the normalization come from the frozen sys-id run.
+and what rule a residual policy is anchored to. The objective — which
+outputs are held inside which band, what power is priced at — is not a hook:
+it is the `losses` table in control.yaml, over columns of the surrogate and
+of your reference files (see `make_references.py`). The Y/U/D roles and the
+normalization come from the frozen sys-id run.
 
 Everything returned "in normalized space" uses the surrogate's own
 per-column shift/stretch (norm_stats), which also carries an entry for every
 reference column the objective names.
 
 The file must be named `control_user_defined.py` and live in the directory
-you run `nt` from, or be pointed at by `user_hooks_path` in your YAML.
+you run `nt` from, or be pointed at by `user_hooks_path` in your YAML. Fill
+the hooks in here, in place: each docstring is that hook's specification
+for the library version you have installed. A control run keeps a copy of
+this file, and reloading the run uses the copy.
 
-Every required hook runs as written. Then consider `reference_control`: a
-policy anchored to a rule you trust, inside a box you chose, caps what the
-surrogate's error can cost you.
+Every required hook runs as written. The examples in comments are syntax:
+the column names, and any number in them, belong to some other plant.
 """
 
 from __future__ import annotations
@@ -41,14 +43,19 @@ def actuation_bounds(
     squashed into this box.
 
     The default below is each U column's observed range in the training
-    data — the region the surrogate was identified on. That makes the box
-    only as wide as the data's excitation: if the data never drove an
-    actuator where you need the policy to go, the policy cannot go there
-    (the reportcard's Actuation section shows time pinned at each bound).
-    Hard-code physical
-    limits here to narrow the box, e.g. to keep one actuator out of
-    another's way; widening it past the data asks the surrogate about
-    inputs it has never seen.
+    data — the region the surrogate was identified on. So the box is only as
+    wide as the data's excitation: if the data never drove an actuator where
+    a target needs it, no policy can command it there, and no residual
+    either. Nothing on the reportcard says so; the reportcard's time pinned
+    at a bound looks the same whether the bound is clipping or nothing was
+    asked. Before training a controller, check this box against the band or
+    targets it will be asked to hold. If it does not reach, the fix is data
+    that goes there, not a wider box: widening it past the data asks the
+    surrogate about inputs it has never seen.
+
+    Narrowing it is often right: to keep one actuator out of another's way
+    (two actuators that oppose each other can be boxed so they can never
+    cross), or to park one that has no job in this season.
     """
     u_cols = nm_mapping["U"]
     if not u_cols:
@@ -72,9 +79,12 @@ def power_channels(nm_mapping: dict[str, list[str]]) -> list[str]:
     Y columns that meter power, in the order you want them plotted.
 
     Return [] when nothing is metered — that turns off the power row on the
-    closed-loop plots and the energy section of the reportcard.
+    closed-loop plots. List them by name rather than by pattern: a name
+    filter such as `"power" in c.lower()` also sweeps in channels nobody is
+    billed for (a second fuel under an electricity tariff), and those then
+    look like a cost to the objective.
 
-        return [c for c in nm_mapping["Y"] if "power" in c.lower()]
+        return ["Compressor Power [W]", "Fan Power [W]"]
     """
     return []
 
@@ -86,14 +96,14 @@ def power_channels(nm_mapping: dict[str, list[str]]) -> list[str]:
 def plot_context_channels(nm_mapping: dict[str, list[str]]) -> list[str]:
     """
     D columns to overlay on the controlled-variable axis of the closed-loop
-    plots — the driver that makes the trace legible (ambient temperature,
-    load, solar). Return [] for none.
+    plots — the driver that makes the trace legible (an ambient temperature,
+    a load, irradiance). Return [] for none.
     """
     return []
 
 
 # ---------------------------------------------------------------------
-# Required when a power term is weighted: the signal they all reduce
+# Required when a loss term names `power`: the signal they all reduce
 # ---------------------------------------------------------------------
 # Set to True once `power_metric` below is implemented. Until then a loss
 # term naming `power` fails at problem build, rather than silently optimizing
@@ -120,21 +130,30 @@ def power_metric(
     units: return Watts and the integral is in Wh. At each step, U is the
     command that drove the plant into that step's yn.
 
-    Two shapes work. If the surrogate predicts metered power, sum it — real
-    units, so the energy numbers mean something outside this run:
+    What the policy learns from is this signal's *gradient*: when a move
+    costs something. Two shapes work.
+
+    If the surrogate predicts metered power well, sum it:
 
         total = sum(_denorm(yn, c, nm_mapping, norm_stats)
                     for c in power_channels(nm_mapping))
         return total.clamp_min(0.0)
 
-    Otherwise write a proxy from the states and inputs, from the physics of
-    when the equipment draws power (e.g. a compressor that runs only while
-    the zone is above its cooling setpoint). A proxy is also worth
-    considering when a predicted power channel is staged or on/off: a
-    regression head averages it, and the policy then cannot tell *when*
-    power is drawn. Whatever you return, the gradient is what the policy
-    learns from — check its shape in the pre-training sweep across the
-    actuation box, and its scale in the objective-share printout.
+    If the equipment is staged or on/off, a predicted power channel usually
+    fits near its mean (judge such a channel by balanced accuracy against
+    persistence on the sys-id reportcard, not by R²), and the policy then
+    cannot tell *when* power is drawn. Write a proxy instead, from the
+    physics of when the equipment runs. Two properties make one sensible: it
+    does not decrease as the demand on the equipment grows, and it is zero
+    whenever the equipment would not be called — that zero is what lets a
+    policy learn that coasting is cheap. Read its levels off your own data
+    (`nt data heads`, and a scatter of power against what calls it). A
+    proxy's units can be relative: absolute energy is the meter's job.
+
+    Before training, the run prints this signal swept across the actuation
+    box and the share of steps where it sits at exactly zero. A large zero
+    share on a cost term means no gradient in the cheap hours, which is
+    where load should move to: a surrogate problem, not a weight.
     """
     raise NotImplementedError(
         "power_metric is not implemented. Name no `power` in the control "
@@ -157,23 +176,42 @@ def _denorm(x: torch.Tensor, col: str, nm_mapping: dict[str, list[str]],
 # With `residual_delta` set in the control YAML, each U column it names
 # commands `reference_control(...)[column] + δ`, δ inside that column's
 # [below, above] box: the rule does the routine work and the policy only
-# adjusts it, inside a bound you chose. A U column it does not name is a free
-# policy output. Return exactly the columns `residual_delta` names (the
-# library refuses anything else).
+# adjusts it. The box is a trust region on surrogate error — it caps what a
+# surrogate that is wrong somewhere can cost you. A U column it does not
+# name is a free policy output over its actuation bounds. Return exactly
+# the columns `residual_delta` names (the library refuses anything else).
 #
 # Current step only, memoryless, normalized in and normalized out — the same
 # space the learned policy emits. `r_now` maps each reference column the
 # objective names to its current value, [b], normalized; `norm_stats` has an
 # entry for each, so `x * stretch + shift` gives physical units. Return
-# continuous values: nothing is rounded to an actuator's resolution, which is
-# the building's job.
+# continuous values: nothing is rounded to an actuator's resolution.
+#
+# What makes a good anchor:
+#   - It is the floor the learned part is measured from, so make it the rule
+#     you would otherwise run, and no worse. An anchor worse than the rule
+#     you compare against makes every timid residual look like a loss.
+#   - Keep it price-blind. r_now carries every reference column the
+#     objective names, a tariff included, but an anchor that reads the price
+#     leaves nothing to measure the learned price response against.
+#   - Two anchored actuators that must not cross (heating above cooling)
+#     should be unable to for any δ the boxes allow. Build that in — via
+#     the anchor and the boxes, or `actuation_bounds` — rather than hoping
+#     the objective forbids it.
+#
+# Sizing the boxes decides what is possible. Too narrow and there is
+# nothing to learn. Room that takes an output past its band edge is room
+# the optimizer will spend wherever the surrogate underprices being out of
+# band. An actuator with no job in this data (heating in a cooling season)
+# is best locked: box it [0, 0], or park it with `actuation_bounds`. A box
+# edge the policy sits on all the time is a finding about the rule or the
+# surrogate, not a tuning target.
 #
 # To score the rule itself, train with every box [0, 0]: the policy is then
-# the rule.
+# the rule, on your surrogate, on your test windows.
 #
 # Leave it commented out if you have no rule. The example brackets one band
-# with a heating/cooling setpoint pair (`bracket_band` below), with boxes
-# that hold each inward: [0, 0.5] on heating, [0.5, 0] on cooling.
+# with a heating/cooling setpoint pair (`bracket_band` below).
 #
 # BAND_LOW = "Comfort Low [°C]"      # the band's columns in your reference
 # BAND_HIGH = "Comfort High [°C]"    # files, as the losses table names them
@@ -195,8 +233,7 @@ def _denorm(x: torch.Tensor, col: str, nm_mapping: dict[str, list[str]],
 #     def normalized(col, value):
 #         return (value - norm_stats[col]["shift"]) / norm_stats[col]["stretch"]
 #
-#     cool, heat = bracket_band(physical(BAND_LOW), physical(BAND_HIGH),
-#                               cool_inset=0.3)
+#     cool, heat = bracket_band(physical(BAND_LOW), physical(BAND_HIGH))
 #     return {HEAT: normalized(HEAT, heat), COOL: normalized(COOL, cool)}
 
 
@@ -213,12 +250,12 @@ def bracket_band(
     at the band floor and cooling at the ceiling, so the two bracket the band
     instead of both chasing one target.
 
-    The insets pull each setpoint further inside its edge. A zone usually
-    floats somewhat above its cooling setpoint, so `cool_inset` corrects for
-    that — measure it on the plant rather than treating it as a comfort
-    margin: too large and the two setpoints collide. When the insets cross,
-    both collapse to the band's midpoint, so heating never commands above
-    cooling.
+    The insets pull each setpoint further inside its edge. A thermostat
+    usually lets the zone float somewhat past its setpoint, and an inset
+    corrects for that. It is a cost knob as much as a comfort one — a cooling
+    setpoint pulled further in conditions more — so measure it on the plant
+    rather than inheriting it. When the insets cross, both collapse to the
+    band's midpoint, so heating never commands above cooling.
 
     Args:
         lo, hi: band edges, any broadcast-compatible shape.
@@ -249,7 +286,10 @@ def bracket_band(
 # Keys are D column names; values are step counts — how far ahead the policy
 # sees each forecast. A property of the plant, shared by every run against
 # it. A reference column's preview (the band ahead, the tariff ahead) is per
-# run, and is `reference_preview` in the YAML.
+# run, and is `reference_preview` in the YAML. When a policy is meant to act
+# ahead of something, preview the forecast that drives it and the price to
+# a similar depth: a policy that sees the price coming but not the weather
+# has to guess which of the two it is answering.
 #
 # @beartype
 # def preview_config(nm_mapping: dict[str, list[str]]) -> dict[str, int]:

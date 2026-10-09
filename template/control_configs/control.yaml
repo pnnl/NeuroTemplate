@@ -1,7 +1,9 @@
 # DPC policy training config. `nt control train` reads this file by default.
 # Fields are shown at their built-in defaults, commented out — uncomment what
 # you change. Y/U/D roles and normalization come from the frozen surrogate.
-# Step counts are in timesteps of your data.
+# Step counts are in timesteps of your data. Column names and numbers in the
+# examples are syntax from some other plant: use your columns, and size
+# values as each comment says.
 
 # ── SURROGATE ────────────────────────────────────────────────────
 # Required: the MLflow run id `nt model train` printed ("Finished run: ...").
@@ -23,27 +25,33 @@ test_data_path: data/test.csv
 # user_hooks_path: null
 
 # ── REFERENCES ───────────────────────────────────────────────────
-# The columns the objective names that are not the surrogate's: a comfort
-# band, a setpoint schedule, a tariff. One file per plant file, row-aligned
-# with it and carrying exactly its timestamps (make_references.py writes
-# them). Set all three or none. List one plant file several times against
-# several reference files to train on several draws of the reference.
+# The columns the objective names that are not the surrogate's: a band, a
+# setpoint schedule, a tariff. One file per plant file, row-aligned with it
+# and carrying exactly its timestamps (make_references.py writes them). Set
+# all three or none. List one plant file several times against several
+# reference files to train on several draws of the reference.
+#
+# Train over every band the policy will be handed in service; make the test
+# reference the one you want it judged on. Check that every test band is
+# reachable inside the actuation box (control_user_defined.actuation_bounds):
+# a band the actuators cannot reach is unreachable by construction.
 train_reference_path: data/train_reference.csv
 dev_reference_path: data/dev_reference.csv
 test_reference_path: data/test_reference.csv
 # The divisor for each reference column that bounds no Y column (a tariff),
-# so the policy sees an O(1) input. A band column needs none: it is scaled
-# like the column it bounds.
+# so the policy sees an O(1) input: about the column's typical magnitude. A
+# band column needs none: it is scaled like the column it bounds.
 # reference_scale: {"Tariff [$/kWh]": 0.30}
-# Future steps of each reference column the policy sees. Shifting load means
-# acting before the expensive hours, which a policy can only do if it sees
-# them coming; seeing a band change coming lets it move before the zone lags.
+# Future steps of each reference column the policy sees. A policy that sees
+# only the current price can react to it but not act ahead of it; it needs
+# to see the expensive period coming. Longer is not better: a preview much
+# longer than the cycle it acts on gives the policy more to fit noise to.
 # reference_preview: {"Tariff [$/kWh]": 48, "Comfort Low [°C]": 2}
 
 # ── HORIZON ──────────────────────────────────────────────────────
-# Closed-loop rollout length in training. It has to span the behaviour you
-# want learned — an action and the payoff it buys (a pre-cool and the coast
-# after it, a daily peak) must fit inside one rollout.
+# Closed-loop rollout length in training. It has to contain an action and
+# the payoff it buys — a pre-conditioning and the period it pays off in —
+# or the gradient never connects them. Memory and time grow with it.
 # train_pred_steps: 48
 # History the policy sees.
 # in_steps: 12
@@ -60,7 +68,17 @@ test_reference_path: data/test_reference.csv
 # `weight` name a Y, U or D column of the surrogate, a reference column, or
 # `power` (control_user_defined.power_metric). `units: physical` (default)
 # makes a gain per physical unit; `normalized` keeps the surrogate's scale.
-# Names below are examples: use your columns.
+#
+# Smoothing: one first_difference row per U column, each with its own gain.
+# Every move the policy makes costs the plant something the surrogate may
+# not price (equipment cycling, wear); this row is the only thing that
+# charges for it, and an actuator that should mostly sit still wants a
+# heavy one.
+#
+# Energy vs cost: an energy row rewards less power at every hour, and its
+# cheapest answer is to do less. Only a cost row (power weighted by a
+# tariff) rewards moving power to cheap hours. For load shifting, use cost
+# and leave energy off.
 losses:
   comfort_lower: {column: "Comfort Low [°C]",  target: "Zone Air Temperature [°C]", map: relu,  norm: 2}
   comfort_upper: {column: "Comfort High [°C]", target: "Zone Air Temperature [°C]", map: nrelu, norm: 2}
@@ -68,42 +86,57 @@ losses:
   # energy: {column: power, norm: 1}
   # cost:   {column: power, norm: 1, weight: "Tariff [$/kWh]"}
   # peak:   {column: power, norm: 4}
-# One gain per term, in its own map so a sweep can --set it. Gains are scale
-# factors between terms in different units, so they do not port between
-# plants. Every run prints each term's share of the objective before and
-# after training: a term at ~0% of the trained objective is not in it,
-# whatever its gain says.
-gains: {comfort_lower: 5.0, comfort_upper: 5.0, du: 1.0}
+# One gain per term, in its own map so a sweep can --set it. Gains are
+# exchange rates between terms in different units, so they do not port
+# between plants; the 1.0s below are placeholders, not starting values.
+# Size them in this order, each move a decade at a time, reading the
+# closed-loop plot after each run:
+#   1. The band terms, until the trained policy keeps its outputs inside
+#      the band. Out of band, the band terms carry the whole gradient and
+#      everything else is decoration.
+#   2. The first_difference rows, until the commands stop jittering.
+#   3. Cost, until the trajectory shows the trade you want — acting before
+#      the expensive period, holding at the band edge through it. Too much
+#      shows just as clearly: outputs pushed past the band edge and held.
+# Every run prints each term's share of the objective before and after
+# training. The pre-training print is taken at the policy's starting point
+# (for a residual, the rule itself, where a first_difference term is 0% by
+# construction); it tells you a term is present, not that it is strong
+# enough. Read strength off the trained share and the trajectory.
+gains: {comfort_lower: 1.0, comfort_upper: 1.0, du: 1.0}
 
 # ── POLICY ───────────────────────────────────────────────────────
-# mlp | linear. `linear` is one saturated affine law, u = sat(Kx + b): few
-# parameters, gains you can read, and hard to overfit to the surrogate.
-# policy: mlp
+# linear | mlp. `linear` is one saturated affine law, u = sat(Kx + b): few
+# parameters, gains you can read, and little it can learn from the
+# surrogate that the plant does not share. Reach for `mlp` when the linear
+# law visibly cannot express the behaviour and the incentive for it is
+# visibly in the objective; extra size tends to buy jitter.
+# policy: linear
 # gelu | relu | tanh | silu (mlp only).
 # policy_nonlin: gelu
 # How the output is squashed into the actuation box: sigmoid_scale (smooth)
 # or relu_clamp (hard clip).
 # policy_bound_method: sigmoid_scale
 # Width 2**log2_policy_hidden (mlp only).
-# log2_policy_hidden: 6
-# policy_layers: 2
+# log2_policy_hidden: 3
+# policy_layers: 1
 
 # ── RESIDUAL CONTROL ─────────────────────────────────────────────
 # Per U column, a box [below, above] in that column's physical units: the
 # column commands reference_control(...)[column] + δ with
 # -below <= δ <= above (needs the reference_control hook, returning exactly
-# these columns). It bounds how far surrogate error can move the plant from a
-# rule you trust. [0, 0.5] lets a heating setpoint the rule anchors at the
-# band floor move inward and never past it; [0.5, 0] does the same for
-# cooling at the ceiling. A U column not named is a free policy output over
-# its actuation bounds; leave the map out for a plain policy. Every box
-# [0, 0] is the rule itself, a cheap first run that scores the rule on your
-# surrogate.
+# these columns). A U column not named is a free policy output over its
+# actuation bounds; leave the map out for a plain policy. Every box [0, 0]
+# is the rule itself: a cheap first run that scores the rule on your
+# surrogate, and the number every later run is read against. How to size a
+# box: the comment above reference_control in control_user_defined.py.
 # residual_delta:
-#   Heating Setpoint [°C]: [0.0, 0.5]
-#   Cooling Setpoint [°C]: [0.5, 0.0]
+#   Heating Setpoint [°C]: [0.0, 0.0]
+#   Cooling Setpoint [°C]: [below, above]
 
 # ── TRAINING ─────────────────────────────────────────────────────
+# Train to convergence and no further: past it the policy learns the
+# surrogate's quirks, which the plant does not have.
 # epochs: 300
 # epoch_verbose: 1
 # warmup: 5
@@ -117,6 +150,8 @@ gains: {comfort_lower: 5.0, comfort_upper: 5.0, du: 1.0}
 # test_stride: 288
 
 # ── RUNTIME ──────────────────────────────────────────────────────
+# One seed is one draw, and nothing reports the spread between seeds here:
+# before believing a difference between two configs, train each on a few.
 # seed: -1
 # device: null
 # verbose: true

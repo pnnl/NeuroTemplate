@@ -4,7 +4,7 @@ A library of generic, time-series, data-driven black-box modeling and control bu
 
 The repo contains two sister subsystems:
 
-- **Modeling** — train a system-identification surrogate `y_{k+1} = f(y_k, u_k, d_k) [+ y_k]` from data, with an optional gradient-sign penalty, post-training physics assertions (equilibrium / step response / reachability / free decay), Optuna search, MLflow tracking. Model families: `mlp`, `nssm`, `lssm`, `gru` (black box) and `2r2c` (grey box — a thermal network with a hidden mass, for buildings whose storage matters). Families can be mixed in one graph, one per block of signals.
+- **Modeling** — train a system-identification surrogate `y_{k+1} = f(y_k, u_k, d_k) [+ y_k]` from data, with an optional gradient-sign penalty, post-training physics checks on thermal states (equilibrium / step response / reachability / free decay), Optuna search, MLflow tracking. Model families: `mlp`, `nssm`, `lssm`, `gru` (black box) and `2r2c` (grey box — a thermal network with a hidden mass, for buildings whose storage matters). Families can be mixed in one graph, one per block of signals.
 - **Control** — train a differentiable predictive control (DPC) policy against a frozen surrogate. Closed-loop rollouts, a declared objective over named columns (comfort bands, tracked schedules, energy, cost and peak-demand terms), reference signals read from their own files. Policy families: `mlp`, `linear` (a saturated affine feedback law). Optionally anchors chosen U columns to a rule, each inside its own box.
 
 Both sides share a thin `common/` layer (YAML/CLI loader, CSV + sliding-window data utilities, per-channel metrics).
@@ -118,7 +118,7 @@ The library imports each hook by attribute (no defaulting), so every row above e
 
 The objective is not a hook: it is the `losses` table in `control.yaml`, below.
 
-`power_metric` returns whatever units the use case meters; the library never converts, so the reportcard labels energy as `power·h`. Metered channels the surrogate already predicts are the best thing to return, because the energy numbers then mean something outside the run. An actuation proxy such as `(setpoint - ambient)²` is a fine alternative when nothing meters power — just read the energy section as relative rather than physical. What has actually cost campaigns here is the term's *scale*, not its shape: a proxy carried over from another dataset came out at 1.7× the entire comfort objective while every pooled metric looked fine. The objective-balance report and the shape sweep both print before training so that magnitude is on screen from the start.
+`power_metric` returns whatever units the use case meters; the library never converts, so the reportcard labels energy as `power·h`. What the policy learns from is the signal's *gradient* — when a move costs something — so summing a metered channel the surrogate predicts well is one good answer, and a physics proxy is the other: one that does not decrease as the demand on the equipment grows and is zero whenever the equipment would not run. Staged or on/off equipment usually wants the proxy, because a predicted staged channel fits near its mean and hides *when* power is drawn. A proxy's units can be relative. Its *scale* is what has cost campaigns: a proxy carried over from another dataset came out at 1.7× the entire band objective while every pooled metric looked fine. The objective-balance report and the shape sweep both print before training so that magnitude is on screen from the start. The template's docstring has the details.
 
 `reference_control` is memoryless and works on the current step: `y_now` `[b, ny]` and `d_now` `[b, nd]` normalized, and `r_now`, each reference column the objective names by name, `[b]`, normalized — `norm_stats` carries an entry for each, so a rule denormalizes a band edge exactly as it does a zone temperature. It returns `{U column: [b]}`, normalized, for exactly the columns `residual_delta` names (anything else is refused, naming both sets). Each of those columns commands `reference_control(...)[column] + δ` with `δ` inside that column's box instead of a setpoint outright: the rule keeps comfort, δ answers whatever else is being optimised, and the box is a trust region on surrogate error rather than a claim about the network. The reportcard reports each box and the fraction of steps δ spent pinned at each edge — an edge that binds most of the time means either the rule is wrong for this plant or the optimizer is riding a surrogate artifact into the wall. Note a box bounds the *action*, not the outcome: the commanded setpoint stays within its box around the rule's, the zone temperature does not, because the plant is in between. The library does not score the rule against the learned policy; to score the rule itself, train with every box `[0, 0]`.
 
@@ -130,7 +130,7 @@ losses:
   comfort_upper: {column: "Comfort High [°C]", target: "Zone Air Temperature [°C]", map: nrelu, norm: 2}
   du:            {column: "Zone Cooling Setpoint [°C]", map: first_difference, norm: 1}
   cost:          {column: power, norm: 1, weight: "Tariff [$/kWh]"}
-gains: {comfort_lower: 5.0, comfort_upper: 5.0, du: 1.0, cost: 1.0e-3}
+gains: {comfort_lower: 1.0, comfort_upper: 1.0, du: 1.0, cost: 1.0}   # placeholders
 ```
 
 Each entry is read in one order: the operand `column − target` (`target` optional), then the `map`, then the `norm`, then `gains[name]`. Nothing else is in the objective.
@@ -143,7 +143,7 @@ Each entry is read in one order: the operand `column − target` (`target` optio
 | `weight` | a reference or D column | per-step weighting in physical units; a tariff is the `weight` of a power term, not a kind of reference |
 | `units` | `physical` (default), `normalized` | `physical` denormalises `column` and `target` before the map, so a gain is per °C, per W; `power` is Watts either way |
 
-Every reduction is horizon-free and homogeneous of degree 1, so a gain tuned at `train_pred_steps: 48` means the same at 288, and switching a power metric from kW to W moves every power gain by the same factor. Two actuators that want different smoothing are two `first_difference` rows, each named on the reportcard. The terms appear in MLflow and on the objective-balance report as `<name>_loss`.
+Every reduction is horizon-free and homogeneous of degree 1, so a gain tuned at one `train_pred_steps` means the same at another, and switching a power metric from kW to W moves every power gain by the same factor. Gains are exchange rates between terms in different units and do not port between plants; [template/control_configs/control.yaml](template/control_configs/control.yaml) says how to size them. Give each actuator its own `first_difference` row: smoothing is the only thing that charges for a move, and an actuator that should mostly sit still wants a heavy one. The terms appear in MLflow and on the objective-balance report as `<name>_loss`.
 
 **The regulated set is derived**: the Y targets of the `relu`/`nrelu` rows, each with at most one lower and one upper bound — a band, a one-sided limit, or (the same column on both sides) a tracked setpoint schedule. The reportcard scores comfort and band-jump response against exactly those bands.
 
@@ -154,7 +154,7 @@ A reference column bounding a Y column is normalised with that column's stats; a
 **What the library does not check about your references.** How a band or a tariff was prepared is the data's business. Two things are worth checking yourself:
 
 - **Draw the tariff from a real historical record, never from the clock.** A tariff that is a deterministic function of hour-of-day is one the policy can learn *as* hour-of-day — D is strongly clock-correlated, so "read the price" and "read the time" collapse into the same task and you get a convincing load-shifting trace with no price responsiveness in it. Real day-to-day variation is what forces the policy to read the column.
-- **Confirm a price response before believing it.** A reference file aligns the tariff with the weather row for row, so the price↔weather correlation is a second route to the same shortcut. `make_references.py` slices the tariff at a random offset by default, putting its peak at a random hour of the plant's day; `--price-align day` keeps the time of day, which is what makes a pre-cool visible in a plot and partly re-opens the shortcut. Either way, re-score the trained policy against a test reference with the peak moved to a different hour (same weather, same surrogate) and check the load moves with it.
+- **Confirm a price response before believing it.** A reference file aligns the tariff with the weather row for row, so the price↔weather correlation is a second route to the same shortcut. Train on references sliced at a random offset (`make_references.py`'s default), which puts the peak at a random hour of the plant's day. `--price-align day` keeps the time of day, which lines peaks up so a response is visible in a plot: use it for the test reference you plot. Then evaluate the trained policy against a second test reference with the peak at another hour (same plant file, same surrogate; see [Programmatic use](#programmatic-use)) and check the load moves with it — and compare against the blind twin, the same config with the price gain at 0.
 
 The tables above are the canonical hook contract. To start writing hooks, copy [template/](template/) — it has all of them stubbed with the right signatures. For worked-through implementations (including an ordinal/bounded `data_head_config`), read [tests/fixtures/modeling_user_defined.py](tests/fixtures/modeling_user_defined.py) and [tests/fixtures/control_user_defined.py](tests/fixtures/control_user_defined.py).
 
@@ -176,8 +176,8 @@ nt control train --config control_configs/control.yaml \
 nt model load --run_id <run_id> --data path/to/test.csv
 
 # 4. Ship them: one package, no torch needed to run it.
-nt export model  --run_id <run_id> --data data/test.csv --out delivery/site --package site
-nt export policy --run_id <control_run_id> --out delivery/site --package site
+nt export model  --run_id <run_id> --data data/test.csv --out delivery/site --package site_model
+nt export policy --run_id <control_run_id> --out delivery/site --package site_model
 
 # Hyperparameter search instead of a single train:
 nt model optuna --config model_configs/modeling.yaml \
@@ -210,7 +210,7 @@ One-off overrides without editing YAML:
 nt model train --config model_configs/modeling.yaml \
     --set epochs=1 \
     --set log2_hidden_size=4 \
-    --set grad_gain=0.5
+    --set ensemble_seeds=3
 ```
 
 The `--set` parser handles `true`/`false`, `null`/`none`, quoted strings, JSON lists/dicts, floats (anything with `.`/`e`/`E`), and ints. Unknown keys fail fast with `ConfigError: Override target does not exist: <key>`.
@@ -254,10 +254,10 @@ mass through one resistance each:
 ```
 
 The state update is fixed physics; only the heat input `g` is learned, by an
-MLP over the current `u` and `d`. We have no plug-load channel and no
-zone-level heat metering, so `g` is where all of that goes — along with the
-solar gain and the conduction to outdoors, which is why nothing has to tell
-the block which `D` column is the weather.
+MLP over the current `u` and `d`. Whatever a dataset does not meter — plug
+loads, occupants, solar gain, and the conduction to outdoors unless
+`ambient` is declared — goes into `g`, which is why an undeclared block does
+not need to be told which `D` column is the weather.
 
 Because `g` reads inputs and never the state, two things hold whatever the
 MLP learns:
@@ -267,7 +267,7 @@ MLP learns:
 - **The two time constants are readable in hours** on the reportcard, so you
   can check them against the building rather than taking the surrogate's word.
 
-Measured on `data/excited` in the RTU-mall app, where the envelope decays at
+Measured on one building's record (a single-zone retail box), where the envelope decays at
 6.4–10.9 h — a 5.8 h half-life at the mid-range estimate — this is how long a
 2 °C head start survives with the compressor held off:
 
@@ -283,19 +283,21 @@ shifting cannot live without it.
 
 **The time constants are a prior, held in a box.** Each `2r2c` block declares
 three, in hours, in its `block_mapping` entry's `params` — a scalar pins one,
-`[min, max]` lets training move it inside that box:
+`[min, max]` lets training move it inside that box. The values below are one
+building's; size yours from your plant (wide where you are unsure):
 
 ```python
 "zone": {"Y": ["Zone Air Temperature [°C]"], "model": "2r2c",
-         "params": {"tau_fast_h": [0.3, 1.0],      # the air settling after an HVAC step
-                    "tau_ambient_h": [2.0, 8.0],   # the initial slope of an HVAC-off drift
+         "params": {"tau_fast_h": [0.3, 1.0],      # the air settling after an actuator step
+                    "tau_ambient_h": [2.0, 8.0],   # the initial slope of an actuators-off drift
                     "tau_slow_h": [20.0, 60.0]}},  # that drift after its first hour
 ```
 
 These are the two modes and the ambient rate — what one measures, so where
 priors are actually held — rather than the network's component rates.
-`tau_slow` is what `nt data decay` fits, and its range is the natural
-`tau_slow_h` box. The boxes must be disjoint in the order fast < ambient <
+`tau_slow` is what `nt data decay` estimates, from free-float periods if the
+data has any; its spread across windows is a reasonable first box, and an
+estimate rather than a measurement. The boxes must be disjoint in the order fast < ambient <
 slow; every point inside them is then a valid building, so training cannot
 leave the feasible set, and `tau_fast` may not start below two timesteps of
 the data, the stability guarantee's floor. There is no default: a block
@@ -497,53 +499,60 @@ To turn on price-driven control:
    timestamps. *Do not build a time-of-use table keyed on hour-of-day* — see
    the objective section above for why the policy will learn the clock
    instead of the price.
-4. **Declare the terms, the tariff's scale and its preview** — pre-cooling
-   happens *before* the expensive block, so a policy that only sees the
-   current price can react but never shift:
+4. **Declare the terms, the tariff's scale and its preview** — acting ahead
+   of the expensive period needs a policy that sees it coming:
 
    ```yaml
    losses:
-     # ...the comfort rows...
-     energy: {column: power, norm: 1}
+     # ...the band rows...
      cost:   {column: power, norm: 1, weight: "Tariff [$/kWh]"}
      peak:   {column: power, norm: 4}      # 1 = mean, 2 = RMS, larger -> hard max
-   gains: {comfort_lower: 5.0, comfort_upper: 5.0, energy: 1.0e-4, cost: 1.0e-3, peak: 1.0e-4}
-   reference_scale: {"Tariff [$/kWh]": 0.30}
-   reference_preview: {"Tariff [$/kWh]": 48}   # 48 steps = 4 h at 5-minute data
-   train_pred_steps: 288                       # 48 is 4 hours: too short to precool and coast
+   gains: {comfort_lower: 1.0, comfort_upper: 1.0, cost: 1.0, peak: 1.0}   # placeholders
+   reference_scale: {"Tariff [$/kWh]": 0.30}   # about the tariff's typical value
+   reference_preview: {"Tariff [$/kWh]": 48}   # steps: long enough to see the peak coming
+   train_pred_steps: 144                       # steps: an action and its payoff in one rollout
    ```
 
-`train_pred_steps` is the real cost — rollout memory grows roughly linearly.
+   The gains are placeholders, sized as
+   [control.yaml](template/control_configs/control.yaml) describes: band
+   terms first, then smoothing, then cost a decade at a time, reading the
+   trajectory each time.
+
+`train_pred_steps` is the real cost — rollout memory and time grow roughly linearly with it.
 
 #### If what you want is pre-cooling
 
-Pre-cooling is load shifting you can point at: drive the zone down through the
-cheap block, then coast up through the expensive one on the building's own
-thermal mass. Four things have to be true at once or it will not appear, and
-three of them are not the gains:
+Pre-cooling is load shifting you can point at, and the worked case behind
+most of the advice here: drive the zone down through the cheap block, then
+coast up through the expensive one on the building's own thermal mass. Four
+things have to be true at once or it will not appear, and three of them are
+not the gains:
 
 - **`reference_preview` covers the run-up to the peak.** Pre-cooling is by
   definition an action taken before the expensive block. A policy whose only
   price input is the current one can be cheap, but it cannot pre-cool.
 - **The comfort band is wide enough to store anything.** Load shifting *is*
   thermal storage, and a 0.5 °C band leaves nowhere to put it — reporting "no
-  price response" out of a narrow band is measuring the band. 1.5–2.5 °C is a
-  reasonable place to start.
-- **The rollout spans the cycle.** 288 steps (24 h at 5-minute data) covers a
-  precool and the coast that pays for it; the default 48 covers neither.
+  price response" out of a narrow band is measuring the band.
+- **The rollout spans the cycle.** At 5-minute data, 144 steps (12 h) held a
+  pre-cool and the coast that pays for it in every run that worked; 288
+  doubled the time and changed nothing measured; the default 48 holds
+  neither.
 - **The cost term carries the power side, not an energy term.** They pull
   different ways: energy rewards using less power at *every* hour, so the
   cheapest way to satisfy it is to stop cooling — load *shedding*, which shows
   up as a big power cut with comfort going backwards. Only cost rewards moving
   power to the cheap hours. If pre-cooling is the goal, start with cost alone
-  and a comfort gain high enough that the savings have to be found rather than
+  and a band gain high enough that the savings have to be found rather than
   bought.
 
-Write the references with `--price-align day` while you are looking for it, or
-the tariff's evening peak lands at a different hour in every window and the
-precool averages out of every plot. Then confirm it is the price and not the
-clock, as above. Pre-heating against an evening peak is the same recipe with
-the sign flipped.
+What it looks like when it works: below the rule through the cheap hours,
+*at* the ceiling — not past it — through the expensive block. A dip with no
+coast is a colder building that costs more; a coast with no dip is a looser
+thermostat. Train on randomly aligned tariffs, plot a day-aligned test
+reference so the peaks line up, and confirm it is the price and not the
+clock, as above. Pre-heating against a peak is the same recipe with the sign
+flipped.
 
 ### Residual control: bound the policy to a rule
 
@@ -562,15 +571,19 @@ error can cost you.
 
    ```yaml
    residual_delta:
-     Heating Setpoint [°C]: [0.0, 0.5]   # up off the band floor, never down
-     Cooling Setpoint [°C]: [0.5, 0.0]   # down off the ceiling, never up
+     Heating Setpoint [°C]: [0.0, 0.0]     # no job in this data: locked to the rule
+     Cooling Setpoint [°C]: [below, above]
    ```
 
-   A heating/cooling pair is held inward in opposite directions, which is why
-   the box is per column. A U column not named is a free policy output over
-   its actuation bounds. Training starts exactly at the rule, and a zero side
-   does not trap it there: the box clamp is exact going forward and the
-   identity going backward, so the gradient keeps the net's own slope.
+   A box per column because actuators differ: a pair that opposes each other
+   (heating and cooling) is held in opposite directions, and one with no job
+   in the data is best locked. A U column not named is a free policy output
+   over its actuation bounds. Training starts exactly at the rule, and a
+   zero side does not trap it there: the box clamp is exact going forward
+   and the identity going backward, so the gradient keeps the net's own
+   slope. How to size a box, and what makes a good anchor, is in the
+   comment above `reference_control` in the
+   [template](template/control_user_defined.py).
 
 Nothing is rounded to an actuator's resolution — a BMS with half-degree
 setpoints implements that, and the controller commands through it. Smoothness
@@ -578,10 +591,12 @@ is the `first_difference` loss term's job.
 
 ### Together
 
-This is the case the residual design is really for — the rule keeps comfort,
-δ answers the incentive, and Δ is an operator-legible knob ("how far from the
-comfort rule am I willing to move for money"): a `residual_delta` box of a
-degree or so on each setpoint, beside the cost and peak rows above, with `train_pred_steps: 288`.
+This is the case the residual design is really for — the rule keeps the
+band, δ answers the incentive, and each box is an operator-legible knob
+("how far from the rule am I willing to move for money"). Anchoring a
+residual is also what makes coupled actuators trainable at all: free
+policies over two opposing setpoints crossed them, and the box is what
+stopped that.
 
 ## Diagnostics that run whether you ask or not
 
@@ -604,7 +619,10 @@ reportcard and in MLflow.
   cannot produce one. Reachability also answers "can any policy hold the band I
   am about to configure" before a controller is built. Needs
   `modeling_user_defined.synth_cfg` to return a `SynthSpec`; skipped when it
-  returns `None`.
+  returns `None`. Instruments, not gates: a failing step response means
+  don't plan against this surrogate, and a small equilibrium drift after an
+  honest attempt is worth noting and moving past — some of the best
+  controllers on record were trained on surrogates that failed it.
 - **Readout channels** — order statistics for every Y channel that is *not* a
   declared thermal state. No verdict: what a readout should do is
   scenario-dependent. But a readout emitting 4000 W at equilibrium feeds back
@@ -635,9 +653,12 @@ mass sits and flags a level under 5%.
 **Before `nt control train` trains anything:**
 
 - **Objective balance** — every term's value and share of the objective on one
-  real batch, warning when one term outweighs all the others combined. This is
-  the one that asserts something: a term carried over from another dataset once
-  came out at 1.7× the whole comfort objective.
+  real batch, warning when one term outweighs all the others combined. A
+  term carried over from another dataset once came out at 1.7× the whole band
+  objective. It is taken at the policy's starting point — for a residual, the
+  rule, where a `first_difference` term is 0% by construction — so it says a
+  term is *present*, not that it is strong enough where the trade-off
+  happens. The same print after training, and the trajectory, say that.
 - **Power term shape** — the power signal swept across each actuation box, so
   its magnitude and shape sit next to the gains you are choosing. One sweep
   serves every term on `power`, since each is a reduction of the same signal. Reported without a verdict: an honest power metric is
@@ -679,7 +700,7 @@ they never reimplement it — into a package that needs only `numpy` and
 
 ```
 delivery/site/
-  site/runtime.py        Model (warmup / step / rollout / predict), Policy (act)
+  site_model/runtime.py  Model (warmup / step / rollout / predict), Policy (act)
   cpp/                   the same runtime in C++17 (runtime.hpp), validate.cpp,
                          example.cpp, CMakeLists.txt
   model/                 warm_start.onnx, step.onnx, model.json, reference/
@@ -732,6 +753,22 @@ cfg, _ = load_config_from_cli(
     config_dir=MODEL_CONFIG_DIR,
 )
 # ...then call train_and_evaluate(cfg, ...) etc.
+```
+
+To evaluate a trained policy on another test reference — the same plant
+file with the price peak moved, say — without retraining:
+
+```python
+from neurotemplate.control.load import load_trained_policy
+from neurotemplate.control.pipeline import evaluate_closed_loop
+from neurotemplate.control.scenarios import load_control_splits
+
+_, cl_system, cfg, sysid_cfg, nm_mapping, norm_stats = load_trained_policy(run_id)
+cfg.test_reference_path = ["data/test_reference_shifted.csv"]
+_, _, test_dfs = load_control_splits(cfg, nm_mapping, norm_stats)
+results, _ = evaluate_closed_loop(cfg, sysid_cfg, cl_system, test_dfs,
+                                  nm_mapping, norm_stats)
+print(results.energy.weighted_energy, results.comfort_mean_exceedance)
 ```
 
 The CLI wrappers ([modeling/cli/train.py](src/neurotemplate/modeling/cli/train.py), [control/cli/train.py](src/neurotemplate/control/cli/train.py)) are short enough — ~30 lines each — that they're worth reading as a template if you want to write your own driver.

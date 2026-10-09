@@ -2,6 +2,8 @@
 # Fields are shown at their built-in defaults, commented out — uncomment what
 # you change. Override any of them per run with `--set key=value`, and check
 # the result with `--print-config`. Step counts are in timesteps of your data.
+# Change one thing per run and keep each run's config (a numbered copy), so
+# the sequence stays readable afterwards.
 
 # ── DATA ─────────────────────────────────────────────────────────
 # Required. Each may be one path or a list; files in a list are windowed
@@ -18,6 +20,10 @@ test_data_path: data/test.csv
 # user_hooks_path: null
 
 # ── MODEL ────────────────────────────────────────────────────────
+# Test error is measured on whatever excitation your data has, which is
+# rarely where a controller will drive the plant; it does not pick a
+# surrogate for control. The reportcard's rollout-stability and physics
+# sections are the readouts for that.
 # Family: mlp | nssm | lssm | gru | 2r2c.
 #   2r2c   grey-box thermal network: a state, a hidden mass, conduction to
 #          ambient, a heat input. Stable under any input by construction,
@@ -34,8 +40,8 @@ test_data_path: data/test.csv
 # in_steps: 12
 # Network width is 2**log2_hidden_size. Under 2r2c this net only maps the
 # columns you left undeclared to a heat flow, and it can be very small.
-# Larger nets tend to buy fit with physics: grow one when the reportcard
-# says the model underfits, not because dev loss went down.
+# Larger nets tend to buy fit with physics: start small, and grow one when
+# the reportcard says the model underfits, not because dev loss went down.
 # log2_hidden_size: 6
 # num_layers: 3
 # Predict the change from the current state rather than the state.
@@ -117,15 +123,17 @@ run: ""
 # trial_seeds: 3
 
 # ── PHYSICS ──────────────────────────────────────────────────────
-# Gradient-sign penalty, evaluated at random off-trajectory points. 0 = off;
-# > 0 requires grad_path (written by write_gradient_mapping in
-# modeling_user_defined.py). Its useful scale is dataset-specific — size it
-# by what the physics section does, not by switching it on.
+# Gradient-sign penalty, evaluated at random off-trajectory points: the
+# mean sign violation per declared (output, input) pair, so a gain means the
+# same however many channels the plant has. 0 = off; > 0 requires grad_path
+# (written by write_gradient_mapping in modeling_user_defined.py). Size it by
+# what the physics section does, not by switching it on.
 # grad_gain: 0.0
 # grad_path: data/grad/mapping.json
 # grad_n_samples: 128
 # The physics checks (equilibrium, step response, reachability, free decay)
-# run after training whenever synth_cfg returns a spec. Instances per check,
+# run after training whenever synth_cfg returns a spec. They are instruments:
+# read a failure as a diagnosis (see synth_cfg), not as a wall. Instances per check,
 # and horizon in hours: raise the count if pass rates swing between seeds,
 # and keep the horizon comparable to the plant's slow time constant.
 # synth_n_scenarios: 32
