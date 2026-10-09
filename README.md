@@ -121,7 +121,7 @@ The objective is not a hook: it is the `losses` table in `control.yaml`, below.
 
 `reference_control` is memoryless and works on the current step: `y_now` `[b, ny]` and `d_now` `[b, nd]` normalized, and `r_now`, each reference column the objective names by name, `[b]`, normalized — `norm_stats` carries an entry for each, so a rule denormalizes a band edge exactly as it does a zone temperature. If it is defined, `nt control train` rolls that rule out on the same test windows against the same test references, adds a learned-vs-baseline table to the reportcard, and states plainly whether the learned policy cleared its own reference on mean exceedance. **A policy that does not clear its reference should ship the reference** — training is scored against a surrogate whose held-out error is not the plant's, and the rule is the one controller here whose behaviour does not depend on that. Without a rule the comparison section just says so.
 
-The same hook is what `residual_delta` anchors to. Set it and the policy commands `reference_control(...) + δ` with `|δ| ≤ residual_delta` instead of commanding a setpoint outright: the rule keeps comfort, δ answers whatever else is being optimised, and the ±Δ box is a trust region on surrogate error rather than a claim about the network. The reportcard reports the box and the fraction of steps δ spent pinned at it — a cap that binds most of the time means either the rule is wrong for this plant or the optimizer is riding a surrogate artifact into the wall. Note Δ bounds the *action*, not the outcome: the commanded setpoint stays within Δ of the rule's, the zone temperature does not, because the plant is in between.
+The same hook is what `residual_delta` anchors to. Set it and the policy commands `reference_control(...) + δ` with `δ` inside the `residual_delta` box instead of commanding a setpoint outright: the rule keeps comfort, δ answers whatever else is being optimised, and the ±Δ box is a trust region on surrogate error rather than a claim about the network. The reportcard reports the box and the fraction of steps δ spent pinned at each edge — an edge that binds most of the time means either the rule is wrong for this plant or the optimizer is riding a surrogate artifact into the wall. Note Δ bounds the *action*, not the outcome: the commanded setpoint stays within Δ of the rule's, the zone temperature does not, because the plant is in between.
 
 ### The control objective: a declared table over named columns
 
@@ -535,6 +535,13 @@ is not the plant's, and a ±Δ box caps what that error can cost you.
    setpoint_step: 0.5      # Delta below one grid step is rejected: every
                            # residual would quantize back to zero
    ```
+
+   A pair `[below, above]` makes the box one-sided: `[0, 0.5]` lets a setpoint
+   the rule anchors at the band floor move up off it and never down — the fix
+   for a heating setpoint that a symmetric box let fall below the floor. One
+   box holds for every U column, and a zero side is a hard floor with no
+   gradient past it, like the actuator bounds. Training still starts exactly
+   at the rule.
 
 3. **Read the verdict.** The reportcard scores the rule on the same windows
    against the same test references and states whether the learned policy

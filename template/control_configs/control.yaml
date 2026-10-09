@@ -92,12 +92,15 @@ gains: {comfort_lower: 5.0, comfort_upper: 5.0, du: 1.0}
 # setpoint_step: 0.0
 
 # ── RESIDUAL CONTROL ─────────────────────────────────────────────
-# Set to command reference_control(...) + δ with |δ| <= residual_delta, in
-# physical units (needs the reference_control hook). It bounds how far
-# surrogate error can move the plant from a rule you trust. null = a free
-# policy over the whole actuation box. 0.0 = the rule itself, which is a
-# cheap first run: it scores the rule on your surrogate. Must be at least
-# setpoint_step when the output is quantized.
+# Set to command reference_control(...) + δ, in physical units (needs the
+# reference_control hook). It bounds how far surrogate error can move the
+# plant from a rule you trust. A number Δ allows -Δ <= δ <= Δ; a pair
+# [below, above] allows -below <= δ <= above — [0, 0.5] lets a setpoint the
+# rule anchors at an edge move inward and never past it. The same box holds
+# for every U column. null = a free policy over the whole actuation box.
+# 0 = the rule itself, which is a cheap first run: it scores the rule on your
+# surrogate. A non-zero side must be at least setpoint_step when the output
+# is quantized.
 # residual_delta: null
 
 # ── TRAINING ─────────────────────────────────────────────────────

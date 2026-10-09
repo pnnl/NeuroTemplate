@@ -241,12 +241,13 @@ def evaluate_closed_loop(
     # (memoryless) rule on the recorded trajectory gives the command it would
     # have issued at each step, so U - u_ref is the deviation that was deployed.
     residual = None
-    if cfg.residual_delta is not None:
+    box = cfg.residual_box()
+    if box is not None:
         u_ref = reference_over_horizon(cfg, out, hmax, nm_mapping, norm_stats)
         tol = (0.5 * cfg.setpoint_step if cfg.setpoint_step > 0
-               else SATURATION_TOL * max(cfg.residual_delta, 1e-12))
+               else SATURATION_TOL * max(*box, 1e-12))
         residual = residual_metrics(
-            U, to_physical(u_ref, u_cols, norm_stats), cfg.residual_delta, tol,
+            U, to_physical(u_ref, u_cols, norm_stats), box, tol,
         )
 
     return ControlResults(
@@ -323,11 +324,14 @@ def _flat_control_metrics(results: ControlResults, prefix: str) -> dict:
         for name, value in results.energy.weighted_energy.items():
             flat[f"{prefix}_{metric_key(name)}_weighted_energy"] = value
     if results.residual is not None:
-        flat[f"{prefix}_residual_delta"] = results.residual.delta_cap
-        flat[f"{prefix}_mean_abs_delta"] = results.residual.mean_abs_delta
-        # Absent at Δ = 0, where a zero-width box makes the fraction vacuous.
-        if results.residual.frac_at_cap is not None:
-            flat[f"{prefix}_frac_delta_at_cap"] = results.residual.frac_at_cap
+        r = results.residual
+        flat[f"{prefix}_residual_below"] = r.below_cap
+        flat[f"{prefix}_residual_above"] = r.above_cap
+        flat[f"{prefix}_mean_abs_delta"] = r.mean_abs_delta
+        # Absent for an edge at 0, where the fraction is vacuous.
+        for side, frac in (("below", r.frac_at_below), ("above", r.frac_at_above)):
+            if frac is not None:
+                flat[f"{prefix}_frac_delta_at_{side}"] = frac
     return flat
 
 

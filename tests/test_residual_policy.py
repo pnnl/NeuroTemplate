@@ -83,40 +83,43 @@ def test_zero_init_holds_for_both_bound_methods(method):
 def test_a_zero_width_box_pins_the_policy_to_the_rule_forever():
     """Δ = 0 is the floor: train nothing, and score exactly the rule."""
     s = full_setup(residual_delta=0.0, setpoint_step=0.0)
-    cfg, sysid_cfg, nm, ns = s["cfg"], s["sysid_cfg"], s["nm"], s["norm_stats"]
-    _, _, hmax = horizons(cfg, sysid_cfg)
-
-    policy = build_policy(cfg, sysid_cfg, nm, ns)
-    # Perturb the whole network: the box is what holds, not the initialization.
-    with torch.no_grad():
-        for p in policy.parameters():
-            p.add_(torch.randn_like(p) * 5.0)
-
-    cl = build_closed_loop(s["dyn_node"], policy, cfg, sysid_cfg)
-    out = cl(_windows(s))
-    u_ref = reference_over_horizon(cfg, out, hmax, nm, ns)
-    assert torch.allclose(out["U"][:, scored_steps("U", hmax), :], u_ref, atol=1e-6)
+    assert _perturbed_deviation(s, 5.0).abs().max() < 1e-5
 
 
 # ── The box actually bounds ──────────────────────────────────────
 
 
-def test_a_trained_residual_never_leaves_the_box():
-    s = full_setup(residual_delta=1.0, setpoint_step=0.0)
+def _perturbed_deviation(s, scale):
+    """The deployed deviation from the rule, in °C, after shaking every
+    parameter of the policy by `scale` — the box is what holds, not the
+    initialisation."""
     cfg, sysid_cfg, nm, ns = s["cfg"], s["sysid_cfg"], s["nm"], s["norm_stats"]
     _, _, hmax = horizons(cfg, sysid_cfg)
-
     policy = build_policy(cfg, sysid_cfg, nm, ns)
     with torch.no_grad():
         for p in policy.parameters():
-            p.add_(torch.randn_like(p) * 20.0)
-
-    cl = build_closed_loop(s["dyn_node"], policy, cfg, sysid_cfg)
-    out = cl(_windows(s))
+            p.add_(torch.randn_like(p) * scale)
+    out = build_closed_loop(s["dyn_node"], policy, cfg, sysid_cfg)(_windows(s))
     u_ref = reference_over_horizon(cfg, out, hmax, nm, ns)
     stretch = torch.tensor([ns[c]["stretch"] for c in nm["U"]])
-    delta_phys = ((out["U"][:, scored_steps("U", hmax), :] - u_ref) * stretch).abs().detach()
-    assert float(delta_phys.max()) <= cfg.residual_delta + 1e-4
+    return ((out["U"][:, scored_steps("U", hmax), :] - u_ref) * stretch).detach()
+
+
+def test_an_asymmetric_box_starts_at_the_rule_and_never_crosses_its_zero_side():
+    """[0, 0.5]: a setpoint anchored at the band floor may move up off it and
+    never down — and a fresh policy still emits the rule exactly."""
+    s = full_setup(residual_delta=[0.0, 0.5], setpoint_step=0.0)
+    assert _perturbed_deviation(s, 0.0).abs().max() < 1e-5
+    torch.manual_seed(0)
+    delta = _perturbed_deviation(s, 20.0)
+    assert float(delta.min()) >= -1e-5
+    assert float(delta.max()) <= 0.5 + 1e-4
+    assert float(delta.max()) > 0.1, "the open side should still be reachable"
+
+
+def test_a_trained_residual_never_leaves_the_box():
+    s = full_setup(residual_delta=1.0, setpoint_step=0.0)
+    assert float(_perturbed_deviation(s, 20.0).abs().max()) <= 1.0 + 1e-4
 
 
 def test_the_residual_still_learns():
@@ -165,12 +168,14 @@ def test_the_in_rollout_current_step_matches_the_bare_node_call():
 
 
 def test_residual_metrics_measure_the_deployed_deviation():
-    u = torch.tensor([[[22.0], [23.0], [24.0]]])
-    u_ref = torch.tensor([[[22.0], [22.5], [22.0]]])
-    m = residual_metrics(u, u_ref, delta_cap=2.0, tol=0.25)
-    assert m.mean_abs_delta == pytest.approx((0.0 + 0.5 + 2.0) / 3)
+    u = torch.tensor([[[22.0], [23.0], [24.0], [20.0]]])
+    u_ref = torch.tensor([[[22.0], [22.5], [22.0], [22.0]]])
+    m = residual_metrics(u, u_ref, box=(2.0, 2.0), tol=0.25)
+    assert m.mean_abs_delta == pytest.approx((0.0 + 0.5 + 2.0 + 2.0) / 4)
     assert m.max_abs_delta == pytest.approx(2.0)
-    assert m.frac_at_cap == pytest.approx(1 / 3)
+    # One step on each edge, reported separately.
+    assert m.frac_at_below == pytest.approx(1 / 4)
+    assert m.frac_at_above == pytest.approx(1 / 4)
 
 
 def test_a_zero_width_box_reports_no_saturation_rather_than_all_of_it():
@@ -182,11 +187,15 @@ def test_a_zero_width_box_reports_no_saturation_rather_than_all_of_it():
     is the assertion that the residual path is inert.
     """
     u = torch.tensor([[[22.0], [23.0]]])
-    m = residual_metrics(u, u, delta_cap=0.0, tol=0.25)
+    m = residual_metrics(u, u, box=(0.0, 0.0), tol=0.25)
 
-    assert m.frac_at_cap is None
+    assert m.frac_at_below is None and m.frac_at_above is None
     assert m.mean_abs_delta == 0.0
     assert m.max_abs_delta == 0.0
+    # A one-sided box reports only the edge that has an interior.
+    one_sided = residual_metrics(u + 0.5, u, box=(0.0, 0.5), tol=0.25)
+    assert one_sided.frac_at_below is None
+    assert one_sided.frac_at_above == 1.0
 
 
 def test_a_grid_aligned_reference_leaves_no_snapping_floor(monkeypatch):
@@ -207,7 +216,7 @@ def test_a_grid_aligned_reference_leaves_no_snapping_floor(monkeypatch):
         u_ref = reference_over_horizon(cfg, out, hmax, nm, ns)
         return residual_metrics(
             (out["U"][:, scored_steps("U", hmax), :] * stretch + shift).detach(),
-            (u_ref * stretch + shift).detach(), cfg.residual_delta, 0.25,
+            (u_ref * stretch + shift).detach(), cfg.residual_box(), 0.25,
         ).mean_abs_delta
 
     # The fixture's midpoint rule is not grid-aligned, so a delta = 0 policy

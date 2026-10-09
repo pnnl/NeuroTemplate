@@ -187,7 +187,7 @@ class _ReferenceRule(nn.Module):
 class _ResidualPolicy(nn.Module):
     """Command a bounded deviation from a reference rule, not a setpoint.
 
-        δ = MLP_bounds(window)                    bounded to [-Δ, +Δ]
+        δ = clamp(MLP_bounds(window), -below, +above)   net bounded to ±max
         u = clamp(quantize(u_ref + δ), umin, umax)
 
     The point is not that a network finds it easier to learn zero than
@@ -208,6 +208,14 @@ class _ResidualPolicy(nn.Module):
     setpoint comfortably under 1 °C of zone deviation — state it that way
     rather than as a comfort guarantee.
 
+    The box may be asymmetric — [0, 0.5] lets a heating setpoint anchored at
+    the band floor move up and never down. The net is bounded to the symmetric
+    ±max(below, above) and its output clamped to the box, rather than bounded
+    to the box itself: a sigmoid squash cannot reach an edge, so a box with a
+    zero side would have no output for "the rule exactly", and training could
+    not start there. A zero side is a hard floor, with no gradient past it —
+    the same as the actuator clamp.
+
     Order is easy to get backwards and matters: the reference is already
     grid-snapped and δ is not, so the **sum** is what gets snapped, and the
     clamp comes **last** — quantizing after clamping can push a value back
@@ -216,16 +224,19 @@ class _ResidualPolicy(nn.Module):
 
     def __init__(self, base: nn.Module, reference: _ReferenceRule,
                  umin: torch.Tensor, umax: torch.Tensor,
-                 quantize=None):
+                 below: torch.Tensor, above: torch.Tensor, quantize=None):
         super().__init__()
         self.base = base
         self.reference = reference
         self.quantize = quantize
         self.register_buffer("umin", umin)
         self.register_buffer("umax", umax)
+        self.register_buffer("below", below)
+        self.register_buffer("above", above)
 
     def forward(self, *args: torch.Tensor) -> torch.Tensor:
-        u = self.reference(*args) + self.base(*args)
+        delta = torch.clamp(self.base(*args), -self.below, self.above)
+        u = self.reference(*args) + delta
         if self.quantize is not None:
             u = self.quantize(u)
         return torch.clamp(u, self.umin, self.umax)
@@ -234,9 +245,9 @@ class _ResidualPolicy(nn.Module):
 def _zero_final_layer(net: nn.Module) -> None:
     """Start the residual at δ ≡ 0, exactly.
 
-    Both bound methods send a pre-bound output of 0 to the centre of a
-    symmetric box: `sigmoid_scale` gives 2Δ·σ(0) − Δ = 0, and `relu_clamp` is
-    the identity there. So zeroing the last linear layer makes the policy emit
+    Both bound methods send a pre-bound output of 0 to the centre of the
+    net's symmetric box: `sigmoid_scale` gives 2Δ·σ(0) − Δ = 0, and
+    `relu_clamp` is the identity there. So zeroing the last linear layer makes the policy emit
     the reference rule exactly at initialization — training starts at the rule.
     The gradient at that point is also maximal (σ′(0) = ¼), so it is a
     responsive start, not a dead one.
@@ -531,10 +542,12 @@ def build_policy(
     if reference is None:
         net_min, net_max = umin, umax
     else:
-        # A residual policy is bounded to a symmetric box around the rule, in
-        # physical units converted per U column exactly as setpoint_step is.
-        delta_norm = cfg.residual_delta / u_stretch
-        net_min, net_max = -delta_norm, delta_norm
+        # A residual's box is around the rule, in physical units converted per
+        # U column exactly as setpoint_step is. The net takes the symmetric
+        # ±max of it; _ResidualPolicy clamps to the box itself.
+        below, above = (side / u_stretch for side in cfg.residual_box())
+        net_max = torch.maximum(below, above)
+        net_min = -net_max
 
     net = policy_catalog[cfg.policy](cfg, insize, nu, net_min, net_max).to(device)
 
@@ -565,7 +578,8 @@ def build_policy(
         net = _PreviewGather(net, gathers)
 
     if reference is not None:
-        net = _ResidualPolicy(net, reference, umin, umax, quantize).to(device)
+        net = _ResidualPolicy(net, reference, umin, umax, below, above,
+                              quantize).to(device)
     elif quantize is not None:
         net = _QuantizedPolicy(net, quantize).to(device)
 
@@ -656,5 +670,5 @@ def describe_policy(
         "umax_phys": umax_phys,
         "quantized": quantized,
         "setpoint_step": cfg.setpoint_step,
-        "residual_delta": cfg.residual_delta if residual else None,
+        "residual_box": cfg.residual_box() if residual else None,
     }

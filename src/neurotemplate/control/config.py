@@ -97,14 +97,16 @@ class ControlConfig:
     # continuous. 0 disables quantization — the default, since a nonzero grid
     # is one plant's actuator resolution, not a library-wide default.
     setpoint_step: float = 0.0
-    # Half-width of the residual box, in the plant's physical units. None
-    # disables the residual entirely (a plain policy over the actuation box).
-    # Set it and the policy commands `reference_control(...) + δ` with
-    # |δ| <= residual_delta, which caps how far a surrogate error can move
-    # the deployed setpoint. 0.0 emits the reference rule exactly — a useful
-    # floor to train nothing and score. Requires the
+    # The residual box, in the plant's physical units. None disables the
+    # residual entirely (a plain policy over the actuation box). Set it and
+    # the policy commands `reference_control(...) + δ`, which caps how far a
+    # surrogate error can move the deployed setpoint: a number Δ bounds
+    # -Δ <= δ <= Δ; a pair [below, above] bounds -below <= δ <= above, so
+    # [0, 0.5] lets a setpoint move up off the rule and never down. One box
+    # for every U column. 0 (or [0, 0]) emits the reference rule exactly — a
+    # useful floor to train nothing and score. Requires the
     # control_user_defined.reference_control hook.
-    residual_delta: Optional[float] = None
+    residual_delta: Union[float, list[float], None] = None
 
     # ── Training ─────────────────────────────────────────────────
     epochs: int = 300
@@ -206,23 +208,36 @@ class ControlConfig:
             check_non_negative(self, name)
 
         if self.residual_delta is not None:
-            if self.residual_delta < 0:
+            box = self.residual_delta
+            pair = box if isinstance(box, list) else [box, box]
+            if len(pair) != 2 or any(isinstance(d, bool) or not isinstance(
+                    d, (int, float)) or d < 0 for d in pair):
                 raise ValueError(
-                    f"residual_delta must be >= 0, got {self.residual_delta}. "
-                    "0 emits the reference rule exactly; null disables the "
-                    "residual."
+                    f"residual_delta must be a number >= 0 or a pair [below, "
+                    f"above] of numbers >= 0, got {box!r}. 0 emits the "
+                    "reference rule exactly; null disables the residual."
                 )
             # The single most likely way to waste a campaign on this feature:
             # every δ snaps back to zero and you get a rule that trained for an
             # hour, with nothing on any report to say so.
-            if 0 < self.residual_delta < self.setpoint_step:
-                raise ValueError(
-                    f"residual_delta ({self.residual_delta}) is smaller than "
-                    f"setpoint_step ({self.setpoint_step}), so every residual "
-                    "quantizes back to zero and the policy can only ever emit "
-                    "the reference rule. Raise it to at least one grid step, "
-                    "or set setpoint_step: 0."
-                )
+            for side in self.residual_box():
+                if 0 < side < self.setpoint_step:
+                    raise ValueError(
+                        f"residual_delta ({box}) is smaller than setpoint_step "
+                        f"({self.setpoint_step}) on one side, so every residual "
+                        "that way quantizes back to zero. Raise it to at least "
+                        "one grid step, make that side 0, or set "
+                        "setpoint_step: 0."
+                    )
+
+    def residual_box(self) -> Optional[tuple[float, float]]:
+        """(below, above) of the residual box in physical units, or None
+        when there is no residual."""
+        box = self.residual_delta
+        if box is None:
+            return None
+        below, above = box if isinstance(box, list) else (box, box)
+        return float(below), float(above)
 
     def asdict(self) -> dict:
         return asdict(self)

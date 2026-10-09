@@ -102,6 +102,10 @@ def _preview_rows(label: str, depths: dict[str, int],
             *(f"  - `{col}`: {depth}" for col, depth in depths.items())]
 
 
+def _box(below: float, above: float) -> str:
+    return f"±{above:g}" if below == above else f"[−{below:g}, +{above:g}]"
+
+
 def _policy_section(arch: dict) -> str:
     hsizes = arch["hsizes"] if arch["hsizes"] else "*(none — single affine map)*"
     bounds = "\n".join(
@@ -129,11 +133,12 @@ def _policy_section(arch: dict) -> str:
         "no measurement restriction.",
         f"- **Setpoint quantization:** {quant}",
     ]
-    if arch["residual_delta"] is not None:
+    if arch["residual_box"] is not None:
         rows.append(
-            f"- **Residual box:** ±{arch['residual_delta']:g} around "
+            f"- **Residual box:** {_box(*arch['residual_box'])} around "
             "`reference_control` *(the network commands the deviation, not "
-            "the setpoint; Δ bounds the action, not the zone temperature)*"
+            "the setpoint; the box bounds the action, not the zone "
+            "temperature)*"
         )
     rows += [
         "- **Actuation bounds (physical units):**",
@@ -313,25 +318,31 @@ def _actuation_section(results) -> str:
     if r is not None:
         body += [
             "",
-            f"- **Residual vs. the reference rule** (Δ = ±{r.delta_cap:g}):",
+            f"- **Residual vs. the reference rule** (box "
+            f"{_box(r.below_cap, r.above_cap)}):",
             f"  - Mean |δ|: {r.mean_abs_delta:.4g}   max |δ|: "
             f"{r.max_abs_delta:.4g}",
         ]
-        if r.frac_at_cap is None:
+        if r.frac_at_below is None and r.frac_at_above is None:
             body += [
-                "  - Pinned at ±Δ: n/a — Δ = 0, so the policy *is* the "
-                "reference rule and the box has no interior to bind. Mean |δ| "
-                "above is the check that the residual path is inert; anything "
-                "but zero there is a bug.",
+                "  - Pinned at an edge: n/a — the box is zero-width, so the "
+                "policy *is* the reference rule and the box has no interior "
+                "to bind. Mean |δ| above is the check that the residual path "
+                "is inert; anything but zero there is a bug.",
             ]
         else:
             body += [
-                f"  - Pinned at ±Δ on {r.frac_at_cap * 100:.1f}% of steps",
-                "  - A cap that binds most of the time means one of three "
+                f"  - Pinned at the {name} edge on {frac * 100:.1f}% of steps"
+                for name, frac in (("lower", r.frac_at_below),
+                                   ("upper", r.frac_at_above))
+                if frac is not None
+            ]
+            body += [
+                "  - An edge that binds most of the time means one of three "
                 "things: the reference is wrong for this plant, the optimizer "
                 "is riding a surrogate artifact into the wall, or the "
-                "incentive has simply outgrown what ±Δ can express. The third "
-                "is the cap doing its job. Read this before the comfort "
+                "incentive has simply outgrown what the box can express. The "
+                "third is the box doing its job. Read this before the comfort "
                 "number either way.",
             ]
         body += [

@@ -117,22 +117,26 @@ class ActuationMetrics:
 class ResidualMetrics:
     """How far a residual policy's commands sat from their reference rule.
 
-    `frac_at_cap` is the line that earns its place: if the ±Δ box is binding
-    most of the time, either the reference is wrong for this plant or the
-    optimizer is riding a surrogate artifact into the wall. Both are things to
-    know before reading the comfort number.
+    The pinned fractions are the lines that earn their place: if one edge of
+    the box is binding most of the time, either the reference is wrong for
+    this plant or the optimizer is riding a surrogate artifact into the wall.
+    Both are things to know before reading the comfort number. Each edge is
+    reported on its own — an asymmetric box pooled into one figure would say
+    nothing about which edge binds.
 
-    It is None at Δ = 0, where the question does not exist: every deviation is
-    trivially at the bound of a zero-width box, so the fraction is 1.0 and
-    means nothing. Δ = 0 is the configuration the library recommends running
-    first (it scores the bare rule), so this is a case worth stating rather
-    than a corner. `mean_abs_delta` still earns its place there — it is the
+    An edge at 0 has no fraction (None): the deviation cannot pass it, so
+    sitting on it is sitting on the rule, and the share means nothing. Δ = 0
+    on both sides is the configuration the library recommends running first
+    (it scores the bare rule), so this is a case worth stating rather than a
+    corner. `mean_abs_delta` still earns its place there — it is the
     assertion that the residual path really is inert.
     """
-    delta_cap: float        # Δ, the configured half-width, in physical units
+    below_cap: float        # the box is [-below_cap, +above_cap], physical units
+    above_cap: float
     mean_abs_delta: float   # mean |commanded − reference|
     max_abs_delta: float
-    frac_at_cap: Optional[float]  # share pinned at ±Δ; None when Δ = 0
+    frac_at_below: Optional[float]  # share pinned at -below_cap; None when it is 0
+    frac_at_above: Optional[float]  # share pinned at +above_cap; None when it is 0
 
 
 @dataclass
@@ -343,17 +347,17 @@ def actuation_metrics(
 def residual_metrics(
     u: torch.Tensor,
     u_ref: torch.Tensor,
-    delta_cap: float,
+    box: tuple[float, float],
     tol: float,
 ) -> ResidualMetrics:
     """
     Args:
         u:     [batch, time, nu] commanded controls in physical units.
         u_ref: [batch, time, nu] the reference rule's commands, same units.
-        delta_cap: the configured Δ, in physical units.
-        tol:   how close to Δ counts as pinned. Half a setpoint grid step is
-            the natural choice when quantization is on, because the commanded
-            deviation can only land on grid points.
+        box:   (below, above), the configured box, in physical units.
+        tol:   how close to an edge counts as pinned. Half a setpoint grid
+            step is the natural choice when quantization is on, because the
+            commanded deviation can only land on grid points.
 
     This is the *realized* residual — measured after quantization and after
     the actuator clamp — so it is the deviation that was actually deployed,
@@ -369,18 +373,20 @@ def residual_metrics(
         raise ValueError(
             f"u {tuple(u.shape)} and u_ref {tuple(u_ref.shape)} must match"
         )
-    if delta_cap < 0:
-        raise ValueError(f"delta_cap must be >= 0, got {delta_cap}")
+    below, above = box
+    if below < 0 or above < 0:
+        raise ValueError(f"box edges must be >= 0, got {box}")
 
-    delta = (u - u_ref).detach().cpu().abs()
+    delta = (u - u_ref).detach().cpu()
     return ResidualMetrics(
-        delta_cap=delta_cap,
-        mean_abs_delta=float(delta.mean()),
-        max_abs_delta=float(delta.max()),
-        # A zero-width box has no interior, so "pinned at the bound" is true of
-        # every step and says nothing. Reported as absent rather than as 100%.
-        frac_at_cap=(None if delta_cap == 0 else
-                     float((delta >= delta_cap - tol).float().mean())),
+        below_cap=below,
+        above_cap=above,
+        mean_abs_delta=float(delta.abs().mean()),
+        max_abs_delta=float(delta.abs().max()),
+        frac_at_below=(None if below == 0 else
+                       float((delta <= -below + tol).float().mean())),
+        frac_at_above=(None if above == 0 else
+                       float((delta >= above - tol).float().mean())),
     )
 
 

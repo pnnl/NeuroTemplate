@@ -109,6 +109,8 @@ def _band(**changes):
     # The single most likely way to waste a campaign on the residual: every
     # delta snaps back to zero and nothing on any report says so.
     ({"setpoint_step": 0.5, "residual_delta": 0.2}, "smaller than setpoint_step"),
+    ({"setpoint_step": 0.5, "residual_delta": [0.2, 0.5]}, "smaller than setpoint_step"),
+    ({"residual_delta": [0.5]}, r"pair \[below, above\]"),
 ])
 def test_validate_names_the_problem(fields, message):
     with pytest.raises(ValueError, match=message):
@@ -121,6 +123,8 @@ def test_validate_names_the_problem(fields, message):
     # 0 means "emit the reference exactly" — a floor to train nothing and
     # score, and not the same thing as a residual that quantizes away.
     pytest.param({"residual_delta": 0.0}, id="zero-width residual box"),
+    pytest.param({"setpoint_step": 0.5, "residual_delta": [0, 0.5]},
+                 id="one-sided residual box"),
 ])
 def test_validate_stays_quiet_on_a_legal_config(fields):
     make_control_cfg(**fields).validate()
