@@ -18,7 +18,8 @@ import torch
 
 from neurotemplate.common.data_utils import get_sw_dict
 from neurotemplate.modeling.config import ModelingConfig as Config
-from neurotemplate.modeling.dynamics import GRUBlock, get_dynamics
+from neurotemplate.modeling.dynamics import get_dynamics
+from neurotemplate.modeling.gru import GRUBlock
 from model_fixtures import model_cfg
 
 NY, NU, ND = 2, 1, 1

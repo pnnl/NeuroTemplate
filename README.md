@@ -749,7 +749,8 @@ src/neurotemplate/
 │   └── reportcard.py    # _section, write_reportcard (shared by both sides)
 ├── modeling/
 │   ├── config.py        # ModelingConfig
-│   ├── dynamics.py      # SSMGrad, GRUBlock, BlockStack, get_dynamics
+│   ├── dynamics.py      # SSMGrad, BlockStack, get_dynamics
+│   ├── gru.py           # GRUBlock — the recurrent family
 │   ├── rc.py            # RCBlock — the 2R2C thermal network
 │   ├── blocks.py        # build_blocks — the Y/U/D partition behind per-block models
 │   ├── diagnostics.py   # nt data heads / nt data decay — pre-training advice
