@@ -13,7 +13,6 @@ import pytest
 from neurotemplate.common.config import (
     ConfigError, apply_overrides, dict_to_dataclass, paths_as_list,
 )
-from neurotemplate.control.config import ControlConfig
 from neurotemplate.modeling.config import ModelingConfig as Config
 
 _OPTIONAL = ("norm_type", "device", "grad_path")
@@ -39,8 +38,8 @@ def test_a_real_string_is_not_coerced():
 
 
 def test_an_optional_float_keeps_both_readings():
-    assert dict_to_dataclass({"residual_delta": "1e1"}, ControlConfig).residual_delta == 10.0
-    assert dict_to_dataclass({"residual_delta": "none"}, ControlConfig).residual_delta is None
+    assert dict_to_dataclass({"steps_per_hour": "1.2e1"}, Config).steps_per_hour == 12.0
+    assert dict_to_dataclass({"steps_per_hour": "none"}, Config).steps_per_hour is None
 
 
 # ── Float formats ────────────────────────────────────────────────

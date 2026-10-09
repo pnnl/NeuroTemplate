@@ -9,7 +9,10 @@ R is the objective's reference columns (control.losses), present only when it
 names one.
 
 Output is squashed into the actuator limits (normalized U space) by
-blocks.MLP_bounds. Windowing uses the same input_map convention as
+blocks.MLP_bounds; a U column `residual_delta` names is instead a bounded
+deviation from `reference_control` (`_ResidualPolicy`). Nothing is rounded to
+an actuator's resolution: that is the building's job, and the controller
+commands through it. Windowing uses the same input_map convention as
 modeling/dynamics.get_dynamics so the policy composes with the frozen dynamics Node.
 
 `policy_catalog` selects the network family the same way `model_catalog`
@@ -58,57 +61,6 @@ _D_ARG_INDEX = 1
 _R_ARG_INDEX = 2
 
 
-class STEQuantize(nn.Module):
-    """Snap to a setpoint grid in the forward pass; identity in the backward.
-
-    Lets the policy learn against a continuous surrogate while emitting only
-    grid-feasible setpoints (e.g. half-degree thermostat steps). The
-    `(round(.) - u).detach()` trick zeros the gradient contribution of the
-    snap, so ∂out/∂u = 1.
-
-    Snap targets the grid `{k*step - offset : integer k}` in the same space
-    as the input. For the policy this is normalized U: caller passes
-    `step = step_phys / stretch` and `offset = shift / stretch` so the
-    *physical* grid lands at multiples of `step_phys`.
-
-    `step` and `offset` may be scalars or 1-D tensors of shape [nu]
-    (per-channel grid, broadcast over batch/time).
-    """
-
-    def __init__(self, step, offset=0.0):
-        super().__init__()
-        if isinstance(step, torch.Tensor):
-            if (step <= 0).any():
-                raise ValueError(f"STEQuantize step entries must be > 0, got {step}")
-            self.register_buffer("step", step.float())
-        else:
-            if step <= 0:
-                raise ValueError(f"STEQuantize step must be > 0, got {step}")
-            self.step = float(step)
-
-        if isinstance(offset, torch.Tensor):
-            self.register_buffer("offset", offset.float())
-        else:
-            self.offset = float(offset)
-
-    def forward(self, u: torch.Tensor) -> torch.Tensor:
-        snapped = ((u + self.offset) / self.step).round() * self.step - self.offset
-        return u + (snapped - u).detach()
-
-
-class _QuantizedPolicy(nn.Module):
-    """Compose the bounded MLP with STEQuantize while keeping the variadic
-    forward signature the Neuromancer Node expects."""
-
-    def __init__(self, base: nn.Module, quantize: STEQuantize):
-        super().__init__()
-        self.base = base
-        self.quantize = quantize
-
-    def forward(self, *args: torch.Tensor) -> torch.Tensor:
-        return self.quantize(self.base(*args))
-
-
 class _PreviewGather(nn.Module):
     """Narrow previewed windows to the (column, timestep) pairs declared.
 
@@ -151,6 +103,10 @@ class _ReferenceRule(nn.Module):
     into a use case's rule. This slices the current step back out and hands the
     hook plain `[b, n]` tensors, and each reference column by name.
 
+    The rule returns `{U column: [b]}`, one command per anchored column, and
+    must return exactly the columns `residual_delta` names: a column it adds
+    would be silently ignored, one it drops would have no anchor.
+
     Deliberately memoryless: every rule-based controller in the record is a
     function of the reference and the current state, and it is what the
     deploy-side callback can supply with no new plumbing. A rule that needs its
@@ -159,12 +115,14 @@ class _ReferenceRule(nn.Module):
     """
 
     def __init__(self, rule, nm_mapping: dict[str, list[str]],
-                 norm_stats: NormStats, h_ctrl: int, r_columns: list[str]):
+                 norm_stats: NormStats, h_ctrl: int, r_columns: list[str],
+                 anchored: list[str]):
         super().__init__()
         self.rule = rule
         self.nm_mapping = nm_mapping
         self.norm_stats = norm_stats
         self.r_columns = r_columns
+        self.anchored = anchored
         # Which block of each flattened window holds the current step. yn and
         # D look `h_ctrl - 1` steps back, so it is the last of their history;
         # R has no history, so it is the first.
@@ -172,90 +130,121 @@ class _ReferenceRule(nn.Module):
         self.now = h_ctrl - 1
 
     def forward(self, yn: torch.Tensor, d: torch.Tensor,
-                r: Optional[torch.Tensor] = None) -> torch.Tensor:
+                r: Optional[torch.Tensor] = None) -> dict[str, torch.Tensor]:
         r_now = {} if r is None else {
             name: r[:, j] for j, name in enumerate(self.r_columns)}
-        return self.rule(
+        commands = self.rule(
             _current(yn, self.now, self.ny),
             r_now,
             _current(d, self.now, self.nd),
             self.nm_mapping,
             self.norm_stats,
         )
+        if set(commands) != set(self.anchored):
+            raise ValueError(
+                f"reference_control returned {sorted(commands)}, but "
+                f"residual_delta names {sorted(self.anchored)}. They must be "
+                "the same columns: the rule anchors exactly the columns that "
+                "have a box."
+            )
+        return commands
+
+
+def _clamp_straight_through(x: torch.Tensor, lo: torch.Tensor,
+                            hi: torch.Tensor) -> torch.Tensor:
+    """`clamp(x, lo, hi)` forward; the identity backward.
+
+    The exact clamp, so the box asked for is the box delivered, but no dead
+    gradient on the clamped side: a box with a zero side starts on that edge,
+    and a hard clamp there zeroes the gradient for good — measured, a
+    [0, 0.5] heating box under an incentive pushing down lost its gradient in
+    one Adam step and stayed at δ = 0 when the incentive turned. What bounds
+    the raw output instead is the net's own squash, ±max(below, above); a raw
+    output held long against a closed side saturates that squash, and comes
+    back as slowly as from any sigmoid edge.
+    """
+    return x + (torch.clamp(x, lo, hi) - x).detach()
 
 
 class _ResidualPolicy(nn.Module):
-    """Command a bounded deviation from a reference rule, not a setpoint.
+    """Command a bounded deviation from a reference rule, per U column.
 
-        δ = clamp(MLP_bounds(window), -below, +above)   net bounded to ±max
-        u = clamp(quantize(u_ref + δ), umin, umax)
+    For each column `residual_delta` names (an *anchored* column):
+
+        δ = clamp(net, -below, +above)    net bounded to ±max(below, above)
+        u = clamp(rule + δ, umin, umax)
+
+    and every other column is the net's own output over its actuation bounds.
 
     The point is not that a network finds it easier to learn zero than
     identity — the `linear` family already expresses `u = sat(Kx + b)`, so
     representing the rule was never the binding constraint. The point is that
     a bounded residual is **a trust region on surrogate error**: the optimizer's
     gradient and the model-selection criterion both come from a surrogate whose
-    own held-out score can be anti-correlated with plant fidelity, and a ±Δ box
+    own held-out score can be anti-correlated with plant fidelity, and a box
     caps what that error can cost you without needing to fix it.
 
-    What it buys, in descending order: a hard cap on deployed deviation; an
-    exactly-recoverable δ = 0 point that `evaluate_baseline` scores on the same
-    reference and the same windows; and a start at the rule itself.
+    What it buys: a hard cap on deployed deviation, and a start at the rule
+    itself (`_zero_final_layer`).
 
-    Note Δ bounds the *action*, not the outcome. The commanded setpoint stays
-    within Δ of the rule's; the zone temperature does not, because the plant is
-    in between. A setpoint→zone gain well under 1 °C/°C makes Δ = 1 °C of
-    setpoint comfortably under 1 °C of zone deviation — state it that way
-    rather than as a comfort guarantee.
+    Note the box bounds the *action*, not the outcome. The commanded setpoint
+    stays within its box around the rule's; the zone temperature does not,
+    because the plant is in between.
 
-    The box may be asymmetric — [0, 0.5] lets a heating setpoint anchored at
-    the band floor move up and never down. The net is bounded to the symmetric
-    ±max(below, above) and its output clamped to the box, rather than bounded
-    to the box itself: a sigmoid squash cannot reach an edge, so a box with a
-    zero side would have no output for "the rule exactly", and training could
-    not start there. A zero side is a hard floor, with no gradient past it —
-    the same as the actuator clamp.
-
-    Order is easy to get backwards and matters: the reference is already
-    grid-snapped and δ is not, so the **sum** is what gets snapped, and the
-    clamp comes **last** — quantizing after clamping can push a value back
-    outside the actuator box.
+    A box per column, because a heating/cooling pair is held inward in
+    opposite directions — [0, 0.5] on heating, [0.5, 0] on cooling — and a
+    box is in its column's units. The net is bounded to the symmetric
+    ±max(below, above) and its output clamped to the box (straight-through,
+    see `_clamp_straight_through`), rather than bounded to the box itself: a
+    sigmoid squash cannot reach an edge, so a box with a zero side would have
+    no output for "the rule exactly", and training could not start there.
     """
 
-    def __init__(self, base: nn.Module, reference: _ReferenceRule,
+    def __init__(self, base: nn.Module, reference: nn.Module,
+                 u_columns: list[str],
                  umin: torch.Tensor, umax: torch.Tensor,
-                 below: torch.Tensor, above: torch.Tensor, quantize=None):
+                 below: torch.Tensor, above: torch.Tensor):
         super().__init__()
         self.base = base
         self.reference = reference
-        self.quantize = quantize
+        self.u_columns = u_columns
         self.register_buffer("umin", umin)
         self.register_buffer("umax", umax)
         self.register_buffer("below", below)
         self.register_buffer("above", above)
 
     def forward(self, *args: torch.Tensor) -> torch.Tensor:
-        delta = torch.clamp(self.base(*args), -self.below, self.above)
-        u = self.reference(*args) + delta
-        if self.quantize is not None:
-            u = self.quantize(u)
-        return torch.clamp(u, self.umin, self.umax)
+        raw = self.base(*args)
+        rule = self.reference(*args)
+        columns = []
+        for j, column in enumerate(self.u_columns):
+            if column in rule:
+                delta = _clamp_straight_through(raw[:, j], -self.below[j],
+                                                self.above[j])
+                columns.append(torch.clamp(rule[column] + delta,
+                                           self.umin[j], self.umax[j]))
+            else:
+                columns.append(raw[:, j])
+        return torch.stack(columns, dim=-1)
 
 
-def _zero_final_layer(net: nn.Module) -> None:
-    """Start the residual at δ ≡ 0, exactly.
+def _zero_final_layer(net: nn.Module, rows: torch.Tensor) -> None:
+    """Start each anchored column's residual at δ ≡ 0, exactly.
 
     Both bound methods send a pre-bound output of 0 to the centre of the
     net's symmetric box: `sigmoid_scale` gives 2Δ·σ(0) − Δ = 0, and
-    `relu_clamp` is the identity there. So zeroing the last linear layer makes the policy emit
-    the reference rule exactly at initialization — training starts at the rule.
-    The gradient at that point is also maximal (σ′(0) = ¼), so it is a
-    responsive start, not a dead one.
+    `relu_clamp` is the identity there. So zeroing the last linear layer's
+    rows for the anchored columns (`rows`, a bool mask over U) makes the
+    policy emit the reference rule exactly there at initialization —
+    training starts at the rule. The gradient at that point is also maximal
+    (σ′(0) = ¼), so it is a responsive start, not a dead one. Unanchored
+    columns keep their usual initialization.
     """
     last = net.linear[-1]
-    nn.init.zeros_(last.weight)
-    if last.bias is not None:
-        nn.init.zeros_(last.bias)
+    with torch.no_grad():
+        last.weight[rows] = 0.0
+        if last.bias is not None:
+            last.bias[rows] = 0.0
 
 
 def _validated_preview_spec(hooks, nm_mapping: dict[str, list[str]]
@@ -382,69 +371,36 @@ policy_catalog = {
 POLICY_BOUND_METHODS = list(blocks.MLP_bounds.bound_methods)
 
 
-def _u_scaling(nm_mapping, norm_stats, device) -> tuple[torch.Tensor, torch.Tensor]:
-    """(stretch, shift) per U column — the physical↔normalized conversion."""
-    def col(key):
-        return torch.tensor([norm_stats[c][key] for c in nm_mapping["U"]],
-                            dtype=torch.float32, device=device)
-    return col("stretch"), col("shift")
-
-
 def _reference_rule(cfg, hooks, nm_mapping, norm_stats, h_ctrl: int,
-                    r_columns: list[str]):
-    """The residual's anchor rule, or None when `residual_delta` is unset.
+                    r_columns: list[str]) -> Optional[_ReferenceRule]:
+    """The residual's anchor rule, or None when `residual_delta` is empty.
 
     No silent "no reference → plain policy" path: a residual anchored to a bad
     rule is a bad controller with extra steps, and the fix for that is to write
     the rule, not to quietly drop the anchor.
     """
-    if cfg.residual_delta is None:
+    if not cfg.residual_delta:
         return None
+    unknown = sorted(set(cfg.residual_delta) - set(nm_mapping["U"]))
+    if unknown:
+        raise ValueError(
+            f"residual_delta names {unknown}, which are not U columns of the "
+            f"surrogate. U columns: {nm_mapping['U']}."
+        )
     rule = getattr(hooks, "reference_control", None)
     if rule is None:
         raise NotImplementedError(
             f"residual_delta is set ({cfg.residual_delta}) but "
             "control_user_defined.reference_control is not defined, so there "
             "is no rule for the residual to deviate from. Implement the hook, "
-            "or set residual_delta to null for a plain policy."
+            "or leave residual_delta empty for a plain policy."
         )
-    return _ReferenceRule(rule, nm_mapping, norm_stats, h_ctrl, r_columns)
+    return _ReferenceRule(rule, nm_mapping, norm_stats, h_ctrl, r_columns,
+                          anchored=list(cfg.residual_delta))
 
 
 def _input_keys(r_columns: list[str]) -> list[str]:
     return ["yn", "D"] + (["R"] if r_columns else [])
-
-
-@beartype
-def build_reference_node(
-    cfg,
-    sysid_cfg,
-    nm_mapping: dict[str, list[str]],
-    norm_stats: NormStats,
-) -> Node:
-    """The use case's reference rule as a standalone controller Node.
-
-    One rule, two consumers. The same `reference_control` the residual policy
-    is anchored to is what `evaluate_baseline` scores, so the δ = 0 floor and
-    the baseline column are the same controller by construction. Two copies of
-    a cooling inset is two places for it to drift, and the record says that
-    inset is what decides whether the rule works at all.
-
-    A history of one step and no preview means every window collapses to the
-    current step, so `_ReferenceRule`'s slicing is the identity here and the
-    Node reads plain current-step tensors. It has no parameters: it is
-    evaluated, never trained.
-    """
-    hooks = load_control_hooks(cfg)
-    rule = getattr(hooks, "reference_control", None)
-    if rule is None:
-        raise NotImplementedError(
-            "control_user_defined.reference_control is not defined."
-        )
-    r_columns = resolve_objective(cfg, nm_mapping).r_columns
-    net = _ReferenceRule(rule, nm_mapping, norm_stats, h_ctrl=1,
-                         r_columns=r_columns).to(sysid_cfg.device)
-    return Node(net, _input_keys(r_columns), ["U"], name="Reference rule")
 
 
 @beartype
@@ -454,15 +410,16 @@ def reference_over_horizon(
     hmax: int,
     nm_mapping: dict[str, list[str]],
     norm_stats: NormStats,
-) -> torch.Tensor:
-    """The reference rule replayed on a recorded rollout, [b, P, nu] normalized.
+) -> dict[str, torch.Tensor]:
+    """The reference rule replayed on a recorded rollout: {anchored U column:
+    [b, P]}, normalized.
 
     The rule is memoryless, so every (window, step) can be evaluated at once by
-    folding time into the batch axis. What comes back is exactly the command
-    the rule would have issued at each step of this trajectory, which makes
-    `U[:, scored_steps("U", hmax)] - u_ref` the *realized* residual — after
-    quantization and after the actuator clamp, i.e. the deviation that was
-    actually deployed.
+    folding time into the batch axis — a history of one step, so every window
+    is the current step. What comes back is exactly the command the rule would
+    have issued at each step of this trajectory, which makes
+    `U[:, scored_steps("U", hmax)] - u_ref` the *realized* residual — after the
+    actuator clamp, i.e. the deviation that was actually deployed.
 
     The command at `U[hmax - 1 + k]` was chosen from the signals at that same
     index, so the rule's inputs are read over the command slice, not over
@@ -470,12 +427,9 @@ def reference_over_horizon(
     silently compare each command against the *next* step's rule, which on a
     reference that moves is a residual that never was.
     """
-    rule = getattr(load_control_hooks(cfg), "reference_control", None)
-    if rule is None:
-        raise NotImplementedError(
-            "control_user_defined.reference_control is not defined."
-        )
     r_columns = resolve_objective(cfg, nm_mapping).r_columns
+    rule = _reference_rule(cfg, load_control_hooks(cfg), nm_mapping, norm_stats,
+                           h_ctrl=1, r_columns=r_columns)
     # The other keys run one step past U, so bound the slice by U's length.
     steps = slice(scored_steps("U", hmax).start, out["U"].shape[1])
     P = steps.stop - steps.start
@@ -485,10 +439,8 @@ def reference_over_horizon(
         x = out[key][:, steps, :]
         return x.reshape(b * P, x.shape[-1])
 
-    r_now = {} if not r_columns else {
-        name: flat("R")[:, j] for j, name in enumerate(r_columns)}
-    return rule(flat("yn"), r_now, flat("D"), nm_mapping,
-                norm_stats).reshape(b, P, -1)
+    commands = rule(flat("yn"), flat("D"), flat("R") if r_columns else None)
+    return {column: value.reshape(b, P) for column, value in commands.items()}
 
 
 @beartype
@@ -535,38 +487,37 @@ def build_policy(
 
     umin, umax = hooks.actuation_bounds(nm_mapping, norm_stats)
     umin, umax = umin.to(device), umax.to(device)
-    u_stretch, u_shift = _u_scaling(nm_mapping, norm_stats, device)
 
     reference = _reference_rule(cfg, hooks, nm_mapping, norm_stats, h_ctrl,
                                 r_columns)
     if reference is None:
         net_min, net_max = umin, umax
     else:
-        # A residual's box is around the rule, in physical units converted per
-        # U column exactly as setpoint_step is. The net takes the symmetric
-        # ±max of it; _ResidualPolicy clamps to the box itself.
-        below, above = (side / u_stretch for side in cfg.residual_box())
-        net_max = torch.maximum(below, above)
-        net_min = -net_max
+        # Each anchored column's box around the rule, normalized; zero for a
+        # free column. The net takes the symmetric ±max of an anchored
+        # column's box and its actuation bounds for a free one;
+        # _ResidualPolicy clamps the anchored ones to their box.
+        u_cols = nm_mapping["U"]
+        anchored = torch.tensor([c in cfg.residual_delta for c in u_cols],
+                                device=device)
+        physical = torch.tensor(
+            [cfg.residual_delta.get(c, [0.0, 0.0]) for c in u_cols],
+            dtype=torch.float32, device=device)
+        stretch = torch.tensor([norm_stats[c]["stretch"] for c in u_cols],
+                               dtype=torch.float32, device=device)
+        below, above = physical[:, 0] / stretch, physical[:, 1] / stretch
+        half = torch.maximum(below, above)
+        net_min = torch.where(anchored, -half, umin)
+        net_max = torch.where(anchored, half, umax)
 
     net = policy_catalog[cfg.policy](cfg, insize, nu, net_min, net_max).to(device)
-
-    quantize = None
-    if cfg.setpoint_step > 0:
-        # Quantization is in physical °C, but the policy emits normalized U;
-        # convert step + shift per channel so the physical grid lands at
-        # multiples of cfg.setpoint_step (not multiples of step shifted by
-        # the column mean).
-        quantize = STEQuantize(cfg.setpoint_step / u_stretch,
-                               u_shift / u_stretch)
-
     if reference is not None:
-        _zero_final_layer(net)
+        _zero_final_layer(net, anchored)
 
     # Per-column preview is a gather in front of whatever net was just built,
-    # applied before the residual/quantize wrapping below so the reference
-    # (which slices its own current step directly, see _ReferenceRule) and
-    # the trainable net see the same windows either way.
+    # applied before the residual wrapping below so the reference (which
+    # slices its own current step directly, see _ReferenceRule) and the
+    # trainable net see the same windows either way.
     gathers = {}
     d_gather = _preview_gather(nd, h_ctrl, d_depths)
     if d_gather is not None:
@@ -578,10 +529,8 @@ def build_policy(
         net = _PreviewGather(net, gathers)
 
     if reference is not None:
-        net = _ResidualPolicy(net, reference, umin, umax, below, above,
-                              quantize).to(device)
-    elif quantize is not None:
-        net = _QuantizedPolicy(net, quantize).to(device)
+        net = _ResidualPolicy(net, reference, list(u_cols), umin, umax,
+                              below, above).to(device)
 
     input_map = {
         "yn": {"past": h_ctrl - 1, "future": 0, "pad_mode": "nearest"},
@@ -627,12 +576,10 @@ def describe_policy(
     the ny*H_ctrl + [h_ctrl*nd + sum(D depths)] + [n_ref + sum(R depths)] sum
     by eye — a wrong window is otherwise an invisible failure.
     """
-    # Unwrap: Node -> (_ResidualPolicy | _QuantizedPolicy) -> [_PreviewGather] -> MLP_bounds
+    # Unwrap: Node -> [_ResidualPolicy] -> [_PreviewGather] -> MLP_bounds
     raw = policy_node.callable
     residual = isinstance(raw, _ResidualPolicy)
-    wrapped = isinstance(raw, (_ResidualPolicy, _QuantizedPolicy))
-    net = raw.base if wrapped else raw
-    quantized = raw.quantize is not None if wrapped else False
+    net = raw.base if residual else raw
     if isinstance(net, _PreviewGather):
         net = net.base
 
@@ -644,7 +591,8 @@ def describe_policy(
     # Actuator limits are set in normalized U space by the actuation_bounds
     # hook; report them in physical units, which is what a reader can sanity
     # check against the building. For a residual policy the network's own box
-    # is ±Δ, so the limits the commands actually live in are the clamp's.
+    # is ±Δ on an anchored column, so the limits the commands actually live in
+    # are the clamp's.
     u_cols = nm_mapping["U"]
     stretch = torch.tensor([norm_stats[c]["stretch"] for c in u_cols])
     shift = torch.tensor([norm_stats[c]["shift"] for c in u_cols])
@@ -668,7 +616,6 @@ def describe_policy(
         "u_cols": list(u_cols),
         "umin_phys": umin_phys,
         "umax_phys": umax_phys,
-        "quantized": quantized,
-        "setpoint_step": cfg.setpoint_step,
-        "residual_box": cfg.residual_box() if residual else None,
+        "residual_box": ({c: tuple(box) for c, box in cfg.residual_delta.items()}
+                         if residual else None),
     }

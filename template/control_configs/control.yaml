@@ -87,21 +87,21 @@ gains: {comfort_lower: 5.0, comfort_upper: 5.0, du: 1.0}
 # Width 2**log2_policy_hidden (mlp only).
 # log2_policy_hidden: 6
 # policy_layers: 2
-# Snap the output to a grid, in physical units (the actuator's resolution).
-# Straight-through, so gradients still flow. 0 = continuous.
-# setpoint_step: 0.0
 
 # ── RESIDUAL CONTROL ─────────────────────────────────────────────
-# Set to command reference_control(...) + δ, in physical units (needs the
-# reference_control hook). It bounds how far surrogate error can move the
-# plant from a rule you trust. A number Δ allows -Δ <= δ <= Δ; a pair
-# [below, above] allows -below <= δ <= above — [0, 0.5] lets a setpoint the
-# rule anchors at an edge move inward and never past it. The same box holds
-# for every U column. null = a free policy over the whole actuation box.
-# 0 = the rule itself, which is a cheap first run: it scores the rule on your
-# surrogate. A non-zero side must be at least setpoint_step when the output
-# is quantized.
-# residual_delta: null
+# Per U column, a box [below, above] in that column's physical units: the
+# column commands reference_control(...)[column] + δ with
+# -below <= δ <= above (needs the reference_control hook, returning exactly
+# these columns). It bounds how far surrogate error can move the plant from a
+# rule you trust. [0, 0.5] lets a heating setpoint the rule anchors at the
+# band floor move inward and never past it; [0.5, 0] does the same for
+# cooling at the ceiling. A U column not named is a free policy output over
+# its actuation bounds; leave the map out for a plain policy. Every box
+# [0, 0] is the rule itself, a cheap first run that scores the rule on your
+# surrogate.
+# residual_delta:
+#   Heating Setpoint [°C]: [0.0, 0.5]
+#   Cooling Setpoint [°C]: [0.5, 0.0]
 
 # ── TRAINING ─────────────────────────────────────────────────────
 # epochs: 300

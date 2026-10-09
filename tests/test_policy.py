@@ -6,7 +6,6 @@ import torch
 from neurotemplate.control.scenarios import build_window_dict, horizons, scored_steps
 from neurotemplate.control.policy import (
     POLICY_BOUND_METHODS,
-    STEQuantize,
     _PreviewGather,
     _d_preview_by_column,
     _preview_gather,
@@ -71,7 +70,7 @@ def test_per_column_preview_narrows_insize_to_the_declared_sum(monkeypatch):
     """Two D columns at different declared depths: insize is the per-column
     sum, not nd * (h_ctrl + max_depth)."""
     import control_user_defined as cud
-    s = full_setup(setpoint_step=0.0)
+    s = full_setup()
     cfg, sysid_cfg, nm, ns = s["cfg"], s["sysid_cfg"], s["nm"], s["norm_stats"]
     outdoor, irr, occ = nm["D"]
     monkeypatch.setattr(cud, "preview_config",
@@ -95,7 +94,7 @@ def test_per_column_preview_reaches_only_the_declared_column(monkeypatch):
     """A D column with no declared preview must be invisible past its current
     step; a column that declared one must not be."""
     import control_user_defined as cud
-    s = full_setup(setpoint_step=0.0)
+    s = full_setup()
     cfg, sysid_cfg, nm, ns = s["cfg"], s["sysid_cfg"], s["nm"], s["norm_stats"]
     outdoor, irr, occ = nm["D"]
     monkeypatch.setattr(cud, "preview_config",
@@ -128,9 +127,8 @@ def test_per_column_preview_reaches_only_the_declared_column(monkeypatch):
 
 def test_reference_preview_widens_the_input_by_each_columns_depth():
     """Each reference column adds its current step plus its own preview."""
-    base = _describe(full_setup(setpoint_step=0.0))
-    grown = _describe(full_setup(setpoint_step=0.0,
-                                 reference_preview={LOW: 3, HIGH: 1}))
+    base = _describe(full_setup())
+    grown = _describe(full_setup(reference_preview={LOW: 3, HIGH: 1}))
     assert grown["insize"] == base["insize"] + 3 + 1
     assert grown["r_preview_by_column"] == {HIGH: 1, LOW: 3}
 
@@ -145,7 +143,7 @@ def test_policy_node_io():
 def test_the_reference_reaches_the_policy_and_changes_what_it_commands():
     """An input the policy never reads is a dead window. Moving the band must
     move the commanded setpoint."""
-    s = full_setup(setpoint_step=0.0)
+    s = full_setup()
     cfg, sysid_cfg, nm, ns = s["cfg"], s["sysid_cfg"], s["nm"], s["norm_stats"]
     cl = build_closed_loop(s["dyn_node"], build_policy(cfg, sysid_cfg, nm, ns),
                            cfg, sysid_cfg)
@@ -155,46 +153,11 @@ def test_the_reference_reaches_the_policy_and_changes_what_it_commands():
     assert not torch.allclose(here, moved)
 
 
-def test_ste_quantize_snaps_forward():
-    q = STEQuantize(0.5)
-    x = torch.tensor([22.78, 25.7, 30.54, 28.25, 23.0])
-    expected = torch.tensor([23.0, 25.5, 30.5, 28.0, 23.0])
-    assert torch.allclose(q(x), expected)
-
-
-def test_ste_quantize_gradient_is_identity():
-    q = STEQuantize(0.5)
-    x = torch.tensor([24.3, 27.8], requires_grad=True)
-    q(x).sum().backward()
-    assert torch.allclose(x.grad, torch.ones_like(x))
-
-
-def test_policy_output_lands_on_physical_grid():
-    s = full_setup(setpoint_step=0.5)
-    cfg, sysid_cfg, nm = s["cfg"], s["sysid_cfg"], s["nm"]
-    _, _, hmax = horizons(cfg, sysid_cfg)
-
-    policy = build_policy(cfg, sysid_cfg, nm, s["norm_stats"])
-    cl = build_closed_loop(s["dyn_node"], policy, cfg, sysid_cfg)
-    out = cl(_windows(s))
-
-    # Denormalize the policy-produced U back to °C and assert each value sits
-    # on a 0.5 °C grid (modulo numerical noise).
-    U = out["U"][:, scored_steps("U", hmax), :].detach()
-    for j, col in enumerate(nm["U"]):
-        s_col = s["norm_stats"][col]
-        u_phys = U[:, :, j] * s_col["stretch"] + s_col["shift"]
-        residual = (u_phys / 0.5 - (u_phys / 0.5).round()).abs()
-        assert residual.max().item() < 1e-3, (
-            f"{col}: max grid residual {residual.max().item()}"
-        )
-
-
 # ── Policy family registry ───────────────────────────────────────
 
 
 def test_linear_policy_is_a_single_affine_layer():
-    s = full_setup(policy="linear", setpoint_step=0.0)
+    s = full_setup(policy="linear")
     net = build_policy(s["cfg"], s["sysid_cfg"], s["nm"], s["norm_stats"]).callable
     assert len(net.linear) == 1
     assert net.linear[0].out_features == len(s["nm"]["U"])
@@ -204,9 +167,8 @@ def test_linear_policy_is_a_single_affine_layer():
 @pytest.mark.parametrize("family", list(policy_catalog))
 def test_bounds_respected_for_every_family_and_method(family, method):
     """Both bound methods, on both families, must keep U inside the actuator
-    limits. setpoint_step=0 because the quantizer sits *after* the bound and
-    can legitimately round a hair past it."""
-    s = full_setup(policy=family, policy_bound_method=method, setpoint_step=0.0)
+    limits."""
+    s = full_setup(policy=family, policy_bound_method=method)
     cfg, sysid_cfg, nm = s["cfg"], s["sysid_cfg"], s["nm"]
     _, _, hmax = horizons(cfg, sysid_cfg)
 
@@ -224,13 +186,12 @@ def test_bounds_respected_for_every_family_and_method(family, method):
 
 
 def test_describe_policy_reports_shape_and_physical_bounds():
-    s = full_setup(setpoint_step=0.5)
+    s = full_setup()
     cfg, sysid_cfg, nm, ns = s["cfg"], s["sysid_cfg"], s["nm"], s["norm_stats"]
     policy = build_policy(cfg, sysid_cfg, nm, ns)
     d = describe_policy(policy, cfg, sysid_cfg, nm, ns)
 
     assert d["family"] == "mlp"
-    assert d["quantized"] is True
     assert d["outsize"] == len(nm["U"])
     assert d["hsizes"] == cfg.policy_layers * [2**cfg.log2_policy_hidden]
 

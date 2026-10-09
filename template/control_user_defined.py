@@ -2,7 +2,7 @@
 Control hooks — the glue between the DPC machinery and *your* plant.
 
 These answer: what the actuator limits are, and optionally what power costs
-and what rule a learned policy should be measured against. The objective —
+and what rule a residual policy is anchored to. The objective —
 which outputs are held inside which band, what power is priced at — is not a
 hook: it is the `losses` table in control.yaml, over columns of the surrogate
 and of your reference files (see `make_references.py`). The Y/U/D roles and
@@ -16,8 +16,8 @@ The file must be named `control_user_defined.py` and live in the directory
 you run `nt` from, or be pointed at by `user_hooks_path` in your YAML.
 
 Every required hook runs as written. Then consider `reference_control`: a
-learned policy is only worth shipping if it beats a simple rule, and this is
-how the reportcard knows the rule.
+policy anchored to a rule you trust, inside a box you chose, caps what the
+surrogate's error can cost you.
 """
 
 from __future__ import annotations
@@ -152,31 +152,33 @@ def _denorm(x: torch.Tensor, col: str, nm_mapping: dict[str, list[str]],
 
 
 # ---------------------------------------------------------------------
-# Optional: the reference rule — baseline, and the residual policy's anchor
+# Optional: the reference rule — the residual policy's anchor
 # ---------------------------------------------------------------------
-# Defined, it does two jobs:
+# With `residual_delta` set in the control YAML, each U column it names
+# commands `reference_control(...)[column] + δ`, δ inside that column's
+# [below, above] box: the rule does the routine work and the policy only
+# adjusts it, inside a bound you chose. A U column it does not name is a free
+# policy output. Return exactly the columns `residual_delta` names (the
+# library refuses anything else).
 #
-#   1. Baseline. `nt control train` rolls the rule out on the same test
-#      windows and references as the learned policy and adds a
-#      learned-vs-rule table to the reportcard — the only direct answer to
-#      "is the learned policy earning its keep?"
-#   2. Anchor. With `residual_delta` set, the policy commands
-#      `reference_control(...) + δ`, |δ| <= residual_delta: the rule does the
-#      routine work and the policy only adjusts it, inside a bound you chose.
-#
-# Current step only, memoryless, normalized in and normalized U out — the
-# same space the learned policy emits. `r_now` maps each reference column the
+# Current step only, memoryless, normalized in and normalized out — the same
+# space the learned policy emits. `r_now` maps each reference column the
 # objective names to its current value, [b], normalized; `norm_stats` has an
-# entry for each, so `x * stretch + shift` gives physical units. A rule that
-# needs its own state goes in `build_baseline_policy` below instead; define
-# one or the other, never both (the library raises).
+# entry for each, so `x * stretch + shift` gives physical units. Return
+# continuous values: nothing is rounded to an actuator's resolution, which is
+# the building's job.
 #
-# Leave it commented out if you have no rule. The example below aims every
-# setpoint at the middle of one band; `bracket_band` after it is a rule for
-# the common case of a heating/cooling setpoint pair holding one band.
+# To score the rule itself, train with every box [0, 0]: the policy is then
+# the rule.
+#
+# Leave it commented out if you have no rule. The example brackets one band
+# with a heating/cooling setpoint pair (`bracket_band` below), with boxes
+# that hold each inward: [0, 0.5] on heating, [0.5, 0] on cooling.
 #
 # BAND_LOW = "Comfort Low [°C]"      # the band's columns in your reference
 # BAND_HIGH = "Comfort High [°C]"    # files, as the losses table names them
+# HEAT = "Heating Setpoint [°C]"     # the U columns the rule anchors, as
+# COOL = "Cooling Setpoint [°C]"     # residual_delta names them
 #
 # @beartype
 # def reference_control(
@@ -185,24 +187,23 @@ def _denorm(x: torch.Tensor, col: str, nm_mapping: dict[str, list[str]],
 #     d_now: torch.Tensor,               # [b, nd] current disturbances, normalized
 #     nm_mapping: dict[str, list[str]],
 #     norm_stats: NormStats,
-# ) -> torch.Tensor:                     # [b, nu] normalized U
-#     """Aim each setpoint at the middle of the band."""
+# ) -> dict[str, torch.Tensor]:          # {anchored U column: [b]}, normalized
+#     """Heating at the band floor, cooling at its ceiling."""
 #     def physical(col):
 #         return r_now[col] * norm_stats[col]["stretch"] + norm_stats[col]["shift"]
 #
-#     target = 0.5 * (physical(BAND_LOW) + physical(BAND_HIGH))   # [b], physical
-#     u_cols = nm_mapping["U"]
-#     u_shift = torch.tensor([norm_stats[c]["shift"] for c in u_cols])
-#     u_stretch = torch.tensor([norm_stats[c]["stretch"] for c in u_cols])
-#     umin, umax = actuation_bounds(nm_mapping, norm_stats)
-#     return torch.clamp((target[:, None] - u_shift) / u_stretch, umin, umax)
+#     def normalized(col, value):
+#         return (value - norm_stats[col]["shift"]) / norm_stats[col]["stretch"]
+#
+#     cool, heat = bracket_band(physical(BAND_LOW), physical(BAND_HIGH),
+#                               cool_inset=0.3)
+#     return {HEAT: normalized(HEAT, heat), COOL: normalized(COOL, cool)}
 
 
 @beartype
 def bracket_band(
     lo: torch.Tensor,
     hi: torch.Tensor,
-    step: float,
     cool_inset: float = 0.0,
     heat_inset: float = 0.0,
 ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -210,61 +211,33 @@ def bracket_band(
 
     Example code for `reference_control`, not library behaviour. Heating sits
     at the band floor and cooling at the ceiling, so the two bracket the band
-    instead of both chasing one target. Both snap to the `step` grid *toward
-    the band interior* (heating up, cooling down), never outside it.
+    instead of both chasing one target.
 
     The insets pull each setpoint further inside its edge. A zone usually
     floats somewhat above its cooling setpoint, so `cool_inset` corrects for
     that — measure it on the plant rather than treating it as a comfort
-    margin: too large and the two setpoints collide. When the band is too
-    narrow to seat both on the grid, both collapse to the grid point nearest
-    the midpoint, so heating never commands above cooling.
+    margin: too large and the two setpoints collide. When the insets cross,
+    both collapse to the band's midpoint, so heating never commands above
+    cooling.
 
     Args:
         lo, hi: band edges, any broadcast-compatible shape.
-        step: setpoint grid (e.g. 0.5). Must be > 0.
         cool_inset: pull the cooling setpoint below the ceiling by this much.
         heat_inset: pull the heating setpoint above the floor by this much.
 
     Returns:
         (cooling, heating), each the shape of `lo`/`hi` broadcast together.
-
-    Wired into `reference_control`, after denormalizing the band as above:
-
-        cool, heat = bracket_band(physical(BAND_LOW), physical(BAND_HIGH),
-                                  step=0.5, cool_inset=0.3)
-        phys = torch.stack([cool, heat], dim=-1)  # U order: [cooling, heating]
     """
-    if step <= 0:
-        raise ValueError(f"step must be > 0, got {step}")
     if cool_inset < 0 or heat_inset < 0:
         raise ValueError(
             f"insets must be >= 0, got cool={cool_inset}, heat={heat_inset}"
         )
 
-    heat = torch.ceil((lo + heat_inset) / step) * step
-    cool = torch.floor((hi - cool_inset) / step) * step
-
-    mid = torch.round(0.5 * (lo + hi) / step) * step
+    heat = lo + heat_inset
+    cool = hi - cool_inset
+    mid = 0.5 * (lo + hi)
     collapse = heat > cool
     return torch.where(collapse, mid, cool), torch.where(collapse, mid, heat)
-
-
-# ---------------------------------------------------------------------
-# Optional: a baseline a memoryless rule cannot express
-# ---------------------------------------------------------------------
-# For a rule that needs its own state (an integrator, an equipment timer).
-# Return a Neuromancer Node writing ["U"] with no trainable parameters,
-# reading any of "yn", "D" and "R" (the reference columns, [b, n_ref] in
-# sorted name order). It is scored, never trained, and cannot anchor a
-# residual policy.
-#
-# def build_baseline_policy(cfg, sysid_cfg, nm_mapping, norm_stats):
-#     from neuromancer.system import Node
-#     umin, umax = actuation_bounds(nm_mapping, norm_stats)
-#     net = MyStatefulRule(umin.to(sysid_cfg.device), umax.to(sysid_cfg.device))
-#     return Node(net.to(sysid_cfg.device), ["yn", "R"], ["U"],
-#                 name="Stateful baseline")
 
 
 # ---------------------------------------------------------------------

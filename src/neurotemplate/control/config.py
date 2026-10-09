@@ -91,22 +91,16 @@ class ControlConfig:
     policy_bound_method: str = "sigmoid_scale"
     log2_policy_hidden: int = 6
     policy_layers: int = 2
-    # Snap policy output to a fixed setpoint grid, in the plant's physical
-    # units (e.g. 0.5 for half-degree HVAC thermostat steps). Straight-through
-    # estimator on backward, so gradients still flow as if the output were
-    # continuous. 0 disables quantization — the default, since a nonzero grid
-    # is one plant's actuator resolution, not a library-wide default.
-    setpoint_step: float = 0.0
-    # The residual box, in the plant's physical units. None disables the
-    # residual entirely (a plain policy over the actuation box). Set it and
-    # the policy commands `reference_control(...) + δ`, which caps how far a
-    # surrogate error can move the deployed setpoint: a number Δ bounds
-    # -Δ <= δ <= Δ; a pair [below, above] bounds -below <= δ <= above, so
-    # [0, 0.5] lets a setpoint move up off the rule and never down. One box
-    # for every U column. 0 (or [0, 0]) emits the reference rule exactly — a
-    # useful floor to train nothing and score. Requires the
-    # control_user_defined.reference_control hook.
-    residual_delta: Union[float, list[float], None] = None
+    # The residual, per U column: {column: [below, above]} in that column's
+    # physical units. A column named here commands
+    # clamp(reference_control(...)[column] + δ, umin, umax) with
+    # -below <= δ <= above, which caps how far a surrogate error can move what
+    # is deployed: [0, 0.5] lets a heating setpoint move up off the rule and
+    # never down, [0, 0] is the rule exactly. A U column not named is a free
+    # policy output over its actuation bounds. Empty: no residual, a plain
+    # policy. Requires the control_user_defined.reference_control hook, which
+    # returns exactly the columns named here.
+    residual_delta: dict[str, list[float]] = field(default_factory=dict)
 
     # ── Training ─────────────────────────────────────────────────
     epochs: int = 300
@@ -204,40 +198,19 @@ class ControlConfig:
         ]:
             check_positive(self, name)
 
-        for name in ["d_preview", "warmup", "patience", "setpoint_step"]:
+        for name in ["d_preview", "warmup", "patience"]:
             check_non_negative(self, name)
 
-        if self.residual_delta is not None:
-            box = self.residual_delta
-            pair = box if isinstance(box, list) else [box, box]
-            if len(pair) != 2 or any(isinstance(d, bool) or not isinstance(
-                    d, (int, float)) or d < 0 for d in pair):
+        # Column names are resolved against the surrogate's U at policy build.
+        for column, box in self.residual_delta.items():
+            if not (isinstance(box, list) and len(box) == 2 and all(
+                    isinstance(side, (int, float)) and not isinstance(side, bool)
+                    and side >= 0 for side in box)):
                 raise ValueError(
-                    f"residual_delta must be a number >= 0 or a pair [below, "
-                    f"above] of numbers >= 0, got {box!r}. 0 emits the "
-                    "reference rule exactly; null disables the residual."
+                    f"residual_delta[{column!r}] must be a pair [below, above] "
+                    f"of numbers >= 0 in the column's units, got {box!r}. "
+                    "[0, 0] emits the reference rule exactly."
                 )
-            # The single most likely way to waste a campaign on this feature:
-            # every δ snaps back to zero and you get a rule that trained for an
-            # hour, with nothing on any report to say so.
-            for side in self.residual_box():
-                if 0 < side < self.setpoint_step:
-                    raise ValueError(
-                        f"residual_delta ({box}) is smaller than setpoint_step "
-                        f"({self.setpoint_step}) on one side, so every residual "
-                        "that way quantizes back to zero. Raise it to at least "
-                        "one grid step, make that side 0, or set "
-                        "setpoint_step: 0."
-                    )
-
-    def residual_box(self) -> Optional[tuple[float, float]]:
-        """(below, above) of the residual box in physical units, or None
-        when there is no residual."""
-        box = self.residual_delta
-        if box is None:
-            return None
-        below, above = box if isinstance(box, list) else (box, box)
-        return float(below), float(above)
 
     def asdict(self) -> dict:
         return asdict(self)

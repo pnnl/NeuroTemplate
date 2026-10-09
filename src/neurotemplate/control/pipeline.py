@@ -7,7 +7,7 @@ frozen, so the optimizer is built over requires_grad params only.
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from time import perf_counter as tic
 from typing import Optional
@@ -32,7 +32,6 @@ from neurotemplate.control.metrics import (
     EnergyMetrics,
     JumpResponse,
     ResidualMetrics,
-    SATURATION_TOL,
     actuation_metrics,
     actuation_to_dict,
     comfort_metrics,
@@ -43,9 +42,8 @@ from neurotemplate.control.metrics import (
     response_audit,
     response_to_dict,
 )
-from neurotemplate.control.closed_loop import build_closed_loop
 from neurotemplate.control.losses import POWER, Objective, resolve_objective
-from neurotemplate.control.policy import build_reference_node, reference_over_horizon
+from neurotemplate.control.policy import reference_over_horizon
 from neurotemplate.control.scenarios import (
     build_window_dict_multi,
     eval_pred_steps,
@@ -70,7 +68,8 @@ class ControlResults:
     tracking: list[ChannelMetrics]     # error vs band midpoint, two-sided bands
     energy: Optional[EnergyMetrics]    # None if power_metric not implemented
     eval_time_s: float
-    residual: Optional[ResidualMetrics] = None   # None unless residual_delta
+    # Per anchored U column; empty without a residual.
+    residual: list[ResidualMetrics] = field(default_factory=list)
 
 
 # ── Train (policy only) ──────────────────────────────────────────
@@ -169,8 +168,8 @@ def evaluate_closed_loop(
     regulated = objective.regulated
     device = sysid_cfg.device
 
-    # The test split's reference columns are fixed data, so every run — and
-    # the baseline beside it — is scored against the same references.
+    # The test split's reference columns are fixed data, so every run is
+    # scored against the same references.
     pred_steps = eval_pred_steps(cfg, hmax)
     data = build_window_dict_multi(
         test_dfs, cfg, sysid_cfg, nm_mapping, P=pred_steps, stride=cfg.test_stride,
@@ -240,18 +239,19 @@ def evaluate_closed_loop(
         }
         energy = energy_metrics(power, step_hours, weights)
 
-    # How much of the ±Δ box a residual policy actually used. Replaying the
+    # How much of each box a residual policy actually used. Replaying the
     # (memoryless) rule on the recorded trajectory gives the command it would
     # have issued at each step, so U - u_ref is the deviation that was deployed.
-    residual = None
-    box = cfg.residual_box()
-    if box is not None:
+    residual = []
+    if cfg.residual_delta:
         u_ref = reference_over_horizon(cfg, out, hmax, nm_mapping, norm_stats)
-        tol = (0.5 * cfg.setpoint_step if cfg.setpoint_step > 0
-               else SATURATION_TOL * max(*box, 1e-12))
-        residual = residual_metrics(
-            U, to_physical(u_ref, u_cols, norm_stats), box, tol,
-        )
+        for column, ref in u_ref.items():
+            j = u_cols.index(column)
+            stats = norm_stats[column]
+            residual.append(residual_metrics(
+                column, U[:, :, j], ref * stats["stretch"] + stats["shift"],
+                tuple(float(side) for side in cfg.residual_delta[column]),
+            ))
 
     return ControlResults(
         comfort_violation_rate=violation_rate,
@@ -270,34 +270,19 @@ def evaluate_closed_loop(
 # ── MLflow metric logging ────────────────────────────────────────
 
 
-def log_control_results(
-    logger,
-    results: ControlResults,
-    baseline: Optional[ControlResults] = None,
-) -> None:
+def log_control_results(logger, results: ControlResults) -> None:
     """Flatten closed-loop metrics into MLflow-safe metric keys + log dict.
 
-    Mirrors modeling.pipeline.log_test_results. Baseline metrics are logged
-    under a `baseline_` prefix so a single run holds both sides of the
-    comparison and they can be diffed across runs in the MLflow UI.
+    Mirrors modeling.pipeline.log_test_results.
     """
     if logger is None:
         return
-
-    flat = _flat_control_metrics(results, prefix="control")
-    payload = {"learned": _control_metrics_dict(results)}
-    if baseline is not None:
-        flat.update(_flat_control_metrics(baseline, prefix="baseline"))
-        payload["baseline"] = _control_metrics_dict(baseline)
-        flat["control_clears_reference"] = float(
-            clears_reference(results, baseline)
-        )
-
-    logger.log_metrics(flat)
-    logger.log_dict(payload, name="control_metrics.json")
+    logger.log_metrics(_flat_control_metrics(results))
+    logger.log_dict(_control_metrics_dict(results), name="control_metrics.json")
 
 
-def _flat_control_metrics(results: ControlResults, prefix: str) -> dict:
+def _flat_control_metrics(results: ControlResults) -> dict:
+    prefix = "control"
     flat = {
         f"{prefix}_violation_rate": results.comfort_violation_rate,
         f"{prefix}_mean_exceedance": results.comfort_mean_exceedance,
@@ -326,15 +311,15 @@ def _flat_control_metrics(results: ControlResults, prefix: str) -> dict:
         flat[f"{prefix}_mean_window_peak"] = results.energy.mean_window_peak
         for name, value in results.energy.weighted_energy.items():
             flat[f"{prefix}_{metric_key(name)}_weighted_energy"] = value
-    if results.residual is not None:
-        r = results.residual
-        flat[f"{prefix}_residual_below"] = r.below_cap
-        flat[f"{prefix}_residual_above"] = r.above_cap
-        flat[f"{prefix}_mean_abs_delta"] = r.mean_abs_delta
+    for r in results.residual:
+        safe = metric_key(r.name)
+        flat[f"{prefix}_{safe}_residual_below"] = r.below_cap
+        flat[f"{prefix}_{safe}_residual_above"] = r.above_cap
+        flat[f"{prefix}_{safe}_mean_abs_delta"] = r.mean_abs_delta
         # Absent for an edge at 0, where the fraction is vacuous.
         for side, frac in (("below", r.frac_at_below), ("above", r.frac_at_above)):
             if frac is not None:
-                flat[f"{prefix}_frac_delta_at_{side}"] = frac
+                flat[f"{prefix}_{safe}_frac_delta_at_{side}"] = frac
     return flat
 
 
@@ -347,104 +332,9 @@ def _control_metrics_dict(results: ControlResults) -> dict:
         "actuation": actuation_to_dict(results.actuation),
         "response": response_to_dict(results.response),
         "energy": None if results.energy is None else asdict(results.energy),
-        "residual": (None if results.residual is None
-                     else asdict(results.residual)),
+        "residual": [asdict(r) for r in results.residual],
         "tracking": metrics_to_dict(results.tracking),
     }
-
-
-# ── Rule-based baseline (optional) ───────────────────────────────
-
-
-@beartype
-def baseline_node(
-    cfg,
-    sysid_cfg,
-    nm_mapping: dict[str, list[str]],
-    norm_stats: NormStats,
-) -> Optional[object]:
-    """The rule-based controller to score alongside the learned policy.
-
-    Two hooks can supply one, and a use case must not define both:
-
-      `reference_control` — the memoryless rule, and the one to prefer. It is
-      also the residual policy's anchor, so using it here makes the baseline
-      column and the δ = 0 floor the same controller by construction.
-      `build_baseline_policy` — the escape hatch for a rule a memoryless
-      function cannot express. Returns a Node, or None to skip the comparison.
-
-    Neither defined means there is simply nothing to compare against.
-    """
-    hooks = load_control_hooks(cfg)
-    rule = getattr(hooks, "reference_control", None)
-    build = getattr(hooks, "build_baseline_policy", None)
-
-    if rule is not None and build is not None:
-        raise ValueError(
-            "control_user_defined defines both reference_control and "
-            "build_baseline_policy, so there are two definitions of one rule "
-            "and two places for a cooling inset to drift apart. Keep "
-            "reference_control (the residual policy is anchored to it) and "
-            "delete the other — or keep build_baseline_policy if the rule "
-            "genuinely cannot be written memorylessly."
-        )
-    if rule is not None:
-        return build_reference_node(cfg, sysid_cfg, nm_mapping, norm_stats)
-    return None if build is None else build(cfg, sysid_cfg, nm_mapping,
-                                            norm_stats)
-
-
-@beartype
-def evaluate_baseline(
-    cfg,
-    sysid_cfg,
-    dyn_node,
-    test_dfs: list,
-    nm_mapping: dict[str, list[str]],
-    norm_stats: NormStats,
-) -> Optional[ControlResults]:
-    """Score the use case's rule-based controller on the same test rollouts.
-
-    The comparison is apples-to-apples because the test split's references
-    are fixed data, so the baseline sees byte-identical references on
-    byte-identical test windows. The baseline is never trained: it has no
-    trainable parameters by construction.
-
-    With a residual policy this is also the δ = 0 score, which is what turns
-    the residual's floor from rhetorical into something you can decide on —
-    see `clears_reference`.
-    """
-    node = baseline_node(cfg, sysid_cfg, nm_mapping, norm_stats)
-    if node is None:
-        return None
-
-    cl = build_closed_loop(dyn_node, node, cfg, sysid_cfg)
-    results, _ = evaluate_closed_loop(
-        cfg, sysid_cfg, cl, test_dfs, nm_mapping, norm_stats,
-    )
-    return results
-
-
-@beartype
-def clears_reference(results: ControlResults,
-                     baseline: Optional[ControlResults]) -> Optional[bool]:
-    """Did the learned policy beat the rule it is anchored to? None if no rule.
-
-    Scored on mean exceedance rather than violation rate: a threshold count
-    saturates, and measured against a surrogate rather than the plant its
-    argmin can select a substantially worse controller.
-
-    Why this needs saying at all: the floor a residual promises is not
-    automatic. Neuromancer's Trainer checkpoints the best model after each
-    epoch's optimizer steps, so the δ = 0 point is never itself a candidate —
-    by the first evaluation δ is already non-zero. `evaluate_baseline` scores
-    that point explicitly on byte-identical references; this is the decision rule
-    that makes the score mean something. **A submission that does not clear
-    its own reference should ship the reference.**
-    """
-    if baseline is None:
-        return None
-    return results.comfort_mean_exceedance <= baseline.comfort_mean_exceedance
 
 
 @rc_context(PLOT_STYLE)

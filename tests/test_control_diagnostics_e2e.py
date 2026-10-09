@@ -25,7 +25,7 @@ from neurotemplate.control.objective import (
     term_shapes,
 )
 from neurotemplate.control.pipeline import (
-    clears_reference, evaluate_baseline, evaluate_closed_loop,
+    evaluate_closed_loop,
     log_control_results,
 )
 from neurotemplate.control.policy import build_policy, describe_policy
@@ -85,14 +85,12 @@ def _run_diagnostics(reference=None, **overrides):
     arch = describe_policy(policy, cfg, sysid_cfg, nm, ns)
     notes = objective_notes(objective, cfg)
     results, _ = evaluate_closed_loop(cfg, sysid_cfg, cl, test_dfs, nm, ns)
-    baseline = evaluate_baseline(cfg, sysid_cfg, s["dyn_node"], test_dfs, nm, ns)
     md = render_control_reportcard(
-        cfg, sysid_cfg, arch, nm, results, baseline=baseline,
-        clears_reference=clears_reference(results, baseline),
+        cfg, sysid_cfg, arch, nm, results,
         balance=balance, shapes=shapes,
         power=power_diag, objective_notes=notes,
     )
-    return dict(results=results, balance=balance, baseline=baseline,
+    return dict(results=results, balance=balance,
                 shapes=shapes, notes=notes, power=power_diag,
                 md=md, u_cols=nm["U"])
 
@@ -134,7 +132,7 @@ def test_everything_logged_is_json_serializable():
 
     d = _run_diagnostics(**_with_power("energy", "cost"))
     logger = _FakeLogger()
-    log_control_results(logger, d["results"], baseline=d["baseline"])
+    log_control_results(logger, d["results"])
     logger.log_dict(
         objective_to_dict(d["balance"], d["shapes"], d["power"],
                           d["notes"]),
@@ -147,7 +145,6 @@ def test_everything_logged_is_json_serializable():
     # The headline behavioural keys, present without anyone asking.
     assert any(k.endswith("_frac_saturated") for k in logger.metrics)
     assert "control_mean_exceedance" in logger.metrics
-    assert "control_clears_reference" in logger.metrics
 
 
 # ── Grid response and residual control, through the same sequence ─

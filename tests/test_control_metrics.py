@@ -177,17 +177,4 @@ def test_log_control_results_flattens_metrics():
     assert logger.metrics["control_peak_power"] == pytest.approx(1000.0)
     # Channel names are sanitized into MLflow-safe keys (no brackets/degree sign).
     assert "control_zone_C_degree_hours" in logger.metrics
-    assert logger.dicts["control_metrics.json"]["learned"]["comfort"]
-
-
-def test_log_control_results_prefixes_baseline():
-    from neurotemplate.control.pipeline import log_control_results
-
-    logger = _FakeLogger()
-    log_control_results(logger, _results(0.5, 1000.0),
-                        baseline=_results(0.9, 1500.0))
-
-    assert logger.metrics["control_violation_rate"] == pytest.approx(0.5)
-    assert logger.metrics["baseline_violation_rate"] == pytest.approx(0.9)
-    assert logger.metrics["baseline_peak_power"] == pytest.approx(1500.0)
-    assert set(logger.dicts["control_metrics.json"]) == {"learned", "baseline"}
+    assert logger.dicts["control_metrics.json"]["comfort"]

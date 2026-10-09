@@ -115,7 +115,7 @@ class ActuationMetrics:
 
 @dataclass
 class ResidualMetrics:
-    """How far a residual policy's commands sat from their reference rule.
+    """How far one anchored U column's commands sat from its reference rule.
 
     The pinned fractions are the lines that earn their place: if one edge of
     the box is binding most of the time, either the reference is wrong for
@@ -125,12 +125,12 @@ class ResidualMetrics:
     nothing about which edge binds.
 
     An edge at 0 has no fraction (None): the deviation cannot pass it, so
-    sitting on it is sitting on the rule, and the share means nothing. Δ = 0
-    on both sides is the configuration the library recommends running first
-    (it scores the bare rule), so this is a case worth stating rather than a
-    corner. `mean_abs_delta` still earns its place there — it is the
-    assertion that the residual path really is inert.
+    sitting on it is sitting on the rule, and the share means nothing. A box
+    of [0, 0] is how the rule itself is scored, so this is a case worth
+    stating rather than a corner. `mean_abs_delta` still earns its place
+    there — it is the assertion that the residual path really is inert.
     """
+    name: str               # the anchored U column
     below_cap: float        # the box is [-below_cap, +above_cap], physical units
     above_cap: float
     mean_abs_delta: float   # mean |commanded − reference|
@@ -345,29 +345,23 @@ def actuation_metrics(
 
 @beartype
 def residual_metrics(
+    name: str,
     u: torch.Tensor,
     u_ref: torch.Tensor,
     box: tuple[float, float],
-    tol: float,
 ) -> ResidualMetrics:
     """
     Args:
-        u:     [batch, time, nu] commanded controls in physical units.
-        u_ref: [batch, time, nu] the reference rule's commands, same units.
+        name:  the anchored U column.
+        u:     [batch, time] its commands, physical units.
+        u_ref: [batch, time] the reference rule's commands, same units.
         box:   (below, above), the configured box, in physical units.
-        tol:   how close to an edge counts as pinned. Half a setpoint grid
-            step is the natural choice when quantization is on, because the
-            commanded deviation can only land on grid points.
 
-    This is the *realized* residual — measured after quantization and after
-    the actuator clamp — so it is the deviation that was actually deployed,
-    not the network's pre-bound output.
-
-    One consequence worth knowing before reading `mean_abs_delta`: when
-    quantization is on and the reference rule is not itself snapped to the
-    same grid, `u` cannot equal `u_ref` even at δ = 0, so mean |δ| has a floor
-    of up to half a grid step which is snapping rather than steering. A rule
-    built over `bracket_band` is grid-aligned and has no such floor.
+    This is the *realized* residual — measured after the actuator clamp — so
+    it is the deviation that was actually deployed, not the network's
+    pre-bound output. A deviation within `SATURATION_TOL` of the box's larger
+    side of an edge counts as pinned there: the net's squash never reaches
+    an edge exactly.
     """
     if u.shape != u_ref.shape:
         raise ValueError(
@@ -377,8 +371,10 @@ def residual_metrics(
     if below < 0 or above < 0:
         raise ValueError(f"box edges must be >= 0, got {box}")
 
+    tol = SATURATION_TOL * max(below, above)
     delta = (u - u_ref).detach().cpu()
     return ResidualMetrics(
+        name=name,
         below_cap=below,
         above_cap=above,
         mean_abs_delta=float(delta.abs().mean()),

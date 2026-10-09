@@ -45,9 +45,7 @@ from neurotemplate.control.objective import (
 )
 from neurotemplate.control.reportcard import render_control_reportcard
 from neurotemplate.control.pipeline import (
-    clears_reference,
     train_policy,
-    evaluate_baseline,
     evaluate_closed_loop,
     log_control_results,
     write_reportcard,
@@ -157,21 +155,6 @@ def main() -> None:
             cfg, sysid_cfg, cl_system, test_dfs, nm_mapping, norm_stats,
         )
 
-        # Optional rule-based comparison. Scored on the same windows and the
-        # same test references; None when the use case defines no baseline.
-        baseline = evaluate_baseline(
-            cfg, sysid_cfg, dyn_node, test_dfs, nm_mapping, norm_stats,
-        )
-        clears = clears_reference(results, baseline)
-        if cfg.verbose:
-            if baseline is None:
-                print("No baseline defined (no reference_control hook).")
-            else:
-                print("Baseline comfort violation rate: "
-                      f"{baseline.comfort_violation_rate * 100:.2f}%")
-                print("Learned policy clears its reference: "
-                      f"{'yes' if clears else 'NO — ship the reference'}")
-
         if cfg.plot:
             # `t` is elapsed seconds from each file's first row, so the plots
             # need the files' wall-clock origins to be stamped with real dates.
@@ -184,14 +167,13 @@ def main() -> None:
         md = render_control_reportcard(
             cfg, sysid_cfg, arch, nm_mapping, results,
             surrogate_arch=surrogate_arch,
-            baseline=baseline,
-            clears_reference=clears, best_dev_loss=best_dev,
+            best_dev_loss=best_dev,
             train_time_s=train_time_s,
             balance=balance, trained_balance=trained_balance, shapes=shapes,
             power=power_diag, objective_notes=notes,
         )
         write_reportcard(md, Path(cfg.savedir), logger=logger)
-        log_control_results(logger, results, baseline=baseline)
+        log_control_results(logger, results)
         logger.log_dict(objective_to_dict(balance, shapes, power_diag, notes,
                                           trained_balance),
                         name="objective_diagnostics.json")

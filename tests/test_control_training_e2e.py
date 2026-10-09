@@ -15,7 +15,7 @@ from neurotemplate.control.closed_loop import (
 from neurotemplate.control.config import ControlConfig
 from neurotemplate.control.losses import extend_norm_stats, resolve_objective
 from neurotemplate.control.pipeline import (
-    clears_reference, evaluate_baseline, evaluate_closed_loop, train_policy,
+    evaluate_closed_loop, train_policy,
 )
 from neurotemplate.control.policy import build_policy, reference_over_horizon
 from neurotemplate.control.scenarios import (
@@ -60,7 +60,7 @@ def test_a_grid_response_objective_trains():
 def test_a_residual_over_a_reference_file_trains_and_reloads(tmp_path):
     """The band arrives as a reference file, the rule reads its columns by
     name, and the run rebuilds from its logged config to the same policy."""
-    s = full_setup(epochs=3, residual_delta=1.0, setpoint_step=0.5)
+    s = full_setup(epochs=3, residual_delta={SETPT: [1.0, 1.0]})
     cfg, sysid_cfg, nm, ns = s["cfg"], s["sysid_cfg"], s["nm"], s["norm_stats"]
     write_splits(cfg, tmp_path, s["plant"], [make_reference_df(s["plant"])])
     train_dfs, _, test_dfs = load_control_splits(cfg, nm, ns)
@@ -69,16 +69,14 @@ def test_a_residual_over_a_reference_file_trains_and_reloads(tmp_path):
 
     assert torch.isfinite(torch.tensor(best_dev))
     results, out = evaluate_closed_loop(cfg, sysid_cfg, trained, test_dfs, nm, ns)
-    # The commanded setpoint never leaves the box, after training and after
-    # quantization — the guarantee the residual exists to give.
-    u_ref = reference_over_horizon(cfg, out, hmax, nm, ns)
-    stretch = torch.tensor([ns[c]["stretch"] for c in nm["U"]])
-    delta = ((out["U"][:, scored_steps("U", hmax), :] - u_ref) * stretch).abs()
-    assert float(delta.max()) <= cfg.residual_delta + 1e-4
-    assert results.residual.max_abs_delta <= cfg.residual_delta + 1e-4
-    # ...and the run answers the question the residual makes answerable.
-    baseline = evaluate_baseline(cfg, sysid_cfg, s["dyn_node"], test_dfs, nm, ns)
-    assert clears_reference(results, baseline) in (True, False)
+    # The commanded setpoint never leaves the box after training — the
+    # guarantee the residual exists to give.
+    u_ref = reference_over_horizon(cfg, out, hmax, nm, ns)[SETPT]
+    delta = ((out["U"][:, scored_steps("U", hmax), 0] - u_ref)
+             * ns[SETPT]["stretch"]).abs()
+    assert float(delta.max()) <= 1.0 + 1e-4
+    (residual,) = results.residual
+    assert residual.max_abs_delta <= 1.0 + 1e-4
 
     # Reload as `load_trained_policy` does: the config from its logged params,
     # the reference stats rebuilt from it, the checkpoint loaded strictly.

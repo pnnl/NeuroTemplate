@@ -3,7 +3,7 @@ Domain bridge for the DPC controller (mirrors src/user_defined.py).
 
 These are the user-owned hooks that connect the generic control machinery to
 *this* building: what the actuator limits are, how electrical power is
-computed, and the rule a learned policy is measured against. The band itself
+computed, and the rule a residual policy is anchored to. The band itself
 is data — reference columns the objective names (see control_fixtures).
 
 Everything returned in "normalized space" uses the same per-column
@@ -79,7 +79,7 @@ POWER_METRIC_IMPLEMENTED = True
 
 
 # ---------------------------------------------------------------------
-# Optional: the reference rule — a baseline, and the residual's anchor
+# Optional: the reference rule — the residual's anchor
 # ---------------------------------------------------------------------
 @beartype
 def reference_control(
@@ -88,7 +88,7 @@ def reference_control(
     d_now: torch.Tensor,
     nm_mapping: dict[str, list[str]],
     norm_stats: NormStats,
-) -> torch.Tensor:
+) -> dict[str, torch.Tensor]:
     """Park the setpoint at the middle of the comfort band.
 
     The simplest rule that is actually trying: it ignores the disturbances and
@@ -98,18 +98,17 @@ def reference_control(
     whether a learned policy is earning its complexity.
 
     Memoryless, current step only, normalized in and normalized U out — the
-    same space the learned policy emits.
+    same space the learned policy emits — one entry per anchored U column.
     """
     def physical(name):
         return r_now[name] * norm_stats[name]["stretch"] + norm_stats[name]["shift"]
 
     mid = 0.5 * (physical(LOW) + physical(HIGH))            # [b], °C
-    u_cols = nm_mapping["U"]
-    shift = torch.tensor([norm_stats[c]["shift"] for c in u_cols], device=mid.device)
-    stretch = torch.tensor([norm_stats[c]["stretch"] for c in u_cols], device=mid.device)
+    (setpoint,) = nm_mapping["U"]
+    stats = norm_stats[setpoint]
     umin, umax = actuation_bounds(nm_mapping, norm_stats)
-    u = (mid[:, None] - shift) / stretch                    # [b, nu]
-    return torch.clamp(u, umin.to(u.device), umax.to(u.device))
+    u = (mid - stats["shift"]) / stats["stretch"]           # [b]
+    return {setpoint: torch.clamp(u, float(umin[0]), float(umax[0]))}
 
 
 @beartype

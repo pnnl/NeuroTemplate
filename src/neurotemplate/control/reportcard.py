@@ -19,9 +19,8 @@ Sections (in order):
    6. Closed-loop performance — comfort table, actuation, energy
    7. Actuation            — per-control effort and time at each bound
    8. Band-jump response   — did the loop react when the reference moved
-   9. Baseline comparison  — learned vs. rule-based, or why there is none
-  10. Tracking error       — per-channel error vs. the comfort-band midpoint
-  11. Hyperparameters      — the knobs that produced this run
+   9. Tracking error       — per-channel error vs. the comfort-band midpoint
+  10. Hyperparameters      — the knobs that produced this run
 
 Whether a band is reachable at all is answered on the sys-id side,
 by the reachability scenario in modeling/scenarios.py, against a declared
@@ -118,10 +117,6 @@ def _policy_section(arch: dict) -> str:
             arch["u_cols"], arch["umin_phys"], arch["umax_phys"]
         )
     )
-    quant = (
-        f"{arch['setpoint_step']:g} (straight-through)" if arch["quantized"]
-        else "off"
-    )
     rows = [
         f"- **Family:** `{arch['family']}`",
         f"- **Nonlinearity:** {arch['nonlin']}",
@@ -135,15 +130,16 @@ def _policy_section(arch: dict) -> str:
         f"- **Output width:** {arch['outsize']}",
         f"- **Observation:** Policy observes all {arch['ny']} Y channels — "
         "no measurement restriction.",
-        f"- **Setpoint quantization:** {quant}",
     ]
     if arch["residual_box"] is not None:
         rows.append(
-            f"- **Residual box:** {_box(*arch['residual_box'])} around "
-            "`reference_control` *(the network commands the deviation, not "
-            "the setpoint; the box bounds the action, not the zone "
-            "temperature)*"
+            "- **Residual boxes** around `reference_control` *(an anchored "
+            "column commands the deviation, not the setpoint; the box bounds "
+            "the action, not the zone temperature; a column not listed is a "
+            "free output over its actuation bounds)*:"
         )
+        rows += [f"  - `{col}`: {_box(*box)}"
+                 for col, box in arch["residual_box"].items()]
     rows += [
         "- **Actuation bounds (physical units):**",
         bounds,
@@ -318,19 +314,18 @@ def _actuation_section(results) -> str:
         "the same way here as one that is stuck.\n",
         actuation_to_markdown(results.actuation),
     ]
-    r = results.residual
-    if r is not None:
+    for r in results.residual:
         body += [
             "",
-            f"- **Residual vs. the reference rule** (box "
+            f"- **Residual of `{r.name}` vs. the reference rule** (box "
             f"{_box(r.below_cap, r.above_cap)}):",
             f"  - Mean |δ|: {r.mean_abs_delta:.4g}   max |δ|: "
             f"{r.max_abs_delta:.4g}",
         ]
         if r.frac_at_below is None and r.frac_at_above is None:
             body += [
-                "  - Pinned at an edge: n/a — the box is zero-width, so the "
-                "policy *is* the reference rule and the box has no interior "
+                "  - Pinned at an edge: n/a — the box is zero-width, so this "
+                "column *is* the reference rule and the box has no interior "
                 "to bind. Mean |δ| above is the check that the residual path "
                 "is inert; anything but zero there is a bug.",
             ]
@@ -341,19 +336,16 @@ def _actuation_section(results) -> str:
                                    ("upper", r.frac_at_above))
                 if frac is not None
             ]
-            body += [
-                "  - An edge that binds most of the time means one of three "
-                "things: the reference is wrong for this plant, the optimizer "
-                "is riding a surrogate artifact into the wall, or the "
-                "incentive has simply outgrown what the box can express. The "
-                "third is the box doing its job. Read this before the comfort "
-                "number either way.",
-            ]
+    if any(r.frac_at_below is not None or r.frac_at_above is not None
+           for r in results.residual):
         body += [
-            "  - This is the *realized* deviation, measured after quantization "
-            "and the actuator clamp. With `setpoint_step` on and a reference "
-            "that is not itself grid-aligned, mean |δ| has a floor of half a "
-            "grid step that is snapping, not steering.",
+            "",
+            "An edge that binds most of the time means one of three things: "
+            "the reference is wrong for this plant, the optimizer is riding a "
+            "surrogate artifact into the wall, or the incentive has simply "
+            "outgrown what the box can express. The third is the box doing its "
+            "job. Read this before the comfort number either way. Each δ is "
+            "the *realized* deviation, measured after the actuator clamp.",
         ]
     return _section("Actuation", "\n".join(body))
 
@@ -397,91 +389,6 @@ def _response_section(results, u_names: list[str]) -> str:
     return _section("Band-jump response", "\n".join(body))
 
 
-def _comparison_columns(results) -> list[tuple[str, Optional[float]]]:
-    """The headline numbers as (column header, value), in table order. None
-    renders as n/a."""
-    energy = results.energy
-    columns = [
-        ("Mean exceedance", results.comfort_mean_exceedance),
-        ("Violation rate (%)", results.comfort_violation_rate * 100.0),
-        ("Degree-hours", sum(m.degree_hours for m in results.comfort)),
-        (r"Mean \|Δu\|", results.mean_abs_du),
-        ("Mean power", None if energy is None else energy.mean_power),
-        ("Peak power", None if energy is None else energy.peak_power),
-    ]
-    if energy is not None:
-        columns += [(f"∫`{name}`·power", value)
-                    for name, value in energy.weighted_energy.items()]
-    return columns
-
-
-def _comparison_row(label: str, values: list[Optional[float]],
-                    signed: bool = False) -> str:
-    fmt = "+.4g" if signed else ".4g"
-    cells = ["n/a" if v is None else f"{v:{fmt}}" for v in values]
-    return f"| {label} | " + " | ".join(cells) + " |"
-
-
-def _baseline_section(results, baseline, clears: Optional[bool] = None) -> str:
-    """Learned vs. rule-based, scored on the identical band realization."""
-    if baseline is None:
-        return _section(
-            "Baseline comparison",
-            "*(none — neither `control_user_defined.reference_control` nor "
-            "`build_baseline_policy` is defined, so there is no rule-based "
-            "controller to compare against.)*",
-        )
-
-    columns = _comparison_columns(results)
-    learned = [value for _, value in columns]
-    rule = [value for _, value in _comparison_columns(baseline)]
-    delta = [
-        None if (a is None or b is None) else a - b
-        for a, b in zip(learned, rule)
-    ]
-
-    body = [
-        "Both controllers were rolled out on the same test windows against "
-        "the same test references, so these numbers are directly "
-        "comparable. Degree-hours is summed across regulated channels. "
-        "Lower is better in every column, so a negative Δ favours the "
-        "learned policy.\n",
-        "| Controller | " + " | ".join(header for header, _ in columns) + " |",
-        "|---|" + "---:|" * len(columns),
-        _comparison_row("Learned policy", learned),
-        _comparison_row("Baseline", rule),
-        _comparison_row("Δ (learned − baseline)", delta, signed=True),
-    ]
-    if clears is not None:
-        verdict = (
-            "**✅ The learned policy clears its reference** on mean "
-            "exceedance."
-            if clears else
-            "**⚠️ The learned policy does not clear its reference** on mean "
-            "exceedance. **Ship the reference.** Training is scored against a "
-            "surrogate whose held-out error is not the plant's, and the rule "
-            "is the one controller here whose behaviour does not depend on "
-            "that. Nothing about a longer run changes that arithmetic."
-        )
-        body += [
-            "",
-            verdict + " Judged on mean exceedance rather than violation rate: "
-            "a threshold count saturates, and measured against a surrogate its "
-            "argmin can select a substantially worse controller.",
-            "",
-            "**The bar this verdict clears moves with the surrogate.** The "
-            "reference is rolled out against the same frozen model as the "
-            "policy, so the rule's score is a property of that model's "
-            "actuation realism and not of the rule. A smooth power head sells "
-            "the rule fractional cooling that a staged plant cannot deliver, "
-            "and flatters it; a staged head does not. The same fixed rule has "
-            "been measured 28 points apart on two surrogates whose zone NRMSE "
-            "differed by 3%. Re-read this section after any change to the "
-            "surrogate's readout heads.",
-        ]
-    return _section("Baseline comparison", "\n".join(body))
-
-
 def _tracking_section(results) -> str:
     body = (
         "Error of each regulated channel with a two-sided band against the "
@@ -514,8 +421,6 @@ def render_control_reportcard(
     results,
     *,
     surrogate_arch: Optional[dict] = None,
-    baseline: Optional[object] = None,
-    clears_reference: Optional[bool] = None,
     balance: Optional[ObjectiveBalance] = None,
     trained_balance: Optional[ObjectiveBalance] = None,
     shapes: Optional[list[TermShape]] = None,
@@ -536,9 +441,6 @@ def render_control_reportcard(
                      for the frozen sys-id model this policy was trained
                      against (num_layers, hidden size, RC forcing maps, ...).
                      None renders no extra section.
-        baseline:    Optional ControlResults for the rule-based controller.
-        clears_reference: Optional pipeline.clears_reference(...) verdict; the
-                     baseline section renders it as a ship/don't-ship call.
         balance:     Optional objective.ObjectiveBalance from the pre-training
                      forward pass; the section is skipped without it.
         trained_balance: Optional ObjectiveBalance of the same batch through
@@ -576,7 +478,6 @@ def render_control_reportcard(
         _performance_section(results),
         _actuation_section(results),
         _response_section(results, nm_mapping["U"]),
-        _baseline_section(results, baseline, clears_reference),
         _tracking_section(results),
         _hyperparameters_section(cfg),
     ]

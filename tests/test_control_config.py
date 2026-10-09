@@ -106,11 +106,8 @@ def _band(**changes):
     ({"losses": _band(du={"norm": 0.5})}, "norm"),
     # A split with no reference file has no value for a reference column.
     ({"dev_reference_path": None}, "set together or not at all"),
-    # The single most likely way to waste a campaign on the residual: every
-    # delta snaps back to zero and nothing on any report says so.
-    ({"setpoint_step": 0.5, "residual_delta": 0.2}, "smaller than setpoint_step"),
-    ({"setpoint_step": 0.5, "residual_delta": [0.2, 0.5]}, "smaller than setpoint_step"),
-    ({"residual_delta": [0.5]}, r"pair \[below, above\]"),
+    # A box is in its column's units, so there is no scalar shorthand.
+    ({"residual_delta": {"sp": 0.5}}, r"pair \[below, above\]"),
 ])
 def test_validate_names_the_problem(fields, message):
     with pytest.raises(ValueError, match=message):
@@ -118,13 +115,10 @@ def test_validate_names_the_problem(fields, message):
 
 
 @pytest.mark.parametrize("fields", [
-    pytest.param({"setpoint_step": 0.5, "residual_delta": 0.5},
-                 id="residual at exactly one grid step"),
-    # 0 means "emit the reference exactly" — a floor to train nothing and
-    # score, and not the same thing as a residual that quantizes away.
-    pytest.param({"residual_delta": 0.0}, id="zero-width residual box"),
-    pytest.param({"setpoint_step": 0.5, "residual_delta": [0, 0.5]},
-                 id="one-sided residual box"),
+    # [0, 0] means "emit the reference exactly" — the rule itself, scored.
+    pytest.param({"residual_delta": {"sp": [0, 0]}}, id="zero-width residual box"),
+    pytest.param({"residual_delta": {"heat": [0, 0.5], "cool": [0.5, 0]}},
+                 id="one-sided boxes, opposite ways"),
 ])
 def test_validate_stays_quiet_on_a_legal_config(fields):
     make_control_cfg(**fields).validate()

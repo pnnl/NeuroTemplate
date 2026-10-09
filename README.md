@@ -5,7 +5,7 @@ A library of generic, time-series, data-driven black-box modeling and control bu
 The repo contains two sister subsystems:
 
 - **Modeling** — train a system-identification surrogate `y_{k+1} = f(y_k, u_k, d_k) [+ y_k]` from data, with an optional gradient-sign penalty, post-training physics assertions (equilibrium / step response / reachability / free decay), Optuna search, MLflow tracking. Model families: `mlp`, `nssm`, `lssm`, `gru` (black box) and `2r2c` (grey box — a thermal network with a hidden mass, for buildings whose storage matters). Families can be mixed in one graph, one per block of signals.
-- **Control** — train a differentiable predictive control (DPC) policy against a frozen surrogate. Closed-loop rollouts, a declared objective over named columns (comfort bands, tracked schedules, energy, cost and peak-demand terms), reference signals read from their own files, setpoint quantization. Policy families: `mlp`, `linear` (a saturated affine feedback law). Optionally scores a rule-based baseline alongside the learned policy.
+- **Control** — train a differentiable predictive control (DPC) policy against a frozen surrogate. Closed-loop rollouts, a declared objective over named columns (comfort bands, tracked schedules, energy, cost and peak-demand terms), reference signals read from their own files. Policy families: `mlp`, `linear` (a saturated affine feedback law). Optionally anchors chosen U columns to a rule, each inside its own box.
 
 Both sides share a thin `common/` layer (YAML/CLI loader, CSV + sliding-window data utilities, per-channel metrics).
 
@@ -111,17 +111,14 @@ The library imports each hook by attribute (no defaulting), so every row above e
 | `power_channels(nm_mapping) -> [col]` | must be defined; return `[]` when nothing is metered | closed-loop plot power row |
 | `plot_context_channels(nm_mapping) -> [col]` | must be defined; return `[]` for none | D traces overlaid on the closed-loop plot |
 | `power_metric(yn, U, D, nm_mapping, norm_stats) -> Tensor` + `POWER_METRIC_IMPLEMENTED: bool` | required only when a loss term names `power` | power terms (energy, cost, peak) + energy reportcard |
-| `reference_control(y_now, r_now, d_now, nm_mapping, norm_stats) -> Tensor` | optional | rule-based baseline **and** the residual policy's anchor |
-| `build_baseline_policy(cfg, sysid_cfg, nm_mapping, norm_stats) -> Node \| None` | optional; mutually exclusive with `reference_control` | escape hatch for a baseline a memoryless rule cannot express |
+| `reference_control(y_now, r_now, d_now, nm_mapping, norm_stats) -> dict[str, Tensor]` | required with `residual_delta` | the residual policy's anchor, one command per anchored U column |
 | `preview_config(nm_mapping) -> {D column: n_steps}` | optional | per-column disturbance preview (a reference column's preview is `reference_preview` in the config) |
 
 The objective is not a hook: it is the `losses` table in `control.yaml`, below.
 
 `power_metric` returns whatever units the use case meters; the library never converts, so the reportcard labels energy as `power·h`. Metered channels the surrogate already predicts are the best thing to return, because the energy numbers then mean something outside the run. An actuation proxy such as `(setpoint - ambient)²` is a fine alternative when nothing meters power — just read the energy section as relative rather than physical. What has actually cost campaigns here is the term's *scale*, not its shape: a proxy carried over from another dataset came out at 1.7× the entire comfort objective while every pooled metric looked fine. The objective-balance report and the shape sweep both print before training so that magnitude is on screen from the start.
 
-`reference_control` is memoryless and works on the current step: `y_now` `[b, ny]` and `d_now` `[b, nd]` normalized, and `r_now`, each reference column the objective names by name, `[b]`, normalized — `norm_stats` carries an entry for each, so a rule denormalizes a band edge exactly as it does a zone temperature. If it is defined, `nt control train` rolls that rule out on the same test windows against the same test references, adds a learned-vs-baseline table to the reportcard, and states plainly whether the learned policy cleared its own reference on mean exceedance. **A policy that does not clear its reference should ship the reference** — training is scored against a surrogate whose held-out error is not the plant's, and the rule is the one controller here whose behaviour does not depend on that. Without a rule the comparison section just says so.
-
-The same hook is what `residual_delta` anchors to. Set it and the policy commands `reference_control(...) + δ` with `δ` inside the `residual_delta` box instead of commanding a setpoint outright: the rule keeps comfort, δ answers whatever else is being optimised, and the ±Δ box is a trust region on surrogate error rather than a claim about the network. The reportcard reports the box and the fraction of steps δ spent pinned at each edge — an edge that binds most of the time means either the rule is wrong for this plant or the optimizer is riding a surrogate artifact into the wall. Note Δ bounds the *action*, not the outcome: the commanded setpoint stays within Δ of the rule's, the zone temperature does not, because the plant is in between.
+`reference_control` is memoryless and works on the current step: `y_now` `[b, ny]` and `d_now` `[b, nd]` normalized, and `r_now`, each reference column the objective names by name, `[b]`, normalized — `norm_stats` carries an entry for each, so a rule denormalizes a band edge exactly as it does a zone temperature. It returns `{U column: [b]}`, normalized, for exactly the columns `residual_delta` names (anything else is refused, naming both sets). Each of those columns commands `reference_control(...)[column] + δ` with `δ` inside that column's box instead of a setpoint outright: the rule keeps comfort, δ answers whatever else is being optimised, and the box is a trust region on surrogate error rather than a claim about the network. The reportcard reports each box and the fraction of steps δ spent pinned at each edge — an edge that binds most of the time means either the rule is wrong for this plant or the optimizer is riding a surrogate artifact into the wall. Note a box bounds the *action*, not the outcome: the commanded setpoint stays within its box around the rule's, the zone temperature does not, because the plant is in between. The library does not score the rule against the learned policy; to score the rule itself, train with every box `[0, 0]`.
 
 ### The control objective: a declared table over named columns
 
@@ -146,7 +143,7 @@ Each entry is read in one order: the operand `column − target` (`target` optio
 
 Every reduction is horizon-free and homogeneous of degree 1, so a gain tuned at `train_pred_steps: 48` means the same at 288, and switching a power metric from kW to W moves every power gain by the same factor. Two actuators that want different smoothing are two `first_difference` rows, each named on the reportcard. The terms appear in MLflow and on the objective-balance report as `<name>_loss`.
 
-**The regulated set is derived**: the Y targets of the `relu`/`nrelu` rows, each with at most one lower and one upper bound — a band, a one-sided limit, or (the same column on both sides) a tracked setpoint schedule. The reportcard scores comfort, band-jump response and the baseline against exactly those bands.
+**The regulated set is derived**: the Y targets of the `relu`/`nrelu` rows, each with at most one lower and one upper bound — a band, a one-sided limit, or (the same column on both sides) a tracked setpoint schedule. The reportcard scores comfort and band-jump response against exactly those bands.
 
 **Reference columns are data, in their own files.** A name that is not a surrogate column or `power` is a reference column, read from `train_reference_path` / `dev_reference_path` / `test_reference_path` — one list per split, parallel to its plant files, each file row-aligned with its plant file and carrying exactly its timestamps (a mismatch is refused, naming both ranges). They reach the policy and the loss as one `R` key and never the surrogate, whose Node reads only `yn`, `U` and `D`. Several draws are several files: list the plant file once per draw. [template/make_references.py](template/make_references.py) samples a band and slices a tariff into such a file; it is example code to edit, not library behaviour.
 
@@ -528,46 +525,41 @@ the sign flipped.
 
 ### Residual control: bound the policy to a rule
 
-The policy commands `reference_control(...) + δ` with `|δ| ≤ residual_delta`
-instead of commanding a setpoint. This is a trust region on surrogate error,
-not a claim about what networks find easy to learn: training's gradient *and*
-its model-selection criterion both come from a surrogate whose held-out score
-is not the plant's, and a ±Δ box caps what that error can cost you.
+An anchored U column commands `reference_control(...)[column] + δ`, with
+`-below ≤ δ ≤ above`, instead of commanding a setpoint. This is a trust region
+on surrogate error, not a claim about what networks find easy to learn:
+training's gradient *and* its model-selection criterion both come from a
+surrogate whose held-out score is not the plant's, and a box caps what that
+error can cost you.
 
 1. **Implement `reference_control`** (see the template; its `bracket_band`
-   does the hard part for a heating/cooling pair). Delete
-   `build_baseline_policy` if you have one — defining both raises.
-2. **Set `residual_delta`**, in physical units:
+   does the hard part for a heating/cooling pair). It returns one command per
+   anchored column.
+2. **Set `residual_delta`**, a box per anchored U column, in that column's
+   physical units:
 
    ```yaml
-   residual_delta: 1.0     # +/- 1 degC around the rule
-   setpoint_step: 0.5      # Delta below one grid step is rejected: every
-                           # residual would quantize back to zero
+   residual_delta:
+     Heating Setpoint [°C]: [0.0, 0.5]   # up off the band floor, never down
+     Cooling Setpoint [°C]: [0.5, 0.0]   # down off the ceiling, never up
    ```
 
-   A pair `[below, above]` makes the box one-sided: `[0, 0.5]` lets a setpoint
-   the rule anchors at the band floor move up off it and never down — the fix
-   for a heating setpoint that a symmetric box let fall below the floor. One
-   box holds for every U column, and a zero side is a hard floor with no
-   gradient past it, like the actuator bounds. Training still starts exactly
-   at the rule.
+   A heating/cooling pair is held inward in opposite directions, which is why
+   the box is per column. A U column not named is a free policy output over
+   its actuation bounds. Training starts exactly at the rule, and a zero side
+   does not trap it there: the box clamp is exact going forward and the
+   identity going backward, so the gradient keeps the net's own slope.
 
-3. **Read the verdict.** The reportcard scores the rule on the same windows
-   against the same test references and states whether the learned policy
-   cleared it on mean exceedance. It does not always. **A policy that does not
-   clear its reference should ship the reference** — that call is the reason
-   δ = 0 is worth scoring at all, because the Trainer checkpoints after each
-   epoch's optimizer steps and never considers δ = 0 itself.
-
-Δ bounds the **action**, not the outcome: the commanded setpoint stays within Δ
-of the rule's, the zone temperature does not, because the plant is in between.
+Nothing is rounded to an actuator's resolution — a BMS with half-degree
+setpoints implements that, and the controller commands through it. Smoothness
+is the `first_difference` loss term's job.
 
 ### Together
 
 This is the case the residual design is really for — the rule keeps comfort,
 δ answers the incentive, and Δ is an operator-legible knob ("how far from the
-comfort rule am I willing to move for money"): `residual_delta: 1.0` beside the
-cost and peak rows above, with `train_pred_steps: 288`.
+comfort rule am I willing to move for money"): a `residual_delta` box of a
+degree or so on each setpoint, beside the cost and peak rows above, with `train_pred_steps: 288`.
 
 ## Diagnostics that run whether you ask or not
 
@@ -650,17 +642,12 @@ mass sits and flags a level under 5%.
   the channel followed, and whether it got back in band. Two controllers
   measured at 16.6% and 17.9% pooled violation reacted to 0% and 75% of their
   cooling-demand jumps respectively; the pooled metric ranked them backwards.
-- **Residual saturation** — for a residual policy, Δ and the fraction of steps
-  δ spent pinned at ±Δ, measured *after* quantization and the actuator clamp so
-  it is the deviation actually deployed. A cap that binds most of the time means
-  either the rule is wrong for this plant or the optimizer is riding a surrogate
-  artifact into the wall. Read it before the comfort number.
-- **Baseline comparison and the ship/don't-ship call** — the same headline
-  numbers for the learned policy and the rule, on identical windows and
-  identical references, plus an explicit verdict. For a residual policy this is also
-  the δ = 0 score, which is what turns its floor from rhetorical into a
-  decision: the Trainer checkpoints after each epoch's optimizer steps, so
-  δ = 0 is never itself a candidate and has to be scored on purpose.
+- **Residual saturation** — for a residual policy, each anchored column's box
+  and the fraction of steps δ spent pinned at each edge, measured *after* the
+  actuator clamp so it is the deviation actually deployed. A cap that binds
+  most of the time means either the rule is wrong for this plant or the
+  optimizer is riding a surrogate artifact into the wall. Read it before the
+  comfort number.
 
 ## Shipping a model: ONNX export
 
@@ -747,13 +734,13 @@ src/neurotemplate/
 │   └── cli/             # train, optuna, load, debug_heads
 └── control/
     ├── config.py        # ControlConfig
-    ├── policy.py        # policy_catalog (MLP/linear), build_policy, describe_policy, STEQuantize, residual policy
+    ├── policy.py        # policy_catalog (MLP/linear), build_policy, describe_policy, residual policy
     ├── losses.py        # the declared objective: parse, resolve names, power_mean
     ├── closed_loop.py   # build_closed_loop, build_control_loss, power_term
     ├── objective.py     # term balance + power-signal shape sweep
     ├── scenarios.py     # load_control_splits (plant + reference files), build_window_dict, build_loaders
     ├── metrics.py       # ComfortMetrics, EnergyMetrics, ActuationMetrics, JumpResponse, ResidualMetrics
-    ├── pipeline.py      # train_policy, evaluate_closed_loop, evaluate_baseline, clears_reference
+    ├── pipeline.py      # train_policy, evaluate_closed_loop, log_control_results
     ├── reportcard.py    # render_control_reportcard
     ├── load.py          # load_frozen_dynamics, load_trained_policy
     └── cli/             # train
@@ -782,7 +769,7 @@ NeuroTemplate is a layer **on top of** Neuromancer, not a replacement. We reuse 
 - Synthetic physics assertions (equilibrium / step response / reachability / free decay)
 - `HeadStack` per-channel output heads (regression / binary / bounded / ordinal)
 - Per-channel metrics + markdown reportcards
-- Control-side: `STEQuantize`, a declared objective over named columns, closed-loop assembly
+- Control-side: a declared objective over named columns, closed-loop assembly
 
 If you find yourself shadowing a Neuromancer class, prefer the import.
 

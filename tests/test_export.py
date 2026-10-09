@@ -212,9 +212,9 @@ def _priced(**overrides):
     # key has several columns, so a wrong window layout shows up.
     {"d_preview": 2},
     # Everything a policy can wrap around its net: the residual anchored to
-    # the reference rule, setpoint quantisation, and a tariff it previews.
-    _priced(residual_delta=1.0, setpoint_step=0.5, d_preview=1),
-], ids=["plain", "residual, quantised, priced"])
+    # the reference rule, and a tariff it previews.
+    _priced(residual_delta={"Zone Cooling Setpoint [°C]": [0.0, 1.0]}, d_preview=1),
+], ids=["plain", "residual, priced"])
 def test_trained_policy_exports_as_the_trained_policy(tmp_path, overrides):
     from control_fixtures import full_setup
     from neurotemplate.control.closed_loop import build_closed_loop
@@ -250,10 +250,7 @@ def test_trained_policy_exports_as_the_trained_policy(tmp_path, overrides):
     with torch.no_grad():
         wrapped = PolicyGraph(policy.callable, inputs, nm, ns)(*physical)
         direct = policy.callable(*flat.values()) * stretch + shift
-    # Quantised commands can round the other way on float noise at a grid
-    # midpoint, so compare how many agree rather than the worst one.
-    agree = (wrapped - direct).abs() < 1e-4
-    assert agree.float().mean() > 0.99
+    assert torch.allclose(wrapped, direct, atol=1e-4)
 
 
 # ── the C++ runner ───────────────────────────────────────────────

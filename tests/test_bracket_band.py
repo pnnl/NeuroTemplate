@@ -10,13 +10,10 @@ by name would collide with that.
 
 Measured on a real single-zone plant, this rule holds a 0.5-2.0 °C-wide random
 comfort band to 2.5-6.2% violation across four buildings with no model at all,
-where aiming both setpoints at the band edge gives 21.8-56.7%. These tests pin
-the three properties that make the difference, each of which is easy to get
-backwards:
-
-  - both setpoints land ON the quantization grid,
-  - each rounds toward the band INTERIOR, never outside its own edge,
-  - heating never commands above cooling (the stages would fight).
+where aiming both setpoints at the band edge gives 21.8-56.7% (both measured
+with setpoints rounded to a half-degree grid, which the rule no longer does:
+resolution is the building's). These tests pin the property that is easy to
+get backwards: heating never commands above cooling (the stages would fight).
 """
 
 import importlib.util
@@ -32,21 +29,6 @@ _spec.loader.exec_module(_template_control)
 bracket_band = _template_control.bracket_band
 
 
-def test_rounds_toward_the_band_interior():
-    """Heating rounds up off the floor, cooling rounds down off the ceiling.
-
-    Rounding the other way would put a setpoint outside the band it holds —
-    the mistake this rule exists to avoid.
-    """
-    lo = torch.tensor([20.1])   # nearest grid point below is 20.0, outside
-    hi = torch.tensor([23.9])   # nearest grid point above is 24.0, outside
-    cool, heat = bracket_band(lo, hi, step=0.5)
-    assert heat.item() == pytest.approx(20.5)
-    assert cool.item() == pytest.approx(23.5)
-    assert heat.item() >= lo.item()
-    assert cool.item() <= hi.item()
-
-
 def test_heating_never_exceeds_cooling():
     """Across a wide sweep of bands and insets, the ordering must hold."""
     lo = torch.linspace(20.0, 28.0, 60).reshape(-1, 1)
@@ -55,7 +37,7 @@ def test_heating_never_exceeds_cooling():
     for cool_inset, heat_inset in ((0.0, 0.0), (0.5, 0.0), (1.0, 0.25),
                                    (2.0, 2.0)):
         cool, heat = bracket_band(
-            lo, hi, step=0.5, cool_inset=cool_inset, heat_inset=heat_inset)
+            lo, hi, cool_inset=cool_inset, heat_inset=heat_inset)
         assert (heat <= cool).all(), f"insets {cool_inset}/{heat_inset}"
 
 
@@ -67,6 +49,6 @@ def test_oversized_inset_collapses_rather_than_inverting():
     safer one.
     """
     lo, hi = torch.tensor([20.0]), torch.tensor([21.0])
-    cool, heat = bracket_band(lo, hi, step=0.5, cool_inset=2.0)
+    cool, heat = bracket_band(lo, hi, cool_inset=2.0)
     assert cool.item() == pytest.approx(heat.item())
     assert heat.item() <= cool.item()

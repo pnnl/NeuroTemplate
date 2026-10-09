@@ -65,8 +65,8 @@ than from memory of another version.
    (`python make_references.py data/train.csv data/train_reference.csv
    --band 21 25`, and the same for dev and test), the `losses` and `gains`
    in `control_configs/control.yaml` naming your columns, and ideally
-   `reference_control`: a simple rule the reportcard scores the learned
-   policy against. Then
+   `reference_control`: a rule you trust, which `residual_delta` then
+   anchors the policy to. Then
    `nt control train --set sysid_run_id=<run_id>`.
 
 Check any config without running anything:
@@ -85,8 +85,8 @@ Each is off until you ask for it — see
 | an energy objective, and the energy section of the reportcard | `power_metric` + `POWER_METRIC_IMPLEMENTED` | a `{column: power, norm: 1}` row |
 | price-driven load shifting | `power_metric`, and a tariff column in the reference files (`make_references.py --price`) | a `{column: power, norm: 1, weight: <tariff>}` row, `reference_scale`, `reference_preview` |
 | peak shaving | `power_metric` | a `{column: power, norm: 4}` row |
-| a rule-based baseline on the reportcard | `reference_control` | *(nothing)* |
-| a policy bounded to that rule | `reference_control` | `residual_delta` |
+| a policy bounded to a rule, per U column | `reference_control` | `residual_delta` |
+| the rule itself, scored | `reference_control` | `residual_delta` with every box `[0, 0]` |
 
 ## Reading a run
 
@@ -96,7 +96,7 @@ Each is off until you ask for it — see
   physical units; the headline `test_rmse` is one number in normalized space.
 - **Control:** `control_reportcard.md` — the objective balance (a term near
   0% of the trained objective is not doing anything), time pinned at each
-  actuator bound, and the learned-vs-rule comparison if you defined a rule.
+  actuator bound, and how much of each residual box the policy used.
   Look at the closed-loop plots before the numbers.
 
 ## Things that bite silently

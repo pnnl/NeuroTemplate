@@ -1,25 +1,34 @@
-"""Residual DPC: the policy commands a bounded deviation from a rule.
+"""Residual DPC: an anchored U column commands a bounded deviation from a rule.
 
 The properties worth pinning are the ones that make the design mean anything:
-δ starts at exactly zero, the commanded setpoint never leaves the ±Δ box
-around the rule, the in-rollout slice of the current step matches the layout
-the deploy path hands the same Node, and a Δ smaller than the setpoint grid —
-the cheapest way to waste a campaign on this feature — raises.
+δ starts at exactly zero, the commanded value never leaves its column's box
+around the rule, a box with a zero side does not kill the gradient, the
+in-rollout slice of the current step matches the layout the deploy path hands
+the rule, and a rule that anchors different columns from the boxes is refused.
 """
 
 import pytest
 import torch
+import torch.nn as nn
+from neuromancer.modules import blocks
 
 from neurotemplate.control.closed_loop import build_closed_loop
+from neurotemplate.control.losses import resolve_objective
 from neurotemplate.control.metrics import residual_metrics
 from neurotemplate.control.policy import (
     _ResidualPolicy,
+    _reference_rule,
+    _zero_final_layer,
     build_policy,
-    build_reference_node,
     reference_over_horizon,
 )
 from neurotemplate.control.scenarios import build_window_dict, horizons, scored_steps
-from control_fixtures import full_setup
+from neurotemplate.hooks import load_control_hooks
+from control_fixtures import SETPT, full_setup
+
+
+def _box(below, above):
+    return {SETPT: [below, above]}
 
 
 def _windows(s):
@@ -39,11 +48,11 @@ def _rollout(s):
 
 
 def test_residual_keeps_the_node_signature_the_deploy_path_calls():
-    """Shape B: the rule is composed inside the policy Node's callable, so the
-    Node's input keys, input_map and output are unchanged — which is what lets
-    the evaluator rebuild and invoke it with no edits at all."""
+    """The rule is composed inside the policy Node's callable, so the Node's
+    input keys, input_map and output are unchanged — which is what lets the
+    evaluator rebuild and invoke it with no edits at all."""
     plain = full_setup()
-    resid = full_setup(residual_delta=1.0)
+    resid = full_setup(residual_delta=_box(1.0, 1.0))
     a = build_policy(plain["cfg"], plain["sysid_cfg"], plain["nm"],
                      plain["norm_stats"])
     b = build_policy(resid["cfg"], resid["sysid_cfg"], resid["nm"],
@@ -54,35 +63,39 @@ def test_residual_keeps_the_node_signature_the_deploy_path_calls():
     assert a.input_map == b.input_map
 
 
+def test_a_rule_anchoring_other_columns_than_the_boxes_is_refused(monkeypatch):
+    """A column the rule adds would be silently ignored, and one it drops
+    would have no anchor."""
+    import control_user_defined as cud
+    s = full_setup(residual_delta=_box(1.0, 1.0))
+    rule = cud.reference_control
+
+    def extra(*args):
+        return {**rule(*args), "Fan Speed [-]": torch.zeros(1)}
+
+    monkeypatch.setattr(cud, "reference_control", extra)
+    with pytest.raises(ValueError, match=r"'Fan Speed \[-\]'.*residual_delta names"):
+        _rollout(s)
+
+
 # ── δ = 0 at initialization ──────────────────────────────────────
 
 
-def test_a_fresh_residual_policy_emits_the_reference_exactly():
-    """Zero-initialising the last layer plus a symmetric box means training
-    starts at the rule, not near it."""
-    s = full_setup(residual_delta=1.0, setpoint_step=0.0)
-    cfg, sysid_cfg, nm, ns = s["cfg"], s["sysid_cfg"], s["nm"], s["norm_stats"]
-    _, _, hmax = horizons(cfg, sysid_cfg)
-
-    _, out = _rollout(s)
-    u_ref = reference_over_horizon(cfg, out, hmax, nm, ns)
-    assert torch.allclose(out["U"][:, scored_steps("U", hmax), :], u_ref, atol=1e-6)
-
-
 @pytest.mark.parametrize("method", ["sigmoid_scale", "relu_clamp"])
-def test_zero_init_holds_for_both_bound_methods(method):
-    s = full_setup(residual_delta=1.0, setpoint_step=0.0,
-                   policy_bound_method=method)
+def test_a_fresh_residual_policy_emits_the_reference_exactly(method):
+    """Zero-initialising the anchored rows of the last layer, plus a symmetric
+    net box, means training starts at the rule, not near it."""
+    s = full_setup(residual_delta=_box(1.0, 1.0), policy_bound_method=method)
     cfg, sysid_cfg, nm, ns = s["cfg"], s["sysid_cfg"], s["nm"], s["norm_stats"]
     _, _, hmax = horizons(cfg, sysid_cfg)
     _, out = _rollout(s)
-    u_ref = reference_over_horizon(cfg, out, hmax, nm, ns)
-    assert torch.allclose(out["U"][:, scored_steps("U", hmax), :], u_ref, atol=1e-6)
+    u_ref = reference_over_horizon(cfg, out, hmax, nm, ns)[SETPT]
+    assert torch.allclose(out["U"][:, scored_steps("U", hmax), 0], u_ref, atol=1e-6)
 
 
 def test_a_zero_width_box_pins_the_policy_to_the_rule_forever():
-    """Δ = 0 is the floor: train nothing, and score exactly the rule."""
-    s = full_setup(residual_delta=0.0, setpoint_step=0.0)
+    """[0, 0] is the rule itself: train nothing, and score exactly the rule."""
+    s = full_setup(residual_delta=_box(0.0, 0.0))
     assert _perturbed_deviation(s, 5.0).abs().max() < 1e-5
 
 
@@ -100,31 +113,26 @@ def _perturbed_deviation(s, scale):
         for p in policy.parameters():
             p.add_(torch.randn_like(p) * scale)
     out = build_closed_loop(s["dyn_node"], policy, cfg, sysid_cfg)(_windows(s))
-    u_ref = reference_over_horizon(cfg, out, hmax, nm, ns)
-    stretch = torch.tensor([ns[c]["stretch"] for c in nm["U"]])
-    return ((out["U"][:, scored_steps("U", hmax), :] - u_ref) * stretch).detach()
+    u_ref = reference_over_horizon(cfg, out, hmax, nm, ns)[SETPT]
+    deviation = out["U"][:, scored_steps("U", hmax), 0] - u_ref
+    return (deviation * ns[SETPT]["stretch"]).detach()
 
 
-def test_an_asymmetric_box_starts_at_the_rule_and_never_crosses_its_zero_side():
-    """[0, 0.5]: a setpoint anchored at the band floor may move up off it and
-    never down — and a fresh policy still emits the rule exactly."""
-    s = full_setup(residual_delta=[0.0, 0.5], setpoint_step=0.0)
+def test_a_one_sided_box_starts_at_the_rule_and_deploys_only_its_open_side():
+    """[0, 0.8]: a setpoint anchored at the band floor may move up off it by
+    at most 0.8 and never down — and a fresh policy still emits the rule."""
+    s = full_setup(residual_delta=_box(0.0, 0.8))
     assert _perturbed_deviation(s, 0.0).abs().max() < 1e-5
     torch.manual_seed(0)
     delta = _perturbed_deviation(s, 20.0)
     assert float(delta.min()) >= -1e-5
-    assert float(delta.max()) <= 0.5 + 1e-4
+    assert float(delta.max()) <= 0.8 + 1e-5
     assert float(delta.max()) > 0.1, "the open side should still be reachable"
-
-
-def test_a_trained_residual_never_leaves_the_box():
-    s = full_setup(residual_delta=1.0, setpoint_step=0.0)
-    assert float(_perturbed_deviation(s, 20.0).abs().max()) <= 1.0 + 1e-4
 
 
 def test_the_residual_still_learns():
     """A zero start is only useful if the gradient is alive there."""
-    s = full_setup(residual_delta=1.0, setpoint_step=0.0)
+    s = full_setup(residual_delta=_box(1.0, 1.0))
     cfg, sysid_cfg, nm, ns = s["cfg"], s["sysid_cfg"], s["nm"], s["norm_stats"]
     _, _, hmax = horizons(cfg, sysid_cfg)
 
@@ -136,31 +144,71 @@ def test_the_residual_still_learns():
     assert any(float(g.abs().sum()) > 0 for g in grads)
 
 
+def test_a_heating_and_cooling_pair_recover_from_their_closed_sides():
+    """A [0, 0.5] heating column and a [0.5, 0] cooling column, held inward in
+    opposite directions. Each starts on its rule, which is its closed edge;
+    pushed against that edge and then away, each must come off it. A hard
+    clamp there zeroes the gradient for good — measured, δ stayed 0 with the
+    incentive reversed — so this is the straight-through clamp's test. (A
+    long push saturates the net's own sigmoid, from which recovery is slow:
+    measured, ~300 steps instead of 40, as at any sigmoid edge.)"""
+    torch.manual_seed(0)
+    half = torch.tensor([0.5, 0.5])
+    net = blocks.MLP_bounds(insize=4, outsize=2, bias=True, linear_map=nn.Linear,
+                            nonlin=nn.GELU, hsizes=[8], min=-half, max=half,
+                            method="sigmoid_scale")
+    _zero_final_layer(net, torch.tensor([True, True]))
+    rule = {"heat": torch.tensor(20.0), "cool": torch.tensor(24.0)}
+    policy = _ResidualPolicy(
+        net, lambda x: rule, ["heat", "cool"],
+        umin=torch.tensor([0.0, 0.0]), umax=torch.tensor([50.0, 50.0]),
+        below=torch.tensor([0.0, 0.5]), above=torch.tensor([0.5, 0.0]))
+    x = torch.randn(32, 4)
+    optimizer = torch.optim.Adam(net.parameters(), lr=0.05)
+
+    def push(direction, steps):
+        """Push heating's δ in `direction` and cooling's against it."""
+        for _ in range(steps):
+            delta = policy(x) - torch.stack([rule["heat"], rule["cool"]])
+            loss = -direction * (delta[:, 0] - delta[:, 1]).mean()
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+        return (policy(x) - torch.stack([rule["heat"], rule["cool"]])).detach()
+
+    closed = push(-1.0, 5)                  # into each closed side
+    assert closed[:, 0].max() <= 0.0 and closed[:, 1].min() >= 0.0
+    opened = push(+1.0, 40)                 # and back out through the rule
+    assert opened[:, 0].mean() > 0.4 and opened[:, 0].max() <= 0.5
+    assert opened[:, 1].mean() < -0.4 and opened[:, 1].min() >= -0.5
+
+
 # ── Slicing matches the deploy layout ────────────────────────────
 
 
-def test_the_in_rollout_current_step_matches_the_bare_node_call():
-    """The rule inside the policy and the rule as a standalone Node must see
-    the same current step, or the residual is measured against a fiction."""
-    s = full_setup(residual_delta=1.0, setpoint_step=0.0,
+def test_the_in_rollout_current_step_matches_the_bare_rule():
+    """The rule inside the policy and the rule handed only the current step
+    must agree, or the residual is measured against a fiction."""
+    s = full_setup(residual_delta=_box(1.0, 1.0),
                    reference_preview={"Comfort Low [°C]": 2})
     cfg, sysid_cfg, nm, ns = s["cfg"], s["sysid_cfg"], s["nm"], s["norm_stats"]
-    _, h_ctrl, hmax = horizons(cfg, sysid_cfg)
+    _, h_ctrl, _ = horizons(cfg, sysid_cfg)
     ny, nd, n_ref = len(nm["Y"]), len(nm["D"]), 2
 
     policy = build_policy(cfg, sysid_cfg, nm, ns)
     rule_in_policy = policy.callable.reference
-    bare = build_reference_node(cfg, sysid_cfg, nm, ns).callable
+    bare = _reference_rule(cfg, load_control_hooks(cfg), nm, ns, h_ctrl=1,
+                           r_columns=resolve_objective(cfg, nm).r_columns)
 
     b = 3
     yn_win = torch.randn(b, ny * h_ctrl)
     d_win = torch.randn(b, nd * h_ctrl)
     r_win = torch.randn(b, n_ref * 3)       # current step + 2 previewed
 
-    windowed = rule_in_policy(yn_win, d_win, r_win)
-    # The deploy path hands the bare Node the current step of each signal:
-    # the LAST block of the yn/D history, the FIRST block of the reference.
-    current = bare(yn_win[:, -ny:], d_win[:, -nd:], r_win[:, :n_ref])
+    windowed = rule_in_policy(yn_win, d_win, r_win)[SETPT]
+    # The deploy path hands the rule the current step of each signal: the
+    # LAST block of the yn/D history, the FIRST block of the reference.
+    current = bare(yn_win[:, -ny:], d_win[:, -nd:], r_win[:, :n_ref])[SETPT]
     assert torch.allclose(windowed, current)
 
 
@@ -168,9 +216,9 @@ def test_the_in_rollout_current_step_matches_the_bare_node_call():
 
 
 def test_residual_metrics_measure_the_deployed_deviation():
-    u = torch.tensor([[[22.0], [23.0], [24.0], [20.0]]])
-    u_ref = torch.tensor([[[22.0], [22.5], [22.0], [22.0]]])
-    m = residual_metrics(u, u_ref, box=(2.0, 2.0), tol=0.25)
+    u = torch.tensor([[22.0, 23.0, 24.0, 20.0]])
+    u_ref = torch.tensor([[22.0, 22.5, 22.0, 22.0]])
+    m = residual_metrics(SETPT, u, u_ref, box=(2.0, 2.0))
     assert m.mean_abs_delta == pytest.approx((0.0 + 0.5 + 2.0 + 2.0) / 4)
     assert m.max_abs_delta == pytest.approx(2.0)
     # One step on each edge, reported separately.
@@ -179,58 +227,20 @@ def test_residual_metrics_measure_the_deployed_deviation():
 
 
 def test_a_zero_width_box_reports_no_saturation_rather_than_all_of_it():
-    """Δ = 0 is the recommended first run — it scores the bare rule.
+    """[0, 0] scores the bare rule.
 
     Every deviation is trivially at the bound of a zero-width box, so "pinned
     on 100% of steps" is true and meaningless, and it drags in the reportcard's
-    warning about a cap that binds. Mean |δ| still earns its place: at Δ = 0 it
-    is the assertion that the residual path is inert.
+    warning about a cap that binds. Mean |δ| still earns its place: at [0, 0]
+    it is the assertion that the residual path is inert.
     """
-    u = torch.tensor([[[22.0], [23.0]]])
-    m = residual_metrics(u, u, box=(0.0, 0.0), tol=0.25)
+    u = torch.tensor([[22.0, 23.0]])
+    m = residual_metrics(SETPT, u, u, box=(0.0, 0.0))
 
     assert m.frac_at_below is None and m.frac_at_above is None
     assert m.mean_abs_delta == 0.0
     assert m.max_abs_delta == 0.0
     # A one-sided box reports only the edge that has an interior.
-    one_sided = residual_metrics(u + 0.5, u, box=(0.0, 0.5), tol=0.25)
+    one_sided = residual_metrics(SETPT, u + 0.5, u, box=(0.0, 0.5))
     assert one_sided.frac_at_below is None
     assert one_sided.frac_at_above == 1.0
-
-
-def test_a_grid_aligned_reference_leaves_no_snapping_floor(monkeypatch):
-    """Quantization plus an off-grid reference puts a floor of half a grid step
-    on mean |delta| that is snapping, not steering. A reference already on the
-    grid does not — and the reportcard says which case you are in."""
-    import control_user_defined as cud
-    from neurotemplate.control.metrics import residual_metrics
-
-    s = full_setup(residual_delta=1.0, setpoint_step=0.5)
-    cfg, sysid_cfg, nm, ns = s["cfg"], s["sysid_cfg"], s["nm"], s["norm_stats"]
-    _, _, hmax = horizons(cfg, sysid_cfg)
-    stretch = torch.tensor([ns[c]["stretch"] for c in nm["U"]])
-    shift = torch.tensor([ns[c]["shift"] for c in nm["U"]])
-
-    def measure(s):
-        _, out = _rollout(s)
-        u_ref = reference_over_horizon(cfg, out, hmax, nm, ns)
-        return residual_metrics(
-            (out["U"][:, scored_steps("U", hmax), :] * stretch + shift).detach(),
-            (u_ref * stretch + shift).detach(), cfg.residual_box(), 0.25,
-        ).mean_abs_delta
-
-    # The fixture's midpoint rule is not grid-aligned, so a delta = 0 policy
-    # still shows a non-zero realized residual: the snap, not the network.
-    off_grid = measure(s)
-    assert off_grid > 0.05          # a real fraction of the 0.25 half-step floor
-
-    midpoint = cud.reference_control
-
-    def grid_aligned(yn, r, d, nm_mapping, norm_stats):
-        phys = midpoint(yn, r, d, nm_mapping, norm_stats) * stretch + shift
-        return ((phys / 0.5).round() * 0.5 - shift) / stretch
-
-    monkeypatch.setattr(cud, "reference_control", grid_aligned)
-    # What is left is float32 round-trip noise through normalize/denormalize,
-    # two orders of magnitude below the floor above.
-    assert measure(s) < off_grid / 100
