@@ -103,7 +103,11 @@ def _preview_rows(label: str, depths: dict[str, int],
 
 
 def _box(below: float, above: float) -> str:
-    return f"±{above:g}" if below == above else f"[−{below:g}, +{above:g}]"
+    if below == above:
+        return f"±{above:g}"
+    lo = f"−{below:g}" if below else "0"
+    hi = f"+{above:g}" if above else "0"
+    return f"[{lo}, {hi}]"
 
 
 def _policy_section(arch: dict) -> str:
