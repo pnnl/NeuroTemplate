@@ -5,13 +5,13 @@ A library of generic, time-series, data-driven black-box modeling and control bu
 The repo contains two sister subsystems:
 
 - **Modeling** — train a system-identification surrogate `y_{k+1} = f(y_k, u_k, d_k) [+ y_k]` from data, with an optional gradient-sign penalty, post-training physics checks on thermal states (equilibrium / step response / reachability / free decay), Optuna search, MLflow tracking. Model families: `mlp`, `nssm`, `lssm`, `gru` (black box) and `2r2c` (grey box — a thermal network with a hidden mass, for buildings whose storage matters). Families can be mixed in one graph, one per block of signals.
-- **Control** — train a differentiable predictive control (DPC) policy against a frozen surrogate. Closed-loop rollouts, a declared objective over named columns (comfort bands, tracked schedules, energy, cost and peak-demand terms), reference signals read from their own files. Policy families: `mlp`, `linear` (a saturated affine feedback law). Optionally anchors chosen U columns to a rule, each inside its own box.
+- **Control** — train a differentiable predictive control (DPC) policy against a frozen surrogate. Closed-loop rollouts, a declared objective over named columns (bands an output must stay in, tracked schedules, energy, cost and peak-demand terms), reference signals read from their own files. Policy families: `mlp`, `linear` (a saturated affine feedback law). Optionally anchors chosen U columns to a rule, each inside its own box.
 
 Both sides share a thin `common/` layer (YAML/CLI loader, CSV + sliding-window data utilities, per-channel metrics).
 
 NeuroTemplate is meant to be installed as a dependency in an application repo. You bring the data and the two user-defined hook files; the library brings everything else. New framework features land here once, get tagged, and downstream apps pick them up via a version bump.
 
-Defects are tracked in [audit.md](audit.md), unfinished work in [issues.md](issues.md), and design direction in [generalization_report.md](generalization_report.md).
+To start an application, copy [template/](template/) and follow [template/README.md](template/README.md); it is written to be followed by a person or an agent. Defects are tracked in [audit.md](audit.md), unfinished work in [issues.md](issues.md), and design direction in [generalization_report.md](generalization_report.md).
 
 ## Installing as a dependency
 
@@ -120,7 +120,7 @@ The objective is not a hook: it is the `losses` table in `control.yaml`, below.
 
 `power_metric` returns whatever units the use case meters; the library never converts, so the reportcard labels energy as `power·h`. What the policy learns from is the signal's *gradient* — when a move costs something — so summing a metered channel the surrogate predicts well is one good answer, and a physics proxy is the other: one that does not decrease as the demand on the equipment grows and is zero whenever the equipment would not run. Staged or on/off equipment usually wants the proxy, because a predicted staged channel fits near its mean and hides *when* power is drawn. A proxy's units can be relative. Its *scale* is what has cost campaigns: a proxy carried over from another dataset came out at 1.7× the entire band objective while every pooled metric looked fine. The objective-balance report and the shape sweep both print before training so that magnitude is on screen from the start. The template's docstring has the details.
 
-`reference_control` is memoryless and works on the current step: `y_now` `[b, ny]` and `d_now` `[b, nd]` normalized, and `r_now`, each reference column the objective names by name, `[b]`, normalized — `norm_stats` carries an entry for each, so a rule denormalizes a band edge exactly as it does a zone temperature. It returns `{U column: [b]}`, normalized, for exactly the columns `residual_delta` names (anything else is refused, naming both sets). Each of those columns commands `reference_control(...)[column] + δ` with `δ` inside that column's box instead of a setpoint outright: the rule keeps comfort, δ answers whatever else is being optimised, and the box is a trust region on surrogate error rather than a claim about the network. The reportcard reports each box and the fraction of steps δ spent pinned at each edge — an edge that binds most of the time means either the rule is wrong for this plant or the optimizer is riding a surrogate artifact into the wall. Note a box bounds the *action*, not the outcome: the commanded setpoint stays within its box around the rule's, the zone temperature does not, because the plant is in between. The library does not score the rule against the learned policy; to score the rule itself, train with every box `[0, 0]`.
+`reference_control` is memoryless and works on the current step: `y_now` `[b, ny]` and `d_now` `[b, nd]` normalized, and `r_now`, each reference column the objective names by name, `[b]`, normalized — `norm_stats` carries an entry for each, so a rule denormalizes a band edge exactly as it does a zone temperature. It returns `{U column: [b]}`, normalized, for exactly the columns `residual_delta` names (anything else is refused, naming both sets). Each of those columns commands `reference_control(...)[column] + δ` with `δ` inside that column's box instead of a setpoint outright: the rule keeps the band, δ answers whatever else is being optimised, and the box is a trust region on surrogate error rather than a claim about the network. The reportcard reports each box and the fraction of steps δ spent pinned at each edge — an edge that binds most of the time means either the rule is wrong for this plant or the optimizer is riding a surrogate artifact into the wall. Note a box bounds the *action*, not the outcome: the command stays within its box around the rule's, the regulated output does not, because the plant is in between. The library does not score the rule against the learned policy; to score the rule itself, train with every box `[0, 0]`.
 
 ### The control objective: a declared table over named columns
 
@@ -145,7 +145,7 @@ Each entry is read in one order: the operand `column − target` (`target` optio
 
 Every reduction is horizon-free and homogeneous of degree 1, so a gain tuned at one `train_pred_steps` means the same at another, and switching a power metric from kW to W moves every power gain by the same factor. Gains are exchange rates between terms in different units and do not port between plants; [template/control_configs/control.yaml](template/control_configs/control.yaml) says how to size them. Give each actuator its own `first_difference` row: smoothing is the only thing that charges for a move, and an actuator that should mostly sit still wants a heavy one. The terms appear in MLflow and on the objective-balance report as `<name>_loss`.
 
-**The regulated set is derived**: the Y targets of the `relu`/`nrelu` rows, each with at most one lower and one upper bound — a band, a one-sided limit, or (the same column on both sides) a tracked setpoint schedule. The reportcard scores comfort and band-jump response against exactly those bands.
+**The regulated set is derived**: the Y targets of the `relu`/`nrelu` rows, each with at most one lower and one upper bound — a band, a one-sided limit, or (the same column on both sides) a tracked setpoint schedule. The reportcard scores band violation and band-jump response against exactly those bands.
 
 **Reference columns are data, in their own files.** A name that is not a surrogate column or `power` is a reference column, read from `train_reference_path` / `dev_reference_path` / `test_reference_path` — one list per split, parallel to its plant files, each file row-aligned with its plant file and carrying exactly its timestamps (a mismatch is refused, naming both ranges). They reach the policy and the loss as one `R` key and never the surrogate, whose Node reads only `yn`, `U` and `D`. Several draws are several files: list the plant file once per draw. [template/make_references.py](template/make_references.py) samples a band and slices a tariff into such a file; it is example code to edit, not library behaviour.
 
@@ -600,7 +600,7 @@ stopped that.
 
 ## Diagnostics that run whether you ask or not
 
-Fit metrics and pooled comfort rates cannot see the failures that cost the
+Fit metrics and pooled band-violation rates cannot see the failures that cost the
 most, because those failures are silent: nothing crashes and the headline
 number looks reasonable. Every run therefore also produces these, in the
 reportcard and in MLflow.
@@ -690,7 +690,7 @@ mass sits and flags a level under 5%.
   actuator clamp so it is the deviation actually deployed. A cap that binds
   most of the time means either the rule is wrong for this plant or the
   optimizer is riding a surrogate artifact into the wall. Read it before the
-  comfort number.
+  band number.
 
 ## Shipping a model: ONNX export
 
