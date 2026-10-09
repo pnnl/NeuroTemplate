@@ -56,8 +56,13 @@ constraint-dependencies = [
 ]
 
 [project.optional-dependencies]
+# neurotemplate.prep's smoother; training never imports it.
+prep = [
+    "statsmodels>=0.14",
+]
 dev = [
     "pytest>=8.0",
+    "neurotemplate[prep]",
 ]
 
 [tool.pytest.ini_options]

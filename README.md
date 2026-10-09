@@ -182,6 +182,26 @@ nt model optuna --config model_configs/modeling.yaml \
     --set n_trials=50 --set trial_epochs=30
 ```
 
+### Before training: preparing the record
+
+The loader refuses an unevenly spaced timestamp or a NaN; training never
+invents data. Cleaning a record is yours to do, and `neurotemplate.prep` has
+the small tools for it, as plain functions over a pandas Series or DataFrame
+with a DatetimeIndex, to run from a notebook or a script:
+
+```python
+from neurotemplate.prep import average, expand, fill_gaps, smooth
+
+df = average(raw, "5min")                     # onto an even grid; a missing slot is NaN
+df = fill_gaps(df, "15min")                   # interpolate NaN runs up to 15 minutes
+tariff = expand(hourly_tariff, "5min", "hold")          # a held quantity
+hourly_oat = hourly_oat.fillna(smooth(hourly_oat, period="1D"))  # patch longer gaps
+oat = expand(hourly_oat, "5min", "quadratic")           # a smooth physical one
+```
+
+`smooth` needs the `neurotemplate[prep]` extra (statsmodels). The library never
+calls any of these, and nothing reports how a record was prepared.
+
 One-off overrides without editing YAML:
 
 ```bash
@@ -719,6 +739,7 @@ The CLI wrappers ([modeling/cli/train.py](src/neurotemplate/modeling/cli/train.p
 ```
 src/neurotemplate/
 ├── hooks.py             # load_modeling_hooks(cfg), load_control_hooks(cfg)
+├── prep.py              # average / expand / fill_gaps / smooth — data prep, never called by training
 ├── common/
 │   ├── config.py        # YAML, --set, dict_to_dataclass, CLI parser
 │   ├── data_utils.py    # CSV load, sliding windows, norm/denorm

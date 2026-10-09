@@ -40,6 +40,7 @@ import numpy as np
 import pandas as pd
 
 from neurotemplate.common.data_utils import get_data
+from neurotemplate.prep import expand
 
 
 def sample_band(n_rows: int, lo: float, hi: float, width_min: float,
@@ -58,18 +59,13 @@ def sample_band(n_rows: int, lo: float, hi: float, width_min: float,
 
 
 def slice_price(plant: pd.DataFrame, plant_step: float, price: pd.Series,
-                price_step: float, align: str, rng: np.random.Generator
-                ) -> np.ndarray:
-    """`len(plant)` rows of `price`, resampled onto the plant's timestep.
+                align: str, rng: np.random.Generator) -> np.ndarray:
+    """`len(plant)` rows of `price`, held onto the plant's timestep.
 
     `random` starts at any offset; `day` starts where the price's time of day
     matches the plant file's first row, on a random day.
     """
-    repeat = price_step / plant_step
-    if repeat != int(repeat) or repeat < 1:
-        raise ValueError(f"The price timestep ({price_step} s) must be a whole "
-                         f"multiple of the plant's ({plant_step} s).")
-    series = np.repeat(price.to_numpy(), int(repeat))
+    series = expand(price, pd.Timedelta(seconds=plant_step), "hold").to_numpy()
     n = len(plant)
     if len(series) < n:
         raise ValueError(f"The price record covers {len(series)} plant steps; "
@@ -118,14 +114,14 @@ def main() -> None:
                              index=plant.index)
 
     if args.price:
-        prices, price_step = get_data(args.price)
+        prices, _ = get_data(args.price)
         columns = [c for c in prices.columns if c != "sec_elapsed"]
         column = args.price_column or (columns[0] if len(columns) == 1 else None)
         if column is None:
             raise ValueError(f"{args.price} has several columns {columns}; "
                              "pass --price-column.")
         reference[args.tariff_column] = slice_price(
-            plant, plant_step, prices[column], price_step, args.price_align, rng)
+            plant, plant_step, prices[column], args.price_align, rng)
 
     reference.rename_axis("timestamp").to_csv(args.out)
     print(f"wrote {args.out}: {len(reference)} rows, columns {list(reference.columns)}")
