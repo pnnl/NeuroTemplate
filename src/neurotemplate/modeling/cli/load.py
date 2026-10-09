@@ -6,7 +6,6 @@ points at, and optionally plot. Wrapper over pipeline.evaluate_and_plot.
 import argparse
 import json
 import sys
-import warnings
 from dataclasses import fields
 from datetime import datetime
 from pathlib import Path
@@ -18,7 +17,8 @@ import mlflow
 import torch
 
 from neurotemplate.modeling.config import ModelingConfig
-from neurotemplate.common.config import dict_to_dataclass, _parse_value
+from neurotemplate.common.config import ConfigError, dict_to_dataclass, _parse_value
+from neurotemplate.common.tracking import CHECKPOINT
 from neurotemplate.common.data_utils import get_grad_masks, load_split, normalize_df
 from neurotemplate.modeling.experiment import resolve_device, set_seeds
 from neurotemplate.modeling.gradient_sampling import SampledGradientPenalty
@@ -37,37 +37,21 @@ def _load_run_params(run_id: str) -> dict[str, object]:
 
 
 def config_from_run_params(run_id: str, cls: type = ModelingConfig):
-    """This run's params as a `cls` config, tolerating fields since removed.
+    """This run's params as a `cls` config.
 
     `cls` is ModelingConfig for a sys-id run and ControlConfig for a control
-    run; both are logged the same way, as the config's fields.
-
-    `dict_to_dataclass` is strict on purpose: an unknown key in a config a
-    human just wrote is a typo, and failing loudly is right. Replaying a
-    *finished* run is the opposite case. Its params were logged by whichever
-    library version trained it, so a field this version has dropped is a fact
-    about history, not a mistake anyone can still fix -- and rejecting it makes
-    every model trained before that removal permanently unloadable.
-
-    So unknown keys are dropped here and named in a warning. They are inert by
-    construction: a field this version no longer defines is one nothing in this
-    version reads, and the architecture is rebuilt from the fields that survive
-    plus the saved artifacts. What is lost is provenance, which is why the
-    warning lists them rather than passing over them silently.
+    run; both are logged the same way, as the config's fields. Strict: a run
+    trained by a version whose fields this one has dropped fails here, naming
+    them, rather than reloading without settings it was trained with.
     """
     params = _load_run_params(run_id)
-    known = {f.name for f in fields(cls)}
-    stale = sorted(set(params) - known)
+    stale = sorted(set(params) - {f.name for f in fields(cls)})
     if stale:
-        warnings.warn(
-            f"Run {run_id} logged {len(stale)} param(s) this version of "
-            f"neurotemplate no longer defines: {', '.join(stale)}. They were "
-            "ignored while rebuilding the config. The run was trained by an "
-            "older version, so its settings for those fields are not recorded "
-            "in the loaded config.",
-            stacklevel=2,
+        raise ConfigError(
+            f"Run {run_id} logged param(s) this version of neurotemplate no "
+            f"longer defines: {', '.join(stale)}. It was trained by an older "
+            "version; retrain it."
         )
-        params = {k: v for k, v in params.items() if k in known}
     return dict_to_dataclass(params, cls)
 
 
@@ -160,7 +144,7 @@ def load_trained_dynamics(
     nm_mapping = _load_json(artifacts_dir / "nm_mapping.json")
 
     weights_path = (Path(weights).expanduser() if weights is not None
-                    else artifacts_dir / "best_model_state_dict.pth")
+                    else artifacts_dir / CHECKPOINT)
     if not weights_path.exists():
         raise FileNotFoundError(f"Weights not found at {weights_path}")
 

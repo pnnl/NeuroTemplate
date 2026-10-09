@@ -101,7 +101,9 @@ test_data_path: data/test.csv
 run: ""
 # plots_dir: plots
 # plot: true
-# Which curriculum stage's weights to keep: last_step | all | None.
+# Which weights to keep: last_step (the run's final checkpoint), all (that,
+# plus each curriculum stage's in its child run) or None (none; the run
+# cannot be reloaded).
 # save_config: last_step
 
 # ── OPTUNA (nt model optuna) ─────────────────────────────────────

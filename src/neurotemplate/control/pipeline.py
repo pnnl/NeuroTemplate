@@ -25,6 +25,7 @@ from neurotemplate.common.metrics import (
     per_channel_metrics,
 )
 from neurotemplate.common.reportcard import write_reportcard as _write_reportcard
+from neurotemplate.common.tracking import save_checkpoint
 from neurotemplate.control.metrics import (
     ActuationMetrics,
     ComfortMetrics,
@@ -109,6 +110,8 @@ def train_policy(
     t0 = tic()
     trainer.train()  # leaves the best weights loaded
     train_time_s = tic() - t0
+    if logger is not None:
+        save_checkpoint(logger, trainer.best_model)
 
     cl_system = trainer.model.nodes[0]
     return cl_system, trainer.get_devloss(), train_time_s

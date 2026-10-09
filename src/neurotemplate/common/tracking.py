@@ -28,6 +28,11 @@ def tracked_run(
 
     `run_name` overrides `cfg.run` for this run's MLflow name only; `cfg`
     itself is not modified.
+
+    `save_weights=False` stops Neuromancer's Trainer from writing its own
+    checkpoints at the end of `train()` — among them a pickled `best_model.pth`
+    that nothing reads. Each pipeline writes `best_model_state_dict.pth`
+    itself (`save_checkpoint`).
     """
     args = cfg if run_name is None else replace(cfg, run=run_name)
     logger = MLFlowLogger(
@@ -37,6 +42,7 @@ def tracked_run(
         verbosity=cfg.epoch_verbose if cfg.verbose else 0,
         logout=logout,
         nested=False,
+        save_weights=False,
     )
     try:
         yield logger
@@ -45,3 +51,12 @@ def tracked_run(
         shutil.rmtree(logger.savedir, ignore_errors=True)
         raise
     logger.clean_up()
+
+
+#: The one checkpoint a run carries: the trained Problem's state_dict.
+CHECKPOINT = "best_model_state_dict.pth"
+
+
+def save_checkpoint(logger: MLFlowLogger, state_dict: dict) -> None:
+    """Log `state_dict` to the run as its checkpoint, `CHECKPOINT`."""
+    logger.log_artifacts({CHECKPOINT: state_dict})

@@ -6,7 +6,8 @@ readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
     "beartype>=0.22.3",
-    "jupyter>=1.1.1",
+    # neuromancer.callbacks imports IPython.display without declaring it.
+    "ipython",
     "matplotlib>=3.10.7",
     "mlflow>=3.9.0",
     # Pinned to the tip of develop on the official pnnl/neuromancer repo as of

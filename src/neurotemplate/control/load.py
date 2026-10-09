@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import torch
 
+from neurotemplate.common.tracking import CHECKPOINT
 from neurotemplate.control.closed_loop import (
     build_closed_loop, build_control_loss, build_problem,
 )
@@ -82,7 +83,7 @@ def load_trained_policy(run_id: str, run_dir=None):
     problem = build_problem(
         cl_system, build_control_loss(cfg, sysid_cfg, nm_mapping, norm_stats),
     ).to(cfg.device)
-    weights = _resolve_artifacts_dir(run_dir, run_id) / "best_model_state_dict.pth"
+    weights = _resolve_artifacts_dir(run_dir, run_id) / CHECKPOINT
     problem.load_state_dict(torch.load(weights, map_location=cfg.device))
     problem.eval()
     return policy_node, cl_system, cfg, sysid_cfg, nm_mapping, norm_stats

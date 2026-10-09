@@ -21,6 +21,7 @@ from pandas import DataFrame
 from neurotemplate._typing import beartype
 
 from neurotemplate.common.data_utils import NormStats, get_loader
+from neurotemplate.common.tracking import save_checkpoint
 from neurotemplate.modeling.heads import HeadStack
 from neurotemplate.modeling.dynamics import get_dynamics
 from neurotemplate.modeling.loss import build_loss
@@ -190,7 +191,6 @@ def create_child_logger(
     global_logger: MLFlowLogger,
     pred_steps: int,
     curriculum_step: int,
-    save_weights: bool = False,
 ) -> MLFlowLogger:
     """Create a nested MLflow child run for a curriculum stage.
 
@@ -213,7 +213,7 @@ def create_child_logger(
         verbosity=cfg.epoch_verbose if cfg.verbose else 0,
         logout=global_logger.logout,
         nested=True,
-        save_weights=save_weights,
+        save_weights=False,
     )
 
     child_logger._mlflow.log_param("curriculum_step", curriculum_step)
@@ -259,19 +259,19 @@ def train_with_curriculum(
 
         child_logger = None
         if (global_logger is not None) and (cfg.curriculum_steps > 0):
-            save_weights = cfg.save_config == "all"
             child_logger = create_child_logger(
                 cfg=cfg,
                 global_logger=global_logger,
                 pred_steps=pred_steps,
                 curriculum_step=i,
-                save_weights=save_weights,
             )
             trainer.logger = child_logger
 
         trainer.train()  # leaves the best weights loaded
 
         if child_logger is not None:
+            if cfg.save_config == "all":
+                save_checkpoint(child_logger, trainer.best_model)
             child_logger.clean_up()
             trainer.logger = None
 
@@ -288,10 +288,10 @@ def train_with_curriculum(
     # Extract the trained System (first node of the Problem)
     dyn_sys = trainer.model.nodes[0]
 
-    if (global_logger is not None) and (cfg.save_config == "last_step"):
-        global_logger.log_artifacts({
-            "best_model_state_dict.pth": trainer.best_model,
-        })
+    # The run's own checkpoint, which every reload reads; "all" has also
+    # written each curriculum stage's to that stage's child run above.
+    if (global_logger is not None) and (cfg.save_config in ("last_step", "all")):
+        save_checkpoint(global_logger, trainer.best_model)
 
     return dyn_sys, trainer.get_devloss()
 
