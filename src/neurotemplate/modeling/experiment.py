@@ -113,7 +113,7 @@ def build_trainer(
         print("Building loss (tracking + physics)...")
 
     # Single PenaltyLoss with all objectives:
-    #   - Tracking: ref_loss, vel_loss, sgn_loss (Variable expressions)
+    #   - Tracking: ref_loss
     #   - Physics:  grad_penalty (Loss object, train-only)
     loss = build_loss(
         cfg=cfg,

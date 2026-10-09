@@ -112,9 +112,6 @@ class ModelingConfig:
 
     # ---- LOSS ----------------------------------------------------------------
     ref_gain: float = 1.0
-    vel_gain: float = 0.0
-    sgn_gain: float = 0.0
-    sgn_steepness: float = 2.0
 
     # ---- STAGED CHANNELS -----------------------------------------------------
     # A binary / ordinal channel is usually a rare-event channel (a furnace
@@ -185,7 +182,7 @@ class ModelingConfig:
             # lr=0 is valid: it mints a checkpoint without any parameter updates.
             "lr",
             "warmup", "patience", "curriculum_steps",
-            "ref_gain", "vel_gain", "sgn_gain", "sgn_steepness",
+            "ref_gain",
             "n_trials", "grad_gain", "trial_epochs",
             "grad_n_samples", "synth_n_scenarios",
             "synth_hours", "synth_n_plot",

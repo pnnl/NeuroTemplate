@@ -25,8 +25,6 @@ def make_cfg(in_steps: int) -> Config:
     cfg.log2_hidden_size = 3
     cfg.num_layers = 1
     cfg.ref_gain = 1.0
-    cfg.vel_gain = 0.0
-    cfg.sgn_gain = 0.0
     cfg.grad_gain = 0.0
     cfg.device = torch.device("cpu")
     cfg.verbose = False

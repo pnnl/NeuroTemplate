@@ -28,8 +28,8 @@ from neurotemplate.modeling.pipeline import (
 #: Loss terms echoed to stdout each epoch, and the substrings of the metric
 #: keys logged to MLflow. Shared with `nt model optuna`'s final retrain.
 STDOUT_METRICS = ["train_loss", "train_ref_loss", "train_grad_penalty", "dev_loss"]
-LOGGED_METRICS = ["train_loss", "dev_loss", "ref_loss", "sgn_loss", "vel_loss",
-                  "grad_penalty", "time", "rmse"]
+LOGGED_METRICS = ["train_loss", "dev_loss", "ref_loss", "grad_penalty", "time",
+                  "rmse"]
 
 
 def print_finished(run_id: str, normalized_rmse: float) -> None:

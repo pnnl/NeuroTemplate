@@ -84,9 +84,6 @@ test_data_path: data/test.csv
 
 # ── LOSS ─────────────────────────────────────────────────────────
 # ref_gain: 1.0          # state-tracking error
-# vel_gain: 0.0          # error in each channel's first difference
-# sgn_gain: 0.0          # penalty on first-difference sign errors
-# sgn_steepness: 2.0
 
 # ── BINARY / ORDINAL HEADS ───────────────────────────────────────
 # Weight each levelled head's loss by inverse square-root level frequency.

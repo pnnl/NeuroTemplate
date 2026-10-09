@@ -2,7 +2,7 @@
 Loss construction for the physics-informed training pipeline.
 
 Builds a single Neuromancer PenaltyLoss containing:
-  1. Tracking objectives (ref, velocity, sign) — standard Variable expressions
+  1. The tracking objective (ref_loss) — MSE, or each head's own loss
   2. Sampled gradient sign penalty — Neuromancer Loss
 
 All loss terms are proper Neuromancer objectives so they flow through
@@ -16,7 +16,6 @@ import warnings
 from typing import Optional
 
 import torch
-from torch.nn.functional import softplus
 
 from neuromancer.constraint import variable, Loss
 from neuromancer.loss import PenaltyLoss
@@ -94,31 +93,6 @@ def build_loss(
         )
 
     objectives = [ref_loss]
-
-    # Finite differences over the prediction span only — y/yhat already have
-    # the seeded history sliced off. Symbolic Variable expressions, so this is
-    # cheap to build even when neither cfg.vel_gain nor cfg.sgn_gain is set;
-    # both the velocity and sign-agreement terms below read from it.
-    v = y[:, 1:, :] - y[:, :-1, :]
-    vhat = yhat[:, 1:, :] - yhat[:, :-1, :]
-
-    # Velocity tracking: R2 style on finite differences
-    if cfg.vel_gain > 0:
-        vel_sum_res = torch.mean((vhat - v) ** 2)
-        # vel_sum_tot = torch.sum((v - torch.mean(v)) ** 2)
-        vel_loss = cfg.vel_gain * vel_sum_res == 0
-        vel_loss.update_name("vel_loss")
-        objectives.append(vel_loss)
-
-    # Sign agreement: penalises predicted velocity with wrong sign
-    if cfg.sgn_gain > 0:
-        sgn_loss = (
-            cfg.sgn_gain * softplus(-v * vhat, beta=cfg.sgn_steepness) 
-            == 
-            torch.zeros_like(v)
-        )
-        sgn_loss.update_name("sgn_loss")
-        objectives.append(sgn_loss)
 
     # ── Sampled gradient sign penalty ───────────────────────────────
     #

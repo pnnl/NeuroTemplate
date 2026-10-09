@@ -677,10 +677,6 @@ def _hyperparameters_section(cfg: ModelingConfig) -> str:
     gains = []
     if cfg.ref_gain != 0:
         gains.append(f"ref={cfg.ref_gain}")
-    if cfg.vel_gain != 0:
-        gains.append(f"vel={cfg.vel_gain}")
-    if cfg.sgn_gain != 0:
-        gains.append(f"sgn={cfg.sgn_gain}")
     if cfg.grad_gain != 0:
         gains.append(f"grad={cfg.grad_gain}")
     rows.append(f"- **Loss gains:** {', '.join(gains) if gains else 'ref-only'}")
