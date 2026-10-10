@@ -16,6 +16,7 @@ import sys
 from neurotemplate._typing import beartype
 
 from neurotemplate.common.config import load_config_from_cli, MODEL_CONFIG_DIR
+from neurotemplate.common.metrics import ChannelMetrics
 from neurotemplate.common.run_summary import write_run_summary
 from neurotemplate.common.tracking import tracked_run
 from neurotemplate.hooks import MODELING_SNAPSHOT, load_modeling_hooks, snapshot_hooks
@@ -32,9 +33,17 @@ LOGGED_METRICS = ["train_loss", "dev_loss", "ref_loss", "grad_penalty", "time",
                   "rmse"]
 
 
-def print_finished(run_id: str, normalized_rmse: float) -> None:
-    """The closing lines of a training run: its id and how to look at it."""
-    print(f"Finished run: {run_id}, test_rmse: {normalized_rmse:.3f}")
+def print_finished(run_id: str, metrics: list[ChannelMetrics]) -> None:
+    """The closing lines of a training run: its id, each channel's test RMSE
+    and how to look at it.
+
+    Per channel and in physical units, because one pooled normalised number
+    rounds two different surrogates to the same three digits.
+    """
+    print(f"Finished run: {run_id}")
+    width = max(len(m.name) for m in metrics)
+    for m in metrics:
+        print(f"  test RMSE  {m.name:<{width}s}  {m.rmse:.4g}")
     print("MLflow UI:  uv run mlflow ui")
     print(f"Load model: uv run nt model load --run_id {run_id} --data <test csv>")
 
@@ -80,7 +89,7 @@ def main() -> None:
         )
         if cfg.verbose:
             print_finished(logger.run.info.run_id,
-                           result["test_results"].normalized_rmse)
+                           result["test_results"].metrics)
 
 
 if __name__ == "__main__":

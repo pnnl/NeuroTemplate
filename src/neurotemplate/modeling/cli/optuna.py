@@ -194,7 +194,7 @@ def main() -> None:
             mapping=data.nm_mapping,
         )
         print_finished(logger.run.info.run_id,
-                       result["test_results"].normalized_rmse)
+                       result["test_results"].metrics)
         print(f"Optuna dashboard: uv run optuna-dashboard sqlite:///{db_path}")
 
 

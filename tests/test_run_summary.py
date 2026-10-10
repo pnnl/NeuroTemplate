@@ -22,7 +22,7 @@ _NM = {"Y": ["zone [°C]"], "U": ["setpoint [°C]"], "D": ["outdoor [°C]"],
 
 
 def _mlflow_params(cfg) -> dict:
-    """What MLFlowLogger.log_parameters hands to mlflow.log_params."""
+    """What RunLogger.log_parameters hands to mlflow.log_params."""
     return {k: getattr(cfg, k) for k in vars(cfg)}
 
 

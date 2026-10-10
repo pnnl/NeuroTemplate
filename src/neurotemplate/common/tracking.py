@@ -48,6 +48,11 @@ class RunLogger(MLFlowLogger):
     def log_param(self, key: str, value) -> None:
         self._mlflow.log_param(key, value)
 
+    def log_parameters(self) -> None:
+        """Log every config field as a run param. Neuromancer's version also
+        prints each field's type to stdout, a leftover debug line."""
+        self._mlflow.log_params({k: getattr(self.args, k) for k in vars(self.args)})
+
     def fail(self) -> None:
         """Close the run as FAILED."""
         self._mlflow.end_run(status="FAILED")

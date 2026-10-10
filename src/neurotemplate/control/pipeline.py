@@ -62,7 +62,7 @@ class ControlResults:
     comfort_violation_rate: float      # pooled fraction of (channel, step) outside band
     comfort_mean_exceedance: float     # pooled mean excursion over ALL steps
     comfort: list[ComfortMetrics]      # per regulated channel
-    mean_abs_du: float                 # mean |Δsetpoint| (physical units)
+    mean_abs_du: float                 # mean |ΔU| over every U column (physical units)
     actuation: list[ActuationMetrics]  # per-control effort + saturation
     response: list[JumpResponse]       # reaction to band jumps
     tracking: list[ChannelMetrics]     # error vs band midpoint, two-sided bands

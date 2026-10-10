@@ -187,7 +187,7 @@ def main() -> None:
 
         print(f"Comfort violation rate: "
               f"{results.comfort_violation_rate * 100:.2f}%")
-        print(f"Mean |Δsetpoint|: {results.mean_abs_du:.4g}")
+        print(f"Mean |ΔU| (all U columns, physical units): {results.mean_abs_du:.4g}")
         rid = logger.run.info.run_id
         print(f"Finished DPC run: {rid}")
 

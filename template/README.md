@@ -134,8 +134,9 @@ Each is off until you ask for it — see
 
 - **Sys-id:** `reportcard.md` in the run's artifacts — the physics checks,
   rollout stability, and (under `2r2c`) the time constants and declared
-  branches in physical units. `test_metrics.json` has per-channel errors in
-  physical units; the headline `test_rmse` is one number in normalized
+  branches in physical units. The `Finished run:` lines and
+  `test_metrics.json` give per-channel test errors in physical units;
+  `test_rmse` in `run_summary.json` is one number pooled in normalized
   space. Test error is measured on your data's excitation, not where a
   controller will drive the plant; the stability and physics sections are
   the better guide to a surrogate for control.

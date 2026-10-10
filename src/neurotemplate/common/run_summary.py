@@ -6,7 +6,7 @@ on stdout, through a reader, into a hand-typed deliverable — and every hop
 is lossy. `run_summary.json` lets a downstream reader copy a block instead
 of retyping one, so an audit compares a value to itself.
 
-`params` are read off the same config object that `MLFlowLogger` hands to
+`params` are read off the same config object that `RunLogger` hands to
 `mlflow.log_params`, so the file and the run's params cannot drift. A field
 that stops existing on the config raises `AttributeError` here rather than
 quietly dropping out of the summary.

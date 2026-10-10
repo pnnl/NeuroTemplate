@@ -289,7 +289,7 @@ def _performance_section(results) -> str:
         f"- **Pooled violation rate:** "
         f"{results.comfort_violation_rate * 100:.2f}% "
         "*(acceptance criterion — report it, don't tune on it)*",
-        f"- **Mean |Δsetpoint|:** {results.mean_abs_du:.4g}",
+        f"- **Mean |ΔU|** (all U columns, physical units): {results.mean_abs_du:.4g}",
     ]
     body += _energy_lines(results.energy)
     return _section("Closed-loop performance", "\n".join(body))

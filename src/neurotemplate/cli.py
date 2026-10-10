@@ -51,7 +51,9 @@ def main(argv: Optional[list[str]] = None) -> None:
 
     # Reports print symbols (Δ, ⚠, −) that Windows' default cp1252 cannot
     # encode when stdout is a pipe or a log file; a console already takes UTF-8.
-    sys.stdout.reconfigure(encoding="utf-8")
+    # Line buffering keeps a redirected log (`nt ... > run.log`) current
+    # instead of dumping training progress in blocks minutes apart.
+    sys.stdout.reconfigure(encoding="utf-8", line_buffering=True)
     sys.stderr.reconfigure(encoding="utf-8")
 
     if not argv or argv[0] in ("-h", "--help"):
