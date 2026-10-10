@@ -150,10 +150,19 @@ def power_metric(
     (`nt data heads`, and a scatter of power against what calls it). A
     proxy's units can be relative: absolute energy is the meter's job.
 
+    A `relu` makes that zero and also stops all gradient there, so the
+    policy never learns what leaving the coast would cost. `soft_clamp_min`
+    (`from neurotemplate.modeling.prestack import soft_clamp_min`) gives the
+    same zero forward and a gradient back toward the active side. Its
+    backward is softplus's, so apply it to an O(1) quantity — a temperature
+    difference, not Watts.
+
     Before training, the run prints this signal swept across the actuation
-    box and the share of steps where it sits at exactly zero. A large zero
-    share on a cost term means no gradient in the cheap hours, which is
-    where load should move to: a surrogate problem, not a weight.
+    box, the share of steps where it sits at exactly zero, and how many of
+    those pass no gradient back. A large dead share on a cost term means no
+    gradient in the cheap hours, which is where load should move to. It is
+    a clamp on the signal's path — a power head predicting negative values,
+    or a hard clamp in this function — and a weight cannot fix it.
     """
     raise NotImplementedError(
         "power_metric is not implemented. Name no `power` in the control "

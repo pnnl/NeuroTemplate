@@ -206,12 +206,13 @@ def power_diagnostics(term_fn, out: dict, hmax: int) -> PowerDiagnostics:
     """How often the power signal reads zero, how often that costs a gradient,
     and whether the term reads the surrogate's outputs at all.
 
-    The recommended `power_metric` shape ends in `.clamp_min(0.0)`, and
-    wherever the surrogate predicts negative power that clamp zeroes the
-    gradient. For a mean energy term that is a rounding detail. For a cost term
-    it is not: the near-zero-power steps are disproportionately the cheap hours
-    the controller is supposed to be moving load *into*, so a large dead
-    fraction means the cost gradient is missing exactly where it was needed.
+    A metered `power_metric` ends in `.clamp_min(0.0)`, and wherever the
+    surrogate predicts negative power that clamp zeroes the gradient; a
+    proxy written with a `relu` zeroes it wherever the equipment coasts. For
+    a mean energy term that is a rounding detail. For a cost term it is not:
+    the near-zero-power steps are disproportionately the cheap hours the
+    controller is supposed to be moving load *into*, so a large dead fraction
+    means the cost gradient is missing exactly where it was needed.
 
     The two numbers are separate because a zero power reading is not by itself
     a defect, and reporting only the forward value gets one whole class of head
@@ -223,8 +224,9 @@ def power_diagnostics(term_fn, out: dict, hmax: int) -> PowerDiagnostics:
     the model being right. Measuring the gradient tells them apart without the
     diagnostic needing to know what heads exist.
 
-    Reported, not judged — and a large `frac_dead` is a surrogate problem (a
-    power head that goes negative), not a weighting problem.
+    Reported, not judged — and a large `frac_dead` is a clamp problem (a power
+    head that goes negative, or a hard clamp in a proxy), not a weighting
+    problem.
     """
     power, grad = power_gradient(term_fn, out, hmax)
     is_zero = power == 0
@@ -457,7 +459,8 @@ def format_objective_report(balance: ObjectiveBalance,
         lines.append(f"  power exactly zero on {power.frac_zero * 100:.1f}% of "
                      "scored steps")
         lines.append(f"  ...of which {power.frac_dead * 100:.1f}% of all steps "
-                     "also pass no gradient back (clamped => dead there)")
+                     "also pass no gradient back (a clamp on the power path: "
+                     "a negative power head, or relu/clamp_min in power_metric)")
     for note in notes or []:
         lines.append(f"  NOTE: {note}")
     return "\n".join(lines)

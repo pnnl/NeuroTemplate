@@ -248,11 +248,14 @@ def _objective_section(balance: ObjectiveBalance,
             "itself a defect — an ordinal or staged head predicting "
             "\"compressor off\" is being right, and a straight-through "
             "estimator still passes gradient there. A *dead* step is a "
-            "surrogate predicting negative power and getting clamped, which "
-            "is harmless for a mean energy term and not harmless for a cost "
-            "term, because those steps are disproportionately the cheap hours "
-            "load is supposed to move *into*. A large dead fraction is a "
-            "surrogate problem, not a weight.",
+            "clamp on the power signal's path passing no gradient: a power "
+            "head predicting negative power, or a `relu`/`clamp_min` in "
+            "`power_metric` itself. That is harmless for a mean energy term "
+            "and not harmless for a cost term, because those steps are "
+            "disproportionately the cheap hours load is supposed to move "
+            "*into*. A large dead fraction is fixed where the clamp is, not "
+            "with a weight; a proxy's clamp keeps its zero and passes "
+            "gradient with `soft_clamp_min` (`neurotemplate.modeling.prestack`).",
         ]
     if notes:
         body += [""] + [f"- {n}" for n in notes]
