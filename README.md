@@ -615,8 +615,8 @@ reportcard and in MLflow.
   emitting a ramp. RMSE on a short window will not.
 - **Physics checks** — four assertions per state channel, on synthetic states
   the recorded data never contains, each answered in physical units. The states
-  must hold at **equilibrium**, move the declared way under a **step response**,
-  be drivable across a usable span (**reachability**), and relax toward ambient
+  must hold at **equilibrium**, move the declared way under a **step response**
+  (measured against the same seeds left at rest, so drift cancels), be drivable across a usable span (**reachability**), and relax toward ambient
   in **free decay**. *"`Zone Air Temperature` closed 0.4% of an 8.3 °C gap to
   ambient in 24 steps"* is a reason to reject a surrogate; a test-split RMSE
   cannot produce one. Reachability also answers "can any policy hold the band I

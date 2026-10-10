@@ -15,10 +15,12 @@ Four scenarios, each an assertion rather than a score:
                  something it should not.
   Step response — from equilibrium, drive one actuator off its rest value, to
                  each end of its range in turn. Every state with a declared
-                 sign must move the declared way. Zero response means the policy
-                 will have no lever; a wrong-signed response means it will pull
-                 it backwards. Coverage is generated from `SynthSpec.responds`,
-                 so no actuator goes untested by omission.
+                 sign must move the declared way, measured against the same
+                 seeds left at rest so the model's own drift cancels. Zero
+                 response means the policy will have no lever; a wrong-signed
+                 response means it will pull it backwards. Coverage is
+                 generated from `SynthSpec.responds`, so no actuator goes
+                 untested by omission.
   Reachability — from equilibrium, push every actuator that moves a state, and
                  every disturbance with a declared sign, the same way. The span
                  between the two directions is what a comfort band has to fit
@@ -94,6 +96,9 @@ class SynthSpec:
                   wider span — supply air against a zone, say — narrows nothing
                   but does subject that channel to the assertions. Leave it out
                   to have it seeded at rest and reported without a verdict.
+                  Zones held at different temperatures may share no recorded
+                  temperature at all; they are then seeded in the gap between
+                  their ranges (see `_state_range`).
       ambient     the D column the states relax toward.
       off         physical value of each column when nothing is running.
                   **Required for every control column** and only for those:
@@ -292,36 +297,29 @@ def _resting_value(col: str, spec: SynthSpec, norm_stats: dict) -> float:
 
 
 def _state_range(spec: SynthSpec, norm_stats: dict) -> tuple[float, float]:
-    """Temperatures every state channel has been observed at — never all of Y.
+    """Temperatures to seed equilibria at: the ones nearest every state's data.
 
-    The *intersection* of the state channels' recorded ranges, not their union.
+    `highest min .. lowest max`, never all of Y. When the state channels'
+    recorded ranges overlap, that is their *intersection*, not their union.
     At equilibrium every state holds the same temperature and ambient holds it
-    too, so the only place to sample one honestly is where all of them have
-    data. The union is actively wrong once a second state is named: on a real
-    RTU whose zone spans 18.9-27.3 °C and whose supply air spans 8.6-54.5 °C,
-    it would assert the building holds steady at 51 °C indoors *and* out — 28 °C
-    past anything the ambient channel ever recorded.
+    too, so the honest place to sample one is where all of them have data. The
+    union is actively wrong once a second state is named: on a real RTU whose
+    zone spans 18.9-27.3 °C and whose supply air spans 8.6-54.5 °C, it would
+    assert the building holds steady at 51 °C indoors *and* out — 28 °C past
+    anything the ambient channel ever recorded.
 
-    With a single state channel the two rules agree, so this is a no-op for the
-    common case.
+    When the ranges do not overlap — conditioned zones held at different
+    temperatures (20.4-21.4 °C beside 21.8-23.6 °C) never share one — the
+    same two numbers bound the gap between them, the temperatures closest to
+    every state's data. A building at rest does reach a common temperature;
+    the data just never shows it, so each state seeded outside its own range
+    says by how much in its Equilibrium headline (`_outside_range`).
+
+    With a single state channel this is its own range.
     """
-    lo = max(norm_stats[c]["min"] for c in spec.states)
-    hi = min(norm_stats[c]["max"] for c in spec.states)
-    if lo > hi:
-        spans = ", ".join(
-            f"{c} {norm_stats[c]['min']:.4g}..{norm_stats[c]['max']:.4g}"
-            for c in spec.states
-        )
-        raise ValueError(
-            "No temperature is shared by every channel named in `states`, so "
-            "there is no equilibrium the data supports seeding. Recorded "
-            f"ranges: {spans}. This says the data never shows these channels "
-            "at a common temperature — not that they physically cannot reach "
-            "one. Either drop the outlying channel from `states` (a readout "
-            "seeded at its `off` value is not asserted on), or run the checks "
-            "on data that covers a period when the plant was closer to rest."
-        )
-    return lo, hi
+    highest_min = max(norm_stats[c]["min"] for c in spec.states)
+    lowest_max = min(norm_stats[c]["max"] for c in spec.states)
+    return min(highest_min, lowest_max), max(highest_min, lowest_max)
 
 
 def _equilibrium_inputs(t_phys, nm_mapping, norm_stats, spec, device):
@@ -381,6 +379,20 @@ def _rollout_data(yn_row, u_rows, d_rows, in_steps, n_steps, ny, device):
     }
 
 
+def _declared_demands(system) -> dict[str, dict]:
+    """`{U column: {"kind", "state", "sign", ...}}` for every `demand` the
+    surrogate declares, or {}.
+
+    Read off the model's own `PreStack` rather than the block spec, so the
+    checks and the trained run cannot disagree about what is a thermostat.
+    """
+    pre_stack = getattr(system.nodes[0].callable, "pre_stack", None)
+    if pre_stack is None:
+        return {}
+    return {col: entry for col, entry in pre_stack.to_config().items()
+            if entry["kind"] == "demand"}
+
+
 # ── Scenarios ────────────────────────────────────────────────────
 
 
@@ -419,6 +431,13 @@ class _Scenario:
         self.ny = len(nm_mapping["Y"])
         self.state_idx = [nm_mapping["Y"].index(c) for c in spec.states]
         self.t_min, self.t_max = _state_range(spec, norm_stats)
+        self.demands = _declared_demands(system)
+
+    def _outside_range(self, col: str) -> float:
+        """How far the seed range reaches past `col`'s recorded range; 0 when
+        the states overlap."""
+        stats = self.norm_stats[col]
+        return max(0.0, self.t_max - stats["max"], stats["min"] - self.t_min)
 
     def _sample_equilibrium(self, n, lo=None, hi=None):
         lo = self.t_min if lo is None else lo
@@ -534,9 +553,15 @@ class EquilibriumScenario(_Scenario):
                 "should not, or a control's `off` value is not off across the "
                 "whole range equilibria are sampled from"
             )
+            outside = self._outside_range(channel)
+            seeded = (
+                f" Seeded up to {outside:.3g} outside this channel's recorded "
+                "range: the states share no recorded temperature."
+                if outside > 0 else ""
+            )
             results.append(ScenarioResult(
                 name=self.label, passed=passed,
-                headline=f"{verdict} (limit {limit:.3g}).",
+                headline=f"{verdict} (limit {limit:.3g}).{seeded}",
                 channel=channel, value=value, tolerance=limit,
             ))
         return ScenarioOutcome(results, readouts)
@@ -558,20 +583,47 @@ class StepResponseScenario(_Scenario):
     exercised. Each state with a declared sign in `responds` gets its own
     verdict, so an actuator that warms one zone while cooling another is
     expressible — a single per-actuation direction could not say that.
+
+    The response is the step's *effect*: the move with the step minus the move
+    of the same seeds left at rest. Measured from rest alone, a model's own
+    drift decides the verdict — the same −0.23 °C drift once failed a heating
+    sweep as "the wrong way" and passed a cooling sweep beside it.
+
+    A control declared `demand` is a thermostat: the clamp makes it command
+    nothing while the zone is on the inactive side of the target. Its sweep
+    is seeded only where the target is active (a cooling target below the
+    zone, a heating target above it), and a target inactive across the whole
+    seed range asserts nothing and is skipped — its answer is zero by
+    construction. The pairing is read off the model, so a `demand` whose
+    zone is not one of `states` is swept unrestricted.
     """
 
     label = "Step response"
 
-    def _data(self, col: str, target: float, n):
-        t = self._sample_equilibrium(n)
+    def _seed_range(self, col: str, target: float) -> Optional[tuple[float, float]]:
+        """Where to seed `col`'s sweep to `target`, or None to skip it."""
+        demand = self.demands.get(col)
+        if demand is None or demand["state"] not in self.spec.states:
+            return self.t_min, self.t_max
+        if demand["sign"] < 0:      # cooling: active with the zone above
+            lo, hi = max(self.t_min, target), self.t_max
+        else:                       # heating: active with the zone below
+            lo, hi = self.t_min, min(self.t_max, target)
+        return (lo, hi) if lo < hi else None
+
+    def _data(self, t, col: str, target: Optional[float]):
+        """Seeds `t`; `col` stepped to `target` after the history, or held at
+        rest throughout when `target` is None."""
+        n = t.shape[0]
         y, u_off, d = _equilibrium_inputs(
             t, self.nm_mapping, self.norm_stats, self.spec, self.device,
         )
         u_on = u_off.clone()
-        j = self.nm_mapping["U"].index(col)
-        u_on[:, j] = _normalize(
-            torch.full((n,), target, device=self.device), col, self.norm_stats,
-        )
+        if target is not None:
+            j = self.nm_mapping["U"].index(col)
+            u_on[:, j] = _normalize(
+                torch.full((n,), target, device=self.device), col, self.norm_stats,
+            )
         return _rollout_data(y, (u_off, u_on), (d, d), self.in_steps,
                              self.n_steps, self.ny, self.device)
 
@@ -584,10 +636,15 @@ class StepResponseScenario(_Scenario):
         n = n or self.n_scenarios
         results, readouts = [], []
         for col, target, moved in self._sweeps():
+            seeds = self._seed_range(col, target)
+            if seeds is None:
+                continue
             label = f"{self.label}: {col} to {target:.4g}"
             with torch.no_grad():
-                y_pred = self.system(self._data(col, target, n))["yn"]
-                move = self._move(y_pred).mean(dim=0)     # [n_states]
+                t = self._sample_equilibrium(n, *seeds)
+                y_pred = self.system(self._data(t, col, target))["yn"]
+                y_rest = self.system(self._data(t, col, None))["yn"]
+                move = (self._move(y_pred) - self._move(y_rest)).mean(dim=0)
                 readouts += self._readouts(y_pred, label)
 
             tol = self._tolerance(RESPONSE_MOVE_FRAC)
@@ -601,17 +658,20 @@ class StepResponseScenario(_Scenario):
                 value, limit = float(move[i]), tol[i]
                 if want * value >= limit:
                     passed, verdict = True, (
-                        f"Moved {value:+.3g} over {self.n_steps} steps"
+                        f"Moved {value:+.3g} over {self.n_steps} steps, net of "
+                        "the drift at rest"
                     )
                 elif abs(value) < limit:
                     passed, verdict = False, (
                         f"Did not respond ({value:+.3g} over {self.n_steps} "
-                        "steps) — the policy will have no lever here"
+                        "steps, net of the drift at rest) — the policy will "
+                        "have no lever here"
                     )
                 else:
                     passed, verdict = False, (
-                        f"Moved {value:+.3g}, the wrong way — the policy will "
-                        "pull this actuator backwards"
+                        f"Moved {value:+.3g} net of the drift at rest, the "
+                        "wrong way — the policy will pull this actuator "
+                        "backwards"
                     )
                 results.append(ScenarioResult(
                     name=label, passed=passed,
@@ -623,16 +683,17 @@ class StepResponseScenario(_Scenario):
         return ScenarioOutcome(results, readouts)
 
     def trace(self, n: int) -> dict:
-        sweeps = self._sweeps()
-        if not sweeps:
-            return {}
-        col, target, _ = sweeps[0]
-        with torch.no_grad():
-            data = self._data(col, target, n)
-            y_pred = self.system(data)["yn"]
-        return _trace(f"{self.label}: {col} to {target:.4g}", data, y_pred,
-                      self.nm_mapping, self.norm_stats, self.spec,
-                      self.in_steps)
+        for col, target, _ in self._sweeps():
+            seeds = self._seed_range(col, target)
+            if seeds is None:
+                continue
+            with torch.no_grad():
+                data = self._data(self._sample_equilibrium(n, *seeds), col, target)
+                y_pred = self.system(data)["yn"]
+            return _trace(f"{self.label}: {col} to {target:.4g}", data, y_pred,
+                          self.nm_mapping, self.norm_stats, self.spec,
+                          self.in_steps)
+        return {}
 
 
 class ReachabilityScenario(_Scenario):

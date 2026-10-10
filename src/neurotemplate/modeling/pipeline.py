@@ -187,6 +187,11 @@ def prepare_data(cfg: ModelingConfig, hooks) -> PreparedData:
         column_overrides=hooks.column_norm_config(nm_mapping),
     )
     warn_degenerate_columns(norm_stats, nm_mapping)
+    synth_cfg = hooks.synth_cfg(nm_mapping, norm_stats)
+    if synth_cfg is not None:
+        # Before the first epoch, not after the last: the checks run once
+        # training is over, and `build_scenarios` re-validates on reload.
+        synth_cfg.validate(nm_mapping)
     train_dfs = [normalize_df(r, norm_stats) for r in train_raws]
     return PreparedData(
         train_dfs=train_dfs,
@@ -197,7 +202,7 @@ def prepare_data(cfg: ModelingConfig, hooks) -> PreparedData:
         block_spec=block_spec,
         norm_stats=norm_stats,
         grad_masks=get_grad_masks(grad_path=cfg.grad_path, nm_mapping=nm_mapping),
-        synth_cfg=hooks.synth_cfg(nm_mapping, norm_stats),
+        synth_cfg=synth_cfg,
         head_stack=build_head_stack(hooks, cfg, nm_mapping, norm_stats, train_dfs),
     )
 

@@ -283,7 +283,7 @@ def synth_cfg(
     """
     Physics checks, run after training: equilibrium (states hold when nothing
     drives them), step response (each actuator moves each state the declared
-    way), reachability, and free decay (states relax toward ambient with the
+    way, net of the model's drift at rest), reachability, and free decay (states relax toward ambient with the
     actuators off). They put the surrogate in states the recorded data never
     visits — which is where a controller will take it — and they are the
     readout most likely to tell you a surrogate is wrong for control when
@@ -304,7 +304,10 @@ def synth_cfg(
                as that control INCREASES, from a state where the control is
                live. Required for every U. A `demand` declaration in
                `block_mapping` does not change these signs — they describe
-               the column, not the feature built from it.
+               the column, not the feature built from it. It does change
+               where a sweep starts: a demand's step is measured only from
+               zone temperatures where the target calls for something, and
+               an end of its range that never does is skipped.
 
         cool_sp = "Zone Cooling Setpoint [degC]"
         zone = "Zone Air Temperature [degC]"

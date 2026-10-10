@@ -14,6 +14,7 @@ from torch import nn
 
 from neuromancer.system import Node, SystemPreview
 
+from neurotemplate.modeling.prestack import PreStack
 from neurotemplate.modeling.scenarios import (
     ScenarioResult,
     SynthSpec,
@@ -170,6 +171,54 @@ def test_a_backwards_response_is_distinguished_from_no_response():
     assert not r.passed
     assert r.value > 0                      # moved, but upward
     assert "the wrong way" in r.headline
+
+
+def test_the_step_is_measured_net_of_the_drift_at_rest():
+    """A model that drifts at rest must not have its drift read as a response
+    (field report: one −0.23 °C drift failed one sweep and passed another)."""
+    def drifting(y, u, d):
+        return _perfect(y, u, d) + torch.tensor([0.3, 0.0])
+
+    (r,) = _scenarios(drifting)[1].check()
+    (clean,) = _scenarios(_perfect)[1].check()
+    assert r.value == pytest.approx(clean.value, abs=1e-4)
+
+
+HEAT = "heating setpoint [°C]"
+
+
+def test_a_demand_target_inactive_everywhere_is_skipped_not_failed():
+    """A heating setpoint swept to its recorded minimum (16 °C) calls for no
+    heat in an 18-30 °C zone: a declared `demand` makes that zero by
+    construction, so the sweep asserts nothing. Its other end still does."""
+    nm = {"Y": [ZONE, POWER], "U": [HEAT], "D": [AMBIENT], "t": ["sec_elapsed"]}
+    stats = dict(NORM_STATS, **{HEAT: {"shift": 0.0, "stretch": 1.0,
+                                       "min": 16.0, "max": 24.0}})
+    spec = SynthSpec(states=[ZONE], ambient=AMBIENT, off={HEAT: 10.0},
+                     responds={ZONE: {HEAT: +1}})
+
+    def thermostat(y, u, d):
+        zone = y[:, 0]
+        heat = (u[:, 0] > zone).float()
+        return torch.stack([zone + 0.25 * (d[:, 0] - zone) + heat,
+                            torch.zeros_like(zone)], dim=1)
+
+    def step_results(declared: bool):
+        system = _system(thermostat)
+        if declared:
+            system.nodes[0].callable.pre_stack = PreStack.from_config(
+                {HEAT: {"kind": "demand", "state": ZONE, "sign": +1}},
+                nm["Y"], nm["U"], stats, IN_STEPS)
+        return build_scenarios(
+            system=system, nm_mapping=nm, norm_stats=stats, synth_cfg=spec,
+            in_steps=IN_STEPS, n_scenarios=16, n_steps=N_STEPS, device="cpu",
+        )[1].check()
+
+    undeclared = {r.name: r for r in step_results(declared=False)}
+    assert not undeclared[f"Step response: {HEAT} to 16"].passed
+    (declared,) = step_results(declared=True)
+    assert declared.name == f"Step response: {HEAT} to 24"
+    assert declared.passed
 
 
 def test_a_state_with_no_declared_sign_is_not_asserted_on():
@@ -374,18 +423,18 @@ def test_equilibrium_is_seeded_from_the_intersection_not_the_union():
     assert float(sampled.max()) <= 27.3
 
 
-def test_states_with_no_shared_temperature_fail_loudly():
-    """A chiller loop and a zone never overlap in the data — say why."""
+def test_states_with_no_shared_temperature_are_seeded_in_the_gap():
+    """Zones held at different temperatures never overlap in the data (field
+    report: 20.4-21.4 beside 21.8-23.6 °C). Seed between them, and say how far
+    outside its own range each state was seeded."""
     stats = _two_state_stats(supply_lo=2.0, supply_hi=12.0)
+    scenario = _two_state_scenarios(stats)[0]
 
-    with pytest.raises(ValueError) as exc:
-        _two_state_scenarios(stats)
-
-    message = str(exc.value)
-    assert "No temperature is shared by every channel named in `states`" in message
-    assert "18.9..27.3" in message and "2..12" in message
-    # The data is what is missing, not the physics.
-    assert "not that they physically cannot reach one" in message
+    assert (scenario.t_min, scenario.t_max) == pytest.approx((12.0, 18.9))
+    # The zone is seeded down to 12 (6.9 below its 18.9), the supply up to
+    # 18.9 (6.9 above its 12).
+    for r in scenario.check():
+        assert "Seeded up to 6.9 outside this channel's recorded range" in r.headline
 
 
 def test_the_free_decay_gap_scales_with_the_intersection():
