@@ -15,7 +15,7 @@ from neurotemplate.common.config import load_config_from_cli
 from neurotemplate.control.config import ControlConfig
 from neurotemplate.control.losses import resolve_objective
 from control_fixtures import (
-    BAND_GAINS, BAND_LOSSES, HIGH, LOW, SETPT, TARIFF, ZONE, DIST,
+    BAND_GAINS, BAND_LOSSES, HIGH, LOW, SETPT, SUPPLY_T, TARIFF, ZONE, DIST,
     make_control_cfg, make_nm_mapping,
 )
 
@@ -127,6 +127,12 @@ def test_validate_stays_quiet_on_a_legal_config(fields):
 # ── The names, against the surrogate (resolve_objective) ─────────
 
 _COST = {"column": "power", "norm": 1, "weight": TARIFF}
+#: The same comfort band over a second Y channel.
+_SUPPLY_BAND = {
+    "supply_lower": {"column": LOW, "target": SUPPLY_T, "map": "relu", "norm": 2},
+    "supply_upper": {"column": HIGH, "target": SUPPLY_T, "map": "nrelu", "norm": 2},
+}
+_SUPPLY_GAINS = {**BAND_GAINS, "supply_lower": 1.0, "supply_upper": 1.0}
 
 
 @pytest.mark.parametrize("fields,message", [
@@ -149,11 +155,26 @@ _COST = {"column": "power", "norm": 1, "weight": TARIFF}
     ({"train_reference_path": None, "dev_reference_path": None,
       "test_reference_path": None}, "no reference files are set"),
     ({"reference_preview": {DIST[0]: 2}}, "not reference columns"),
+    # A shared band takes one target's stats; a normalised compare against
+    # the other target would be on the wrong scale.
+    ({"losses": {**BAND_LOSSES, **_SUPPLY_BAND,
+                 "supply_lower": {**_SUPPLY_BAND["supply_lower"], "units": "normalized"}},
+      "gains": _SUPPLY_GAINS}, "wrong scale"),
 ])
 def test_resolve_names_the_problem(fields, message):
     cfg = make_control_cfg(**fields)
     with pytest.raises(ValueError, match=message):
         resolve_objective(cfg, make_nm_mapping())
+
+
+def test_one_band_column_may_bound_several_outputs():
+    """One comfort band over every zone, not 2N copies of it (field report:
+    5 and 17 zones). It takes the first target's stats, in Y order."""
+    cfg = make_control_cfg(losses={**BAND_LOSSES, **_SUPPLY_BAND}, gains=_SUPPLY_GAINS)
+    objective = resolve_objective(cfg, make_nm_mapping())
+    assert objective.regulated == [ZONE, SUPPLY_T]
+    assert objective.r_columns == [HIGH, LOW]
+    assert objective.bound_to == {LOW: ZONE, HIGH: ZONE}
 
 
 def test_the_regulated_set_and_reference_order_are_derived():

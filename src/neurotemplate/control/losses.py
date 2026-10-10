@@ -34,9 +34,13 @@ surrogate.
 
 How an `R` column is normalised is declared rather than inferred. A column
 bound to a Y target (the `column` of an entry whose `target` is in Y) uses that
-target's shift and stretch, so the policy compares like with like. Every other
-`R` column — a tariff, a cap on `power` — is divided by its entry in
-`reference_scale`, with no shift, so a zero stays a zero.
+target's shift and stretch, so the policy compares like with like. One band
+column may bound several targets — one comfort band over every zone — and
+then takes the stats of the first of them in Y order: a `units: physical`
+term denormalises column and target separately, so the loss is the same
+whichever it takes, and only the policy's input scale depends on the choice.
+Every other `R` column — a tariff, a cap on `power` — is divided by its entry
+in `reference_scale`, with no shift, so a zero stays a zero.
 
 The regulated set is derived: the Y targets of the `relu`/`nrelu` entries.
 """
@@ -226,7 +230,7 @@ def resolve_objective(cfg, nm_mapping: dict[str, list[str]]) -> Objective:
              "Reference files are set but no loss term names one of their "
              "columns, so they would be read and ignored.")
 
-    bound_to: dict[str, str] = {}
+    targets_of: dict[str, list[str]] = {}
     for term in terms:
         where = f"losses[{term.name!r}]"
         if term.target is not None:
@@ -246,11 +250,24 @@ def resolve_objective(cfg, nm_mapping: dict[str, list[str]]) -> Objective:
                      "Use `units: physical`.")
         if roles[term.column] == "R" and term.target is not None \
                 and roles[term.target] == "Y":
-            earlier = bound_to.setdefault(term.column, term.target)
-            _require(earlier == term.target,
-                     f"Reference column {term.column!r} bounds both {earlier!r} "
-                     f"and {term.target!r}, but it can be normalised with only "
-                     "one target's stats. Give each target its own column.")
+            targets = targets_of.setdefault(term.column, [])
+            if term.target not in targets:
+                targets.append(term.target)
+
+    # A column shared by several targets takes the first one's stats; a
+    # normalised compare against any other would be on the wrong scale.
+    bound_to: dict[str, str] = {}
+    for column, targets in targets_of.items():
+        first = min(targets, key=nm_mapping["Y"].index)
+        bound_to[column] = first
+        normalized = [t.name for t in terms
+                      if t.column == column and t.units == "normalized"]
+        _require(len(targets) == 1 or not normalized,
+                 f"Reference column {column!r} bounds {targets} and is "
+                 f"normalised with {first!r}'s stats, so `units: normalized` "
+                 f"in {normalized} compares it with the others on the wrong "
+                 "scale. Use `units: physical`, or give each target its own "
+                 "column.")
 
     scales = cfg.reference_scale
     for name in r_columns:
