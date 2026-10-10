@@ -297,7 +297,10 @@ These are the two modes and the ambient rate — what one measures, so where
 priors are actually held — rather than the network's component rates.
 `tau_slow` is what `nt data decay` estimates, from free-float periods if the
 data has any; its spread across windows is a reasonable first box, and an
-estimate rather than a measurement. The boxes must be disjoint in the order fast < ambient <
+estimate rather than a measurement. "Free float" is the controls that
+`synth_cfg.responds` pairs with `--state` sitting at their `off` values;
+on a record whose setpoints are excited, define it by a meter instead
+(`--off-by "<power column>"`, repeatable). The boxes must be disjoint in the order fast < ambient <
 slow; every point inside them is then a valid building, so training cannot
 leave the feasible set, and `tau_fast` may not start below two timesteps of
 the data, the stability guarantee's floor. There is no default: a block

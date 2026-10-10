@@ -266,9 +266,14 @@ def resolve_config_path(
     return default_config_path
 
 
-def build_cli_parser() -> argparse.ArgumentParser:
+def build_cli_parser(
+    command_flags: Optional[argparse.ArgumentParser] = None,
+) -> argparse.ArgumentParser:
+    """The standard config flags, plus a command's own (`command_flags`, built
+    with `add_help=False`) so `--help` lists both."""
     parser = argparse.ArgumentParser(
         description="Run with a YAML configuration file.",
+        parents=[] if command_flags is None else [command_flags],
     )
     parser.add_argument(
         "--config",
@@ -306,10 +311,15 @@ def load_config_from_cli(
     cls: Type,
     config_dir: Path,
     default_config_path: Optional[Path] = None,
+    command_flags: Optional[argparse.ArgumentParser] = None,
 ) -> tuple[Any, argparse.Namespace]:
-    """Load a config dataclass from a YAML file + CLI --set overrides."""
+    """Load a config dataclass from a YAML file + CLI --set overrides.
 
-    parser = build_cli_parser()
+    A command with flags of its own passes them as `command_flags`; they are
+    parsed with the standard ones and returned on the same namespace.
+    """
+
+    parser = build_cli_parser(command_flags)
     cli_args = parser.parse_args(argv)
 
     if cli_args.list_configs:

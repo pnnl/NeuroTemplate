@@ -19,6 +19,8 @@ Usage:
     nt data heads --config model_configs/modeling.yaml --column "Total DX Power [W]"
     nt data decay --config model_configs/modeling.yaml \
         --state "North Zone Air Temperature [°C]" --ref "Ambient Temperature [°C]"
+    nt data decay --config model_configs/modeling.yaml \
+        --state "Zone [°C]" --ref "Outdoor [°C]" --off-by "Total DX Power [W]"
 """
 
 from __future__ import annotations
@@ -59,16 +61,15 @@ def _print_head_recommendation(rec) -> None:
 
 @beartype
 def heads_main() -> None:
-    parser = argparse.ArgumentParser(add_help=False)
-    parser.add_argument("--column", type=str, default=None,
-                         help="Only this Y column (default: every Y column).")
-    parser.add_argument("--k-max", type=int, default=K_MAX_DEFAULT,
-                         help=f"Largest K tried in the k-means sweep (default {K_MAX_DEFAULT}).")
-    args, remaining = parser.parse_known_args(sys.argv[1:])
-
-    cfg, _cli = load_config_from_cli(
-        remaining, cls=ModelingConfig, config_dir=MODEL_CONFIG_DIR,
+    flags = argparse.ArgumentParser(add_help=False)
+    flags.add_argument("--column", type=str, default=None,
+                       help="Only this Y column (default: every Y column).")
+    flags.add_argument("--k-max", type=int, default=K_MAX_DEFAULT,
+                       help=f"Largest K tried in the k-means sweep (default {K_MAX_DEFAULT}).")
+    cfg, args = load_config_from_cli(
+        sys.argv[1:], cls=ModelingConfig, config_dir=MODEL_CONFIG_DIR,
         default_config_path=MODEL_CONFIG_DIR / "modeling.yaml",
+        command_flags=flags,
     )
 
     hooks = load_modeling_hooks(cfg)
@@ -98,29 +99,48 @@ def heads_main() -> None:
     print()
 
 
+def _off_columns(args, spec, nm_mapping: dict[str, list[str]]) -> list[str]:
+    """The columns that define "off" for `--state`: `--off-by` if given, else
+    the controls `synth_cfg.responds` pairs with that state.
+
+    Per state rather than all of U: in a multi-zone building every zone's
+    actuator is never off at once, but each zone's own one often is.
+    """
+    if args.off_by:
+        return args.off_by
+    if not nm_mapping["U"]:
+        return []
+    paired = list(spec.responds.get(args.state, {})) if spec is not None else []
+    if not paired:
+        raise SystemExit(
+            f"synth_cfg.responds pairs no control with {args.state!r}, so "
+            "there is no actuator to call off. Name the columns that define "
+            "off with --off-by (a control, or a meter that reads zero when "
+            "the equipment is off)."
+        )
+    return paired
+
+
 @beartype
 def decay_main() -> None:
-    parser = argparse.ArgumentParser(add_help=False)
-    parser.add_argument("--state", type=str, default=None,
-                         help="Y column to fit the free-decay envelope for.")
-    parser.add_argument("--ref", type=str, default=None,
-                         help="Reference column the state decays toward (usually ambient).")
-    parser.add_argument("--min-hours", type=float, default=MIN_RUN_HOURS_DEFAULT,
-                         help=f"Minimum length of an off-run to fit, in hours "
-                              f"(default {MIN_RUN_HOURS_DEFAULT:g}).")
-    args, remaining = parser.parse_known_args(sys.argv[1:])
-
-    cfg, _cli = load_config_from_cli(
-        remaining, cls=ModelingConfig, config_dir=MODEL_CONFIG_DIR,
+    flags = argparse.ArgumentParser(add_help=False)
+    flags.add_argument("--state", type=str, required=True,
+                       help="Y column to fit the free-decay envelope for.")
+    flags.add_argument("--ref", type=str, required=True,
+                       help="Reference column the state decays toward (usually ambient).")
+    flags.add_argument("--off-by", type=str, action="append", default=[],
+                       help="A column that defines 'off' (repeatable): a control, "
+                            "or a meter that reads zero when the equipment is off. "
+                            "Default: the controls synth_cfg.responds pairs with "
+                            "--state.")
+    flags.add_argument("--min-hours", type=float, default=MIN_RUN_HOURS_DEFAULT,
+                       help=f"Minimum length of an off-run to fit, in hours "
+                            f"(default {MIN_RUN_HOURS_DEFAULT:g}).")
+    cfg, args = load_config_from_cli(
+        sys.argv[1:], cls=ModelingConfig, config_dir=MODEL_CONFIG_DIR,
         default_config_path=MODEL_CONFIG_DIR / "modeling.yaml",
+        command_flags=flags,
     )
-    # Checked after load_config_from_cli so --help/--print-config/etc still
-    # work without also having to pass --state/--ref.
-    if args.state is None or args.ref is None:
-        raise SystemExit(
-            "nt data decay requires --state and --ref (the Y column to fit "
-            "and the reference/ambient column it decays toward)."
-        )
 
     hooks = load_modeling_hooks(cfg)
     train_raws, _dev_raws, _test_raws, freq_s = get_data_splits(cfg)
@@ -128,9 +148,10 @@ def decay_main() -> None:
     nm_mapping = resolve_nm_mapping(hooks, train_raws[0], cfg)
 
     known_columns = nm_mapping["Y"] + nm_mapping["U"] + nm_mapping["D"]
-    for col in (args.state, args.ref):
-        if col not in known_columns:
-            raise SystemExit(f"--state/--ref column {col!r} is not in the data mapping.")
+    unknown = [c for c in (args.state, args.ref, *args.off_by) if c not in known_columns]
+    if unknown:
+        raise SystemExit(f"--state/--ref/--off-by column(s) {unknown} are not "
+                         "in the data mapping.")
 
     train_pool = pool_dfs(train_raws)
     norm_overrides = hooks.column_norm_config(nm_mapping)
@@ -138,18 +159,22 @@ def decay_main() -> None:
         df=train_pool, norm_type=cfg.norm_type, column_overrides=norm_overrides,
     )
     spec = hooks.synth_cfg(nm_mapping, norm_stats)
-    if spec is None:
+    if spec is None and not args.off_by:
         raise SystemExit(
-            "nt data decay reads the actuator `off` values from the synth_cfg "
-            "hook, and synth_cfg(nm_mapping, norm_stats) returned None. Fill "
-            "in synth_cfg in modeling_user_defined.py first."
+            "nt data decay reads which controls move --state, and their `off` "
+            "values, from the synth_cfg hook, and synth_cfg(nm_mapping, "
+            "norm_stats) returned None. Fill in synth_cfg in "
+            "modeling_user_defined.py, or name the columns that define off "
+            "with --off-by."
         )
 
-    # Every U column not named in spec.off idles at its recorded minimum,
-    # per SynthSpec.off's own docstring.
+    # A column the spec gives no `off` idles at its recorded minimum, per
+    # SynthSpec.off's own docstring — zero, for a meter.
+    off_columns = _off_columns(args, spec, nm_mapping)
+    declared_off = spec.off if spec is not None else {}
     off_values = {
-        col: spec.off.get(col, float(train_pool[col].min()))
-        for col in nm_mapping["U"]
+        col: declared_off.get(col, float(train_pool[col].min()))
+        for col in off_columns
     }
     min_run_steps = max(2, round(args.min_hours * cfg.steps_per_hour))
 
@@ -160,22 +185,24 @@ def decay_main() -> None:
         t_hours = raw_df["sec_elapsed"].to_numpy(dtype=float) / 3600.0
         state = raw_df[args.state].to_numpy(dtype=float)
         ref = raw_df[args.ref].to_numpy(dtype=float)
-        if nm_mapping["U"]:
-            u_values = {col: raw_df[col].to_numpy(dtype=float) for col in nm_mapping["U"]}
-            mask = actuator_off_mask(u_values, off_values)
+        if off_columns:
+            values = {col: raw_df[col].to_numpy(dtype=float) for col in off_columns}
+            mask = actuator_off_mask(values, off_values)
         else:
             mask = pd.Series(True, index=raw_df.index).to_numpy()
         all_windows.extend(estimate_decay(t_hours, state, ref, mask, min_run_steps))
 
     print(f"Free-decay tau for {args.state!r} relative to {args.ref!r}")
-    print(f"  actuators off (every U column within "
-          f"{OFF_TOLERANCE_FRAC * 100:.0f}% of its off value) for "
+    print(f"  off = every one of {off_columns} within "
+          f"{OFF_TOLERANCE_FRAC * 100:.0f}% of its off value, for "
           f">= {args.min_hours:g}h: {len(all_windows)} qualifying window(s)")
 
     if not all_windows:
         print(
             "  No free-decay episode found in this data -- the plant is "
-            "never uncoupled for long enough at these off values. The "
+            "never uncoupled for long enough at these off values. If a "
+            "setpoint is excited and never sits at its off value, define off "
+            "by a meter instead (--off-by \"<power column>\"). The "
             "tau_slow_h box then has to come from what you know about the "
             "building: hold it wide, and read on the reportcard whether the "
             "fit presses against an edge."
