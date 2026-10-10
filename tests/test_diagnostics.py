@@ -84,6 +84,19 @@ def test_staged_signal_recommends_the_right_number_of_levels():
     assert "project_physical_to_norm" in rec.snippet
 
 
+def test_a_mostly_off_staged_channel_is_still_staged():
+    """Exactly 0 on ~80% of steps: quantile seeds coincide at 0, and without
+    re-seeding the empty clusters every K collapses to K=2 (field report,
+    modelica_rtu_mall DX power)."""
+    rng = np.random.default_rng(0)
+    on = np.asarray([4253.0, 8608.0])[rng.integers(0, 2, 600)] + rng.normal(0, 100, 600)
+    x = np.concatenate([np.full(2400, -0.0), on])
+    rec = recommend_head(x, "Total DX Power [W]")
+    assert rec.kind == "ordinal"
+    assert "n_levels=3" in rec.snippet
+    assert "-0" not in rec.evidence + rec.snippet
+
+
 def test_a_rare_binary_flag_is_flagged_too():
     x = np.array([0.0] * 990 + [1.0] * 10)
     rec = recommend_head(x, "Compressor On/Off")

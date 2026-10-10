@@ -99,18 +99,29 @@ def _kmeans_1d(x: np.ndarray, k: int, max_iter: int = 100) -> np.ndarray:
     tracks the data instead of an arbitrary random draw. Each iteration
     assigns every sample to its nearest center, then recomputes each center
     as the mean of the samples assigned to it, until the centers stop
-    moving. A cluster that loses every sample keeps its last center rather
-    than producing a NaN.
+    moving.
+
+    A cluster that wins no sample is re-seeded at the sample farthest from
+    its own center. On a mostly-off channel (a compressor at exactly 0 on
+    80% of steps) several quantile seeds coincide at 0, ties go to the
+    first, and without the re-seed the duplicates would sit there for good —
+    every K would collapse to K=2 plus phantom centers.
     """
     quantile_positions = (np.arange(k) + 0.5) / k
     centers = np.quantile(x, quantile_positions)
     for _ in range(max_iter):
-        labels = np.argmin(np.abs(x[:, None] - centers[None, :]), axis=1)
+        distances = np.abs(x[:, None] - centers[None, :])
+        labels = np.argmin(distances, axis=1)
         new_centers = centers.copy()
         for i in range(k):
             in_cluster = x[labels == i]
             if in_cluster.size > 0:
                 new_centers[i] = in_cluster.mean()
+            else:
+                farthest = np.argmax(distances[np.arange(len(x)), labels])
+                new_centers[i] = x[farthest]
+                # Taken: the next empty cluster must not land on it too.
+                distances[farthest, :] = 0.0
         if np.allclose(new_centers, centers):
             centers = new_centers
             break
@@ -273,7 +284,9 @@ def recommend_head(
     into several continuous regimes by some other variable looks the same
     as staged equipment here. See `_scope_note`, always appended.
     """
-    x = np.asarray(x, dtype=float)
+    # `+ 0.0` turns IEEE −0.0 (simulator output, `clip(lower=0)`) into 0.0,
+    # so no floor prints as "-0" in the evidence or the pasteable snippet.
+    x = np.asarray(x, dtype=float) + 0.0
     fits = fit_levels(x, k_max)
     uniques = np.unique(x)
 
