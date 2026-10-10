@@ -58,10 +58,16 @@ def load_frozen_dynamics(
     return dyn_sys, dyn_node, sysid_cfg, nm_mapping, norm_stats
 
 
-def load_trained_policy(run_id: str, run_dir=None):
+def load_trained_policy(run_id: str, run_dir=None, sysid_run_dir=None):
     """Rebuild a trained control run's policy and closed loop, weights loaded.
 
     Returns (policy_node, cl_system, cfg, sysid_cfg, nm_mapping, norm_stats).
+
+    `run_dir` is the control run's directory and `sysid_run_dir` its
+    surrogate's, each overriding where MLflow says that run's artifacts are —
+    for a run tree that has moved (a container, another machine). Without
+    `sysid_run_dir` the surrogate is found through the `run_dir` the control
+    run logged.
 
     The closed loop is assembled exactly as `nt control train` assembled it —
     same builders, from the run's own logged config and the copy of the
@@ -77,7 +83,8 @@ def load_trained_policy(run_id: str, run_dir=None):
     cfg.validate()
     cfg.device = resolve_device(cfg.device)
     _, dyn_node, sysid_cfg, nm_mapping, sysid_stats = load_frozen_dynamics(
-        cfg.sysid_run_id, cfg.run_dir, cfg.weights)
+        cfg.sysid_run_id, cfg.run_dir if sysid_run_dir is None else sysid_run_dir,
+        cfg.weights)
     norm_stats = extend_norm_stats(resolve_objective(cfg, nm_mapping), cfg,
                                    sysid_stats)
 

@@ -20,23 +20,32 @@ Add NeuroTemplate to an application's `pyproject.toml`:
 ```toml
 [project]
 dependencies = [
-    "NeuroTemplate @ git+ssh://git@github.com/<owner>/sys_id_framework.git@v0.1.0",
+    "NeuroTemplate @ git+ssh://git@<host>/<owner>/neurotemplate.git@v0.1.0",
 ]
 
-# Until upstream Neuromancer ships a macOS arm64 wheel for torch-harmonics,
-# every downstream app needs this same override. The framework's own
-# pyproject has the same block, but uv overrides don't propagate to consumers.
+# neuromancer.modules.operators imports SFNO from neuralop, which was removed
+# in neuraloperator 2.0; neuromancer declares both packages unpinned. Copy
+# this block from the library's own pyproject: uv reads [tool.uv] settings
+# only from the project being synced, never from a dependency.
 [tool.uv]
-override-dependencies = [
-    "torch-harmonics; sys_platform != 'darwin'",
+constraint-dependencies = [
+    "neuraloperator<2",
+    "torch-harmonics<0.8",
 ]
 ```
+
+Without the constraints `uv sync` succeeds and every `nt` command fails at
+import with `cannot import name 'SFNO' from 'neuralop.models'`.
+
+The library pins Neuromancer to one git commit. An app that also lists its
+own `neuromancer` source (a local checkout, say) must drop it or point it at
+that commit, or `uv sync` refuses with conflicting URLs for `neuromancer`.
 
 For local development against an in-progress framework checkout, swap the dep source to an editable local install:
 
 ```toml
 [tool.uv.sources]
-NeuroTemplate = { path = "../sys_id_framework", editable = true }
+NeuroTemplate = { path = "../neurotemplate", editable = true }
 ```
 
 Then `uv sync` and a single `nt` console script is on your `PATH`. It dispatches
@@ -71,7 +80,7 @@ commands take the same standard flags (parsed by [common/config.py](src/neurotem
 
 ```
 my_app/
-├── pyproject.toml              # depends on NeuroTemplate + the torch-harmonics override
+├── pyproject.toml              # depends on NeuroTemplate + the neuraloperator constraints
 ├── modeling_user_defined.py    # the modeling hooks
 ├── control_user_defined.py     # the control hooks (only if you train policies)
 ├── model_configs/
@@ -782,7 +791,8 @@ cfg.test_reference_path = ["data/test_reference_shifted.csv"]
 _, _, test_dfs = load_control_splits(cfg, nm_mapping, norm_stats)
 results, _ = evaluate_closed_loop(cfg, sysid_cfg, cl_system, test_dfs,
                                   nm_mapping, norm_stats)
-print(results.energy.weighted_energy, results.comfort_mean_exceedance)
+# weighted_energy is {weight column: value}, one entry per weight a power term names.
+print(results.energy.weighted_energy["Tariff [$/kWh]"], results.comfort_mean_exceedance)
 ```
 
 The CLI wrappers ([modeling/cli/train.py](src/neurotemplate/modeling/cli/train.py), [control/cli/train.py](src/neurotemplate/control/cli/train.py)) are short enough — ~30 lines each — that they're worth reading as a template if you want to write your own driver.
