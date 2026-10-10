@@ -433,6 +433,28 @@ class _Scenario:
         self.t_min, self.t_max = _state_range(spec, norm_stats)
         self.demands = _declared_demands(system)
 
+    def _gates(self, controls) -> dict[str, float]:
+        """`{gate column: its recorded maximum}` for each gated `demand` among
+        `controls`. Gates rest at their minimum (closed), so a scenario that
+        drives a gated control opens its gate, or the control does nothing."""
+        gates = {}
+        for col in controls:
+            gate = self.demands.get(col, {}).get("gate")
+            if gate is not None:
+                gates[gate] = float(self.norm_stats[gate]["max"])
+        return gates
+
+    def _set_columns(self, row, key: str, values: dict[str, float]):
+        """A copy of normalised `row` with each named column set to its
+        physical value."""
+        out = row.clone()
+        for col, value in values.items():
+            out[:, self.nm_mapping[key].index(col)] = _normalize(
+                torch.full((row.shape[0],), float(value), device=self.device),
+                col, self.norm_stats,
+            )
+        return out
+
     def _outside_range(self, col: str) -> float:
         """How far the seed range reaches past `col`'s recorded range; 0 when
         the states overlap."""
@@ -614,16 +636,13 @@ class StepResponseScenario(_Scenario):
     def _data(self, t, col: str, target: Optional[float]):
         """Seeds `t`; `col` stepped to `target` after the history, or held at
         rest throughout when `target` is None."""
-        n = t.shape[0]
         y, u_off, d = _equilibrium_inputs(
             t, self.nm_mapping, self.norm_stats, self.spec, self.device,
         )
-        u_on = u_off.clone()
-        if target is not None:
-            j = self.nm_mapping["U"].index(col)
-            u_on[:, j] = _normalize(
-                torch.full((n,), target, device=self.device), col, self.norm_stats,
-            )
+        u_on = u_off if target is None else self._set_columns(u_off, "U", {col: target})
+        # A gated control's gate is open throughout, at rest as with the step,
+        # so the difference between the two is the actuator alone.
+        d = self._set_columns(d, "D", self._gates([col]))
         return _rollout_data(y, (u_off, u_on), (d, d), self.in_steps,
                              self.n_steps, self.ny, self.device)
 
@@ -766,21 +785,14 @@ class ReachabilityScenario(_Scenario):
             t, self.nm_mapping, self.norm_stats, self.spec, self.device,
         )
         controls, disturbances = self._push_targets(channel, direction)
-
-        def driven(row, key, targets):
-            out = row.clone()
-            for col, value in targets.items():
-                j = self.nm_mapping[key].index(col)
-                out[:, j] = _normalize(
-                    torch.full((n,), float(value), device=self.device),
-                    col, self.norm_stats,
-                )
-            return out
+        # A pushed control's gate opens with it, whatever sign the gradient
+        # mapping gives the gate column as a disturbance.
+        disturbances.update(self._gates(controls))
 
         return _rollout_data(
             y,
-            (u_off, driven(u_off, "U", controls)),
-            (d_rest, driven(d_rest, "D", disturbances)),
+            (u_off, self._set_columns(u_off, "U", controls)),
+            (d_rest, self._set_columns(d_rest, "D", disturbances)),
             self.in_steps, self.n_steps, self.ny, self.device,
         )
 

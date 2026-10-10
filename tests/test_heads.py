@@ -325,15 +325,15 @@ def test_soft_clamp_is_relu_forward_and_never_dead_backward():
 
 def test_a_pre_stack_survives_a_config_round_trip():
     stack = PreStack([Demand(-1, SETPOINT, ZONE)], [("sp", "zone")],
-                     ["zone", "power"], ["sp", "fan"], in_steps=3)
+                     ["zone", "power"], ["sp", "fan"], ["outdoor"], in_steps=3)
     config = stack.to_config()
     assert config == {"sp": {"kind": "demand", "state": "zone", "sign": -1}}
     rebuilt = PreStack.from_config(
-        config, ["zone", "power"], ["sp", "fan"],
+        config, ["zone", "power"], ["sp", "fan"], ["outdoor"],
         {"sp": SETPOINT, "zone": ZONE}, in_steps=3,
     )
-    y, u = torch.randn(4, 6), torch.randn(4, 6)
-    assert torch.equal(rebuilt(y, u), stack(y, u))
+    y, u, d = torch.randn(4, 6), torch.randn(4, 6), torch.randn(4, 3)
+    assert torch.equal(rebuilt(y, u, d), stack(y, u, d))
     assert rebuilt.state_dict().keys() == stack.state_dict().keys()
 
 
@@ -344,16 +344,44 @@ def test_each_output_step_reads_its_own_step_of_u_and_y():
     identity = {"shift": 0.0, "stretch": 1.0, "min": 0.0, "max": 1.0}
     in_steps, ny, nu = 3, 2, 2
     stack = PreStack([Demand(-1, identity, identity)], [("u1", "y1")],
-                     ["y0", "y1"], ["u0", "u1"], in_steps)
+                     ["y0", "y1"], ["u0", "u1"], ["d0"], in_steps)
     y = torch.tensor([[100.0 * t + i for t in range(in_steps) for i in range(ny)]])
     u = torch.tensor([[-(100.0 * t + j) for t in range(in_steps) for j in range(nu)]])
-    out = stack(y, u).reshape(in_steps, nu)
+    d = torch.zeros(1, in_steps)
+    out = stack(y, u, d).reshape(in_steps, nu)
     for t in range(in_steps):
         assert out[t, 0] == -(100 * t)                     # untouched column
         assert out[t, 1] == (100 * t + 1) + (100 * t + 1)  # relu(y1_t - u1_t) / 1
     # Under vmap the window is 1-D and the layout must still hold.
-    single = torch.vmap(stack)(y, u)
-    assert torch.equal(single, stack(y, u))
+    single = torch.vmap(stack)(y, u, d)
+    assert torch.equal(single, stack(y, u, d))
+
+
+OCCUPIED = {"shift": 0.0, "stretch": 1.0, "min": 0.0, "max": 1.0}
+
+
+def test_a_gated_demand_asks_for_nothing_while_its_gate_is_closed():
+    """A scheduled AHU: the demand is the thermostat's, times the schedule.
+    Round-trips through the config with the gate column named."""
+    names = (["zone", "power"], ["sp", "fan"], ["outdoor", "occupied"])
+    plain = PreStack([Demand(-1, SETPOINT, ZONE)], [("sp", "zone")], *names, in_steps=1)
+    gated = PreStack.from_config(
+        {"sp": {"kind": "demand", "state": "zone", "sign": -1, "gate": "occupied"}},
+        *names, {"sp": SETPOINT, "zone": ZONE, "occupied": OCCUPIED}, in_steps=1,
+    )
+    assert gated.to_config()["sp"]["gate"] == "occupied"
+    y = torch.tensor([[2.0, 0.0], [2.0, 0.0]])          # zone well above setpoint
+    u = torch.tensor([[-1.0, 0.0], [-1.0, 0.0]])
+    d = torch.tensor([[0.0, 0.0], [0.0, 1.0]])          # unoccupied, occupied
+    out = gated(y, u, d)[:, 0]
+    assert out[0] == 0.0
+    assert out[1] == plain(y, u, d)[1, 0] > 0
+
+
+def test_a_gate_must_be_a_share_not_a_gain():
+    with pytest.raises(ValueError, match=r"within \[0, 1\]"):
+        Demand(-1, SETPOINT, ZONE, gate={"shift": 0.0, "stretch": 1.0,
+                                         "min": 0.0, "max": 100.0})
 
 
 def test_demand_is_never_active_on_ranges_that_never_overlap():

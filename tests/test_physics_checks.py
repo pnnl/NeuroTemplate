@@ -208,7 +208,7 @@ def test_a_demand_target_inactive_everywhere_is_skipped_not_failed():
         if declared:
             system.nodes[0].callable.pre_stack = PreStack.from_config(
                 {HEAT: {"kind": "demand", "state": ZONE, "sign": +1}},
-                nm["Y"], nm["U"], stats, IN_STEPS)
+                nm["Y"], nm["U"], nm["D"], stats, IN_STEPS)
         return build_scenarios(
             system=system, nm_mapping=nm, norm_stats=stats, synth_cfg=spec,
             in_steps=IN_STEPS, n_scenarios=16, n_steps=N_STEPS, device="cpu",

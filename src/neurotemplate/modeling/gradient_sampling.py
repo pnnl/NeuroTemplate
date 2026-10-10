@@ -131,7 +131,7 @@ class SampledGradientPenalty:
         u = self._repeat_sample(self.model.nu)
         d = self._repeat_sample(self.model.nd)
         if self.model.pre_stack is not None:
-            u = self.model.pre_stack(y, u)
+            u = self.model.pre_stack(y, u, d)
 
         # Each J_i has shape [n_samples, ny, in_steps * nx_i]
         J = self.jac_fn(y, u, d)

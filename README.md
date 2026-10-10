@@ -452,6 +452,17 @@ Nothing is inferred from column names: a dataset whose actuator is metered
 power rather than a setpoint declares it `linear` (or leaves it undeclared)
 and writes no `demand` entry at all.
 
+Equipment that runs only on a schedule — an AHU that follows occupancy while
+the setpoints keep moving overnight — adds `"gate": "<D column>"` to the
+`demand` entry. The gate is one of the block's D columns, recorded within
+[0, 1], and multiplies the demand: while it is 0 the thermostat asks for
+nothing, whatever the setpoint says, and a policy's gradient through that
+setpoint is zero there too, which is the truth. The reportcard prints the
+gate beside the demand, and the physics checks open it while they drive that
+setpoint. Without a gate, a demand asserts cooling during hours the plant
+never cools, and writing an "effective" setpoint in data prep instead tells
+the controller that a setpoint commanded at night is obeyed.
+
 A `demand` declaration also makes the gradient-sign penalty usable on that
 column for the first time. The Jacobian is taken downstream of the
 pre-block, so `grad_path` entries for a declared column constrain

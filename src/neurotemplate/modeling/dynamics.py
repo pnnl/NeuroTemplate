@@ -148,7 +148,7 @@ class SSMGrad(nn.Module):
     gradient penalty differentiates `pre_activation` externally via jacrev.
 
     An optional `pre_stack` (see `prestack.PreStack`) rewrites declared U
-    columns from the U and Y windows before `compute_output` sees them, so
+    columns from the U, Y and D windows before `compute_output` sees them, so
     every family consumes the derived feature and none the raw column. It
     runs inside the autoregressive loop: the Y it reads is recorded data in
     the seeded history and the model's own prediction past it.
@@ -206,7 +206,7 @@ class SSMGrad(nn.Module):
             is attached, otherwise raw model output.
         """
         if self.pre_stack is not None:
-            u = self.pre_stack(y, u)
+            u = self.pre_stack(y, u, d)
         out = self.pre_activation(y, u, d)
         return out if self.head_stack is None else self.head_stack(out)
 
@@ -694,7 +694,8 @@ def _build_pre_stack(
             "norm_stats to get_dynamics."
         )
     return PreStack.from_config(
-        demands, nm_mapping["Y"], nm_mapping["U"], norm_stats, in_steps)
+        demands, nm_mapping["Y"], nm_mapping["U"], nm_mapping["D"], norm_stats,
+        in_steps)
 
 
 def _warn_ignored_declarations(blocks: list[Block], families: list[str]) -> None:
