@@ -252,9 +252,7 @@ def block_mapping(
                it inherits that. Declare every setpoint that drives the
                block. In `2r2c` it drives a bounded, saturating heat input
                (`"branch": "mlp"` routes it into the learned residual
-               instead, losing the stability bound). Equipment that runs
-               only on a schedule adds `"gate": "<D column in [0, 1]>"`,
-               which multiplies the demand.
+               instead, losing the stability bound).
       linear   one sign-fixed coefficient times the physical value: metered
                heat or power delivered, irradiance. An actuator that is a
                power rather than a setpoint is `linear`, never `demand`.

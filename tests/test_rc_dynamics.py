@@ -503,11 +503,10 @@ def test_demand_is_zero_on_the_inactive_side_and_positive_on_the_active():
     cooling = torch.full((1, IN_STEPS), normalised("north sp", 22.0))
     fan = torch.zeros(1, IN_STEPS)
     u = lambda sp: torch.stack([sp, fan], dim=-1).reshape(1, -1)  # noqa: E731
-    d = torch.zeros(1, IN_STEPS * len(DECLARED_MAPPING["D"]))
     assert normalised("north sp", 25.0) < normalised("north T", 24.0)
-    assert torch.equal(pre(zone, u(coasting), d).reshape(IN_STEPS, 2)[:, 0],
+    assert torch.equal(pre(zone, u(coasting)).reshape(IN_STEPS, 2)[:, 0],
                        torch.zeros(IN_STEPS))
-    active = pre(zone, u(cooling), d).reshape(IN_STEPS, 2)[:, 0]
+    active = pre(zone, u(cooling)).reshape(IN_STEPS, 2)[:, 0]
     assert torch.allclose(active, torch.full((IN_STEPS,), 2.0 / (27.0 - 21.0)))
 
 
@@ -623,7 +622,7 @@ def test_a_declared_block_still_differentiates_under_vmap():
     x = torch.randn(4, IN_STEPS * 5)
     y, u, d = x[:, :IN_STEPS], x[:, IN_STEPS:IN_STEPS * 3], x[:, IN_STEPS * 3:]
     jac = torch.vmap(torch.func.jacrev(raw.compute_output, argnums=(0, 1, 2)))(
-        y, raw.pre_stack(y, u, d), d)
+        y, raw.pre_stack(y, u), d)
     assert all(torch.isfinite(j).all() for j in jac)
 
 

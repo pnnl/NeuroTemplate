@@ -324,8 +324,7 @@ def _architecture_section(arch: dict, title: str = "Architecture") -> str:
         lines.append("")
         lines.append("Derived inputs (replace the raw column before every family):")
         for column, entry in pre_stack.items():
-            gated = f", gated by {entry['gate']}" if "gate" in entry else ""
-            lines.append(f"- {column}: {entry['kind']} of {entry['state']}{gated}, "
+            lines.append(f"- {column}: {entry['kind']} of {entry['state']}, "
                          f"sign={entry['sign']:+d}, scale={entry['scale']:.3g}")
     return _section(title, "\n".join(lines))
 

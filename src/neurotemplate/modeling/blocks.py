@@ -57,11 +57,6 @@ feature feeds a bounded `saturating` branch by default; `"branch": "mlp"`
 routes it into the learned residual instead, which gives up the stability
 bound and is reported as such.
 
-Equipment that runs only on a schedule (an AHU that follows occupancy) adds
-`"gate": "<D column>"`, one of the block's D columns recorded within [0, 1]:
-the demand is multiplied by it, so the thermostat asks for nothing while the
-gate is 0, and a policy learns the setpoint does nothing then.
-
 `linear` says the column enters the zone's heat balance as one sign-fixed
 coefficient times the physical value (measured power, solar irradiance).
 Only `2r2c` acts on it; other families see the column as usual.
@@ -264,13 +259,6 @@ def _resolve_inputs(spec: dict, block: str, y_names: list[str],
                 problems.append(f"`inputs[{column!r}]` has branch "
                                 f"{entry.get('branch')!r}; expected one of "
                                 f"{list(DEMAND_BRANCHES)}.")
-            gate = entry.get("gate")
-            if gate is not None and gate not in d_names:
-                problems.append(f"`inputs[{column!r}]` is gated by {gate!r}, which "
-                                f"is not one of this block's D columns {d_names}.")
-        elif "gate" in entry:
-            problems.append(f"`inputs[{column!r}]` has a `gate`, which only a "
-                            "`demand` entry takes.")
 
     if problems:
         raise ValueError(
