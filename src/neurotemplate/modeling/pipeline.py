@@ -283,13 +283,14 @@ def evaluate_and_plot(
     norm_stats: dict,
     synth_cfg: Optional[SynthSpec],
     freq_s: float,
-    plot_run_dir: Path,
+    plot_run_dir: Optional[Path],
     logger=None,
     grad_masks: Optional[dict] = None,
 ) -> TestResults:
     """
     Roll the model out on the test split, compute per-channel metrics,
-    and (if cfg.plot) drop prediction + synth plots in plot_run_dir.
+    and (if cfg.plot) drop prediction + synth plots in plot_run_dir, which
+    may be None only when cfg.plot is off.
 
     The raw rollout tensors do not escape this function — anything a
     caller needs ends up in TestResults or in the on-disk plots.
@@ -301,6 +302,8 @@ def evaluate_and_plot(
 
     `synth_cfg=None` disables the synth subsystem (no plots, no eval).
     """
+    if cfg.plot and plot_run_dir is None:
+        raise ValueError("cfg.plot is on but no plot_run_dir was given.")
     test_data = get_sw_dict_multi(
         dfs=test_dfs, cfg=cfg, nm_mapping=nm_mapping,
         steps=cfg.test_window, stride=cfg.test_stride,

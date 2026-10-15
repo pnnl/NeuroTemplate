@@ -782,16 +782,26 @@ policy_run.results.comfort_violation_rate
 in code. Neither call modifies the config it is given. The objective report
 `nt control train` prints before training is printed here too.
 
-To load a finished run by id:
+To score a finished run on other data — yesterday's model on today's test
+split, say — or load it by id:
 
 ```python
-from neurotemplate.modeling.load import load_trained_dynamics
+from neurotemplate.modeling.load import evaluate_run, load_trained_dynamics
 from neurotemplate.control.load import load_trained_policy
+
+results = evaluate_run(run_id, ["data/today/test.csv"])   # `nt model load`
+results.metrics                       # the same TestResults training reports
 
 dyn_sys, sysid_cfg, nm_mapping, norm_stats = load_trained_dynamics(run_id)
 policy_node, cl_system, cfg, sysid_cfg, nm_mapping, norm_stats = (
     load_trained_policy(run_id))
 ```
+
+`evaluate_run` scales the data with the run's own normalization, as
+training did; plots are written only when it is given a `plot_dir`. The
+loaders read whichever store MLflow points at — `sqlite:///mlflow.db` in the
+working directory unless `mlflow.set_tracking_uri` or `MLFLOW_TRACKING_URI`
+says otherwise.
 
 For example, to evaluate a trained policy on another test reference — the
 same plant file with the price peak moved, say — without retraining:
@@ -812,6 +822,20 @@ print(results.energy.weighted_energy["Tariff [$/kWh]"], results.comfort_mean_exc
 Export is `neurotemplate.export.dynamics.export_model` and
 `neurotemplate.export.policy.export_policy`, both taking the loaded objects
 above; [export/cli.py](src/neurotemplate/export/cli.py) shows the calls.
+
+A few things a script that retrains on a schedule, or across several
+buildings, should know:
+
+- **A run records its data paths, not the data.** Write each pull to its own
+  file (`data/<date>/train.csv`); a file overwritten in place leaves every
+  earlier run pointing at data it never saw.
+- **A run carries its hooks file, and only that file.** One hooks file can
+  serve every building whose columns follow the patterns it matches, and
+  each run keeps its own copy. Logic the file imports from an installed
+  package is not copied: a reload uses whatever version is installed then.
+- **Hooks are imported once per path per process.** A script that rewrites
+  one hooks file between buildings keeps the first version; give each
+  building's hooks their own path.
 
 ## Package layout
 
@@ -841,7 +865,7 @@ src/neurotemplate/
 │   ├── experiment.py    # train_with_curriculum, build_trainer
 │   ├── pipeline.py      # train_and_evaluate, evaluate_and_plot
 │   ├── train.py         # train_model — one tracked run (nt model train)
-│   ├── load.py          # load_trained_dynamics — rebuild a run by id
+│   ├── load.py          # load_trained_dynamics, evaluate_run — a run by id
 │   ├── plotting.py
 │   ├── reportcard.py
 │   └── cli/             # train, optuna, load, debug_heads

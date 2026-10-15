@@ -1,6 +1,6 @@
 """
 Load a trained model from an MLflow run, evaluate it on a dataset the caller
-points at, and optionally plot. Wrapper over pipeline.evaluate_and_plot.
+points at, and optionally plot. Python callers use modeling.load.evaluate_run.
 """
 
 import argparse
@@ -10,11 +10,11 @@ from datetime import datetime
 from pathlib import Path
 from time import perf_counter as tic
 
-from neurotemplate.common.data_utils import get_grad_masks, load_split, normalize_df
+from neurotemplate.common.data_utils import get_grad_masks
 from neurotemplate.modeling.experiment import set_seeds
 from neurotemplate.modeling.gradient_sampling import SampledGradientPenalty
-from neurotemplate.modeling.load import load_trained_dynamics
-from neurotemplate.modeling.pipeline import evaluate_and_plot, render_reportcard, write_reportcard
+from neurotemplate.modeling.load import evaluate_trained, load_trained_dynamics
+from neurotemplate.modeling.pipeline import render_reportcard, write_reportcard
 from neurotemplate.hooks import load_modeling_hooks
 
 from neurotemplate._typing import beartype
@@ -47,26 +47,6 @@ def _parse_data_arg(raw: str) -> list[str]:
             raise ValueError(f"--data argument must be a list of strings, got {raw!r}")
         return paths
     return [p.strip() for p in text.split(",") if p.strip()]
-
-
-def _eval_one_split(cfg, dyn_sys, data_paths, norm_stats, nm_mapping,
-                    synth_cfg, plot_run_dir):
-    """Evaluate + plot one logical split, which may span multiple CSVs.
-
-    Returns (test_results, raw_dfs, freq_s). `raw_dfs` is always a list
-    (length >= 1) of unnormalized dataframes — callers needing a row
-    count sum lengths across the list.
-    """
-    raw_dfs, freq_s = load_split(data_paths, "--data")
-    norm_dfs = [normalize_df(df, norm_stats) for df in raw_dfs]
-    test_results = evaluate_and_plot(
-        cfg=cfg, dyn_sys=dyn_sys,
-        test_dfs=norm_dfs,
-        nm_mapping=nm_mapping, norm_stats=norm_stats,
-        synth_cfg=synth_cfg, freq_s=freq_s,
-        plot_run_dir=plot_run_dir,
-    )
-    return test_results, raw_dfs, freq_s
 
 
 def get_cli_args(argv) -> argparse.Namespace:
@@ -133,7 +113,7 @@ def main() -> None:
     data_paths = _parse_data_arg(args.data)
 
     eval_t0 = tic()
-    test_results, raw_dfs, _freq_s = _eval_one_split(
+    test_results, raw_dfs = evaluate_trained(
         cfg, dyn_sys, data_paths, norm_stats, nm_mapping,
         synth_cfg, plot_run_dir,
     )

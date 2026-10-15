@@ -1,8 +1,10 @@
 """
-Rebuild a trained dynamics model from its MLflow run.
+Rebuild a trained dynamics model from its MLflow run, and score it on data.
 
 `load_trained_dynamics` is the public entry point: `nt model load`, the
 control side and the exporter all load a surrogate through it.
+`evaluate_run` scores a run on new data — `nt model load` without the
+command line.
 """
 
 import json
@@ -16,11 +18,14 @@ import torch
 
 from neurotemplate.modeling.config import ModelingConfig
 from neurotemplate.common.config import ConfigError, dict_to_dataclass, _parse_value
+from neurotemplate.common.data_utils import load_split, normalize_df
 from neurotemplate.common.tracking import CHECKPOINT
-from neurotemplate.modeling.experiment import resolve_device
+from neurotemplate.modeling.experiment import resolve_device, set_seeds
 from neurotemplate.modeling.heads import HeadStack
 from neurotemplate.modeling.dynamics import get_dynamics
-from neurotemplate.hooks import MODELING_SNAPSHOT, run_hooks_path
+from neurotemplate.modeling.pipeline import TestResults, evaluate_and_plot
+from neurotemplate.modeling.scenarios import SynthSpec
+from neurotemplate.hooks import MODELING_SNAPSHOT, load_modeling_hooks, run_hooks_path
 
 from neurotemplate._typing import beartype
 
@@ -153,3 +158,56 @@ def load_trained_dynamics(
     dyn_sys = _load_dyn_sys(cfg, nm_mapping, head_stack, block_spec, norm_stats,
                             weights_path)
     return dyn_sys, cfg, nm_mapping, norm_stats
+
+
+def evaluate_trained(cfg, dyn_sys, data_paths: list[str], norm_stats: dict,
+                     nm_mapping: dict[str, list[str]],
+                     synth_cfg: Optional[SynthSpec],
+                     plot_dir: Optional[Path]):
+    """Evaluate a loaded model on `data_paths`: one split, one or more CSVs.
+
+    The data is normalized with the run's own `norm_stats`, never stats
+    fitted to it: the model only reads inputs in the scaling it trained under.
+
+    Returns (test_results, raw_dfs). `raw_dfs` is always a list (length >= 1)
+    of unnormalized dataframes — callers needing a row count sum lengths
+    across the list.
+    """
+    raw_dfs, freq_s = load_split(data_paths, "--data")
+    norm_dfs = [normalize_df(df, norm_stats) for df in raw_dfs]
+    test_results = evaluate_and_plot(
+        cfg=cfg, dyn_sys=dyn_sys,
+        test_dfs=norm_dfs,
+        nm_mapping=nm_mapping, norm_stats=norm_stats,
+        synth_cfg=synth_cfg, freq_s=freq_s,
+        plot_run_dir=plot_dir,
+    )
+    return test_results, raw_dfs
+
+
+@beartype
+def evaluate_run(
+    run_id: str,
+    data_paths: list[str],
+    *,
+    run_dir: Optional[str] = None,
+    weights: Optional[str] = None,
+    physics_checks: bool = True,
+    plot_dir: Optional[Path] = None,
+) -> TestResults:
+    """Score a trained run on `data_paths` — e.g. yesterday's model on
+    today's test split — with the metrics its training run reported.
+
+    `physics_checks=False` skips the hooks' synthetic scenarios. Plots are
+    written to `plot_dir` when one is given, and nothing is written when not.
+    `run_dir` and `weights` are `load_trained_dynamics`'s.
+    """
+    dyn_sys, cfg, nm_mapping, norm_stats = load_trained_dynamics(
+        run_id, run_dir=run_dir, weights=weights)
+    set_seeds(cfg.seed)
+    synth_cfg = (load_modeling_hooks(cfg).synth_cfg(nm_mapping, norm_stats)
+                 if physics_checks else None)
+    cfg.plot = plot_dir is not None
+    test_results, _ = evaluate_trained(cfg, dyn_sys, data_paths, norm_stats,
+                                       nm_mapping, synth_cfg, plot_dir)
+    return test_results

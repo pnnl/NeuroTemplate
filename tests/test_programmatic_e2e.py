@@ -1,9 +1,10 @@
 """The Python entry points chain the way the CLI commands do.
 
 A surrogate `train_model` trains is the `sysid_run_id` a `train_control` run
-loads, and both runs reload by the ids they return — one real MLflow store,
-one tiny run each. The CLIs are thin wrappers over these two calls, so this
-is also the wiring `nt model train` and `nt control train` depend on.
+loads, both runs reload by the ids they return, and `evaluate_run` scores
+the surrogate as its training run did — one real MLflow store, one tiny run
+each. The CLIs are thin wrappers over these calls, so this is also the
+wiring `nt model train`, `nt model load` and `nt control train` depend on.
 """
 
 import sys
@@ -17,7 +18,7 @@ from neurotemplate.common.config import load_config
 from neurotemplate.control.load import load_trained_policy
 from neurotemplate.control.train import train_control
 from neurotemplate.modeling.config import ModelingConfig
-from neurotemplate.modeling.load import load_trained_dynamics
+from neurotemplate.modeling.load import evaluate_run, load_trained_dynamics
 from neurotemplate.modeling.train import train_model
 from control_fixtures import (
     make_control_cfg, make_raw_df, make_reference_df, write_splits,
@@ -78,6 +79,12 @@ device: cpu
     dyn_sys, sysid_cfg, nm, _ = load_trained_dynamics(model_run.run_id)
     assert sysid_cfg.epochs == 2
     assert [m.name for m in model_run.test_results.metrics] == nm["Y"]
+
+    # Scored again from its id on its own test split, the run reports what
+    # training reported: the run's own scaling, the topology it trained.
+    rescored = evaluate_run(model_run.run_id, [str(plant_path)])
+    assert [m.rmse for m in rescored.metrics] == pytest.approx(
+        [m.rmse for m in model_run.test_results.metrics])
 
     control_cfg = make_control_cfg(
         sysid_run_id=model_run.run_id, location=location,
