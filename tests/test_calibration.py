@@ -321,7 +321,7 @@ def _staged_run(tmp_path, **over):
 
 def test_a_run_persists_the_calibrated_rule_and_reports_its_search(tmp_path):
     result, stack, logger = _staged_run(tmp_path)
-    trained = result["dyn_sys"].nodes[0].callable.head_stack.heads[0]
+    trained = result.dyn_sys.nodes[0].callable.head_stack.heads[0]
     midpoint = stack.heads[0].decision_thresholds
     # head_config.json is what `nt model load` rebuilds from, so it has to
     # carry the rule the run was evaluated with, not the constructor default.
@@ -340,7 +340,7 @@ def test_a_run_persists_the_calibrated_rule_and_reports_its_search(tmp_path):
 
 def test_calibration_can_be_switched_off(tmp_path):
     result, stack, _ = _staged_run(tmp_path, calibrate_thresholds=False)
-    trained = result["dyn_sys"].nodes[0].callable.head_stack.heads[0]
+    trained = result.dyn_sys.nodes[0].callable.head_stack.heads[0]
     assert torch.equal(trained.decision_thresholds, stack.heads[0].decision_thresholds)
     reportcard = (tmp_path / "reportcard.md").read_text()
     assert "Threshold calibration" not in reportcard
@@ -348,5 +348,5 @@ def test_calibration_can_be_switched_off(tmp_path):
 
 def test_the_ensemble_spread_carries_balanced_accuracy(tmp_path):
     result, _, _ = _staged_run(tmp_path, ensemble_seeds=2)
-    assert "stage" in result["ensemble"].balanced_acc
+    assert "stage" in result.ensemble.balanced_acc
     assert "Test balanced accuracy (staged channels)" in (tmp_path / "reportcard.md").read_text()

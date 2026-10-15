@@ -752,26 +752,51 @@ A new stateful family exports for free if it implements
 
 ## Programmatic use
 
-If you'd rather drive things from your own Python instead of the CLIs:
+Every `nt` command is a thin wrapper over a Python call, so a notebook, a
+sweep or a larger pipeline can drive the same runs without a shell. Each
+training call opens and closes its own MLflow run, exactly as the command
+does, and returns the run's id with what it produced:
 
 ```python
-from neurotemplate.common.config import load_config_from_cli, MODEL_CONFIG_DIR
+from neurotemplate.common.config import load_config
+from neurotemplate.control.config import ControlConfig
+from neurotemplate.control.train import train_control
 from neurotemplate.modeling.config import ModelingConfig
-from neurotemplate.modeling.pipeline import train_and_evaluate
+from neurotemplate.modeling.train import train_model
 
-cfg, _ = load_config_from_cli(
-    ["--config", "model_configs/modeling.yaml", "--set", "epochs=1"],
-    cls=ModelingConfig,
-    config_dir=MODEL_CONFIG_DIR,
-)
-# ...then call train_and_evaluate(cfg, ...) etc.
+# load_config is `--config` + `--set`: a YAML file, field overrides on top,
+# validated. A config built in code works too: each call validates it.
+model_cfg = load_config("model_configs/modeling.yaml", ModelingConfig,
+                        {"epochs": 1})
+model_run = train_model(model_cfg, config_path="model_configs/modeling.yaml")
+model_run.run_id                       # the id `nt model train` prints
+model_run.test_results.metrics         # per-channel test metrics, physical units
+
+control_cfg = load_config("control_configs/control.yaml", ControlConfig,
+                          {"sysid_run_id": model_run.run_id})
+policy_run = train_control(control_cfg)
+policy_run.results.comfort_violation_rate
 ```
 
-To evaluate a trained policy on another test reference — the same plant
-file with the price peak moved, say — without retraining:
+`config_path` only labels the run summary; leave it out for a config built
+in code. Neither call modifies the config it is given. The objective report
+`nt control train` prints before training is printed here too.
+
+To load a finished run by id:
 
 ```python
+from neurotemplate.modeling.load import load_trained_dynamics
 from neurotemplate.control.load import load_trained_policy
+
+dyn_sys, sysid_cfg, nm_mapping, norm_stats = load_trained_dynamics(run_id)
+policy_node, cl_system, cfg, sysid_cfg, nm_mapping, norm_stats = (
+    load_trained_policy(run_id))
+```
+
+For example, to evaluate a trained policy on another test reference — the
+same plant file with the price peak moved, say — without retraining:
+
+```python
 from neurotemplate.control.pipeline import evaluate_closed_loop
 from neurotemplate.control.scenarios import load_control_splits
 
@@ -784,7 +809,9 @@ results, _ = evaluate_closed_loop(cfg, sysid_cfg, cl_system, test_dfs,
 print(results.energy.weighted_energy["Tariff [$/kWh]"], results.comfort_mean_exceedance)
 ```
 
-The CLI wrappers ([modeling/cli/train.py](src/neurotemplate/modeling/cli/train.py), [control/cli/train.py](src/neurotemplate/control/cli/train.py)) are short enough — ~30 lines each — that they're worth reading as a template if you want to write your own driver.
+Export is `neurotemplate.export.dynamics.export_model` and
+`neurotemplate.export.policy.export_policy`, both taking the loaded objects
+above; [export/cli.py](src/neurotemplate/export/cli.py) shows the calls.
 
 ## Package layout
 
@@ -793,7 +820,7 @@ src/neurotemplate/
 ├── hooks.py             # load_modeling_hooks(cfg), load_control_hooks(cfg)
 ├── prep.py              # average / expand / fill_gaps / smooth — data prep, never called by training
 ├── common/
-│   ├── config.py        # YAML, --set, dict_to_dataclass, CLI parser
+│   ├── config.py        # load_config, YAML, --set, dict_to_dataclass, CLI parser
 │   ├── data_utils.py    # CSV load, sliding windows, norm/denorm
 │   ├── metrics.py       # ChannelMetrics / LevelMetrics, per_channel_metrics, level_metrics
 │   └── reportcard.py    # _section, write_reportcard (shared by both sides)
@@ -813,6 +840,8 @@ src/neurotemplate/
 │   ├── scenarios.py     # SynthSpec + physics checks
 │   ├── experiment.py    # train_with_curriculum, build_trainer
 │   ├── pipeline.py      # train_and_evaluate, evaluate_and_plot
+│   ├── train.py         # train_model — one tracked run (nt model train)
+│   ├── load.py          # load_trained_dynamics — rebuild a run by id
 │   ├── plotting.py
 │   ├── reportcard.py
 │   └── cli/             # train, optuna, load, debug_heads
@@ -826,6 +855,7 @@ src/neurotemplate/
     ├── metrics.py       # ComfortMetrics, EnergyMetrics, ActuationMetrics, JumpResponse, ResidualMetrics
     ├── pipeline.py      # train_policy, evaluate_closed_loop, log_control_results
     ├── reportcard.py    # render_control_reportcard
+    ├── train.py         # train_control — one tracked run (nt control train)
     ├── load.py          # load_frozen_dynamics, load_trained_policy
     └── cli/             # train
 └── export/              # nt export model / nt export policy

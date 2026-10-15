@@ -23,7 +23,7 @@ import torch
 
 from neurotemplate.common.data_utils import compute_norm_stats, normalize_df
 from neurotemplate.modeling.config import ModelingConfig as Config
-from neurotemplate.modeling.pipeline import train_and_evaluate
+from neurotemplate.modeling.pipeline import TrainedModel, train_and_evaluate
 from fake_logger import FakeLogger
 from model_fixtures import trainable_cfg
 
@@ -44,7 +44,7 @@ def _make_cfg(savedir, **over) -> Config:
     return trainable_cfg(savedir, **{"seed": 123, **over})
 
 
-def _run(cfg: Config) -> dict:
+def _run(cfg: Config) -> TrainedModel:
     df = _synthetic_df()
     norm_stats = compute_norm_stats(df, norm_type=cfg.norm_type)
     dfs = [normalize_df(df, norm_stats)]
@@ -59,7 +59,7 @@ def _run(cfg: Config) -> dict:
 
 def test_ensemble_seeds_one_has_no_ensemble_and_no_spread_section(tmp_path):
     result = _run(_make_cfg(tmp_path, ensemble_seeds=1))
-    assert result["ensemble"] is None
+    assert result.ensemble is None
     reportcard = (tmp_path / "reportcard.md").read_text()
     assert "Seed ensemble spread" not in reportcard
 
@@ -72,17 +72,17 @@ def test_ensemble_seeds_three_reports_a_spread_without_disturbing_the_primary(tm
     result_one = _run(_make_cfg(tmp_path / "one", ensemble_seeds=1))
     result_three = _run(_make_cfg(tmp_path / "three", ensemble_seeds=3))
 
-    state_one = result_one["dyn_sys"].state_dict()
-    state_three = result_three["dyn_sys"].state_dict()
+    state_one = result_one.dyn_sys.state_dict()
+    state_three = result_three.dyn_sys.state_dict()
     assert state_one.keys() == state_three.keys()
     for key in state_one:
         assert torch.equal(state_one[key], state_three[key]), (
             f"primary model's {key!r} differs with ensemble_seeds=3"
         )
-    assert result_one["best_dev_loss"] == result_three["best_dev_loss"]
+    assert result_one.best_dev_loss == result_three.best_dev_loss
 
-    assert result_one["ensemble"] is None
-    ensemble = result_three["ensemble"]
+    assert result_one.ensemble is None
+    ensemble = result_three.ensemble
     assert ensemble is not None
     assert ensemble.n_seeds == 3
     assert "y0" in ensemble.rmse

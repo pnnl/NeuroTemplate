@@ -30,7 +30,7 @@ from neurotemplate.common.data_utils import NormStats, get_grad_masks
 from neurotemplate.common.run_summary import write_run_summary
 from neurotemplate.common.tracking import tracked_run
 from neurotemplate.hooks import MODELING_SNAPSHOT, load_modeling_hooks, snapshot_hooks
-from neurotemplate.modeling.cli.train import LOGGED_METRICS, print_finished
+from neurotemplate.modeling.cli.train import print_finished
 from neurotemplate.modeling.config import ModelingConfig
 from neurotemplate.modeling.experiment import resolve_device, set_seeds, train_with_curriculum
 from neurotemplate.modeling.heads import HeadStack
@@ -38,6 +38,7 @@ from neurotemplate.modeling.pipeline import (
     prepare_data, run_summary_metrics, train_and_evaluate,
 )
 from neurotemplate.modeling.reportcard import spread_stats
+from neurotemplate.modeling.train import LOGGED_METRICS
 
 
 @beartype
@@ -190,11 +191,10 @@ def main() -> None:
         )
         write_run_summary(
             logger, stage="model", config_path=cli.config, cfg=cfg,
-            metrics=run_summary_metrics(result["test_results"]),
+            metrics=run_summary_metrics(result.test_results),
             mapping=data.nm_mapping,
         )
-        print_finished(logger.run.info.run_id,
-                       result["test_results"].metrics)
+        print_finished(result.run_id, result.test_results.metrics)
         print(f"Optuna dashboard: uv run optuna-dashboard sqlite:///{db_path}")
 
 

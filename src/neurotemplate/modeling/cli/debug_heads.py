@@ -2,7 +2,7 @@
 Head diagnostics: plot activation and gradient curves of a trained model's
 output heads.
 
-Loads a run via cli/load.load_trained_dynamics, then probes the
+Loads a run via modeling/load.load_trained_dynamics, then probes the
 head_stack directly — no dataset, no rollout, just the heads themselves.
 
 Useful for catching:
@@ -26,7 +26,7 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import torch
 
-from neurotemplate.modeling.cli.load import load_trained_dynamics
+from neurotemplate.modeling.load import load_trained_dynamics
 from neurotemplate.modeling.plotting import PLOT_STYLE
 
 # Force-disable TeX rendering: titles contain Unicode (β, ∂, σ) and channel

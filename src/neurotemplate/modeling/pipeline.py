@@ -259,6 +259,18 @@ class TestResults:
     persistence_levels: list[LevelMetrics] = field(default_factory=list)
 
 
+@dataclass
+class TrainedModel:
+    """One finished training run: its MLflow id and what it produced."""
+    run_id: str
+    dyn_sys: object
+    best_dev_loss: float
+    train_time_s: float
+    test_results: TestResults
+    # None unless cfg.ensemble_seeds > 1.
+    ensemble: Optional[EnsembleSpread]
+
+
 # ── Test eval + plotting (one operation) ────────────────────────
 
 
@@ -784,7 +796,7 @@ def train_and_evaluate(
     head_stack: Optional[HeadStack] = None,
     block_spec: Optional[dict[str, dict]] = None,
     extra_metrics: Optional[dict] = None,
-) -> dict:
+) -> TrainedModel:
     """
     Train one model, evaluate it, plot, and write the reportcard.
 
@@ -803,9 +815,7 @@ def train_and_evaluate(
     `extra_metrics` lets the caller log run-level numbers that aren't part
     of the standard set (e.g. optuna's `search_time`).
 
-    Returns a dict with dyn_sys, best_dev_loss, train_time_s, test_results,
-    and ensemble (None unless cfg.ensemble_seeds > 1) so the entry point can
-    print a final summary.
+    Returns the run as a `TrainedModel`, its id read off `logger`.
     """
     train_t0 = tic()
     # Reseed here rather than trust the caller to have left the RNG at
@@ -886,10 +896,11 @@ def train_and_evaluate(
     )
     write_reportcard(md, Path(cfg.savedir), logger=logger)
 
-    return {
-        "dyn_sys": dyn_sys,
-        "best_dev_loss": best_dev_loss,
-        "train_time_s": train_time_s,
-        "test_results": test_results,
-        "ensemble": ensemble,
-    }
+    return TrainedModel(
+        run_id=logger.run.info.run_id,
+        dyn_sys=dyn_sys,
+        best_dev_loss=best_dev_loss,
+        train_time_s=train_time_s,
+        test_results=test_results,
+        ensemble=ensemble,
+    )

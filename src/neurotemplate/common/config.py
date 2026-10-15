@@ -221,7 +221,10 @@ def _parse_value(raw: str) -> Any:
         return text
 
 
-def apply_overrides(config_dict: dict, overrides: list[str]) -> dict:
+def parse_set_args(overrides: list[str]) -> dict[str, Any]:
+    """`--set key=value` strings as {key: parsed value}; a repeated key keeps
+    its last value."""
+    parsed = {}
     for override in overrides:
         if "=" not in override:
             raise ConfigError(f"Override must be in key=value form: {override}")
@@ -229,11 +232,26 @@ def apply_overrides(config_dict: dict, overrides: list[str]) -> dict:
         key = key.strip()
         if not key:
             raise ConfigError(f"Override key is empty in '{override}'")
-        if key not in config_dict:
-            raise ConfigError(f"Override target does not exist: {key}")
-        config_dict[key] = _parse_value(raw_value)
+        parsed[key] = _parse_value(raw_value)
+    return parsed
 
-    return config_dict
+
+def apply_overrides(config_dict: dict, overrides: dict[str, Any]) -> dict:
+    unknown = sorted(set(overrides) - set(config_dict))
+    if unknown:
+        raise ConfigError(f"Override target does not exist: {', '.join(unknown)}")
+    return {**config_dict, **overrides}
+
+
+def load_config(path: Union[str, Path], cls: Type[T],
+                overrides: Optional[dict[str, Any]] = None) -> T:
+    """A YAML config file as a validated `cls`, with `overrides` (field name
+    -> value) applied on top — what `--config` and `--set` do on the CLI."""
+    cfg = dict_to_dataclass(load_yaml(Path(path).expanduser()), cls)
+    if overrides:
+        cfg = dict_to_dataclass(apply_overrides(cfg.asdict(), overrides), cls)
+    cfg.validate()
+    return cfg
 
 
 def list_available_configs(config_dir: Path) -> list[str]:
@@ -332,12 +350,7 @@ def load_config_from_cli(
     # name the file that was loaded rather than the bare name (or None) the
     # user typed.
     cli_args.config = str(config_path)
-    cfg = dict_to_dataclass(load_yaml(config_path), cls)
-
-    if cli_args.set:
-        cfg = dict_to_dataclass(apply_overrides(cfg.asdict(), cli_args.set), cls)
-
-    cfg.validate()
+    cfg = load_config(config_path, cls, parse_set_args(cli_args.set))
 
     if cli_args.print_config:
         print(yaml.safe_dump(cfg.asdict(), sort_keys=False))

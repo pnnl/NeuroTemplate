@@ -11,7 +11,8 @@ fields, which accept one path or many.
 import pytest
 
 from neurotemplate.common.config import (
-    ConfigError, apply_overrides, dict_to_dataclass, paths_as_list,
+    ConfigError, apply_overrides, dict_to_dataclass, parse_set_args,
+    paths_as_list,
 )
 from neurotemplate.modeling.config import ModelingConfig as Config
 
@@ -51,7 +52,7 @@ def test_every_float_format_resolves_to_the_same_number(value):
     cfg = dict_to_dataclass({"ref_gain": value}, Config)
     assert isinstance(cfg.ref_gain, float) and cfg.ref_gain == 100000.0
 
-    merged = apply_overrides({"ref_gain": 1.0}, [f"ref_gain={value}"])
+    merged = apply_overrides({"ref_gain": 1.0}, parse_set_args([f"ref_gain={value}"]))
     assert dict_to_dataclass(merged, Config).ref_gain == 100000.0
 
 
@@ -79,7 +80,7 @@ def test_set_parses_a_json_list():
     merged = apply_overrides(
         {"train_data_path": "old.csv", "dev_data_path": "dev.csv",
          "test_data_path": "test.csv"},
-        ['train_data_path=["a.csv","b.csv"]'])
+        parse_set_args(['train_data_path=["a.csv","b.csv"]']))
     cfg = dict_to_dataclass(merged, Config)
     cfg.validate()
     assert cfg.train_data_path == ["a.csv", "b.csv"]

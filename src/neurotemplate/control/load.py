@@ -1,7 +1,7 @@
 """
 Load a frozen sys-id surrogate for closed-loop control, or a trained policy.
 
-Thin wrapper over modeling/cli/load.load_trained_dynamics.
+Thin wrapper over modeling/load.load_trained_dynamics.
 Freezing is explicit here: the dynamics is held fixed while the policy trains
 (the canonical Neuromancer "freeze identified dynamics, train policy" pattern).
 """
@@ -19,8 +19,8 @@ from neurotemplate.control.config import ControlConfig
 from neurotemplate.control.losses import extend_norm_stats, resolve_objective
 from neurotemplate.control.policy import build_policy
 from neurotemplate.hooks import CONTROL_SNAPSHOT, run_hooks_path
-from neurotemplate.modeling.cli.load import (
-    _resolve_artifacts_dir, config_from_run_params, load_trained_dynamics,
+from neurotemplate.modeling.load import (
+    config_from_run_params, load_trained_dynamics, resolve_artifacts_dir,
 )
 from neurotemplate.modeling.experiment import resolve_device
 
@@ -78,7 +78,7 @@ def load_trained_policy(run_id: str, run_dir=None, sysid_run_dir=None):
     config exactly as training built them.
     """
     cfg = config_from_run_params(run_id, ControlConfig)
-    artifacts_dir = _resolve_artifacts_dir(run_dir, run_id)
+    artifacts_dir = resolve_artifacts_dir(run_dir, run_id)
     cfg.user_hooks_path = run_hooks_path(artifacts_dir, CONTROL_SNAPSHOT)
     cfg.validate()
     cfg.device = resolve_device(cfg.device)

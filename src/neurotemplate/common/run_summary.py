@@ -38,12 +38,13 @@ def build_run_summary(
     *,
     stage: str,
     run_id: str,
-    config_path: str,
+    config_path: Optional[str],
     cfg: Any,
     metrics: dict[str, float],
     mapping: Optional[dict[str, list[str]]] = None,
 ) -> dict:
-    """Build the summary envelope for one finished run."""
+    """Build the summary envelope for one finished run. `config_path` is
+    None for a config built in code rather than loaded from a file."""
     if stage not in _PARAM_FIELDS:
         raise ValueError(f"stage must be one of {sorted(_PARAM_FIELDS)}, "
                          f"got {stage!r}")
@@ -66,7 +67,7 @@ def write_run_summary(
     logger,
     *,
     stage: str,
-    config_path: str,
+    config_path: Optional[str],
     cfg: Any,
     metrics: dict[str, float],
     mapping: Optional[dict[str, list[str]]] = None,

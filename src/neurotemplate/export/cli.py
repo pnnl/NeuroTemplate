@@ -27,7 +27,7 @@ from neurotemplate.control.scenarios import load_control_splits
 from neurotemplate.export.dynamics import export_model
 from neurotemplate.export.policy import export_policy
 from neurotemplate.export.trace import EXPORTERS
-from neurotemplate.modeling.cli.load import load_trained_dynamics
+from neurotemplate.modeling.load import load_trained_dynamics
 
 
 def _common_args(parser: argparse.ArgumentParser) -> None:
