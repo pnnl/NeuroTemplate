@@ -1,11 +1,11 @@
 """
-Export trained models as ONNX packages that run without torch.
+Export trained models as standalone packages: ONNX graphs, torch programs, or C.
 
 The trained graph is serialised, not reimplemented: `graphs` wraps a trained
 `SSMGrad` so that normalisation, window layout and the hidden state are all
 inside the traced graph, `state` lifts hidden state into explicit tensors via
-the stateful-block protocol, `trace` exports and audits, `verify` proves the
-result reproduces the trained system, and `package` writes a consumer
-package around the shipped `runtime` and its C++ twin in `cpp/`. Entry
-points: `nt export model`, `nt export policy`.
+the stateful-block protocol, `trace` exports and audits, `ccode` turns the
+ONNX into C, `verify` proves the result reproduces the trained system, and
+`package` writes a package around the shipped `runtime` (and, for C, the C
+runner in `c/`). Entry points: `nt export model`, `nt export policy`.
 """

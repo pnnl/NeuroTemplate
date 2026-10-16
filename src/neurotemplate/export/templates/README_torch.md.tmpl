@@ -1,0 +1,23 @@
+## From torch directly
+
+The graphs are torch programs (`torch.export`). They load with torch alone,
+with no NeuroTemplate and no model code, as ordinary differentiable modules:
+
+```python
+import torch
+
+warm_start = torch.export.load("model/warm_start.pt2").module()
+step = torch.export.load("model/step.pt2").module()
+y_next, state = warm_start(y=y, u=u, d=d)            # the first step of a rollout
+y_next, state = step(y=y, u=u, d=d, state=state)     # every later step
+
+policy = torch.export.load("policy/policy.pt2").module()
+u = policy(y=y, d=d, r=r)                            # r only if it reads one
+```
+
+Each window is a `[batch, steps, n]` float32 tensor in physical units, laid
+out as for `Model` and `Policy` above; a model whose hidden state width is 0
+takes no `state` and returns `y_next` alone. Gradients flow to the inputs and
+the parameters, so you can plan through the model or embed it in a larger
+one. Only the batch axis may change. `Model` and `Policy` run these same
+programs with numpy in and out, and without gradients.

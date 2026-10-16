@@ -1,47 +1,26 @@
 """Check that this package works on your machine:  python validate.py
 
-The generic check reproduces every */reference/ fixture, which the *trained*
-model wrote at export time, with this machine's onnxruntime. Passing means
-the whole chain reproduces the model: trained model -> export -> this
-runtime -> this platform. A model exported unverified has no fixture; the
-check says so instead.
-
-This file is written once and never overwritten by a re-export, so add
-project-specific checks (accuracy against a model card, step responses) at
-the end. Exits non-zero if any check fails.
+Reproduces each reference/ fixture, which the *trained* model wrote at export
+time, with this machine's runtime. Passing means the whole chain reproduces
+the model: trained model -> export -> this runtime -> this platform. Exits
+non-zero if any check fails.
 """
 
 import sys
-from pathlib import Path
 
-from $package import Model, Policy, check_reference
+from runtime import check_reference
 
-failures, checked = [], []
-
-
-def check(name, ok, detail=""):
-    print(f"  [{'PASS' if ok else 'FAIL'}] {name}{'  ' + detail if detail else ''}")
-    checked.append(name)
-    if not ok:
-        failures.append(name)
-
-
-print("1. loading")
-if Path("model").is_dir():
-    print("   " + Model("model").describe().replace("\n", "\n   "))
-if Path("policy").is_dir():
-    print("   " + Policy("policy").describe().replace("\n", "\n   "))
-
-print("\n2. reproducing the trained model's own answers")
-for result in check_reference("."):
+print("reproducing the trained model's own answers")
+results = check_reference(".")
+failures = 0
+for result in results:
     print(result.report())
-    if result.verified:
-        check(f"{result.name} matches {result.name}/reference/", result.ok)
-
-# ── project-specific checks go here ──────────────────────────────
+    print(f"  [{'PASS' if result.ok else 'FAIL'}] {result.name} matches "
+          f"{result.name}/reference/")
+    failures += not result.ok
 
 print()
 if failures:
-    print(f"FAILED {len(failures)} check(s): {', '.join(failures)}")
+    print(f"FAILED {failures} check(s)")
     sys.exit(1)
-print(f"All {len(checked)} check(s) passed." if checked else "Nothing was checked.")
+print(f"All {len(results)} check(s) passed.")

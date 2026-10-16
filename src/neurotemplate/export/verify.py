@@ -32,10 +32,11 @@ from neurotemplate.export.runtime import Model
 from neurotemplate.export.state import read_state
 from neurotemplate.modeling.dynamics import stateful_blocks
 
-#: Export time, same machine, ONNX Runtime vs torch. Measured at or near
-#: float32 round-off for every family; the export refuses to write above it.
+#: Export time, same machine, the package's runtime vs the trained torch
+#: model. Measured at or near float32 round-off for every family; the export
+#: refuses to write above it.
 AGREEMENT_TOL = 1e-4
-#: A consumer's machine, its onnxruntime vs the shipped torch reference. This
+#: A consumer's machine, its runtime vs the shipped torch reference. This
 #: absorbs runtime *and* platform float differences, and cross-platform
 #: reproducibility has not been measured, so it keeps 10x headroom.
 REPRODUCE_TOL = 1e-3
@@ -97,7 +98,7 @@ def torch_rollout(dyn_sys, nm_mapping: dict[str, list[str]],
     return Rollout(y=y, state=state)
 
 
-def onnx_rollout(model_dir, frame: pd.DataFrame) -> Rollout:
+def package_rollout(model_dir, frame: pd.DataFrame) -> Rollout:
     """The exported package's rollout, through the runtime a consumer runs."""
     model = Model(model_dir)
     y, state = model.rollout({c: frame[c].to_numpy() for c in frame.columns})

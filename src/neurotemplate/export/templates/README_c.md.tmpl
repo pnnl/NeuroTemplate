@@ -1,0 +1,26 @@
+## From C
+
+`nt_model.c` and `nt_policy.c` are the C runner: a few lines around the
+generated graphs, with no heap and no I/O. Every shape is a compile-time
+constant in `model/model.h` and `policy/policy.h`, which also list the columns
+in the order every array uses.
+
+```c
+#include "nt_model.h"
+
+nt_model_state state;
+nt_model_warmup(&state, y, u, d);      /* each [NT_MODEL_HISTORY][n], oldest row first */
+nt_model_step(&state, u_now, d_now);   /* one step under this step's u and d */
+state.outputs;                         /* [NT_MODEL_NY], one timestep later */
+
+#include "nt_policy.h"
+
+nt_policy_act(y, d, r, u);             /* windows in; u is [NT_POLICY_NU]; r only if NT_POLICY_HAS_R */
+```
+
+To build them into your own program, compile the runner and the generated
+graphs with `-I.` and link `-lm`; the Makefile has the line.
+
+`runtime.py` runs the same compiled C from Python, through ctypes and the
+library `make` builds (`libnt.so`, or `libnt.dylib` on macOS). Rebuild it with
+`make` after every re-export.

@@ -2,9 +2,9 @@
 `model.json`: what a consumer needs to drive the two graphs, and what a
 human needs to trust them.
 
-The runtime reads only the contract fields: `format`, `export_id`, `opset`,
-`verified`, the column lists, `history_steps`, `timestep_seconds` and
-`state.width`.
+The runtime reads only the contract fields: `format`, `graph_format`,
+`export_id`, `opset`, `verified`, the column lists, `history_steps`,
+`timestep_seconds` and `state.width`.
 Everything under `architecture` is documentation the runtime never reads —
 above all the 2R2C time constants from `RCBlock.describe()`, which are the
 reason a grey-box model is worth trusting and which a graph hides. Do not
@@ -21,19 +21,21 @@ from neurotemplate.export.trace import OPSET
 from neurotemplate.modeling.dynamics import describe_dynamics
 
 #: Must match `runtime.FORMAT`; the runtime refuses any other value.
-FORMAT = 2
+FORMAT = 3
 
 
 def build_spec(*, export_id: str, run_id: str, cfg, dyn_sys,
                nm_mapping: dict[str, list[str]], norm_stats: dict[str, dict],
                timestep_seconds: float, slots: list[StateSlot],
-               description: Optional[str], verified: bool) -> dict:
+               description: Optional[str], verified: bool,
+               graph_format: str) -> dict:
     """The `model.json` document for one export."""
     columns = nm_mapping["Y"] + nm_mapping["U"] + nm_mapping["D"]
     return {
         "format": FORMAT,
+        "graph_format": graph_format,
         "export_id": export_id,
-        "opset": OPSET,
+        "opset": opset(graph_format),
         # False only when the trained model blew up on the verification data
         # and the user chose to export anyway: the graphs were never checked
         # against it, and no reference/ ships.
@@ -60,3 +62,8 @@ def build_spec(*, export_id: str, run_id: str, cfg, dyn_sys,
         },
         "trained_from": {"run_id": run_id, "model": cfg.model},
     }
+
+
+def opset(graph_format: str) -> Optional[int]:
+    """The ONNX opset the graphs target; a torch program has none."""
+    return OPSET if graph_format == "onnx" else None

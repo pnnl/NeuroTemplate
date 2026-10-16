@@ -1,0 +1,28 @@
+# Build the C runtime, and the library the Python runner loads:  make
+# Then: $then
+CC ?= cc
+CFLAGS ?= -O2
+SOURCES = $sources
+DEFINES = $defines
+
+ifeq ($$(shell uname -s),Darwin)
+LIBRARY = libnt.dylib
+else
+LIBRARY = libnt.so
+endif
+
+all: $programs $$(LIBRARY)
+
+example: example.c $$(SOURCES)
+	$$(CC) $$(CFLAGS) $$(DEFINES) -I. -o $$@ $$^ -lm
+
+validate: validate.c $$(SOURCES)
+	$$(CC) $$(CFLAGS) $$(DEFINES) -I. -o $$@ $$^ -lm
+
+$$(LIBRARY): $$(SOURCES)
+	$$(CC) $$(CFLAGS) -I. -shared -fPIC -o $$@ $$^ -lm
+
+clean:
+	rm -f example validate libnt.so libnt.dylib
+
+.PHONY: all clean

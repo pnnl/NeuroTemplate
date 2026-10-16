@@ -1,0 +1,9 @@
+## Checking it
+
+`validate` reproduces each `reference/` fixture on this machine. Those fixtures
+were written by the **trained torch model** at export time, not by these
+graphs, so a pass covers the whole chain: trained model, export, runtime,
+platform. The tolerances are 1e-3 of each column's normalisation scale,
+headroom for float differences between machines; the export itself agreed
+with the trained model much more tightly (`agreement_at_export` in each
+`REFERENCE.json`).

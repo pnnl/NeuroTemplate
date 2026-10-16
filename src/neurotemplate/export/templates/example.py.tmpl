@@ -1,38 +1,44 @@
-"""The smallest useful program:  python example.py"""
+"""The smallest useful program:  python example.py
 
+Runs the model open loop and the policy, and times them. The model runs on
+the shipped reference data where there is some, and then, for timing, on each
+column's typical value (its mean in the training data, from model.json).
+"""
+
+import time
 from pathlib import Path
 
 import numpy as np
 
-from $package import Model, Policy, read_csv, read_windows
+from runtime import Model, Policy, read_csv, read_windows
 
-# Runs on the shipped reference data, which a model exported unverified lacks.
-if Path("model/reference").is_dir():
+STEPS = 1000
+
+if Path("model").is_dir():
     model = Model("model")
     print(model.describe())
-
-    # Physical units throughout; the model normalises internally.
-    index, data = read_csv("model/reference/example_input.csv")
-    print(f"\nloaded {len(index)} rows, {index[0]} .. {index[-1]}")
-
-    # 1. A forecast of the whole window. The first `history_steps` rows are
-    # the warm-up; after that the model feeds on its own predictions and
-    # reads only the u and d columns.
-    forecast = model.predict(data)
     s = model.history_steps
-    for column in model.y_columns[:4]:
-        rmse = np.sqrt(np.mean((forecast[column] - data[column][s:]) ** 2))
-        print(f"  {column}: open-loop RMSE {rmse:.3f} against the recorded values")
 
-    # 2. Step by step. `step` is pure: it returns a new State and never
-    # modifies the one passed in. A controller chooses the u columns itself.
-    state = model.warmup({c: v[:s] for c, v in data.items()})
-    for k in range(12):
-        state = model.step(state, {c: data[c][s + k - 1]
-                                   for c in model.u_columns + model.d_columns})
-    first = model.y_columns[0]
-    print(f"\n12 steps later: {first} = {state.outputs[first]:.3f} "
-          f"(recorded {data[first][s + 11]:.3f})")
+    if Path("model/reference").is_dir():
+        # A forecast of the whole window: the first history_steps rows are the
+        # warm-up, then the model feeds on its own predictions and reads only
+        # the u and d columns.
+        index, data = read_csv("model/reference/example_input.csv")
+        forecast = model.predict(data)
+        for column in model.y_columns[:4]:
+            rmse = np.sqrt(np.mean((forecast[column] - data[column][s:]) ** 2))
+            print(f"  {column}: open-loop RMSE {rmse:.3f} over {len(index) - s} steps")
+
+    # Step by step. `step` returns a new State and never modifies the one
+    # passed in; a controller would choose the u columns itself.
+    typical = {c: v["shift"] for c, v in model.spec["norm_stats"].items()}
+    state = model.warmup({c: np.full(s, v) for c, v in typical.items()})
+    inputs = {c: typical[c] for c in model.u_columns + model.d_columns}
+    start = time.perf_counter()
+    for _ in range(STEPS):
+        state = model.step(state, inputs)
+    print(f"  {STEPS} open-loop steps, "
+          f"{(time.perf_counter() - start) / STEPS * 1e6:.1f} us per step")
 
 if Path("policy").is_dir():
     policy = Policy("policy")
@@ -41,3 +47,8 @@ if Path("policy").is_dir():
     windows = read_windows("policy/reference/inputs.csv", policy.inputs)
     first = {name: window[0] for name, window in windows.items()}
     print("  first reference window ->", policy.act(**first))
+    start = time.perf_counter()
+    for _ in range(STEPS):
+        policy.act(**first)
+    print(f"  {STEPS} commands, "
+          f"{(time.perf_counter() - start) / STEPS * 1e6:.1f} us per command")

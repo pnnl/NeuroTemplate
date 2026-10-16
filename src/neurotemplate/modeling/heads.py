@@ -540,8 +540,14 @@ class OrdinalHead(Head):
         """Exact level value: snap to the k-th level corresponding to the
         count of decision thresholds exceeded. Returns one of self.level_values."""
         z = z.squeeze(-1)
-        idx = (z.unsqueeze(-1) > self.decision_thresholds).sum(dim=-1)
-        return self.level_values[idx]
+        # `level_values[count]`, written in floats only: the C export's code
+        # generator (onnx2c) has no GatherND and no cast to int64, which an
+        # integer index exports as. The one-hot sum is exact, since every
+        # term but the chosen level's is zero.
+        exceeded = (z.unsqueeze(-1) > self.decision_thresholds).to(z.dtype)
+        count = exceeded.sum(dim=-1, keepdim=True)
+        index = torch.arange(len(self.level_values), dtype=z.dtype, device=z.device)
+        return ((count == index).to(z.dtype) * self.level_values).sum(dim=-1)
 
     def levels(self) -> torch.Tensor:
         return self.level_values

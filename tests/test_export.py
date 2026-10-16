@@ -1,5 +1,5 @@
 """
-ONNX export: the exported package must BE the trained model.
+Export: the exported package must BE the trained model.
 
 Every case goes through `export_model`, which rolls the trained
 `SystemPreview` and the exported package (through the shipped runtime) out
@@ -13,22 +13,29 @@ a key has a single column.
 Cases: each family, the per-block split, each head type, and the
 heterogeneous 2r2c + mlp composition with a prestack and a mixed head stack
 — the case the old hand-written deliveries could not express. That one runs
-under the default (dynamo) exporter; the rest use the faster legacy tracer,
-which traces the same forward code.
+under the default (dynamo) exporter in every format (ONNX, torch programs,
+C); the rest use the faster legacy tracer, which traces the same forward
+code. The ONNX graphs must ship without the exporter's per-node debugging
+record, and a torch program must load without NeuroTemplate.
 
 Plus two failure modes that would ship a wrong model silently: a step graph
 with its hidden state baked in as a constant, and an export that disagrees
 with the trained model being written anyway; and a model that blows up on
-the split, which exports unverified only when the user says so. And the
-shipped C++ runner, built and run against a package holding both a model and
-a policy, then an unverified model.
+the split, which exports unverified only when the user says so, and then
+ships nothing to validate. And the shipped C runner, built and run against a
+package holding both a model and a policy, then an unverified model.
+
+The C cases need onnx2c (with the keepdims=0 reduction fix) and make on
+PATH, and are skipped without them.
 """
 
 import json
 import shutil
 import subprocess
+import sys
 
 import numpy as np
+import onnx
 import onnxruntime as ort
 import pandas as pd
 import pytest
@@ -47,6 +54,10 @@ from neurotemplate.modeling.heads import (
     BinaryHead, BoundedHead, HeadStack, OrdinalHead, RegressionHead,
 )
 from model_fixtures import model_cfg
+
+needs_c = pytest.mark.skipif(
+    shutil.which("onnx2c") is None or shutil.which("make") is None,
+    reason="needs onnx2c and make")
 
 IN_STEPS = 4
 ROWS = 60
@@ -110,8 +121,13 @@ def export(tmp_path, cfg, mapping, block_spec=None, heads=None, exporter="legacy
     return export_model(
         dyn_sys=dyn_sys, cfg=cfg, nm_mapping=mapping, norm_stats=stats,
         frame=frame, timestep_seconds=300.0, run_id="0" * 32,
-        out_dir=tmp_path / "pkg", package="exported", exporter=exporter, **options,
+        out_dir=tmp_path / "pkg", exporter=exporter, **options,
     )
+
+
+def make(package):
+    """Build a C package's runner and library, as its README says to."""
+    subprocess.run(["make"], cwd=package, check=True, capture_output=True)
 
 
 CASES = {
@@ -135,15 +151,32 @@ def test_every_family_and_head_exports_as_the_trained_model(tmp_path, name):
     assert all(check.ok for check in check_reference(result.out_dir))
 
 
-def test_heterogeneous_model_with_prestack_and_heads_exports(tmp_path):
+@pytest.mark.parametrize("graph_format", [
+    "onnx", "torch", pytest.param("c", marks=needs_c)])
+def test_heterogeneous_model_with_prestack_and_heads_exports(tmp_path, graph_format):
     """The exit criterion: 2r2c + mlp, a demand prestack, an ordinal head."""
     result = export(tmp_path, make_cfg(), MIXED_MAPPING, MIXED,
-                    [RegressionHead(), OrdinalHead(n_levels=3)], exporter="dynamo")
+                    [RegressionHead(), OrdinalHead(n_levels=3)], exporter="dynamo",
+                    graph_format=graph_format)
     assert result.state_width == 1                  # the one zone's mass
+    if graph_format == "c":
+        make(result.out_dir)                        # the Python runner's library
     assert all(check.ok for check in check_reference(result.out_dir))
     # The package drives itself from its own files, with no training code.
     model = Model(result.out_dir / "model")
     assert model.y_columns == MIXED_MAPPING["Y"]
+
+    model_dir = result.out_dir / "model"
+    if graph_format == "onnx":
+        # The exporter's stack traces carry this machine's paths: never shipped.
+        for path in model_dir.glob("*.onnx"):
+            assert not any(node.metadata_props or node.doc_string
+                           for node in onnx.load(str(path)).graph.node)
+    elif graph_format == "torch":
+        loads = ("import sys, torch\n"
+                 f"torch.export.load({str(model_dir / 'step.pt2')!r}).module()\n"
+                 "assert not any(m.startswith('neurotemplate') for m in sys.modules)")
+        subprocess.run([sys.executable, "-c", loads], check=True, cwd=tmp_path)
 
 
 def test_step_graph_follows_the_state_it_is_handed(tmp_path):
@@ -221,9 +254,8 @@ def test_a_model_that_blows_up_exports_unverified_only_when_asked(tmp_path, monk
     assert not (model_dir / "reference").exists()
     with pytest.warns(UserWarning, match="UNVERIFIED"):
         Model(model_dir)
-    (check,) = check_reference(result.out_dir)
-    assert not check.verified and check.ok
-    assert "UNVERIFIED" in check.report()
+    assert check_reference(result.out_dir) == []
+    assert not (result.out_dir / "validate.py").exists()
 
 
 # ── policy ───────────────────────────────────────────────────────
@@ -240,15 +272,16 @@ def _priced(**overrides):
                 reference_preview={TARIFF: 3, LOW: 1}, **overrides)
 
 
-@pytest.mark.parametrize("overrides", [
+@pytest.mark.parametrize("overrides, graph_format", [
     # Plain policy: its D window runs past the present (preview), and every
     # key has several columns, so a wrong window layout shows up.
-    {"d_preview": 2},
+    ({"d_preview": 2}, "torch"),
     # Everything a policy can wrap around its net: the residual anchored to
     # the reference rule, and a tariff it previews.
-    _priced(residual_delta={"Zone Cooling Setpoint [°C]": [0.0, 1.0]}, d_preview=1),
-], ids=["plain", "residual, priced"])
-def test_trained_policy_exports_as_the_trained_policy(tmp_path, overrides):
+    (_priced(residual_delta={"Zone Cooling Setpoint [°C]": [0.0, 1.0]}, d_preview=1),
+     "onnx"),
+], ids=["plain, torch", "residual, priced, onnx"])
+def test_trained_policy_exports_as_the_trained_policy(tmp_path, overrides, graph_format):
     from control_fixtures import full_setup
     from neurotemplate.control.closed_loop import build_closed_loop
     from neurotemplate.control.losses import resolve_objective
@@ -264,7 +297,8 @@ def test_trained_policy_exports_as_the_trained_policy(tmp_path, overrides):
     result = export_policy(
         policy_node=policy, cl_system=closed_loop, cfg=cfg, sysid_cfg=sysid_cfg,
         nm_mapping=nm, norm_stats=ns, test_dfs=[s["norm_df"]], run_id="0" * 32,
-        out_dir=tmp_path / "pkg", package="exported", exporter="legacy",
+        out_dir=tmp_path / "pkg", graph_format=graph_format,
+        exporter="legacy" if graph_format == "onnx" else "dynamo",
     )
     assert all(check.ok for check in check_reference(result.out_dir))
     # The reference columns are named inputs, in the order the policy reads them.
@@ -286,47 +320,47 @@ def test_trained_policy_exports_as_the_trained_policy(tmp_path, overrides):
     assert torch.allclose(wrapped, direct, atol=1e-4)
 
 
-# ── the C++ runner ───────────────────────────────────────────────
+# ── the C runner ─────────────────────────────────────────────────
 
 
-@pytest.mark.skipif(shutil.which("cmake") is None, reason="needs cmake and a C++17 compiler")
-def test_cpp_runner_reproduces_the_reference(tmp_path, request, monkeypatch):
-    """Build the package's cpp/ and run its `validate` on a model with hidden
-    state and a priced policy in one package, then again once the model is
-    re-exported unverified. This is what keeps runtime.hpp in step with the
-    json and fixtures that runtime.py reads. The first run downloads
-    onnxruntime; later runs reuse pytest's cache."""
+@needs_c
+def test_c_runner_reproduces_the_reference(tmp_path, monkeypatch):
+    """Build a C package's runner and run its `validate` on a model with
+    hidden state and a priced policy in one package, then again once the
+    model is re-exported unverified. This is what keeps the C drivers in step
+    with the generated graphs and the fixtures runtime.py reads."""
     from control_fixtures import full_setup
     from neurotemplate.control.closed_loop import build_closed_loop
     from neurotemplate.control.policy import build_policy
     from neurotemplate.export.policy import export_policy
 
-    package = export(tmp_path, make_cfg(), MAPPING, RC_SPLIT).out_dir
+    package = export(tmp_path, make_cfg(), MAPPING, RC_SPLIT, graph_format="c").out_dir
     s = full_setup(**_priced(d_preview=1))
     cfg, sysid_cfg, nm, ns = s["cfg"], s["sysid_cfg"], s["nm"], s["norm_stats"]
     policy = build_policy(cfg, sysid_cfg, nm, ns)
     export_policy(
         policy_node=policy, cl_system=build_closed_loop(s["dyn_node"], policy, cfg, sysid_cfg),
         cfg=cfg, sysid_cfg=sysid_cfg, nm_mapping=nm, norm_stats=ns,
-        test_dfs=[s["norm_df"]], run_id="0" * 32, out_dir=package, package="exported",
-        exporter="legacy",
+        test_dfs=[s["norm_df"]], run_id="0" * 32, out_dir=package, graph_format="c",
     )
 
-    deps = request.config.cache.mkdir("cpp-deps")
-    build = tmp_path / "build"
-    for command in (["cmake", "-S", "cpp", "-B", str(build), "-DCMAKE_BUILD_TYPE=Release",
-                     f"-DFETCHCONTENT_BASE_DIR={deps}"],
-                    ["cmake", "--build", str(build), "--target", "validate"]):
-        subprocess.run(command, cwd=package, check=True, capture_output=True)
-    result = subprocess.run([str(build / "validate")], cwd=package,
-                            capture_output=True, text=True)
+    make(package)
+    result = subprocess.run(["./validate"], cwd=package, capture_output=True, text=True)
     assert result.returncode == 0, result.stdout + result.stderr
     assert "[PASS] model" in result.stdout and "[PASS] policy" in result.stdout
+    assert all(check.ok for check in check_reference(package))    # through ctypes
+    # Compiled C reads whatever it is pointed at; the Python runner must
+    # refuse a wrongly shaped window rather than hand it over.
+    from neurotemplate.export.runtime import Policy
+    with pytest.raises(ValueError, match="windows of shape"):
+        Policy(package / "policy").act_batch({"y": np.zeros((1, 1, 1)),
+                                              "d": np.zeros((1, 1, 1)),
+                                              "r": np.zeros((1, 1, 1))})
 
     _blow_up(monkeypatch)
-    export(tmp_path, make_cfg(), MAPPING, RC_SPLIT, ask=lambda question: True)
-    result = subprocess.run([str(build / "validate")], cwd=package,
-                            capture_output=True, text=True)
+    export(tmp_path, make_cfg(), MAPPING, RC_SPLIT, graph_format="c",
+           ask=lambda question: True)
+    make(package)
+    result = subprocess.run(["./validate"], cwd=package, capture_output=True, text=True)
     assert result.returncode == 0, result.stdout + result.stderr
-    assert "UNVERIFIED" in result.stdout and "UNVERIFIED" in result.stderr
     assert "[PASS] model" not in result.stdout and "[PASS] policy" in result.stdout

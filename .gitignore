@@ -1,5 +1,11 @@
-# Ignore markdown reports
+# Ignore markdown reports, except the user docs
 *.md
+!/README.md
+!/INSTALL.md
+!/MODELING.md
+!/CONTROL.md
+!/EXPORT.md
+!/template/README.md
 
 # Ignore configuration files
 *.yaml

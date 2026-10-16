@@ -2,7 +2,8 @@
 Export a trained DPC policy into `<out>/policy/`.
 
     policy/
-      policy.onnx           (y, d[, r]) -> u, physical units
+      policy.onnx|.pt2|.c   (y, d[, r]) -> u, physical units
+      policy.h              C only: the contract as C constants
       policy.json           each input's columns, window length and alignment
       reference/
         inputs.csv          real closed-loop windows the trained policy saw,
@@ -39,12 +40,12 @@ import torch.nn as nn
 from neurotemplate.control.losses import resolve_objective
 from neurotemplate.control.pipeline import evaluate_closed_loop
 from neurotemplate.control.policy import describe_policy
+from neurotemplate.export import ccode
 from neurotemplate.export.package import (
-    FLOAT_FORMAT, check_package_name, install, provenance, stamp, write_json,
+    FLOAT_FORMAT, check_graph_format, install, provenance, write_graph, write_json,
 )
 from neurotemplate.export.runtime import Policy, window_columns
-from neurotemplate.export.spec import FORMAT
-from neurotemplate.export.trace import OPSET, export_graph
+from neurotemplate.export.spec import FORMAT, opset
 from neurotemplate.export.verify import AGREEMENT_TOL, REPRODUCE_TOL
 
 #: The policy Node's inputs, in the order `build_policy` gives them; a policy
@@ -144,20 +145,21 @@ class PolicyExport:
     error: dict[str, float]     # worst |ORT - torch| per command, physical units
     windows_verified: int
     windows_shipped: int
-    kept: list[str]
 
 
 def export_policy(*, policy_node, cl_system, cfg, sysid_cfg,
                   nm_mapping: dict[str, list[str]], norm_stats: dict[str, dict],
-                  test_dfs: list, run_id: str, out_dir: Path, package: str,
-                  description: Optional[str] = None, exporter: str = "dynamo",
-                  fixture_windows: int = 256, version: str = "0.1.0") -> PolicyExport:
+                  test_dfs: list, run_id: str, out_dir: Path,
+                  description: Optional[str] = None, graph_format: str = "onnx",
+                  exporter: str = "dynamo", onnx2c: str = "onnx2c",
+                  fixture_windows: int = 256) -> PolicyExport:
     """Export, verify on every closed-loop window of the test split, install.
 
+    `graph_format`, `exporter` and `onnx2c` are as for `dynamics.export_model`.
     `test_dfs` are the control run's normalised test frames. The shipped
     fixture is `fixture_windows` of the verified windows, evenly spaced.
     """
-    check_package_name(package)
+    check_graph_format(graph_format, exporter, onnx2c)
     # Export and verification run on the CPU. The evaluation rollout builds
     # its data on `sysid_cfg.device`, so the configs move with the modules —
     # as copies, leaving the caller's configs as they were.
@@ -181,14 +183,21 @@ def export_policy(*, policy_node, cl_system, cfg, sysid_cfg,
     with tempfile.TemporaryDirectory() as tmp:
         policy_dir = Path(tmp) / "policy"
         policy_dir.mkdir()
-        path = policy_dir / "policy.onnx"
         # Trace on two real windows: batch >= 2, see trace.export_graph.
-        stamp(export_graph(graph, tuple(x[:2] for x in physical.values()),
-                           [GRAPH_NAMES[s.key] for s in inputs], ["u"], path, exporter),
-              path, export_id, run_id)
+        write_graph(graph, tuple(x[:2] for x in physical.values()),
+                    [GRAPH_NAMES[s.key] for s in inputs], ["u"],
+                    policy_dir / "policy", graph_format, exporter, export_id, run_id,
+                    onnx2c)
         spec = _spec(export_id, run_id, cfg, inputs, nm_mapping, description,
-                     describe_policy(policy_node, cfg, sysid_cfg, nm_mapping, norm_stats))
+                     describe_policy(policy_node, cfg, sysid_cfg, nm_mapping, norm_stats),
+                     graph_format)
         write_json(policy_dir / "policy.json", spec)
+        u_tolerance = {c: REPRODUCE_TOL * s for c, s in u_stretch.items()}
+        if graph_format == "c":
+            typical = {GRAPH_NAMES[i.key]: i.shift for i in inputs}
+            (policy_dir / "policy.h").write_text(
+                ccode.policy_header(spec, typical, u_tolerance), encoding="utf-8")
+            ccode.compile_library(Path(tmp), "policy")
 
         named = {GRAPH_NAMES[key]: x.numpy() for key, x in physical.items()}
         actions = Policy(policy_dir).act_batch(named)
@@ -205,28 +214,30 @@ def export_policy(*, policy_node, cl_system, cfg, sysid_cfg,
         _write_reference(policy_dir / "reference", spec["inputs"], named, reference,
                          shipped, nm_mapping["U"], {
                              "export_id": export_id, "run_id": run_id,
-                             "tolerance": {"u": {c: REPRODUCE_TOL * s
-                                                 for c, s in u_stretch.items()}},
+                             "tolerance": {"u": u_tolerance},
                              "agreement_at_export": {
                                  "windows": count,
                                  "tolerance_fraction_of_stretch": AGREEMENT_TOL,
                                  "u_max_abs": error,
                              },
-                             "exported_on": provenance(exporter),
+                             "exported_on": provenance(graph_format, exporter),
                          })
-        kept = install(Path(tmp), Path(out_dir), "policy", package, version)
+        install(Path(tmp), Path(out_dir), "policy")
 
     return PolicyExport(out_dir=Path(out_dir), error=error, windows_verified=count,
-                        windows_shipped=len(shipped), kept=kept)
+                        windows_shipped=len(shipped))
 
 
 def _spec(export_id: str, run_id: str, cfg, inputs: list[PolicyInput],
-          nm_mapping, description: Optional[str], architecture: dict) -> dict:
-    """The `policy.json` document. The runtime reads `inputs` and `u_columns`."""
+          nm_mapping, description: Optional[str], architecture: dict,
+          graph_format: str) -> dict:
+    """The `policy.json` document. The runtime reads `graph_format`, `inputs`
+    and `u_columns`."""
     return {
         "format": FORMAT,
+        "graph_format": graph_format,
         "export_id": export_id,
-        "opset": OPSET,
+        "opset": opset(graph_format),
         "description": description,
         "inputs": {
             GRAPH_NAMES[spec.key]: {"columns": spec.columns, "steps": spec.steps,

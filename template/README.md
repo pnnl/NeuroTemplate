@@ -27,8 +27,8 @@ the library imports and resolves them by name, relative to the directory you
 run `nt` from. (`user_hooks_path` in the YAML relocates the hook files if you
 want them elsewhere; the config directories are fixed.)
 
-Add the dependency to your `pyproject.toml` and `uv sync` — see the install
-section of the [framework README](../README.md) — and `nt` lands on your PATH.
+Add the dependency to your `pyproject.toml` and `uv sync` — see
+[INSTALL.md](../INSTALL.md) — and `nt` lands on your PATH.
 
 ## Working with it
 
@@ -119,8 +119,7 @@ Each run is read against the one before it.
 
 ## Optional control capabilities
 
-Each is off until you ask for it — see
-[the framework README](../README.md#two-optional-control-capabilities).
+Each is off until you ask for it — see [CONTROL.md](../CONTROL.md).
 
 | Want | Implement | Then declare |
 |---|---|---|
@@ -180,5 +179,6 @@ For non-trivial hook bodies — ordinal and bounded output heads, a real
 `power_metric`, a rule-based `reference_control` — see
 [tests/fixtures/modeling_user_defined.py](../tests/fixtures/modeling_user_defined.py)
 and [tests/fixtures/control_user_defined.py](../tests/fixtures/control_user_defined.py).
-The hook contract tables in the [framework README](../README.md#hook-contracts)
-are canonical.
+What each feature does and why is in [MODELING.md](../MODELING.md) and
+[CONTROL.md](../CONTROL.md); shipping a trained run is in
+[EXPORT.md](../EXPORT.md).
