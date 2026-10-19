@@ -284,22 +284,3 @@ def bracket_band(
     mid = 0.5 * (lo + hi)
     collapse = heat > cool
     return torch.where(collapse, mid, cool), torch.where(collapse, mid, heat)
-
-
-# ---------------------------------------------------------------------
-# Optional: per-column disturbance preview
-# ---------------------------------------------------------------------
-# Leave commented out unless you need it: if this function EXISTS it fully
-# replaces `d_preview` from the YAML, so even an empty stub disables preview.
-#
-# Keys are D column names; values are step counts — how far ahead the policy
-# sees each forecast. A property of the plant, shared by every run against
-# it. A reference column's preview (the band ahead, the tariff ahead) is per
-# run, and is `reference_preview` in the YAML. When a policy is meant to act
-# ahead of something, preview the forecast that drives it and the price to
-# a similar depth: a policy that sees the price coming but not the weather
-# has to guess which of the two it is answering.
-#
-# @beartype
-# def preview_config(nm_mapping: dict[str, list[str]]) -> dict[str, int]:
-#     return {"Outdoor Temperature [degC]": 12}

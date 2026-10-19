@@ -26,10 +26,9 @@ The hooks in `control_user_defined.py`, scaffolded in
 | `plot_context_channels` | disturbances drawn on the closed-loop plot | required |
 | `power_metric` | the power signal that energy, cost and peak terms reduce | when a term names `power` |
 | `reference_control` | a rule to anchor a residual policy to | with `residual_delta` |
-| `preview_config` | how far ahead each disturbance column is seen | optional |
 
 The surrogate is a config field, `sysid_run_id`. Column roles and
-normalization come from it. Everything else, including the objective, is in
+normalization come from it. Everything else, including the objective and what the policy reads, is in
 `control_configs/control.yaml`, which explains each setting and how to size
 it.
 
@@ -66,6 +65,28 @@ does. [template/make_references.py](template/make_references.py) writes
 such files, and it is example code to edit. Listing one plant file against
 several reference files trains on several draws.
 
+## What the policy reads: `policy_window`
+
+```yaml
+policy_window:                       # syntax, not values
+  "Zone Temperature": {past: 3}
+  "Cooling Setpoint": {past: 1}
+  "Outdoor Temperature": {past: 0, future: 12}
+  "Tariff":           {past: 0, future: 48}
+```
+
+Every column the policy could read is listed: each `Y`, `U` and `D` column
+of the surrogate and each reference column the objective names. `past`
+counts steps before the current one; `future` counts steps after it, and only
+a forecast has one. A `D` or reference column requires it, and a `Y` column
+cannot take it. A `U` column's window ends at the previous step, the last
+command applied. `past: 0` there means the policy does not read its own
+commands; with `past: 1` it sees the move a `first_difference` row is pricing.
+The deepest `past`, plus the current step, is the policy's history; it sets
+how far apart training windows start and, with the surrogate's
+`history_steps`, how many recorded steps seed each rollout. The reportcard
+lists the table and the input width it gives.
+
 ## Grid response: energy, cost and peak
 
 Energy, cost and peak are three reductions of one signal, `power`, which
@@ -82,8 +103,8 @@ pre-cooling: drive the zone down through cheap hours, then coast through
 the expensive ones on the building's own mass. It appears only when all of
 these hold:
 
-- **The policy sees the expensive period coming.** `reference_preview`
-  covers the run-up to it. A policy that sees only the current price can
+- **The policy sees the expensive period coming.** The tariff's `future`
+  in `policy_window` covers the run-up to it. A policy that sees only the current price can
   react, not shift.
 - **There is somewhere to store it.** A narrow band leaves no room, and
   then "no price response" is a measurement of the band.

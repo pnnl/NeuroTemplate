@@ -124,7 +124,7 @@ Each is off until you ask for it — see [CONTROL.md](../CONTROL.md).
 | Want | Implement | Then declare |
 |---|---|---|
 | an energy objective, and the energy section of the reportcard | `power_metric` + `POWER_METRIC_IMPLEMENTED` | a `{column: power, norm: 1}` row |
-| price-driven load shifting | `power_metric`, and a tariff column in the reference files (`make_references.py --price`) | a `{column: power, norm: 1, weight: <tariff>}` row, `reference_scale`, `reference_preview` |
+| price-driven load shifting | `power_metric`, and a tariff column in the reference files (`make_references.py --price`) | a `{column: power, norm: 1, weight: <tariff>}` row, `reference_scale`, a `future` on the tariff in `policy_window` |
 | peak shaving | `power_metric` | a `{column: power, norm: 4}` row |
 | a policy bounded to a rule, per U column | `reference_control` | `residual_delta` |
 | the rule itself, scored | `reference_control` | `residual_delta` with every box `[0, 0]` |
@@ -164,8 +164,6 @@ Each is off until you ask for it — see [CONTROL.md](../CONTROL.md).
 - **The actuation box is the training data's range** by default
   (`actuation_bounds`). If the data never drove an actuator somewhere, the
   policy cannot go there either, and the plots look plausible regardless.
-- **`preview_config` replaces `d_preview` if it merely exists**, so it is
-  commented out in the template. Define it fully or not at all.
 - **`grad_path` and `demand`:** the gradient penalty differentiates a
   `demand` column as the demand feature, so its sign in the mapping is the
   declared `sign`, not the raw setpoint's.

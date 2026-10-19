@@ -42,22 +42,39 @@ test_reference_path: data/test_reference.csv
 # so the policy sees an O(1) input: about the column's typical magnitude. A
 # band column needs none: it is scaled like the column it bounds.
 # reference_scale: {"Tariff [$/kWh]": 0.30}
-# Future steps of each reference column the policy sees. A policy that sees
-# only the current price can react to it but not act ahead of it; it needs
-# to see the expensive period coming. Longer is not better: a preview much
-# longer than the cycle it acts on gives the policy more to fit noise to.
-# reference_preview: {"Tariff [$/kWh]": 48, "Comfort Low [°C]": 2}
 
 # ── HORIZON ──────────────────────────────────────────────────────
 # Closed-loop rollout length in training. It has to contain an action and
 # the payoff it buys — a pre-conditioning and the period it pays off in —
 # or the gradient never connects them. Memory and time grow with it.
 # train_pred_steps: 48
-# History the policy sees.
-# in_steps: 12
-# Future disturbance steps the policy previews. Ignored if the
-# preview_config hook exists — that hook replaces it entirely.
-# d_preview: 0
+
+# ── POLICY WINDOW ────────────────────────────────────────────────
+# Required: what the policy reads, per column — `past`, the steps before the
+# current one, and for a forecast `future`, the steps after it. List every
+# Y, U and D column of the surrogate and every reference column the
+# objective names; there is no default.
+#   Y          past only: not measured ahead.
+#   U          past only, and its window ends at the previous step: `past: 1`
+#              is the last command applied, `past: 0` does not read it. A
+#              first_difference row penalizes a move; reading the last
+#              command lets the policy see the move it is making.
+#   D, ref.    past and future. A policy that sees only the current price can
+#              react to it but not act ahead of it; it has to see the
+#              expensive period coming, and the forecast that drives the
+#              cost (the weather) to a similar depth, or it has to guess
+#              which of the two it is answering. Longer is not better: a
+#              window much longer than the cycle it acts on gives the policy
+#              more to fit noise to.
+# The deepest `past` (plus the current step) is the policy's history, which
+# also spaces the training windows. The reportcard lists the table and the
+# input width it gives. Names and numbers below are syntax.
+policy_window:
+  "Zone Air Temperature [°C]":  {past: 3}
+  "Zone Cooling Setpoint [°C]": {past: 1}
+  "Outdoor Temperature [°C]":   {past: 0, future: 12}
+  "Comfort Low [°C]":           {past: 0, future: 2}
+  "Comfort High [°C]":          {past: 0, future: 2}
 
 # ── OBJECTIVE ────────────────────────────────────────────────────
 # A table of terms, each read in one order: the operand `column − target`

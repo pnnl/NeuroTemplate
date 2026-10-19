@@ -35,9 +35,22 @@ test_data_path: data/test.csv
 # Families can be mixed, one per block of Y channels — see `block_mapping`
 # in modeling_user_defined.py (e.g. one 2r2c block per zone, an mlp for a meter).
 # model: nssm
-# History the model reads before its first prediction, and the stride between
-# training windows. gru and 2r2c also carry state through a rollout.
-# in_steps: 12
+# Required: steps before the current one the model reads, per column. List
+# every Y, U and D column; there is no default. The names and numbers below
+# are syntax, not values. The deepest lag sets the window every block shares
+# (history_steps = deepest + 1), the seeded history before the first
+# prediction, and the stride between training windows. Each learned map
+# reads a column at its own lag, except that a gru reads one lag for every
+# column it reads (its window is its warm-up), and a 2r2c block reads its own
+# Y columns at one lag and its U and D at the current step only, so a U or D
+# column only 2r2c blocks read is listed at 0. gru and 2r2c also carry state
+# through a rollout. A lag is worth its inputs when the column still tells
+# the model something, that far back, that its other inputs do not; the
+# reportcard lists what each block reads.
+history:
+  "Tank Temperature [degC]": 11
+  "Heater Command [-]": 0
+  "Ambient Temperature [degC]": 3
 # Network width is 2**log2_hidden_size. Under 2r2c this net only maps the
 # columns you left undeclared to a heat flow, and it can be very small.
 # Larger nets tend to buy fit with physics: start small, and grow one when
@@ -73,7 +86,7 @@ test_data_path: data/test.csv
 # lr: 0.001
 # Fixed validation horizon, so dev loss compares across curriculum stages.
 # dev_pred_steps: 48
-# Test window length (in_steps included) and stride. The defaults are one
+# Test window length (history_steps included) and stride. The defaults are one
 # day of 5-minute data.
 # test_window: 287
 # test_stride: 288

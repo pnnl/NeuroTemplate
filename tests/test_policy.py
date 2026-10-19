@@ -108,7 +108,7 @@ def test_per_column_preview_reaches_only_the_declared_column():
     assert not torch.allclose(net(yn, perturbed_outdoor, R), base)
 
 
-def test_reference_preview_widens_the_input_by_each_columns_depth():
+def test_a_reference_future_widens_the_input_by_each_columns_depth():
     """Each reference column adds its current step plus its own preview."""
     base = _describe(full_setup())
     grown = _describe(full_setup(future={LOW: 3, HIGH: 1}))

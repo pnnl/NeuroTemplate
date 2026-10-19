@@ -29,13 +29,39 @@ The hooks in `modeling_user_defined.py`, scaffolded in
 
 "Required" means the function must exist, even if it returns the trivial
 answer. Settings that are not about your data, such as the family default,
-window length, network size and training schedule, live in
-`model_configs/modeling.yaml`, where every field is annotated.
+network size and training schedule, live in `model_configs/modeling.yaml`,
+where every field is annotated. So does `history`, the one setting there
+that names your columns.
 
 ```bash
 nt model train --config model_configs/debug.yaml            # a smoke run first
 nt model train --set epochs=200 --set ensemble_seeds=3      # one-off overrides
 ```
+
+## What the model reads: `history`
+
+`history` gives every `Y`, `U` and `D` column a lag, the steps before the
+current one the model reads. Every column is listed, and there is no
+default.
+
+```yaml
+history:
+  "Tank Temperature [degC]": 11      # syntax, not values
+  "Heater Command [-]": 0
+  "Ambient Temperature [degC]": 3
+```
+
+The deepest lag plus the current step is `history_steps`: the window every
+block shares, the seeded history before the first prediction, the stride
+between training windows, and the rows of every column an exported model
+takes. Each learned map then reads its columns at their own lags. The
+family constrains the table. A `gru` reads one lag for every column it reads,
+because its window is its warm-up. A `2r2c` block reads its own outputs at
+one lag, which seeds its mass, and its `U` and `D` at the current step only.
+The build refuses a table that misses a column, a lag no block actually reads
+(a `U` or `D` column only 2r2c blocks read must be 0), and a `demand`
+setpoint lagged further back than its state. The reportcard lists the lags
+each block reads.
 
 ## Model families
 

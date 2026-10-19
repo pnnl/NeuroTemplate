@@ -216,7 +216,7 @@ def test_gradients_flow_through_the_warmup(nm_mapping):
     assert grads and any(g is not None and g.abs().sum() > 0 for g in grads)
 
 
-def test_in_steps_one_matches_a_hand_rolled_rollout(nm_mapping):
+def test_a_one_step_window_matches_a_hand_rolled_rollout(nm_mapping):
     """With no history there is nothing to warm up — behaviour is unchanged."""
     history_steps = 1
     data = make_batch(history_steps)
