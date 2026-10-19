@@ -173,7 +173,7 @@ def policy_header(spec: dict, typical: dict[str, list[float]],
         "",
         f'#define NT_POLICY_EXPORT_ID "{spec["export_id"]}"',
         f"#define NT_POLICY_NU {len(spec['u_columns'])}",
-        f"#define NT_POLICY_HAS_U {int('u' in inputs)}",
+        f"#define NT_POLICY_HAS_U_HISTORY {int('u_history' in inputs)}",
         f"#define NT_POLICY_HAS_R {int('r' in inputs)}",
     ]
     for name, entry in inputs.items():
@@ -182,11 +182,9 @@ def policy_header(spec: dict, typical: dict[str, list[float]],
                   f"#define NT_POLICY_{upper}_N {len(entry['columns'])}",
                   f"#define NT_POLICY_{upper}_CURRENT_ROW {entry['current_row']}"]
     lines += [""]
-    # Input u's columns are the commands', NT_POLICY_U_COLUMNS below.
     for name, entry in inputs.items():
-        if name != "u":
-            lines.append(_strings(f"NT_POLICY_{name.upper()}_COLUMNS",
-                                  f"NT_POLICY_{name.upper()}_N", entry["columns"]))
+        lines.append(_strings(f"NT_POLICY_{name.upper()}_COLUMNS",
+                              f"NT_POLICY_{name.upper()}_N", entry["columns"]))
     lines.append("/* Each column's mean in the training data: inputs for an example. */")
     for name in inputs:
         lines.append(_floats(f"NT_POLICY_{name.upper()}_TYPICAL",
@@ -201,8 +199,7 @@ def policy_header(spec: dict, typical: dict[str, list[float]],
     ]
     args = [f"const float {name}[1][{entry['steps']}][{len(entry['columns'])}]"
             for name, entry in inputs.items()]
-    lines += [f"void nt_policy_graph({', '.join(args)}, "
-              f"float command[1][{len(spec['u_columns'])}]);",
+    lines += [f"void nt_policy_graph({', '.join(args)}, float u[1][{len(spec['u_columns'])}]);",
               "", "#endif"]
     return "\n".join(lines) + "\n"
 

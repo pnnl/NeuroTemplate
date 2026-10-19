@@ -2,7 +2,7 @@
 Export a trained DPC policy into `<out>/policy/`.
 
     policy/
-      policy.onnx|.pt2|.c   (y[, u], d[, r]) -> command, physical units
+      policy.onnx|.pt2|.c   (y[, u_history], d[, r]) -> u, physical units
       policy.h              C only: the contract as C constants
       policy.json           each input's columns, window length and alignment
       reference/
@@ -16,8 +16,8 @@ state: one graph, not two, and none of the state lifting the dynamics
 export needs. Its windows are read off the policy Node's own `input_map`
 (past / future per key), so whatever window the policy was built with —
 per-column history and preview — is exactly what the graph expects. A
-policy reading past commands takes them as `u`, the last `steps` commands
-applied, which the recipient keeps as the model runtime keeps `u_history`.
+policy reading past commands takes them as `u_history`, the last `steps`
+commands applied, kept by the recipient as the model runtime keeps its own.
 
 Verification runs the trained closed loop over the control run's test split
 (the same `evaluate_closed_loop` the run was scored with) and collects every
@@ -54,7 +54,7 @@ from neurotemplate.export.verify import AGREEMENT_TOL, REPRODUCE_TOL
 #: names reference columns.
 POLICY_KEYS = ["yn", "U", "D", "R"]
 #: Policy Node input key -> graph input name.
-GRAPH_NAMES = {"yn": "y", "U": "u", "D": "d", "R": "r"}
+GRAPH_NAMES = {"yn": "y", "U": "u_history", "D": "d", "R": "r"}
 
 
 @dataclass(frozen=True)
@@ -64,7 +64,7 @@ class PolicyInput:
     columns: list[str]
     steps: int              # window length the graph takes
     current_row: int        # where the present step sits; later rows are preview.
-                            # For u, `steps`: the window ends the step before.
+                            # For u_history, `steps`: it ends the step before.
     shift: list[float]
     stretch: list[float]
 
@@ -102,13 +102,13 @@ class PolicyGraph(nn.Module):
 
     Each input arrives as `[batch, steps, n]` and is normalised and flattened
     time-major — the layout `SystemPreview.get_mapped_data` hands the Node —
-    before the policy sees it; its command leaves in physical units. `u`
-    gets its newest row repeated as the current one, as SystemPreview pads
+    before the policy sees it; its command leaves in physical units.
+    `u_history` gets its newest row repeated as the current one, as SystemPreview pads
     it in the closed loop; the policy drops that row, so the recipient
     never supplies it.
 
     This class is the graph of a policy that reads no past commands;
-    `_PolicyGraphWithU` takes `u` too. `policy_graph` picks.
+    `_PolicyGraphWithU` takes `u_history` too. `policy_graph` picks.
     """
 
     def __init__(self, policy: nn.Module, inputs: list[PolicyInput],
@@ -147,11 +147,12 @@ class PolicyGraph(nn.Module):
 
 
 class _PolicyGraphWithU(PolicyGraph):
-    """`PolicyGraph` for a policy that reads past commands: `(y, u, d[, r])`."""
+    """`PolicyGraph` for a policy that reads past commands:
+    `(y, u_history, d[, r])`."""
 
-    def forward(self, y: torch.Tensor, u: torch.Tensor, d: torch.Tensor,
+    def forward(self, y: torch.Tensor, u_history: torch.Tensor, d: torch.Tensor,
                 r: torch.Tensor | None = None) -> torch.Tensor:
-        return self._command({"yn": y, "U": u, "D": d, "R": r})
+        return self._command({"yn": y, "U": u_history, "D": d, "R": r})
 
 
 def policy_graph(policy: nn.Module, inputs: list[PolicyInput],
@@ -242,7 +243,7 @@ def export_policy(*, policy_node, cl_system, cfg, sysid_cfg,
         policy_dir.mkdir()
         # Trace on two real windows: batch >= 2, see trace.export_graph.
         write_graph(graph, tuple(x[:2] for x in physical.values()),
-                    [GRAPH_NAMES[s.key] for s in inputs], ["command"],
+                    [GRAPH_NAMES[s.key] for s in inputs], ["u"],
                     policy_dir / "policy", graph_format, exporter, export_id, run_id,
                     onnx2c)
         spec = _spec(export_id, run_id, cfg, inputs, nm_mapping, description,

@@ -4,13 +4,13 @@
 from runtime import Policy
 
 policy = Policy("policy")
-command = policy.act(y, u, d, r)      # {u column: command}; u and r only if it reads them
+u = policy.act(y, u_history, d, r)    # {u column: command}; u_history and r only if it reads them
 ```
 
 One stateless graph, one call per control step. Each argument is a
 `[steps, n]` window in physical units, oldest row first; `current row` is
 where the present step sits, and rows after it are the known future
-(forecast disturbances; the reference schedule). `u` holds the commands
+(forecast disturbances; the reference schedule). `u_history` holds the commands
 applied over the last `steps` steps, so it ends the step before the current
 one (its current row is `steps`, one past its last); keep it as you apply
 them. `r` holds the reference columns the policy was trained against (a

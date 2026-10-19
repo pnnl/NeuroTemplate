@@ -722,6 +722,18 @@ def test_a_lag_on_a_column_only_2r2c_reads_is_refused():
                      block_spec=MIXED_SPLIT)
 
 
+def test_a_d_column_no_block_reads_is_listed_at_0():
+    """It may still serve the control side, so it is kept, at 0; a lag on it
+    is refused, pointing at exclude_columns."""
+    spec = {name: {"Y": block["Y"], "U": block["U"], "D": ["oat"]}
+            for name, block in SPLIT.items()}
+    with pytest.raises(ValueError, match=r"history\['ghi'\] is 5, but no block reads it.*exclude_columns"):
+        get_dynamics(make_cfg(model="mlp", per_block=True, history=UNIFORM), MAPPING,
+                     block_spec=spec)
+    get_dynamics(make_cfg(model="mlp", per_block=True, history={**UNIFORM, "ghi": 0}),
+                 MAPPING, block_spec=spec)
+
+
 def test_a_demand_setpoint_lagged_past_its_zone_is_refused():
     """The demand is computed on the full window, so a setpoint read further
     back than its zone carries zone history the zone's own lag excludes."""

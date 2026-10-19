@@ -129,7 +129,9 @@ def _check_lags_consumed(blocks: list[Block], lags: list[Lags],
     """Every column's declared lag is what some block reading it consumes.
 
     A deeper declaration would sit inert: a U column read only by 2r2c
-    blocks is read at its current step, whatever its lag says.
+    blocks is read at its current step, whatever its lag says. A D column
+    no block reads (per-block D subsets that all leave it out) is listed at
+    0: the control side may still use it, so it stays a model column.
     """
     consumed: dict[str, dict[str, int]] = {c: {} for c in history}
     for block, (y, u, d) in zip(blocks, lags):
@@ -137,13 +139,20 @@ def _check_lags_consumed(blocks: list[Block], lags: list[Lags],
         for column, lag in zip(names, y + u + d):
             consumed[column][block.name] = lag
     for column, readers in consumed.items():
+        if not readers and history[column] != 0:
+            raise ValueError(
+                f"history[{column!r}] is {history[column]}, but no block reads "
+                "it. If nothing on the control side needs it either (the "
+                "policy, a loss weight, power_metric, the plots), drop it with "
+                "exclude_columns; otherwise list it at 0."
+            )
         deepest = max(readers.values(), default=0)
         if deepest != history[column]:
             raise ValueError(
                 f"history[{column!r}] is {history[column]}, but no block reads "
-                f"it that far back; the lag each reader consumes: "
-                f"{readers or 'none, no block reads it'}. A 2r2c block reads U "
-                f"and D at the current step only. Set it to {deepest}."
+                f"it that far back; the lag each reader consumes: {readers}. A "
+                f"2r2c block reads U and D at the current step only. Set it to "
+                f"{deepest}."
             )
 
 

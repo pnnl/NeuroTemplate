@@ -142,11 +142,11 @@ state = model.warmup(history)         # the last history_steps rows of every col
 state = model.step(state, inputs)     # one step; inputs holds every u and d column
 
 policy = Policy("policy")
-command = policy.act(y, u, d, r)      # {u column: value}; u and r only if it reads them
+command = policy.act(y, u_history, d, r)  # {u column: value}; u_history and r only if it reads them
 ```
 
 That is the same in every format. A policy that reads past commands takes
-`u`, the commands applied over its last `steps` steps, ending the step before
+`u_history`, the commands applied over its last `steps` steps, ending the step before
 the current one; the recipient keeps them as it applies them. The generated
 README states each input's columns, window length and units, and covers the C
 runner (C) or direct use from torch (torch).

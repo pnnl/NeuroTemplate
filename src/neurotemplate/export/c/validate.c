@@ -173,17 +173,17 @@ static void check_model(void)
 #ifdef NT_HAVE_POLICY
 static void check_policy(void)
 {
-    /* inputs.csv holds one window per row, time-major: y, u, d, then r. */
+    /* inputs.csv holds one window per row, time-major: y, u_history, d, then r. */
     table input = read_csv("policy/reference/inputs.csv");
     table expected = read_csv("policy/reference/expected_actions.csv");
     float y[NT_POLICY_Y_STEPS][NT_POLICY_Y_N], d[NT_POLICY_D_STEPS][NT_POLICY_D_N];
-#if NT_POLICY_HAS_U
-    float u[NT_POLICY_U_STEPS][NT_POLICY_U_N];
+#if NT_POLICY_HAS_U_HISTORY
+    float u_history[NT_POLICY_U_HISTORY_STEPS][NT_POLICY_U_HISTORY_N];
 #endif
 #if NT_POLICY_HAS_R
     float r[NT_POLICY_R_STEPS][NT_POLICY_R_N];
 #endif
-    float command[NT_POLICY_NU];
+    float u[NT_POLICY_NU];
     double error[NT_POLICY_NU] = {0};
     int ok = 1;
 
@@ -191,9 +191,9 @@ static void check_policy(void)
         int c = 0;
         for (int t = 0; t < NT_POLICY_Y_STEPS; t++)
             for (int i = 0; i < NT_POLICY_Y_N; i++) y[t][i] = (float)cell(&input, w, c++);
-#if NT_POLICY_HAS_U
-        for (int t = 0; t < NT_POLICY_U_STEPS; t++)
-            for (int i = 0; i < NT_POLICY_U_N; i++) u[t][i] = (float)cell(&input, w, c++);
+#if NT_POLICY_HAS_U_HISTORY
+        for (int t = 0; t < NT_POLICY_U_HISTORY_STEPS; t++)
+            for (int i = 0; i < NT_POLICY_U_HISTORY_N; i++) u_history[t][i] = (float)cell(&input, w, c++);
 #endif
         for (int t = 0; t < NT_POLICY_D_STEPS; t++)
             for (int i = 0; i < NT_POLICY_D_N; i++) d[t][i] = (float)cell(&input, w, c++);
@@ -202,16 +202,16 @@ static void check_policy(void)
             for (int i = 0; i < NT_POLICY_R_N; i++) r[t][i] = (float)cell(&input, w, c++);
 #endif
         nt_policy_act(y,
-#if NT_POLICY_HAS_U
-                      u,
+#if NT_POLICY_HAS_U_HISTORY
+                      u_history,
 #endif
                       d,
 #if NT_POLICY_HAS_R
                       r,
 #endif
-                      command);
+                      u);
         for (int i = 0; i < NT_POLICY_NU; i++) {
-            double e = fabs((double)command[i] - cell(&expected, w, i));
+            double e = fabs((double)u[i] - cell(&expected, w, i));
             if (e > error[i]) error[i] = e;
         }
     }

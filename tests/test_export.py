@@ -316,13 +316,14 @@ def test_trained_policy_exports_as_the_trained_policy(tmp_path, overrides, graph
     )
     assert all(check.ok for check in check_reference(result.out_dir))
     # The reference columns are named inputs, in the order the policy reads
-    # them; the past commands are `u`, ending the step before the current one.
+    # them; the past commands are `u_history`, ending the step before the current one.
     spec = json.loads((result.out_dir / "policy" / "policy.json").read_text())
     reads_u = "u_past" in overrides
-    assert list(spec["inputs"]) == ["y"] + (["u"] if reads_u else []) + ["d", "r"]
+    assert list(spec["inputs"]) == ["y"] + (["u_history"] if reads_u else []) + ["d", "r"]
     assert spec["inputs"]["r"]["columns"] == resolve_objective(cfg, nm).r_columns
     if reads_u:
-        assert spec["inputs"]["u"]["steps"] == spec["inputs"]["u"]["current_row"] == 2
+        history = spec["inputs"]["u_history"]
+        assert history["steps"] == history["current_row"] == 2
 
     # The graph's physical windows are the closed loop's own windows: the
     # wrapper around the trained net must issue the net's own commands.
@@ -371,7 +372,7 @@ def test_c_runner_reproduces_the_reference(tmp_path, monkeypatch):
     from neurotemplate.export.runtime import Policy
     with pytest.raises(ValueError, match="windows of shape"):
         Policy(package / "policy").act_batch(
-            {name: np.zeros((1, 1, 1)) for name in ("y", "u", "d", "r")})
+            {name: np.zeros((1, 1, 1)) for name in ("y", "u_history", "d", "r")})
 
     _blow_up(monkeypatch)
     export(tmp_path, make_cfg(), MAPPING, RC_SPLIT, graph_format="c",
