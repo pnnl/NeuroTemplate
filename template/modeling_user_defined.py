@@ -371,6 +371,10 @@ def hyper_args(trial, cfg: Config) -> Config:
     # cfg.lr = trial.suggest_float("lr", 1e-4, 1e-2, log=True)
     # cfg.log2_hidden_size = trial.suggest_int("log2_hidden_size", 3, 6)
     # cfg.num_layers = trial.suggest_int("num_layers", 1, 3)
+    # One column's lag. Moving the deepest lag also moves the stride, so
+    # trials then train on different windows.
+    # cfg.history = {**cfg.history,
+    #                "Ambient Temperature [degC]": trial.suggest_int("ambient_lag", 0, 6)}
     return cfg
 
 
