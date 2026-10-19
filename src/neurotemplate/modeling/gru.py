@@ -1,8 +1,8 @@
 """
 GRU — the recurrent black-box family, as a block every model can hold.
 
-A GRU block reads the same flattened `in_steps` history window as every other
-block (see `windows`), and carries a hidden state so its memory can run past
+A GRU block reads a flattened key-major history window (see `windows`), every
+column `steps` rows deep, and carries a hidden state so its memory can run past
 that window during a rollout. It implements the stateful-block protocol
 (`rollout_state` / `set_rollout_state`) that the System's reset and the ONNX
 export rely on, as `rc.RCBlock` does.
@@ -18,9 +18,9 @@ from neurotemplate.modeling import windows
 
 class GRUBlock(nn.Module):
     """
-    GRU-based dynamics block. Reads the same flattened in_steps history window
-    every other block reads, but folds each timestep into its hidden state
-    exactly once:
+    GRU-based dynamics block. Reads a flattened history window, `steps` rows
+    of every column, and folds each timestep into its hidden state exactly
+    once:
 
       - Cold (no hidden state): consume the whole window, so the state
         summarises the full context before the first prediction.
@@ -29,7 +29,7 @@ class GRUBlock(nn.Module):
 
     The invariant is that the hidden state summarises every timestep this block
     has already consumed, and the window supplies whatever it has not. That is
-    what lets memory run past in_steps during a rollout while a single cold
+    what lets memory run past its window during a rollout while a single cold
     call is still correct on its own — instantiate this block anywhere, hand it
     one window, and you get a properly warmed prediction.
 
@@ -37,17 +37,17 @@ class GRUBlock(nn.Module):
     itself from its own window.
 
     Handles two input shapes:
-      - [batch, in_steps*features]  — normal training/inference path
-      - [in_steps*features]         — under vmap (jacrev); always cold, no
-                                      state stored
+      - [batch, steps*features]  — normal training/inference path
+      - [steps*features]         — under vmap (jacrev); always cold, no
+                                   state stored
     """
 
-    def __init__(self, ny: int, nu: int, nd: int, in_steps: int, outsize: int,
+    def __init__(self, ny: int, nu: int, nd: int, steps: int, outsize: int,
                  hidden_size: int, num_layers: int, bias: bool = True):
         super().__init__()
         self.widths = (ny, nu, nd)
-        self.in_steps = in_steps
-        self.in_features = in_steps * (ny + nu + nd)
+        self.steps = steps
+        self.in_features = steps * (ny + nu + nd)
         self.out_features = outsize
         self.gru = nn.GRU(ny + nu + nd, hidden_size, num_layers=num_layers,
                           batch_first=True, bias=bias)
@@ -56,14 +56,14 @@ class GRUBlock(nn.Module):
 
         # SSMGrad hands us a key-major window (see `windows`). A GRU reads
         # time-major, and the reorder is a fixed permutation of positions —
-        # it depends only on (widths, in_steps), never on the data — so
+        # it depends only on (widths, steps), never on the data — so
         # compute it once here instead of on every call.
         self.register_buffer(
             "_seq_perm",
-            torch.tensor(windows.time_major(self.widths, in_steps), dtype=torch.long),
+            torch.tensor(windows.time_major(self.widths, steps), dtype=torch.long),
             persistent=False,
         )
-        self._last_step_slices = windows.last_step(self.widths, in_steps)
+        self._last_step_slices = windows.last_step(self.widths, (steps,) * 3)
 
     # The stateful-block protocol (see `neurotemplate.export.state`). nn.GRU
     # keeps its state layer-first, [num_layers, batch, hidden]; the protocol
@@ -84,14 +84,14 @@ class GRUBlock(nn.Module):
         self._h = state.reshape(-1, layers, hidden).transpose(0, 1).contiguous()
 
     def _to_sequence(self, x: torch.Tensor) -> torch.Tensor:
-        """[..., in_steps*(ny+nu+nd)] -> [..., in_steps, ny+nu+nd], key-major
+        """[..., steps*(ny+nu+nd)] -> [..., steps, ny+nu+nd], key-major
         reordered to time-major via the precomputed permutation."""
         lead = x.shape[:-1]
         seq = x.index_select(x.ndim - 1, self._seq_perm)
-        return seq.reshape(*lead, self.in_steps, sum(self.widths))
+        return seq.reshape(*lead, self.steps, sum(self.widths))
 
     def _last_step(self, x: torch.Tensor) -> torch.Tensor:
-        """[..., in_steps*(ny+nu+nd)] -> [..., ny+nu+nd]: just the newest
+        """[..., steps*(ny+nu+nd)] -> [..., ny+nu+nd]: just the newest
         timestep, without touching the rest of the window."""
         return torch.cat([x[..., s] for s in self._last_step_slices], dim=-1)
 
@@ -109,7 +109,7 @@ class GRUBlock(nn.Module):
         See https://docs.pytorch.org/docs/stable/generated/torch.nn.GRU.html
 
         Args:
-            seq: [in_steps, ny+nu+nd] (1D input, under vmap)
+            seq: [steps, ny+nu+nd] (1D input, under vmap)
         Returns:
             [outsize] output
         """
@@ -119,7 +119,7 @@ class GRUBlock(nn.Module):
         hidden = [torch.zeros(self.gru.hidden_size, device=seq.device)
                   for _ in range(self.gru.num_layers)]
 
-        for step in range(self.in_steps):
+        for step in range(self.steps):
             x = seq[step]
             for layer in range(self.gru.num_layers):
                 w_ih = getattr(self.gru, f'weight_ih_l{layer}')  # [3*H, input]

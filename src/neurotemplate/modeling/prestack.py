@@ -131,7 +131,7 @@ class PreStack(nn.Module):
 
     Each transform replaces one U column with a value computed from that
     column and one Y channel at the same timestep, across the whole
-    `in_steps` window; every other U column passes through untouched, so
+    `history_steps` window; every other U column passes through untouched, so
     `nu`, the column names, the gradient masks and the controller's view of
     U are all unchanged — the column just means something different.
 
@@ -140,13 +140,13 @@ class PreStack(nn.Module):
         columns: `(u_name, y_name)` per transform — the column it replaces
             and the Y channel it reads.
         y_names / u_names: the full `nm_mapping["Y"]` and `["U"]` lists.
-        in_steps: history window length.
+        history_steps: history window length.
     """
 
     @beartype
     def __init__(self, transforms: list[PreTransform],
                  columns: list[tuple[str, str]],
-                 y_names: list[str], u_names: list[str], in_steps: int):
+                 y_names: list[str], u_names: list[str], history_steps: int):
         super().__init__()
         if len(transforms) != len(columns):
             raise ValueError(
@@ -164,23 +164,23 @@ class PreStack(nn.Module):
         self.transforms = nn.ModuleList(transforms)
         self.columns = list(columns)
         self._pairs = [(u_names.index(u), y_names.index(y)) for u, y in columns]
-        self.ny, self.nu, self.in_steps = len(y_names), len(u_names), in_steps
+        self.ny, self.nu, self.history_steps = len(y_names), len(u_names), history_steps
 
     def forward(self, y: torch.Tensor, u: torch.Tensor) -> torch.Tensor:
-        """`[..., in_steps·ny], [..., in_steps·nu] -> [..., in_steps·nu]`.
+        """`[..., history_steps·ny], [..., history_steps·nu] -> [..., history_steps·nu]`.
 
         Both windows are key-major and, within the key, time-major oldest
-        first (see `windows`), so reshaping each to `[..., in_steps, n]`
+        first (see `windows`), so reshaping each to `[..., history_steps, n]`
         pairs step `t` of U with step `t` of Y. The leading shape is kept
         as-is: a batch during a rollout, nothing under vmap.
         """
         lead = y.shape[:-1]
-        y_steps = y.reshape(*lead, self.in_steps, self.ny)
-        u_steps = u.reshape(*lead, self.in_steps, self.nu)
+        y_steps = y.reshape(*lead, self.history_steps, self.ny)
+        u_steps = u.reshape(*lead, self.history_steps, self.nu)
         out = list(u_steps.unbind(-1))
         for (u_idx, y_idx), transform in zip(self._pairs, self.transforms):
             out[u_idx] = transform(u_steps[..., u_idx], y_steps[..., y_idx])
-        return torch.stack(out, dim=-1).reshape(*lead, self.in_steps * self.nu)
+        return torch.stack(out, dim=-1).reshape(*lead, self.history_steps * self.nu)
 
     # ── Serialization / reporting ─────────────────────────────
 
@@ -202,7 +202,7 @@ class PreStack(nn.Module):
     @classmethod
     def from_config(
         cls, data: dict[str, dict], y_names: list[str], u_names: list[str],
-        norm_stats: dict[str, dict], in_steps: int,
+        norm_stats: dict[str, dict], history_steps: int,
     ) -> "PreStack":
         """Inverse of `to_config`. Each entry's column stats come from
         `norm_stats`; `load_state_dict` afterwards restores the buffers the
@@ -221,5 +221,5 @@ class PreStack(nn.Module):
                 control=norm_stats[u_name], state=norm_stats[y_name], **kwargs,
             ))
             columns.append((u_name, y_name))
-        return cls(transforms, columns, y_names, u_names, in_steps)
+        return cls(transforms, columns, y_names, u_names, history_steps)
 

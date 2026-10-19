@@ -1,79 +1,90 @@
 """
-Positions inside the flattened history window a dynamics block receives.
+Positions inside the flattened windows a dynamics block or a policy receives.
 
-`SystemPreview`'s input_map hands every block one flat tensor per call,
-laid out **key-major**: the whole Y window, then the whole U window, then
-the whole D window, each of them time-ordered oldest-first.
+`SystemPreview`'s input_map hands a node one flat tensor per call, laid out
+**key-major**: the whole Y window, then the whole U window, then the whole D
+window, each of them time-ordered oldest-first.
 
-    [ y_0 .. y_{s-1} | u_0 .. u_{s-1} | d_0 .. d_{s-1} ]      s = in_steps
+    [ y_0 .. y_{a-1} | u_0 .. u_{b-1} | d_0 .. d_{c-1} ]      steps = (a, b, c)
 
 Every block that wants a *part* of that — the newest timestep, one key's
-block, one zone's columns — is asking the same question about the same
-layout, so the arithmetic lives here once rather than in each block.
+block, one zone's columns, each column at its own lag — is asking the same
+question about the same layout, so the arithmetic lives here once rather
+than in each block.
 
-These are pure position calculations: they depend only on (widths, in_steps),
+These are pure position calculations: they depend only on (widths, steps),
 never on the data, so blocks compute them once at construction.
 """
 
 from __future__ import annotations
 
 
-def key_blocks(widths: tuple[int, ...], in_steps: int) -> list[slice]:
-    """One slice per key, covering that key's whole `in_steps` window."""
+def key_blocks(widths: tuple[int, ...], steps: tuple[int, ...]) -> list[slice]:
+    """One slice per key, covering that key's whole window of `steps[k]` rows."""
     slices, offset = [], 0
-    for width in widths:
-        slices.append(slice(offset, offset + in_steps * width))
-        offset += in_steps * width
+    for width, rows in zip(widths, steps):
+        slices.append(slice(offset, offset + rows * width))
+        offset += rows * width
     return slices
 
 
-def last_step(widths: tuple[int, ...], in_steps: int) -> list[slice]:
+def last_step(widths: tuple[int, ...], steps: tuple[int, ...]) -> list[slice]:
     """One slice per key, covering just the newest timestep of that key.
 
     The newest step is a contiguous chunk at the end of each key's block,
     so this needs no gather — just a slice.
     """
     return [
-        slice(block.start + (in_steps - 1) * width, block.stop)
-        for block, width in zip(key_blocks(widths, in_steps), widths)
+        slice(block.stop - width, block.stop)
+        for block, width in zip(key_blocks(widths, steps), widths)
     ]
 
 
-def time_major(widths: tuple[int, ...], in_steps: int) -> list[int]:
-    """Permutation that reorders a key-major window to time-major.
+def time_major(widths: tuple[int, ...], steps: int) -> list[int]:
+    """Permutation that reorders a key-major window, every key `steps` rows
+    deep, to time-major.
 
     Result is the index list for `[y_0,u_0,d_0, y_1,u_1,d_1, ...]` — the
     layout a sequence model (an RNN) reads.
     """
-    blocks = key_blocks(widths, in_steps)
+    blocks = key_blocks(widths, (steps,) * len(widths))
     return [
         block.start + t * width + j
-        for t in range(in_steps)
+        for t in range(steps)
         for block, width in zip(blocks, widths)
         for j in range(width)
     ]
 
 
-def per_step(block: slice, width: int, in_steps: int) -> list[slice]:
-    """Split one key's block into its `in_steps` per-timestep slices."""
+def per_step(block: slice, width: int, steps: int) -> list[slice]:
+    """Split one key's block into its `steps` per-timestep slices."""
     return [
         slice(block.start + t * width, block.start + (t + 1) * width)
-        for t in range(in_steps)
+        for t in range(steps)
     ]
 
 
-def gather_columns(
-    widths: tuple[int, ...], in_steps: int, keep: tuple[tuple[int, ...], ...]
+def window_gather(
+    widths: tuple[int, ...],
+    steps: tuple[int, ...],
+    keep: tuple[tuple[tuple[int, int, int], ...], ...],
 ) -> list[int]:
-    """Indices selecting a subset of each key's columns, across all timesteps.
+    """Indices narrowing a rectangular key-major window, column by column.
 
-    `keep[k]` lists which of key k's `widths[k]` columns to keep. The result
-    is itself a valid key-major window over the narrowed widths, so a block
-    reading it can use the helpers above on `tuple(len(c) for c in keep)`.
+    Key k's window is `steps[k]` rows of its `widths[k]` columns. `keep[k]`
+    lists the columns of key k to keep, in the order wanted, each as
+    `(column, first, last)`: the rows it keeps, inclusive, counted from the
+    key's oldest row. A column with `first > last` keeps no row. The result
+    is key-major again and, inside each key, row by row oldest first, with
+    the kept columns in `keep` order on every row they cover — so a column
+    that keeps the newest row has it last.
+
+    Keeping every column on every row, in order, gives the identity.
     """
-    return [
-        block.start + t * width + j
-        for block, width, cols in zip(key_blocks(widths, in_steps), widths, keep)
-        for t in range(in_steps)
-        for j in cols
-    ]
+    indices = []
+    for block, width, rows, columns in zip(key_blocks(widths, steps), widths,
+                                           steps, keep):
+        for t, row in enumerate(per_step(block, width, rows)):
+            indices.extend(row.start + j for j, first, last in columns
+                           if first <= t <= last)
+    return indices

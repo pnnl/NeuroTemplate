@@ -55,14 +55,14 @@ def build_loss(
     #   'yn' = model predictions accumulated by System [batch, time+1, ny]
     #
     # yn has one extra timestep (the initial condition), so we slice :-1
-    # to align predictions with ground truth. The leading in_steps positions
+    # to align predictions with ground truth. The leading history_steps positions
     # of yn are the seeded history — copies of Y that contribute exactly zero
     # error and would only dilute the mean — so both sides drop them. This is
     # the same slice pipeline.evaluate_and_plot uses, which keeps the training
     # loss and the reported test metric measuring the same span.
 
-    y = variable("Y")[:, cfg.in_steps:, :]
-    yhat = variable("yn")[:, cfg.in_steps:-1, :]
+    y = variable("Y")[:, cfg.history_steps:, :]
+    yhat = variable("yn")[:, cfg.history_steps:-1, :]
 
     # Reference tracking
     #
@@ -81,7 +81,7 @@ def build_loss(
     else:
         def head_compute(yn, Y):
             return head_stack.loss(
-                yn[:, cfg.in_steps:-1, :], Y[:, cfg.in_steps:, :]
+                yn[:, cfg.history_steps:-1, :], Y[:, cfg.history_steps:, :]
             )
 
         ref_loss = Loss(

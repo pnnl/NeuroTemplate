@@ -147,6 +147,8 @@ class Block:
     #: The block's physical priors, `{name: value}`, JSON-safe; validated by
     #: the family's builder, which is the one that knows the names.
     params: dict = field(default_factory=dict)
+    #: The Y column names behind `reads`, in `y_in_idx` order.
+    read_names: tuple[str, ...] = ()
 
     @property
     def ny(self) -> int:
@@ -182,6 +184,11 @@ class Block:
         for why.
         """
         return tuple(self.y_idx) + tuple(sorted(self.reads))
+
+    @property
+    def y_in_names(self) -> tuple[str, ...]:
+        """The Y column names behind `y_in_idx`."""
+        return self.y_names + self.read_names
 
     @property
     def ny_in(self) -> int:
@@ -377,7 +384,7 @@ def build_blocks(
         blocks.append(Block(
             name, tuple(y_idx), tuple(u_idx), tuple(y_names), tuple(d_idx),
             tuple(reads_idx), model, tuple(u_names), tuple(d_names), inputs, ambient,
-            dict(params),
+            dict(params), tuple(y_cols[i] for i in sorted(reads_idx)),
         ))
     _check_one_demand_per_column(blocks)
     return blocks

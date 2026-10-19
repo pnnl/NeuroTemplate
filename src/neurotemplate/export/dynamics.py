@@ -84,14 +84,14 @@ def export_model(*, dyn_sys, cfg, nm_mapping: dict[str, list[str]],
     picks the ONNX tracer. `frame` is a held-out split in physical units,
     indexed by timestamp. The
     agreement check covers all of it; the shipped fixture is its first
-    `in_steps + fixture_steps` rows (all of it by default). When the trained
+    `history_steps + fixture_steps` rows (all of it by default). When the trained
     model's own rollout blows up on `frame`, `ask` decides whether to export
     it unverified (see the module docstring).
     """
     check_graph_format(graph_format, exporter, onnx2c)
     columns = nm_mapping["Y"] + nm_mapping["U"] + nm_mapping["D"]
     frame = _round_trip(frame, columns)
-    steps = len(frame) - cfg.in_steps
+    steps = len(frame) - cfg.history_steps
     shipped = steps if fixture_steps is None else fixture_steps
     if not 1 <= shipped <= steps:
         raise ValueError(f"the split has {steps} steps after warm-up; cannot "
@@ -134,8 +134,8 @@ def export_model(*, dyn_sys, cfg, nm_mapping: dict[str, list[str]],
                                 nm_mapping["Y"], norm_stats)
             require_agreement(agreement, norm_stats)
             _write_reference(
-                model_dir / "reference", frame.iloc[:cfg.in_steps + shipped],
-                reference, slots, cfg.in_steps, {
+                model_dir / "reference", frame.iloc[:cfg.history_steps + shipped],
+                reference, slots, cfg.history_steps, {
                     "export_id": export_id, "run_id": run_id,
                     "tolerance": tolerances(nm_mapping["Y"], norm_stats),
                     "agreement_at_export": {
@@ -176,7 +176,7 @@ def _write_graphs(model_dir: Path, dyn_sys, cfg, nm_mapping, norm_stats,
     model_dir.mkdir(parents=True)
     model = dyn_sys.nodes[0].callable
     widths = [len(nm_mapping[key]) for key in ("Y", "U", "D")]
-    batch, steps = 2, cfg.in_steps   # batch 2: see trace.export_graph
+    batch, steps = 2, cfg.history_steps   # batch 2: see trace.export_graph
 
     slots = probe_state_slots(model, *(torch.randn(batch, steps * n) for n in widths))
     width = sum(slot.width for slot in slots)
@@ -203,12 +203,12 @@ def _write_graphs(model_dir: Path, dyn_sys, cfg, nm_mapping, norm_stats,
 
 
 def _write_reference(reference_dir: Path, frame: pd.DataFrame, reference: Rollout,
-                     slots: list[StateSlot], in_steps: int, document: dict,
+                     slots: list[StateSlot], history_steps: int, document: dict,
                      y_columns: list[str]) -> None:
     """The input window, and the trained model's own output and state on it."""
     reference_dir.mkdir(parents=True)
-    steps = len(frame) - in_steps
-    index = frame.index[in_steps:]
+    steps = len(frame) - history_steps
+    index = frame.index[history_steps:]
 
     def write(name: str, values, columns: list[str]) -> None:
         pd.DataFrame(values[:steps], index=index, columns=columns).to_csv(

@@ -13,7 +13,7 @@ from neurotemplate.common.config import (
     check_positive,
     default_savedir,
 )
-from neurotemplate.modeling.config import IN_STEPS_WARN_THRESHOLD
+from neurotemplate.modeling.config import HISTORY_WARN_THRESHOLD
 
 
 @dataclass
@@ -151,10 +151,10 @@ class ControlConfig:
         # modeling side for no good reason. The real risks (memory, a window
         # longer than the training horizon) don't justify refusing a value
         # the user set on purpose; the right window length is dataset-specific.
-        if self.in_steps > IN_STEPS_WARN_THRESHOLD:
+        if self.in_steps > HISTORY_WARN_THRESHOLD:
             warnings.warn(
                 f"in_steps={self.in_steps} is above the usual ceiling of "
-                f"{IN_STEPS_WARN_THRESHOLD}. A longer context window costs "
+                f"{HISTORY_WARN_THRESHOLD}. A longer context window costs "
                 "more memory per batch, and once it exceeds train_pred_steps "
                 "it hands the model, at rollout time, history it never saw "
                 "during training. Not rejected outright — the right window "

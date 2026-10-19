@@ -141,12 +141,12 @@ def build_trainer(
     train_loader = get_loader(
         dfs=train_dfs, cfg=cfg, nm_mapping=nm_mapping,
         name="train",
-        steps=cfg.in_steps + cfg.train_pred_steps,
+        steps=cfg.history_steps + cfg.train_pred_steps,
     )
     dev_loader = get_loader(
         dfs=dev_dfs, cfg=cfg, nm_mapping=nm_mapping,
         name="dev",
-        steps=cfg.in_steps + cfg.dev_pred_steps,
+        steps=cfg.history_steps + cfg.dev_pred_steps,
     )
 
     if cfg.verbose:
@@ -280,7 +280,7 @@ def train_with_curriculum(
             trainer.train_data = get_loader(
                 dfs=train_dfs, cfg=cfg, nm_mapping=nm_mapping,
                 name="train",
-                steps=cfg.in_steps + pred_steps,
+                steps=cfg.history_steps + pred_steps,
             )
             _reset_early_stopping(trainer)
 

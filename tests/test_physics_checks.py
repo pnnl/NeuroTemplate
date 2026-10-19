@@ -36,7 +36,7 @@ NORM_STATS = {
     SETPT: {"shift": 0.0, "stretch": 1.0, "min": 20.0, "max": 26.0},
     AMBIENT: {"shift": 0.0, "stretch": 1.0, "min": -5.0, "max": 35.0},
 }
-IN_STEPS, N_STEPS = 1, 12
+HISTORY_STEPS, N_STEPS = 1, 12
 
 
 def _spec(**overrides) -> SynthSpec:
@@ -74,13 +74,13 @@ class _Plant(nn.Module):
 def _system(step) -> SystemPreview:
     node = Node(_Plant(step), ["yn", "U", "D"], ["yn"], name="plant")
     return SystemPreview([node], name="plant system", nstep_key="Y",
-                         start_iter=IN_STEPS - 1)
+                         start_iter=HISTORY_STEPS - 1)
 
 
 def _scenarios(step, spec=None, n=6, n_steps=N_STEPS):
     return build_scenarios(
         system=_system(step), nm_mapping=NM, norm_stats=NORM_STATS,
-        synth_cfg=spec or _spec(), in_steps=IN_STEPS, n_scenarios=n,
+        synth_cfg=spec or _spec(), history_steps=HISTORY_STEPS, n_scenarios=n,
         n_steps=n_steps, device="cpu",
     )
 
@@ -208,10 +208,10 @@ def test_a_demand_target_inactive_everywhere_is_skipped_not_failed():
         if declared:
             system.nodes[0].callable.pre_stack = PreStack.from_config(
                 {HEAT: {"kind": "demand", "state": ZONE, "sign": +1}},
-                nm["Y"], nm["U"], stats, IN_STEPS)
+                nm["Y"], nm["U"], stats, HISTORY_STEPS)
         return build_scenarios(
             system=system, nm_mapping=nm, norm_stats=stats, synth_cfg=spec,
-            in_steps=IN_STEPS, n_scenarios=16, n_steps=N_STEPS, device="cpu",
+            history_steps=HISTORY_STEPS, n_scenarios=16, n_steps=N_STEPS, device="cpu",
         )[1].check()
 
     undeclared = {r.name: r for r in step_results(declared=False)}
@@ -278,7 +278,7 @@ def _grad_d(sign: int):
 def _reach(step, grad_masks=None, n_steps=N_STEPS):
     return build_scenarios(
         system=_system(step), nm_mapping=NM, norm_stats=NORM_STATS,
-        synth_cfg=_spec(), in_steps=IN_STEPS, n_scenarios=8,
+        synth_cfg=_spec(), history_steps=HISTORY_STEPS, n_scenarios=8,
         n_steps=n_steps, device="cpu", grad_masks=grad_masks,
     )[2]
 
@@ -374,7 +374,7 @@ def test_thresholds_scale_with_the_channel_rather_than_assuming_degrees():
                                        "min": 0.0, "max": 1.0}})
     scenarios = build_scenarios(
         system=_system(_perfect), nm_mapping=NM, norm_stats=stats,
-        synth_cfg=_spec(), in_steps=IN_STEPS, n_scenarios=4, n_steps=N_STEPS,
+        synth_cfg=_spec(), history_steps=HISTORY_STEPS, n_scenarios=4, n_steps=N_STEPS,
         device="cpu",
     )
     (r,) = scenarios[0].check()
@@ -407,7 +407,7 @@ def _two_state_scenarios(stats, step=None):
         system=_system(step or passthrough), nm_mapping=nm, norm_stats=stats,
         synth_cfg=_spec(states=[ZONE, SUPPLY],
                         responds={ZONE: {SETPT: +1}, SUPPLY: {SETPT: +1}}),
-        in_steps=IN_STEPS,
+        history_steps=HISTORY_STEPS,
         n_scenarios=8, n_steps=4, device="cpu",
     )
 

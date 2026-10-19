@@ -39,7 +39,7 @@ def _rolled_out(s):
     policy = build_policy(cfg, sysid_cfg, nm, ns)
     cl = build_closed_loop(s["dyn_node"], policy, cfg, sysid_cfg)
     data = build_window_dict(s["norm_df"], cfg, sysid_cfg, nm,
-                             P=cfg.train_pred_steps, stride=cfg.in_steps)
+                             P=cfg.train_pred_steps, stride=cfg.history_steps)
     return cl(data)
 
 
@@ -121,7 +121,7 @@ def test_every_power_term_reaches_the_policy_parameters(name):
     problem = build_problem(build_closed_loop(s["dyn_node"], policy, cfg, sysid_cfg),
                             build_control_loss(cfg, sysid_cfg, nm, ns))
     data = build_window_dict(s["norm_df"], cfg, sysid_cfg, nm,
-                             P=cfg.train_pred_steps, stride=cfg.in_steps)
+                             P=cfg.train_pred_steps, stride=cfg.history_steps)
     out = problem({**data, "name": "train"})
     params = [p for p in policy.parameters() if p.requires_grad]
     grads = torch.autograd.grad(out[f"train_{name}_loss"], params,

@@ -22,7 +22,7 @@ def _windows(s, df=None):
     cfg = s["cfg"]
     return build_window_dict(
         s["norm_df"] if df is None else df, cfg, s["sysid_cfg"], s["nm"],
-        P=cfg.train_pred_steps, stride=cfg.in_steps,
+        P=cfg.train_pred_steps, stride=cfg.history_steps,
     )
 
 
@@ -64,7 +64,7 @@ def test_build_window_dict_multi_pools_and_tracks_source():
     single = _windows(s)
     multi = build_window_dict_multi(
         [s["norm_df"], s["norm_df"]], cfg, sysid_cfg, nm,
-        P=cfg.train_pred_steps, stride=cfg.in_steps,
+        P=cfg.train_pred_steps, stride=cfg.history_steps,
     )
     n_single = single["yn"].shape[0]
     assert multi["yn"].shape[0] == 2 * n_single
@@ -100,9 +100,9 @@ def test_three_reference_draws_give_three_times_the_windows(tmp_path):
     one, _, _ = load_control_splits(cfg, nm, ns)
 
     pooled = build_window_dict_multi(train, cfg, s["sysid_cfg"], nm,
-                                     P=cfg.train_pred_steps, stride=cfg.in_steps)
+                                     P=cfg.train_pred_steps, stride=cfg.history_steps)
     single = build_window_dict_multi(one, cfg, s["sysid_cfg"], nm,
-                                     P=cfg.train_pred_steps, stride=cfg.in_steps)
+                                     P=cfg.train_pred_steps, stride=cfg.history_steps)
     assert pooled["yn"].shape[0] == 3 * single["yn"].shape[0]
     # Same plant windows three times over, each against its own draw.
     n = single["yn"].shape[0]

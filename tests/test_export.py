@@ -53,13 +53,13 @@ from neurotemplate.modeling.dynamics import get_dynamics
 from neurotemplate.modeling.heads import (
     BinaryHead, BoundedHead, HeadStack, OrdinalHead, RegressionHead,
 )
-from model_fixtures import model_cfg
+from model_fixtures import model_cfg, uniform_history
 
 needs_c = pytest.mark.skipif(
     shutil.which("onnx2c") is None or shutil.which("make") is None,
     reason="needs onnx2c and make")
 
-IN_STEPS = 4
+HISTORY_STEPS = 4
 ROWS = 60
 
 MAPPING = {
@@ -92,8 +92,16 @@ MIXED = {
 }
 
 
+#: Every block 2r2c: U and D are read at the current step only.
+RC_HISTORY = uniform_history(MAPPING, HISTORY_STEPS, at_zero=(*MAPPING["U"], *MAPPING["D"]))
+UNIFORM = uniform_history(MAPPING, HISTORY_STEPS)
+#: The 2r2c zone owns both U columns; the mlp power block reads every D.
+MIXED_HISTORY = uniform_history(MIXED_MAPPING, HISTORY_STEPS,
+                                at_zero=tuple(MIXED_MAPPING["U"]))
+
+
 def make_cfg(**over) -> Config:
-    return model_cfg(**{"model": "2r2c", "in_steps": IN_STEPS, "steps_per_hour": 12.0,
+    return model_cfg(**{"model": "2r2c", "history": RC_HISTORY, "steps_per_hour": 12.0,
                         **over})
 
 
@@ -132,13 +140,13 @@ def make(package):
 
 CASES = {
     "2r2c": (make_cfg(), MAPPING, RC_SPLIT, None),
-    "nssm": (make_cfg(model="nssm"), MAPPING, None, None),
-    "mlp": (make_cfg(model="mlp"), MAPPING, None, None),
-    "lssm": (make_cfg(model="lssm"), MAPPING, None, None),
-    "gru, 2 layers": (make_cfg(model="gru", num_layers=2), MAPPING, None, None),
-    "mlp per block": (make_cfg(model="mlp", per_block=True), MAPPING, SPLIT, None),
-    "gru per block": (make_cfg(model="gru", per_block=True), MAPPING, SPLIT, None),
-    "binary + bounded heads": (make_cfg(model="nssm"), MAPPING, None,
+    "nssm": (make_cfg(model="nssm", history=UNIFORM), MAPPING, None, None),
+    "mlp": (make_cfg(model="mlp", history=UNIFORM), MAPPING, None, None),
+    "lssm": (make_cfg(model="lssm", history=UNIFORM), MAPPING, None, None),
+    "gru, 2 layers": (make_cfg(model="gru", num_layers=2, history=UNIFORM), MAPPING, None, None),
+    "mlp per block": (make_cfg(model="mlp", per_block=True, history=UNIFORM), MAPPING, SPLIT, None),
+    "gru per block": (make_cfg(model="gru", per_block=True, history=UNIFORM), MAPPING, SPLIT, None),
+    "binary + bounded heads": (make_cfg(model="nssm", history=UNIFORM), MAPPING, None,
                                lambda: [BinaryHead(), BoundedHead(lo=-1.0, hi=1.0)]),
 }
 
@@ -147,7 +155,7 @@ CASES = {
 def test_every_family_and_head_exports_as_the_trained_model(tmp_path, name):
     cfg, mapping, block_spec, heads = CASES[name]
     result = export(tmp_path, cfg, mapping, block_spec, heads() if heads else None)
-    assert result.steps_verified == ROWS - IN_STEPS
+    assert result.steps_verified == ROWS - HISTORY_STEPS
     assert all(check.ok for check in check_reference(result.out_dir))
 
 
@@ -155,7 +163,7 @@ def test_every_family_and_head_exports_as_the_trained_model(tmp_path, name):
     "onnx", "torch", pytest.param("c", marks=needs_c)])
 def test_heterogeneous_model_with_prestack_and_heads_exports(tmp_path, graph_format):
     """The exit criterion: 2r2c + mlp, a demand prestack, an ordinal head."""
-    result = export(tmp_path, make_cfg(), MIXED_MAPPING, MIXED,
+    result = export(tmp_path, make_cfg(history=MIXED_HISTORY), MIXED_MAPPING, MIXED,
                     [RegressionHead(), OrdinalHead(n_levels=3)], exporter="dynamo",
                     graph_format=graph_format)
     assert result.state_width == 1                  # the one zone's mass
@@ -183,11 +191,11 @@ def test_step_graph_follows_the_state_it_is_handed(tmp_path):
     """A trace that does not lift the GRU's hidden state bakes it in as a
     constant: the graph then answers the same whatever state it is given.
     The exported step must track torch for two different states."""
-    cfg = make_cfg(model="gru")
+    cfg = make_cfg(model="gru", history=UNIFORM)
     frame, stats = split(MAPPING)
     torch.manual_seed(0)
     model = get_dynamics(cfg, MAPPING, norm_stats=stats).nodes[0].callable.eval()
-    windows = [torch.randn(2, IN_STEPS, len(MAPPING[k])) for k in ("Y", "U", "D")]
+    windows = [torch.randn(2, HISTORY_STEPS, len(MAPPING[k])) for k in ("Y", "U", "D")]
     slots = probe_state_slots(model, *(w.reshape(2, -1) for w in windows))
     width = sum(slot.width for slot in slots)
     graph = Step(model, MAPPING, stats, slots)

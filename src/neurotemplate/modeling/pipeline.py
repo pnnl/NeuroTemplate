@@ -317,10 +317,10 @@ def evaluate_and_plot(
         test_out = dyn_sys(test_data)
     test_time_s = tic() - t0
 
-    # System output prepends the initial condition; slice past the in_steps
+    # System output prepends the initial condition; slice past the history_steps
     # history when comparing to ground truth.
-    pred_norm = test_out["yn"][:, cfg.in_steps:-1, :]
-    true_norm = test_out["Y"][:, cfg.in_steps:, :]
+    pred_norm = test_out["yn"][:, cfg.history_steps:-1, :]
+    true_norm = test_out["Y"][:, cfg.history_steps:, :]
     un_pred = to_physical(pred_norm, nm_mapping["Y"], norm_stats)
     un_true = to_physical(true_norm, nm_mapping["Y"], norm_stats)
     metrics = per_channel_metrics(un_pred, un_true, nm_mapping["Y"])
@@ -330,7 +330,7 @@ def evaluate_and_plot(
 
     # Persistence sees exactly what the rollout sees at its start — the
     # seeded history — and holds the last of it. Same span, same units.
-    persist_norm = test_out["Y"][:, cfg.in_steps - 1:cfg.in_steps, :].expand_as(true_norm)
+    persist_norm = test_out["Y"][:, cfg.history_steps - 1:cfg.history_steps, :].expand_as(true_norm)
     persistence = per_channel_metrics(
         to_physical(persist_norm, nm_mapping["Y"], norm_stats), un_true, nm_mapping["Y"],
     )
@@ -453,7 +453,7 @@ def _run_physics_checks(
         nm_mapping=nm_mapping,
         norm_stats=norm_stats,
         synth_cfg=synth_cfg,
-        in_steps=cfg.in_steps,
+        history_steps=cfg.history_steps,
         n_scenarios=cfg.synth_n_scenarios,
         n_steps=synth_steps(cfg, freq_s),
         device=cfg.device,

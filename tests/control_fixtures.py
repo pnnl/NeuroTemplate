@@ -17,7 +17,7 @@ from neurotemplate.common.data_utils import compute_norm_stats, normalize_df
 from neurotemplate.modeling.dynamics import get_dynamics
 from neurotemplate.control.config import ControlConfig
 from neurotemplate.control.losses import extend_norm_stats, resolve_objective
-from model_fixtures import model_cfg
+from model_fixtures import model_cfg, uniform_history
 
 # Single-zone Modelica RTU strip-mall dataset. Y is one zone temp plus the
 # RTU thermal/flow state plus the two metered RTU power channels; U is a
@@ -76,8 +76,9 @@ def make_norm_stats(raw_df: pd.DataFrame) -> dict:
     return compute_norm_stats(raw_df, norm_type="z_score")
 
 
-def make_sysid_cfg(in_steps: int = 4, model: str = "mlp") -> Config:
-    return model_cfg(model=model, in_steps=in_steps, residual=True)
+def make_sysid_cfg(history_steps: int = 4, model: str = "mlp") -> Config:
+    return model_cfg(model=model, residual=True,
+                     history=uniform_history(make_nm_mapping(), history_steps))
 
 
 # The reference columns: a comfort band on the zone, and a tariff.
@@ -132,9 +133,9 @@ def make_control_cfg(**overrides) -> ControlConfig:
     cfg.train_reference_path = "reference.csv"
     cfg.dev_reference_path = "reference.csv"
     cfg.test_reference_path = "reference.csv"
-    cfg.in_steps = 3
+    cfg.history_steps = 3
     cfg.train_pred_steps = 6
-    # hmax = max(sysid_cfg.in_steps=4, cfg.in_steps=3) = 4; test_window includes warmup.
+    # hmax = max(sysid_cfg.history_steps=4, cfg.history_steps=3) = 4; test_window includes warmup.
     cfg.test_window = 12
     cfg.test_stride = 5
     cfg.batch_size = 4

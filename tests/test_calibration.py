@@ -230,12 +230,12 @@ def test_collected_z_lines_up_with_the_scored_truth():
     cfg.dev_pred_steps = 8
     dyn_sys, _ = _staged_system(cfg, nm, norm_stats)
     data = get_sw_dict_multi([normalize_df(raw, norm_stats)], cfg, nm,
-                             steps=cfg.in_steps + cfg.dev_pred_steps)
+                             steps=cfg.history_steps + cfg.dev_pred_steps)
     data.pop("source_idx")
-    z, y_true = collect_rollout_z(dyn_sys, data, cfg.in_steps)
+    z, y_true = collect_rollout_z(dyn_sys, data, cfg.history_steps)
     assert z.shape[:2] == y_true.shape[:2] == (data["Y"].shape[0], cfg.dev_pred_steps)
     assert z.shape[-1] == dyn_sys.nodes[0].callable.head_stack.raw_width
-    assert torch.equal(y_true, data["Y"][:, cfg.in_steps:])
+    assert torch.equal(y_true, data["Y"][:, cfg.history_steps:])
 
 
 def test_calibration_updates_the_ordinal_head_in_place_and_reports_it():
@@ -302,7 +302,7 @@ def _staged_run(tmp_path, **over):
         "sec_elapsed": np.arange(n) * 300.0,
     })
     nm = {"Y": ["stage"], "U": ["u0"], "D": ["d0"], "t": ["sec_elapsed"]}
-    cfg = trainable_cfg(tmp_path, **over)
+    cfg = trainable_cfg(tmp_path, nm, **over)
 
     norm_stats = compute_norm_stats(df, norm_type=cfg.norm_type)
     dfs = [normalize_df(df, norm_stats)]

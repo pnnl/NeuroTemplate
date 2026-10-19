@@ -3,7 +3,7 @@ Closed-loop training/eval data.
 
 A lean control-specific windower. Per window:
 
-    H_sys  = sysid_cfg.in_steps   (frozen thermal model's history window)
+    H_sys  = sysid_cfg.history_steps   (frozen thermal model's history window)
     H_ctrl = cfg.in_steps         (policy's history window)
     Hmax   = max(H_sys, H_ctrl)
     P      = pure prediction length (train_pred_steps for train, test_window-Hmax for eval)
@@ -55,7 +55,7 @@ from neurotemplate._typing import beartype
 @beartype
 def horizons(cfg, sysid_cfg) -> tuple[int, int, int]:
     """(H_sys, H_ctrl, Hmax)."""
-    h_sys = sysid_cfg.in_steps
+    h_sys = sysid_cfg.history_steps
     h_ctrl = cfg.in_steps
     return h_sys, h_ctrl, max(h_sys, h_ctrl)
 

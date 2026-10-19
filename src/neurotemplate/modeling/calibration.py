@@ -113,7 +113,7 @@ def balance_level_weights(head_stack: HeadStack, train_dfs: list[DataFrame]) -> 
         head.level_weights.copy_(inverse_sqrt_frequency_weights(y, levels))
 
 
-def collect_rollout_z(dyn_sys, data: dict, in_steps: int) -> tuple[torch.Tensor, torch.Tensor]:
+def collect_rollout_z(dyn_sys, data: dict, history_steps: int) -> tuple[torch.Tensor, torch.Tensor]:
     """Roll `dyn_sys` out on `data` and return the pre-activation z it produced
     at every scored step, [batch, steps, raw_width], with the matching truth
     [batch, steps, ny]. Read through a forward hook on the head stack, so the
@@ -127,20 +127,20 @@ def collect_rollout_z(dyn_sys, data: dict, in_steps: int) -> tuple[torch.Tensor,
     finally:
         handle.remove()
     # The rollout runs one step past the last truth (yn has T+1 entries);
-    # drop that final z so z[:, t] lines up with Y[:, in_steps + t].
+    # drop that final z so z[:, t] lines up with Y[:, history_steps + t].
     z = torch.stack(seen, dim=1)[:, :-1]
-    return z, out["Y"][:, in_steps:]
+    return z, out["Y"][:, history_steps:]
 
 
 def _rollout_z(dyn_sys, cfg, dev_dfs, nm_mapping):
     data = get_sw_dict_multi(
         dfs=dev_dfs, cfg=cfg, nm_mapping=nm_mapping,
-        steps=cfg.in_steps + cfg.dev_pred_steps,
+        steps=cfg.history_steps + cfg.dev_pred_steps,
     )
     data.pop("source_idx")
     was_training = dyn_sys.training
     dyn_sys.eval()
-    z_all, y_true = collect_rollout_z(dyn_sys, data, cfg.in_steps)
+    z_all, y_true = collect_rollout_z(dyn_sys, data, cfg.history_steps)
     dyn_sys.train(was_training)
     return z_all, y_true
 

@@ -27,8 +27,8 @@ RUN_SUMMARY_NAME = "run_summary.json"
 # have run. Keep in step with the audit, not with the full config.
 _PARAM_FIELDS = {
     "model": ("model", "epochs", "lr", "batch_size", "train_pred_steps",
-              "in_steps", "test_window", "norm_type", "seed"),
-    "control": ("epochs", "lr", "batch_size", "train_pred_steps", "in_steps",
+              "history", "test_window", "norm_type", "seed"),
+    "control": ("epochs", "lr", "batch_size", "train_pred_steps", "policy_window",
                 "losses", "gains", "seed", "sysid_run_id"),
 }
 

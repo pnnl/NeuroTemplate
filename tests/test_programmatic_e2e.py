@@ -7,6 +7,7 @@ each. The CLIs are thin wrappers over these calls, so this is also the
 wiring `nt model train`, `nt model load` and `nt control train` depend on.
 """
 
+import json
 import sys
 from dataclasses import replace
 from pathlib import Path
@@ -21,8 +22,9 @@ from neurotemplate.modeling.config import ModelingConfig
 from neurotemplate.modeling.load import evaluate_run, load_trained_dynamics
 from neurotemplate.modeling.train import train_model
 from control_fixtures import (
-    make_control_cfg, make_raw_df, make_reference_df, write_splits,
+    make_control_cfg, make_nm_mapping, make_raw_df, make_reference_df, write_splits,
 )
+from model_fixtures import uniform_history
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -47,6 +49,8 @@ def test_a_trained_surrogate_feeds_a_policy_run_and_both_reload(tmp_path, monkey
     plant_path = tmp_path / "plant.csv"
     plant.drop(columns="sec_elapsed").rename_axis("timestamp").to_csv(plant_path)
 
+    # A JSON object is a YAML flow mapping.
+    history = json.dumps(uniform_history(make_nm_mapping(), 4), ensure_ascii=False)
     config_path = tmp_path / "modeling.yaml"
     config_path.write_text(f"""
 train_data_path: {plant_path}
@@ -54,7 +58,7 @@ dev_data_path: {plant_path}
 test_data_path: {plant_path}
 user_hooks_path: {FIXTURES / "modeling_user_defined.py"}
 model: mlp
-in_steps: 4
+history: {history}
 log2_hidden_size: 2
 num_layers: 1
 epochs: 50

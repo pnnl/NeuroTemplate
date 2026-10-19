@@ -241,6 +241,8 @@ def _block_lines(name: str, info: Optional[dict], indent: str = "") -> list[str]
     for channel, taus in info.get("time_constants_h", {}).items():
         lines.append(f"{indent}  - {channel}: tau_fast={taus['fast']:.2f} h, "
                      f"tau_slow={taus['slow']:.2f} h")
+    if "lags" in info:
+        lines.append(f"{indent}  - reads, lag per column: {_lag_list(info['lags'])}")
     lines += _bounded_lines(info.get("bounded", {}), indent + "  ")
     lines += _forcing_lines(info.get("forcing"), indent + "  ")
     for block_name, sub in info.get("blocks", {}).items():
@@ -249,6 +251,10 @@ def _block_lines(name: str, info: Optional[dict], indent: str = "") -> list[str]
             label += f" ({sub['model']})"
         lines += _block_lines(label, sub, indent + "  ")
     return lines
+
+
+def _lag_list(lags: dict[str, int]) -> str:
+    return ", ".join(f"{column} {lag}" for column, lag in lags.items())
 
 
 def _bounded_lines(bounded: dict, indent: str) -> list[str]:
@@ -305,8 +311,9 @@ def _architecture_section(arch: dict, title: str = "Architecture") -> str:
         f"- **Factory:** `{arch['factory']}`",
         f"- **Separable:** {arch['separable']}",
         f"- **Residual:** {arch['residual']}",
-        f"- **Shapes:** in_steps={arch['in_steps']}, "
+        f"- **Shapes:** history_steps={arch['history_steps']}, "
         f"ny={arch['ny']}, nu={arch['nu']}, nd={arch['nd']}",
+        f"- **History (lag per column):** {_lag_list(arch['history'])}",
         f"- **Total trainable params:** {arch['param_count']:,}",
     ]
     blocks = arch.get("blocks", {})

@@ -29,7 +29,7 @@ class SampledGradientPenalty:
     On each call to compute():
       1. Samples n_samples random points in the normalized input space
       2. Computes Jacobians of the full dynamics step via jacrev + vmap
-      3. Sums each Jacobian over the in_steps lags and returns the mean sign
+      3. Sums each Jacobian over the history_steps lags and returns the mean sign
          violation of that sum per constrained (output, input) pair
          (unweighted scalar)
 
@@ -111,7 +111,7 @@ class SampledGradientPenalty:
         else:  # z_score
             sample = torch.randn(self.n_samples, nx, device=self.device)
 
-        return sample.repeat(1, self.model.in_steps)
+        return sample.repeat(1, self.model.history_steps)
 
     def compute(self):
         """
@@ -125,7 +125,7 @@ class SampledGradientPenalty:
 
         # Random inputs in normalized space (distribution matches norm_type).
         # Buildings are slow-moving: sample a single state per trajectory and
-        # tile it across in_steps, so the building has been at that state for
+        # tile it across history_steps, so the building has been at that state for
         # the entire history window rather than jumping randomly each step.
         y = self._repeat_sample(self.model.ny)
         u = self._repeat_sample(self.model.nu)
@@ -133,7 +133,7 @@ class SampledGradientPenalty:
         if self.model.pre_stack is not None:
             u = self.model.pre_stack(y, u)
 
-        # Each J_i has shape [n_samples, ny, in_steps * nx_i]
+        # Each J_i has shape [n_samples, ny, history_steps * nx_i]
         J = self.jac_fn(y, u, d)
         if not isinstance(J, tuple):
             J = (J,)
@@ -143,13 +143,13 @@ class SampledGradientPenalty:
             m = self.signs[key]                  # [ny, nx]
             nx = m.shape[-1]
 
-            # Sum the Jacobian over the in_steps lags: the response to shifting
+            # Sum the Jacobian over the history_steps lags: the response to shifting
             # the whole (constant) history window, i.e. a sustained change.
             # Individual lag coefficients have no physical sign — an older lag
             # may go negative to carry rate information — but their sum does.
-            # Jacobian: [n_samples, ny, in_steps*nx], flattened oldest→newest.
+            # Jacobian: [n_samples, ny, history_steps*nx], flattened oldest→newest.
             j_sustained = j_mat.reshape(
-                j_mat.shape[0], j_mat.shape[1], self.model.in_steps, nx
+                j_mat.shape[0], j_mat.shape[1], self.model.history_steps, nx
             ).sum(dim=2)                         # [n_samples, ny, nx]
 
             # Penalize sign violations:

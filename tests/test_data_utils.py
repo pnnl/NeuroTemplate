@@ -40,7 +40,7 @@ def nm_mapping():
 @pytest.fixture
 def cfg():
     c = dict_to_dataclass({
-                "in_steps": 4,
+        "history": {"y0": 3, "y1": 3, "u0": 3, "d0": 3},
         "train_pred_steps": 6,
         "device": "cpu",
         "verbose": False,
@@ -109,29 +109,29 @@ def test_sec_elapsed_always_identity_regardless_of_override(synthetic_df):
 
 
 def test_sliding_window_shapes(synthetic_df, nm_mapping, cfg):
-    """Default windowing: steps=in_steps+train_pred_steps=10, stride=in_steps=4."""
+    """Default windowing: steps=history_steps+train_pred_steps=10, stride=history_steps=4."""
     data = get_sw_dict(synthetic_df, cfg, nm_mapping)
     n_rows = len(synthetic_df)
-    steps = cfg.in_steps + cfg.train_pred_steps
-    expected_windows = (n_rows - steps) // cfg.in_steps + 1
+    steps = cfg.history_steps + cfg.train_pred_steps
+    expected_windows = (n_rows - steps) // cfg.history_steps + 1
 
     assert data["Y"].shape == (expected_windows, steps, 2)
     assert data["U"].shape == (expected_windows, steps, 1)
     assert data["D"].shape == (expected_windows, steps, 1)
     assert data["t"].shape == (expected_windows, steps, 1)
-    # Initial conditions: yn is the first in_steps of Y
-    assert data["yn"].shape == (expected_windows, cfg.in_steps, 2)
-    assert torch.equal(data["yn"], data["Y"][:, :cfg.in_steps, :])
+    # Initial conditions: yn is the first history_steps of Y
+    assert data["yn"].shape == (expected_windows, cfg.history_steps, 2)
+    assert torch.equal(data["yn"], data["Y"][:, :cfg.history_steps, :])
 
 
 def test_sliding_window_stride(synthetic_df, nm_mapping, cfg):
-    """Each window starts cfg.in_steps after the previous (default stride)."""
+    """Each window starts cfg.history_steps after the previous (default stride)."""
     data = get_sw_dict(synthetic_df, cfg, nm_mapping)
-    # First window starts at row 0; second at row in_steps
+    # First window starts at row 0; second at row history_steps
     if data["Y"].shape[0] >= 2:
         first = data["Y"][0, 0, 0].item()
         second = data["Y"][1, 0, 0].item()
-        expected_second = synthetic_df["y0"].iloc[cfg.in_steps]
+        expected_second = synthetic_df["y0"].iloc[cfg.history_steps]
         assert np.isclose(second, expected_second)
         expected_first = synthetic_df["y0"].iloc[0]
         assert np.isclose(first, expected_first)
@@ -160,8 +160,8 @@ def test_multi_file_window_count_equals_per_file_sum(nm_mapping, cfg):
     """Per-file windows concatenated → total = K × per-file count."""
     dfs = _two_synthetic_dfs(n=100)
     data = get_sw_dict_multi(dfs, cfg, nm_mapping)
-    steps = cfg.in_steps + cfg.train_pred_steps
-    per_file = (100 - steps) // cfg.in_steps + 1
+    steps = cfg.history_steps + cfg.train_pred_steps
+    per_file = (100 - steps) // cfg.history_steps + 1
     assert data["Y"].shape == (2 * per_file, steps, 2)
     assert data["source_idx"].shape == (2 * per_file,)
 

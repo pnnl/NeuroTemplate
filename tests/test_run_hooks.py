@@ -56,7 +56,7 @@ def test_editing_the_hooks_file_after_training_changes_nothing(tmp_path, monkeyp
         train_policy(cfg, problem, *loaders, logger=logger)
 
     windows = build_window_dict(s["norm_df"], cfg, sysid_cfg, nm,
-                                P=cfg.train_pred_steps, stride=cfg.in_steps)
+                                P=cfg.train_pred_steps, stride=cfg.history_steps)
     with torch.no_grad():
         trained = closed_loop(dict(windows))["U"]
 

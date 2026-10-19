@@ -9,7 +9,7 @@ only hope for, so the tests are that list of claims:
   - the reported time constants are the update's real eigenvalues;
   - a rollout cannot diverge, whatever the inputs and wherever the time
     constants sit inside their boxes;
-  - the hidden mass remembers past `in_steps`, which is the point;
+  - the hidden mass remembers past `history_steps`, which is the point;
   - the time constants are the declared prior — pinned where a scalar says
     so, inside the box where `[min, max]` does — and every point of the
     boxes is a valid building;
@@ -42,10 +42,10 @@ from neurotemplate.modeling.rc import (
     MIN_TAU_STEPS, RCBlock, SaturatingTerm, mode_taus, physical_parameters,
     time_constant_boxes,
 )
-from model_fixtures import model_cfg
+from model_fixtures import model_cfg, uniform_history
 
 SPH = 12.0            # 5-minute data
-IN_STEPS = 6
+HISTORY_STEPS = 6
 
 MAPPING = {
     "Y": ["north T", "south T"],
@@ -105,14 +105,25 @@ DECLARED_MAPPING = {
 }
 
 
+#: Every block 2r2c: U and D are read at the current step only.
+RC_HISTORY = uniform_history(MAPPING, HISTORY_STEPS, at_zero=(*MAPPING["U"], *MAPPING["D"]))
+UNIFORM = uniform_history(MAPPING, HISTORY_STEPS)
+#: The 2r2c zone owns the setpoint; the mlp readout reads the outdoor air.
+MIXED_HISTORY = uniform_history(MIXED_MAPPING, HISTORY_STEPS,
+                                at_zero=tuple(MIXED_MAPPING["U"]))
+DECLARED_HISTORY = uniform_history(
+    DECLARED_MAPPING, HISTORY_STEPS,
+    at_zero=(*DECLARED_MAPPING["U"], *DECLARED_MAPPING["D"]))
+
+
 def make_cfg(**over) -> Config:
-    return model_cfg(**{"model": "2r2c", "in_steps": IN_STEPS, "log2_hidden_size": 4,
+    return model_cfg(**{"model": "2r2c", "history": RC_HISTORY, "log2_hidden_size": 4,
                         "steps_per_hour": SPH, **over})
 
 
 def make_block(ny=1, nu=1, nd=1, params=PINNED, **over) -> RCBlock:
     torch.manual_seed(0)
-    return RCBlock(ny, nu, nd, IN_STEPS, SPH, hidden_size=8, num_layers=1,
+    return RCBlock(ny, nu, nd, HISTORY_STEPS, SPH, hidden_size=8, num_layers=1,
                    taus=time_constant_boxes(params, SPH, "b"), **over)
 
 
@@ -138,18 +149,18 @@ def normalised(name: str, value: float) -> float:
 
 
 def window(block: RCBlock, zone, drive_u, drive_d) -> torch.Tensor:
-    """A key-major window holding a constant history and one input row."""
+    """The block's window: a constant zone history and one row of U and D."""
     ny, nu, nd = block.widths
     return torch.cat([
-        torch.tensor(zone, dtype=torch.float32).repeat(1, IN_STEPS * ny),
-        torch.tensor(drive_u, dtype=torch.float32).repeat(1, IN_STEPS * nu),
-        torch.tensor(drive_d, dtype=torch.float32).repeat(1, IN_STEPS * nd),
+        torch.tensor(zone, dtype=torch.float32).repeat(1, HISTORY_STEPS * ny),
+        torch.tensor(drive_u, dtype=torch.float32).repeat(1, nu),
+        torch.tensor(drive_d, dtype=torch.float32).repeat(1, nd),
     ], dim=-1)
 
 
 def rollout(system, y0, steps, u=None, d=None, ny=2, nu=3, nd=2):
     data = {
-        "yn": torch.full((1, IN_STEPS, ny), y0),
+        "yn": torch.full((1, HISTORY_STEPS, ny), y0),
         "U": u if u is not None else torch.zeros(1, steps, nu),
         "D": d if d is not None else torch.zeros(1, steps, nd),
         "Y": torch.zeros(1, steps, ny),
@@ -242,13 +253,13 @@ def test_a_week_of_adversarial_input_does_not_diverge():
 
 def test_a_head_start_outlives_the_history_window():
     """A difference in initial temperature has to survive far longer than
-    `in_steps`, or the family has bought nothing over a windowed MLP."""
+    `history_steps`, or the family has bought nothing over a windowed MLP."""
     system = get_dynamics(make_cfg(), MAPPING, block_spec=SPLIT)
     steps = int(SPH) * 24
     warm = rollout(system, 2.0, steps)[0, :, 0]
     cold = rollout(system, 0.0, steps)[0, :, 0]
     surviving = ((warm - cold) / (warm - cold)[0]).detach()
-    assert surviving[IN_STEPS] > 0.9              # the window is not the memory
+    assert surviving[HISTORY_STEPS] > 0.9              # the window is not the memory
     assert surviving[int(SPH) * 6] > 0.35         # still there six hours later
     assert surviving[-1] < surviving[int(SPH) * 6]  # and it is decaying
 
@@ -261,8 +272,8 @@ def test_the_mass_carries_state_across_calls_until_reset():
     zone stays there however many times it is stepped.
     """
     block = make_block()
-    ramp = torch.arange(IN_STEPS, dtype=torch.float32).unsqueeze(0)
-    x = torch.cat([ramp, torch.zeros(1, IN_STEPS * 2)], dim=-1)
+    ramp = torch.arange(HISTORY_STEPS, dtype=torch.float32).unsqueeze(0)
+    x = torch.cat([ramp, torch.zeros(1, 2)], dim=-1)   # one row of U and D
     block.set_rollout_state(None)
     first = block(x.clone())
     second = block(x.clone())
@@ -276,26 +287,26 @@ def test_the_gradient_penalty_can_still_differentiate_the_block():
     no batch dimension and no state to keep."""
     system = get_dynamics(make_cfg(), MAPPING, block_spec=SPLIT)
     raw = system.nodes[0].callable
-    x = torch.randn(4, IN_STEPS * 7)
+    x = torch.randn(4, HISTORY_STEPS * 7)
     jac = torch.vmap(torch.func.jacrev(raw.compute_output, argnums=(0, 1, 2)))(
-        x[:, :IN_STEPS * 2], x[:, IN_STEPS * 2:IN_STEPS * 5], x[:, IN_STEPS * 5:])
+        x[:, :HISTORY_STEPS * 2], x[:, HISTORY_STEPS * 2:HISTORY_STEPS * 5], x[:, HISTORY_STEPS * 5:])
     assert all(torch.isfinite(j).all() for j in jac)
-    assert jac[0].shape == (4, 2, IN_STEPS * 2)
+    assert jac[0].shape == (4, 2, HISTORY_STEPS * 2)
 
 
 def test_the_gradient_penalty_still_works_on_a_mixed_family_block():
     """The same vmap/jacrev path, but fy now holds an RCBlock and an MLP
     side by side — the gather/scatter permutations that make this vmap-safe
     don't care how many families are mixed in."""
-    cfg = make_cfg(model="mlp")  # default family for blocks that don't override
+    cfg = make_cfg(model="mlp", history=MIXED_HISTORY)  # default family for blocks that don't override
     system = get_dynamics(cfg, MIXED_MAPPING, block_spec=MIXED_SPLIT)
     raw = system.nodes[0].callable
     # widths: ny=2, nu=1, nd=1
-    x = torch.randn(4, IN_STEPS * 4)
+    x = torch.randn(4, HISTORY_STEPS * 4)
     jac = torch.vmap(torch.func.jacrev(raw.compute_output, argnums=(0, 1, 2)))(
-        x[:, :IN_STEPS * 2], x[:, IN_STEPS * 2:IN_STEPS * 3], x[:, IN_STEPS * 3:])
+        x[:, :HISTORY_STEPS * 2], x[:, HISTORY_STEPS * 2:HISTORY_STEPS * 3], x[:, HISTORY_STEPS * 3:])
     assert all(torch.isfinite(j).all() for j in jac)
-    assert jac[0].shape == (4, 2, IN_STEPS * 2)
+    assert jac[0].shape == (4, 2, HISTORY_STEPS * 2)
 
 
 # ── The prior holds where it is declared ─────────────────────────
@@ -346,11 +357,11 @@ def test_one_blocks_input_cannot_move_another_blocks_state():
             for p in block.gain.parameters():
                 p.normal_(0, 1.0)
 
-    x = torch.randn(2, IN_STEPS * 7)
+    x = torch.randn(2, HISTORY_STEPS * 7)
     clear_state(stateful_blocks(fy))
     before = fy(x.clone())
     nudged = x.clone()
-    nudged[:, IN_STEPS * 2 + 0::3] += 5.0        # the north setpoint alone
+    nudged[:, HISTORY_STEPS * 2 + 0::3] += 5.0        # the north setpoint alone
     clear_state(stateful_blocks(fy))
     moved = (fy(nudged) - before).abs().max(0).values
     assert moved[0] > 0.1 and moved[1] == 0.0
@@ -363,7 +374,7 @@ def test_outputs_come_back_in_the_mappings_channel_order():
     system = get_dynamics(make_cfg(), MAPPING, block_spec=reordered)
     fy = system.nodes[0].callable.fy
     assert fy._to_y_order.tolist() == [1, 0]
-    assert fy(torch.randn(2, IN_STEPS * 7)).shape == (2, 2)
+    assert fy(torch.randn(2, HISTORY_STEPS * 7)).shape == (2, 2)
 
 
 def test_each_block_holds_its_own_parameters_and_its_own_names():
@@ -379,7 +390,7 @@ def test_each_block_holds_its_own_parameters_and_its_own_names():
 def test_reset_reaches_every_block():
     system = get_dynamics(make_cfg(), MAPPING, block_spec=SPLIT)
     fy = system.nodes[0].callable.fy
-    fy(torch.randn(2, IN_STEPS * 7))
+    fy(torch.randn(2, HISTORY_STEPS * 7))
     assert all(b._mass is not None for b in fy.blocks)
     clear_state(stateful_blocks(fy))
     assert all(b._mass is None for b in fy.blocks)
@@ -389,18 +400,18 @@ def test_per_block_wraps_any_family_the_flag_allows():
     """`per_block` is a split, not a family: an MLP gets the same treatment."""
     split = {name: {k: v for k, v in spec.items() if k != "params"}
              for name, spec in SPLIT.items()}
-    system = get_dynamics(make_cfg(model="mlp", per_block=True), MAPPING,
+    system = get_dynamics(make_cfg(model="mlp", per_block=True, history=UNIFORM), MAPPING,
                           block_spec=split)
     fy = system.nodes[0].callable.fy
     assert isinstance(fy, BlockStack)
-    assert fy(torch.randn(2, IN_STEPS * 7)).shape == (2, 2)
+    assert fy(torch.randn(2, HISTORY_STEPS * 7)).shape == (2, 2)
 
 
 def test_a_mixed_family_model_scatters_both_kinds_back_in_y_order():
     """One block is `2r2c`, the other `mlp`, in a single graph. The scatter
     must still land in nm_mapping["Y"] order, and a reset must reach only
     the stateful (2r2c) child."""
-    cfg = make_cfg(model="mlp")   # blocks that don't override use "mlp"
+    cfg = make_cfg(model="mlp", history=MIXED_HISTORY)   # blocks that don't override use "mlp"
     system = get_dynamics(cfg, MIXED_MAPPING, block_spec=MIXED_SPLIT)
     fy = system.nodes[0].callable.fy
 
@@ -409,10 +420,10 @@ def test_a_mixed_family_model_scatters_both_kinds_back_in_y_order():
     assert type(fy.blocks[1]).__name__ == "MLP"
     assert stateful_blocks(fy) == [fy.blocks[0]]  # the mlp block is stateless
 
-    out = fy(torch.randn(2, IN_STEPS * 4))
+    out = fy(torch.randn(2, HISTORY_STEPS * 4))
     assert out.shape == (2, 2)                    # nm_mapping["Y"] order, ny=2
 
-    fy(torch.randn(2, IN_STEPS * 4))
+    fy(torch.randn(2, HISTORY_STEPS * 4))
     assert fy.blocks[0]._mass is not None          # the RC block warmed up
     clear_state(stateful_blocks(fy))
     assert fy.blocks[0]._mass is None              # reset reaches it...
@@ -421,7 +432,7 @@ def test_a_mixed_family_model_scatters_both_kinds_back_in_y_order():
 def test_reads_changes_the_reading_blocks_output_and_not_the_read_blocks():
     """`power` reads `north`'s state; perturbing north's history must move
     power's prediction but never the other way around."""
-    cfg = make_cfg(model="mlp")
+    cfg = make_cfg(model="mlp", history=MIXED_HISTORY)
     torch.manual_seed(0)
     system = get_dynamics(cfg, MIXED_MAPPING, block_spec=MIXED_SPLIT)
     fy = system.nodes[0].callable.fy
@@ -431,14 +442,14 @@ def test_reads_changes_the_reading_blocks_output_and_not_the_read_blocks():
         for p in fy.blocks[1].parameters():
             p.normal_(0, 1.0)
 
-    x = torch.randn(2, IN_STEPS * 4)                # widths (2, 1, 1)
+    x = torch.randn(2, HISTORY_STEPS * 4)                # widths (2, 1, 1)
     clear_state(stateful_blocks(fy))
     before = fy(x.clone())
 
     # Y is key-major and, within that key, time-major: two columns per
-    # step (north T, power), for IN_STEPS steps, at the front of the window.
-    north_cols = [2 * t for t in range(IN_STEPS)]
-    power_cols = [2 * t + 1 for t in range(IN_STEPS)]
+    # step (north T, power), for HISTORY_STEPS steps, at the front of the window.
+    north_cols = [2 * t for t in range(HISTORY_STEPS)]
+    power_cols = [2 * t + 1 for t in range(HISTORY_STEPS)]
 
     # Perturb "north T" — the read channel — across its whole history.
     nudged_north = x.clone()
@@ -470,11 +481,12 @@ def test_a_per_block_d_subset_narrows_only_that_blocks_input_width():
         "one": {"Y": ["a"], "D": ["oat"], "model": "mlp"},   # named subset
         "two": {"Y": ["b"], "model": "mlp"},                  # absent -> all D
     }
-    system = get_dynamics(make_cfg(model="mlp"), mapping, block_spec=spec)
+    system = get_dynamics(make_cfg(model="mlp", history=uniform_history(mapping, HISTORY_STEPS)),
+                          mapping, block_spec=spec)
     fy = system.nodes[0].callable.fy
     # widths: ny_in=1, nu=0 for both; nd=1 for "one", nd=2 for "two"
-    assert fy.blocks[0].in_features == IN_STEPS * (1 + 0 + 1)
-    assert fy.blocks[1].in_features == IN_STEPS * (1 + 0 + 2)
+    assert fy.blocks[0].in_features == HISTORY_STEPS * (1 + 0 + 1)
+    assert fy.blocks[1].in_features == HISTORY_STEPS * (1 + 0 + 2)
 
 
 # ── Declared forcing: every claim survives the branches ──────────
@@ -495,19 +507,19 @@ def test_demand_is_zero_on_the_inactive_side_and_positive_on_the_active():
     """Through the normalisation round trip: the two columns have different
     shifts, so a setpoint 1 °C above the zone is *below* it in normalised
     units. Only a physical-unit comparison gates in the right place."""
-    system = get_dynamics(make_cfg(), DECLARED_MAPPING, block_spec=DECLARED,
+    system = get_dynamics(make_cfg(history=DECLARED_HISTORY), DECLARED_MAPPING, block_spec=DECLARED,
                           norm_stats=STATS)
     pre = system.nodes[0].callable.pre_stack
-    zone = torch.full((1, IN_STEPS), normalised("north T", 24.0))
-    coasting = torch.full((1, IN_STEPS), normalised("north sp", 25.0))
-    cooling = torch.full((1, IN_STEPS), normalised("north sp", 22.0))
-    fan = torch.zeros(1, IN_STEPS)
+    zone = torch.full((1, HISTORY_STEPS), normalised("north T", 24.0))
+    coasting = torch.full((1, HISTORY_STEPS), normalised("north sp", 25.0))
+    cooling = torch.full((1, HISTORY_STEPS), normalised("north sp", 22.0))
+    fan = torch.zeros(1, HISTORY_STEPS)
     u = lambda sp: torch.stack([sp, fan], dim=-1).reshape(1, -1)  # noqa: E731
     assert normalised("north sp", 25.0) < normalised("north T", 24.0)
-    assert torch.equal(pre(zone, u(coasting)).reshape(IN_STEPS, 2)[:, 0],
-                       torch.zeros(IN_STEPS))
-    active = pre(zone, u(cooling)).reshape(IN_STEPS, 2)[:, 0]
-    assert torch.allclose(active, torch.full((IN_STEPS,), 2.0 / (27.0 - 21.0)))
+    assert torch.equal(pre(zone, u(coasting)).reshape(HISTORY_STEPS, 2)[:, 0],
+                       torch.zeros(HISTORY_STEPS))
+    active = pre(zone, u(cooling)).reshape(HISTORY_STEPS, 2)[:, 0]
+    assert torch.allclose(active, torch.full((HISTORY_STEPS,), 2.0 / (27.0 - 21.0)))
 
 
 @pytest.mark.parametrize("theta_cap,theta_slope", [(-20.0, 0.0), (0.0, 20.0), (20.0, 20.0)])
@@ -580,16 +592,16 @@ def test_a_declared_block_persists_its_stats_and_reloads_by_config():
     """The branches' norm stats and the pre-stack's are buffers, so the
     checkpoint's numbers reach a rebuilt system through load_state_dict."""
     torch.manual_seed(0)
-    system = get_dynamics(make_cfg(), DECLARED_MAPPING, block_spec=DECLARED,
+    system = get_dynamics(make_cfg(history=DECLARED_HISTORY), DECLARED_MAPPING, block_spec=DECLARED,
                           norm_stats=STATS)
     state = system.state_dict()
     assert any("pre_stack" in k for k in state)
     assert any("saturating.0.theta_cap" in k for k in state)
-    rebuilt = get_dynamics(make_cfg(), DECLARED_MAPPING, block_spec=DECLARED,
+    rebuilt = get_dynamics(make_cfg(history=DECLARED_HISTORY), DECLARED_MAPPING, block_spec=DECLARED,
                            norm_stats=STATS)
     rebuilt.load_state_dict(state)
-    x = torch.randn(2, IN_STEPS * 5)
-    y, u, d = x[:, :IN_STEPS], x[:, IN_STEPS:IN_STEPS * 3], x[:, IN_STEPS * 3:]
+    x = torch.randn(2, HISTORY_STEPS * 5)
+    y, u, d = x[:, :HISTORY_STEPS], x[:, HISTORY_STEPS:HISTORY_STEPS * 3], x[:, HISTORY_STEPS * 3:]
     clear_state(stateful_blocks(system)); clear_state(stateful_blocks(rebuilt))
     assert torch.equal(system.nodes[0].callable(y, u, d), rebuilt.nodes[0].callable(y, u, d))
 
@@ -599,7 +611,7 @@ def test_a_week_of_adversarial_setpoints_does_not_diverge_with_demand_on():
     rollout stays inside the same bound as the undeclared block's — at the
     fastest rates and with the coil driven to its cap."""
     torch.manual_seed(0)
-    system = get_dynamics(make_cfg(), DECLARED_MAPPING, block_spec=DECLARED,
+    system = get_dynamics(make_cfg(history=DECLARED_HISTORY), DECLARED_MAPPING, block_spec=DECLARED,
                           norm_stats=STATS)
     block = system.nodes[0].callable.fy.blocks[0]
     set_thetas(block, -20.0)                          # the fastest rates
@@ -616,11 +628,11 @@ def test_a_week_of_adversarial_setpoints_does_not_diverge_with_demand_on():
 
 
 def test_a_declared_block_still_differentiates_under_vmap():
-    system = get_dynamics(make_cfg(), DECLARED_MAPPING, block_spec=DECLARED,
+    system = get_dynamics(make_cfg(history=DECLARED_HISTORY), DECLARED_MAPPING, block_spec=DECLARED,
                           norm_stats=STATS)
     raw = system.nodes[0].callable
-    x = torch.randn(4, IN_STEPS * 5)
-    y, u, d = x[:, :IN_STEPS], x[:, IN_STEPS:IN_STEPS * 3], x[:, IN_STEPS * 3:]
+    x = torch.randn(4, HISTORY_STEPS * 5)
+    y, u, d = x[:, :HISTORY_STEPS], x[:, HISTORY_STEPS:HISTORY_STEPS * 3], x[:, HISTORY_STEPS * 3:]
     jac = torch.vmap(torch.func.jacrev(raw.compute_output, argnums=(0, 1, 2)))(
         y, raw.pre_stack(y, u), d)
     assert all(torch.isfinite(j).all() for j in jac)
@@ -637,7 +649,7 @@ def test_the_reportcard_reads_the_branches_off_describe():
 
 def test_a_demand_declaration_needs_norm_stats():
     with pytest.raises(ValueError, match="norm_stats"):
-        get_dynamics(make_cfg(), DECLARED_MAPPING, block_spec=DECLARED)
+        get_dynamics(make_cfg(history=DECLARED_HISTORY), DECLARED_MAPPING, block_spec=DECLARED)
 
 
 # ── The ways a wrong model is refused ────────────────────────────
@@ -676,7 +688,7 @@ def test_2r2c_without_a_block_mapping_has_nowhere_to_declare_its_prior():
 def test_params_on_a_family_that_reads_none_are_refused():
     spec = {"all": {"Y": MAPPING["Y"], "params": PINNED}}
     with pytest.raises(ValueError, match="only a 2r2c block reads"):
-        get_dynamics(make_cfg(model="mlp"), MAPPING, block_spec=spec)
+        get_dynamics(make_cfg(model="mlp", history=UNIFORM), MAPPING, block_spec=spec)
 
 
 def test_a_head_that_will_not_add_the_state_back_is_refused():
@@ -697,7 +709,28 @@ def test_2r2c_with_reads_is_refused():
         "power": {"Y": ["power"], "model": "mlp"},
     }
     with pytest.raises(ValueError, match="cannot declare `reads`"):
-        get_dynamics(make_cfg(model="mlp"), MIXED_MAPPING, block_spec=spec)
+        get_dynamics(make_cfg(model="mlp", history=MIXED_HISTORY), MIXED_MAPPING,
+                     block_spec=spec)
+
+
+def test_a_lag_on_a_column_only_2r2c_reads_is_refused():
+    """2r2c drives its zone with the current U and D only, so a lag on a
+    column nothing else reads would sit inert."""
+    history = {**MIXED_HISTORY, "north sp": 2}
+    with pytest.raises(ValueError, match=r"history\['north sp'\] is 2.*'north': 0"):
+        get_dynamics(make_cfg(model="mlp", history=history), MIXED_MAPPING,
+                     block_spec=MIXED_SPLIT)
+
+
+def test_a_demand_setpoint_lagged_past_its_zone_is_refused():
+    """The demand is computed on the full window, so a setpoint read further
+    back than its zone carries zone history the zone's own lag excludes."""
+    spec = {"north": {"Y": ["north T"],
+                      "inputs": {"north sp": DECLARED["north"]["inputs"]["north sp"]}}}
+    history = {**uniform_history(DECLARED_MAPPING, 2), "north sp": 3}
+    with pytest.raises(ValueError, match=r"history\['north sp'\] is 3, deeper"):
+        get_dynamics(make_cfg(model="mlp", history=history), DECLARED_MAPPING,
+                     block_spec=spec, norm_stats=STATS)
 
 
 def test_a_demand_can_be_routed_into_the_mlp_by_declaration():
@@ -712,6 +745,6 @@ def test_a_demand_can_be_routed_into_the_mlp_by_declaration():
     assert block.mlp_names == ["north sp", "ahu fan", "oat", "ghi"]
     assert block.describe()["forcing"]["demand_in_mlp"] == ["north sp"]
     spec = {"north": {**DECLARED["north"], "inputs": inputs}}
-    system = get_dynamics(make_cfg(), DECLARED_MAPPING, block_spec=spec, norm_stats=STATS)
+    system = get_dynamics(make_cfg(history=DECLARED_HISTORY), DECLARED_MAPPING, block_spec=spec, norm_stats=STATS)
     assert system.nodes[0].callable.pre_stack.to_config()["north sp"] == {
         "kind": "demand", "state": "north T", "sign": -1}

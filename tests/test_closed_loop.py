@@ -21,7 +21,7 @@ def _windows(s, cfg=None, sysid_cfg=None):
     cfg = cfg or s["cfg"]
     return build_window_dict(
         s["norm_df"], cfg, sysid_cfg or s["sysid_cfg"], s["nm"],
-        P=cfg.train_pred_steps, stride=cfg.in_steps,
+        P=cfg.train_pred_steps, stride=cfg.history_steps,
     )
 
 
@@ -120,7 +120,7 @@ def test_gru_surrogate_rolls_out_and_warms_up():
     # feeding that window to a freshly reset block reproduces the first
     # prediction. The window is read from `out`, because its last U row is the
     # policy's first command rather than recorded data. Control never has to know those indices — SystemPreview's
-    # input_map derives the window from the model's declared in_steps.
+    # input_map derives the window from the model's declared history_steps.
     model = dyn_node.callable
     model.fy.set_rollout_state(None)
     with torch.no_grad():
@@ -146,6 +146,7 @@ def _demand_setup():
     nm, norm_stats = s["nm"], s["norm_stats"]
     sysid_cfg = make_sysid_cfg(model="2r2c")
     sysid_cfg.steps_per_hour = 12.0
+    sysid_cfg.history[SETPT] = 0      # read by the 2r2c zone alone
     spec = {
         "zone": {"Y": [ZONE], "U": [SETPT], "model": "2r2c", "ambient": DIST[0],
                  "params": {"tau_fast_h": 0.6, "tau_ambient_h": 2.0, "tau_slow_h": 13.4},

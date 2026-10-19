@@ -6,9 +6,9 @@ A trained `SSMGrad` reads normalised, key-major flattened windows (see
 graph — normalisation, window flattening and de-normalisation — so the graph
 signature is physical units in, physical units out:
 
-    y  [batch, in_steps, ny]   the last in_steps outputs, oldest first
-    u  [batch, in_steps, nu]   the matching inputs; row -1 drives this step
-    d  [batch, in_steps, nd]   the matching disturbances
+    y  [batch, history_steps, ny]   the last history_steps outputs, oldest first
+    u  [batch, history_steps, nu]   the matching inputs; row -1 drives this step
+    d  [batch, history_steps, nd]   the matching disturbances
     ->  y_next [batch, ny]
 
 That is the design decision the export rests on: a driver that holds no
@@ -60,7 +60,7 @@ class _PhysicalGraph(nn.Module):
     @staticmethod
     def _window(x: torch.Tensor, shift: torch.Tensor,
                 stretch: torch.Tensor) -> torch.Tensor:
-        """[batch, in_steps, n] physical -> [batch, in_steps*n] normalised.
+        """[batch, history_steps, n] physical -> [batch, history_steps*n] normalised.
 
         One key's block of the window `modeling.windows` describes: time
         ordered, oldest first, every column of a step together. A row-major

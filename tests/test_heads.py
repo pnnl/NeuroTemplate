@@ -325,12 +325,12 @@ def test_soft_clamp_is_relu_forward_and_never_dead_backward():
 
 def test_a_pre_stack_survives_a_config_round_trip():
     stack = PreStack([Demand(-1, SETPOINT, ZONE)], [("sp", "zone")],
-                     ["zone", "power"], ["sp", "fan"], in_steps=3)
+                     ["zone", "power"], ["sp", "fan"], history_steps=3)
     config = stack.to_config()
     assert config == {"sp": {"kind": "demand", "state": "zone", "sign": -1}}
     rebuilt = PreStack.from_config(
         config, ["zone", "power"], ["sp", "fan"],
-        {"sp": SETPOINT, "zone": ZONE}, in_steps=3,
+        {"sp": SETPOINT, "zone": ZONE}, history_steps=3,
     )
     y, u = torch.randn(4, 6), torch.randn(4, 6)
     assert torch.equal(rebuilt(y, u), stack(y, u))
@@ -342,13 +342,13 @@ def test_each_output_step_reads_its_own_step_of_u_and_y():
     with identity stats and a unit range so the demand is exactly
     `relu(y - u)` and the pairing shows in the number itself."""
     identity = {"shift": 0.0, "stretch": 1.0, "min": 0.0, "max": 1.0}
-    in_steps, ny, nu = 3, 2, 2
+    history_steps, ny, nu = 3, 2, 2
     stack = PreStack([Demand(-1, identity, identity)], [("u1", "y1")],
-                     ["y0", "y1"], ["u0", "u1"], in_steps)
-    y = torch.tensor([[100.0 * t + i for t in range(in_steps) for i in range(ny)]])
-    u = torch.tensor([[-(100.0 * t + j) for t in range(in_steps) for j in range(nu)]])
-    out = stack(y, u).reshape(in_steps, nu)
-    for t in range(in_steps):
+                     ["y0", "y1"], ["u0", "u1"], history_steps)
+    y = torch.tensor([[100.0 * t + i for t in range(history_steps) for i in range(ny)]])
+    u = torch.tensor([[-(100.0 * t + j) for t in range(history_steps) for j in range(nu)]])
+    out = stack(y, u).reshape(history_steps, nu)
+    for t in range(history_steps):
         assert out[t, 0] == -(100 * t)                     # untouched column
         assert out[t, 1] == (100 * t + 1) + (100 * t + 1)  # relu(y1_t - u1_t) / 1
     # Under vmap the window is 1-D and the layout must still hold.

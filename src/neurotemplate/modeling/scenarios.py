@@ -354,7 +354,7 @@ def _equilibrium_inputs(t_phys, nm_mapping, norm_stats, spec, device):
     return y, u, d
 
 
-def _rollout_data(yn_row, u_rows, d_rows, in_steps, n_steps, ny, device):
+def _rollout_data(yn_row, u_rows, d_rows, history_steps, n_steps, ny, device):
     """A SystemPreview input dict from per-phase rows.
 
     `u_rows` / `d_rows` are each (history_row, rollout_row); pass the same row
@@ -362,17 +362,17 @@ def _rollout_data(yn_row, u_rows, d_rows, in_steps, n_steps, ny, device):
     sets the rollout length — the System never reads its values here.
     """
     n = yn_row.shape[0]
-    total = (in_steps - 1) + n_steps
+    total = (history_steps - 1) + n_steps
 
     def phased(rows):
         history, rollout = rows
         return torch.cat([
-            history.unsqueeze(1).expand(-1, in_steps - 1, -1),
+            history.unsqueeze(1).expand(-1, history_steps - 1, -1),
             rollout.unsqueeze(1).expand(-1, n_steps, -1),
         ], dim=1).contiguous()
 
     return {
-        "yn": yn_row.unsqueeze(1).expand(-1, in_steps, -1).contiguous(),
+        "yn": yn_row.unsqueeze(1).expand(-1, history_steps, -1).contiguous(),
         "Y": torch.zeros(n, total, ny, device=device),
         "U": phased(u_rows),
         "D": phased(d_rows),
@@ -416,7 +416,7 @@ class _Scenario:
     """Shared plumbing: sample equilibria, roll out, read the state channels."""
 
     def __init__(self, system, nm_mapping, norm_stats, spec: SynthSpec,
-                 in_steps, n_scenarios, n_steps, device, grad_masks=None):
+                 history_steps, n_scenarios, n_steps, device, grad_masks=None):
         self.system = system
         self.nm_mapping = nm_mapping
         self.norm_stats = norm_stats
@@ -424,7 +424,7 @@ class _Scenario:
         # Only the reachability scenario reads these, for the direction to push
         # each disturbance. Empty/None means disturbances stay at rest.
         self.grad_masks = grad_masks or {}
-        self.in_steps = in_steps
+        self.history_steps = history_steps
         self.n_scenarios = n_scenarios
         self.n_steps = n_steps
         self.device = device
@@ -451,7 +451,7 @@ class _Scenario:
         from), so `[:, k] - [:, 0]` is movement caused by the rollout.
         """
         phys = to_physical(y_pred, self.nm_mapping["Y"], self.norm_stats)
-        return phys[:, self.in_steps - 1:, self.state_idx]
+        return phys[:, self.history_steps - 1:, self.state_idx]
 
     def check(self, n: Optional[int] = None) -> list[ScenarioResult]:
         """Just the verdicts. `evaluate` also returns the readout statistics."""
@@ -466,7 +466,7 @@ class _Scenario:
         `seeded_at` so the spread has a reference point.
         """
         phys = to_physical(y_pred, self.nm_mapping["Y"], self.norm_stats)
-        free = phys[:, self.in_steps:, :]
+        free = phys[:, self.history_steps:, :]
         qs = torch.tensor(READOUT_QUANTILES, device=free.device)
         return [
             ReadoutSummary(
@@ -525,7 +525,7 @@ class EquilibriumScenario(_Scenario):
         y, u, d = _equilibrium_inputs(
             t, self.nm_mapping, self.norm_stats, self.spec, self.device,
         )
-        return _rollout_data(y, (u, u), (d, d), self.in_steps, self.n_steps,
+        return _rollout_data(y, (u, u), (d, d), self.history_steps, self.n_steps,
                              self.ny, self.device)
 
     def _drift(self, y_pred):
@@ -571,7 +571,7 @@ class EquilibriumScenario(_Scenario):
             data = self._data(n)
             y_pred = self.system(data)["yn"]
         return _trace(self.label, data, y_pred, self.nm_mapping,
-                      self.norm_stats, self.spec, self.in_steps)
+                      self.norm_stats, self.spec, self.history_steps)
 
 
 class StepResponseScenario(_Scenario):
@@ -624,7 +624,7 @@ class StepResponseScenario(_Scenario):
             u_on[:, j] = _normalize(
                 torch.full((n,), target, device=self.device), col, self.norm_stats,
             )
-        return _rollout_data(y, (u_off, u_on), (d, d), self.in_steps,
+        return _rollout_data(y, (u_off, u_on), (d, d), self.history_steps,
                              self.n_steps, self.ny, self.device)
 
     def _move(self, y_pred):
@@ -692,7 +692,7 @@ class StepResponseScenario(_Scenario):
                 y_pred = self.system(data)["yn"]
             return _trace(f"{self.label}: {col} to {target:.4g}", data, y_pred,
                           self.nm_mapping, self.norm_stats, self.spec,
-                          self.in_steps)
+                          self.history_steps)
         return {}
 
 
@@ -781,7 +781,7 @@ class ReachabilityScenario(_Scenario):
             y,
             (u_off, driven(u_off, "U", controls)),
             (d_rest, driven(d_rest, "D", disturbances)),
-            self.in_steps, self.n_steps, self.ny, self.device,
+            self.history_steps, self.n_steps, self.ny, self.device,
         )
 
     def _settled(self, channel: str, direction: int, n, t) -> tuple[float, object]:
@@ -841,7 +841,7 @@ class ReachabilityScenario(_Scenario):
             y_pred = self.system(data)["yn"]
         return _trace(f"{self.label}: {channel} (up)", data, y_pred,
                       self.nm_mapping, self.norm_stats, self.spec,
-                      self.in_steps)
+                      self.history_steps)
 
 
 class FreeDecayScenario(_Scenario):
@@ -872,7 +872,7 @@ class FreeDecayScenario(_Scenario):
         j = self.nm_mapping["D"].index(self.spec.ambient)
         d_after[:, j] = _normalize(t_out, self.spec.ambient, self.norm_stats)
 
-        data = _rollout_data(y, (u, u), (d_before, d_after), self.in_steps,
+        data = _rollout_data(y, (u, u), (d_before, d_after), self.history_steps,
                              self.n_steps, self.ny, self.device)
         return data, t_in, t_out
 
@@ -926,10 +926,10 @@ class FreeDecayScenario(_Scenario):
             data, _, _ = self._data(n)
             y_pred = self.system(data)["yn"]
         return _trace(self.label, data, y_pred, self.nm_mapping,
-                      self.norm_stats, self.spec, self.in_steps)
+                      self.norm_stats, self.spec, self.history_steps)
 
 
-def _trace(name, data, y_pred, nm_mapping, norm_stats, spec, in_steps) -> dict:
+def _trace(name, data, y_pred, nm_mapping, norm_stats, spec, history_steps) -> dict:
     """Physical-unit trajectories for the plots, one entry per scenario."""
     j = nm_mapping["D"].index(spec.ambient)
     a = norm_stats[spec.ambient]
@@ -941,7 +941,7 @@ def _trace(name, data, y_pred, nm_mapping, norm_stats, spec, in_steps) -> dict:
             data["D"][:, :, j] * a["stretch"] + a["shift"]).detach().cpu(),
         "channel_names": nm_mapping["Y"],
         "state_names": spec.states,
-        "seed_steps": in_steps,
+        "seed_steps": history_steps,
     }
 
 
@@ -954,7 +954,7 @@ def build_scenarios(
     nm_mapping: dict[str, list[str]],
     norm_stats: dict,
     synth_cfg: Optional[SynthSpec],
-    in_steps: int,
+    history_steps: int,
     n_scenarios: int,
     n_steps: int,
     device,
@@ -973,7 +973,7 @@ def build_scenarios(
 
     common = dict(
         system=system, nm_mapping=nm_mapping, norm_stats=norm_stats,
-        spec=synth_cfg, in_steps=in_steps, n_scenarios=n_scenarios,
+        spec=synth_cfg, history_steps=history_steps, n_scenarios=n_scenarios,
         n_steps=n_steps, device=device, grad_masks=grad_masks,
     )
     return [

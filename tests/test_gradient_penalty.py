@@ -1,5 +1,5 @@
 """The sampled gradient sign penalty scores each declared sign against its own
-(output, input) pair and nothing else, summed over the in_steps lags, and
+(output, input) pair and nothing else, summed over the history_steps lags, and
 averaged over the declared pairs only."""
 
 import torch
@@ -17,11 +17,11 @@ class _Linear:
         if weights.dim() == 2:
             weights = torch.stack([torch.zeros_like(weights), weights])
         self.w = weights
-        self.in_steps, self.ny, self.nu = weights.shape
+        self.history_steps, self.ny, self.nu = weights.shape
         self.nd, self.pre_stack = 1, None
 
     def pre_activation(self, y, u, d):
-        return torch.einsum("kij,kj->i", self.w, u.reshape(self.in_steps, self.nu))
+        return torch.einsum("kij,kj->i", self.w, u.reshape(self.history_steps, self.nu))
 
 
 def _penalty(weights: torch.Tensor, mask: torch.Tensor) -> float:

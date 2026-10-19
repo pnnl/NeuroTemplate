@@ -25,7 +25,7 @@ N_REF = 2
 def _windows(s):
     cfg = s["cfg"]
     return build_window_dict(s["norm_df"], cfg, s["sysid_cfg"], s["nm"],
-                             P=cfg.train_pred_steps, stride=cfg.in_steps)
+                             P=cfg.train_pred_steps, stride=cfg.history_steps)
 
 
 def _describe(s):
@@ -102,12 +102,12 @@ def test_per_column_preview_reaches_only_the_declared_column(monkeypatch):
 
     policy = build_policy(cfg, sysid_cfg, nm, ns)
     _, h_ctrl, _ = horizons(cfg, sysid_cfg)
-    in_steps = h_ctrl + 2
+    history_steps = h_ctrl + 2
     nd = len(nm["D"])
 
     torch.manual_seed(0)
     yn = torch.randn(2, h_ctrl * len(nm["Y"]))
-    D = torch.randn(2, in_steps * nd)
+    D = torch.randn(2, history_steps * nd)
     R = torch.randn(2, N_REF)
 
     net = policy.callable
@@ -116,12 +116,12 @@ def test_per_column_preview_reaches_only_the_declared_column(monkeypatch):
     # Last (deepest-future) timestep: irr never declared a preview, so a
     # change there must not reach the net.
     perturbed_irr = D.clone()
-    perturbed_irr[:, (in_steps - 1) * nd + nm["D"].index(irr)] += 5.0
+    perturbed_irr[:, (history_steps - 1) * nd + nm["D"].index(irr)] += 5.0
     assert torch.allclose(net(yn, perturbed_irr, R), base)
 
     # Same timestep, outdoor: it declared a 2-step preview, so it must reach.
     perturbed_outdoor = D.clone()
-    perturbed_outdoor[:, (in_steps - 1) * nd + nm["D"].index(outdoor)] += 5.0
+    perturbed_outdoor[:, (history_steps - 1) * nd + nm["D"].index(outdoor)] += 5.0
     assert not torch.allclose(net(yn, perturbed_outdoor, R), base)
 
 

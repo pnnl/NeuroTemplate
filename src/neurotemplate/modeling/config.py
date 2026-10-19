@@ -12,14 +12,43 @@ from neurotemplate.common.config import (
     default_savedir,
 )
 
-# History-window warning threshold for ModelingConfig.in_steps. Past this
+# History-window warning threshold for a window's depth in steps (the
+# surrogate's `history_steps`, the policy's deepest `past + 1`). Past this
 # many steps, a longer context window costs more memory per batch, and once
 # it exceeds train_pred_steps it hands the model, at rollout time, context
 # it never saw during training. Advisory only — the right window length is
-# dataset-specific, so ModelingConfig.validate() warns rather than rejects
-# (see below). Twelve is a reasonable default for buildings on 5-minute
-# data, not a limit the library can defend for every system.
-IN_STEPS_WARN_THRESHOLD = 12
+# dataset-specific, so validate() warns rather than rejects. Twelve is a
+# reasonable ceiling for buildings on 5-minute data, not a limit the library
+# can defend for every system.
+HISTORY_WARN_THRESHOLD = 12
+
+
+def check_lag_table(name: str, table: dict) -> None:
+    """A per-column table of steps: non-empty, every value an int >= 0.
+
+    Which columns it must name is checked where the columns are known.
+    """
+    if not table:
+        raise ValueError(
+            f"{name} is empty. List every column with its number of steps; "
+            "there is no default.")
+    for column, steps in table.items():
+        if isinstance(steps, bool) or not isinstance(steps, int) or steps < 0:
+            raise ValueError(
+                f"{name}[{column!r}] must be an int >= 0, got {steps!r}")
+
+
+def warn_deep_window(name: str, steps: int) -> None:
+    if steps > HISTORY_WARN_THRESHOLD:
+        warnings.warn(
+            f"{name}={steps} is above the usual ceiling of "
+            f"{HISTORY_WARN_THRESHOLD}. A longer context window costs "
+            "more memory per batch, and once it exceeds train_pred_steps "
+            "it hands the model, at rollout time, history it never saw "
+            "during training. Not rejected outright — the right window "
+            "length is dataset-specific.",
+            stacklevel=3,
+        )
 
 
 @dataclass
@@ -50,7 +79,11 @@ class ModelingConfig:
 
     # ---- MODEL ---------------------------------------------------------------
     model: str = "nssm"
-    in_steps: int = 12
+    # Steps before the current one the model reads, per Y, U and D column:
+    # `{column: lag}`. Every column is listed. The window every block shares
+    # is `history_steps = max(lag) + 1` deep; each learned map then reads
+    # only its columns' own lags (see dynamics.column_lags).
+    history: dict[str, int] = field(default_factory=dict)
     log2_hidden_size: int = 6
     num_layers: int = 3
     residual: bool = True
@@ -154,7 +187,7 @@ class ModelingConfig:
 
     def validate(self) -> None:
         for name in [
-            "batch_size", "in_steps", "log2_hidden_size", "num_layers",
+            "batch_size", "log2_hidden_size", "num_layers",
             "epochs", "epoch_verbose", "train_pred_steps",
             "dev_pred_steps", "test_window", "test_stride",
             "curriculum_ratio", "ensemble_seeds", "trial_seeds",
@@ -185,16 +218,8 @@ class ModelingConfig:
         check_one_of(self, "norm_type", ["min_max", "abs_max", "z_score", None])
         check_one_of(self, "save_config", ["last_step", "all", "None", None])
 
-        if self.in_steps > IN_STEPS_WARN_THRESHOLD:
-            warnings.warn(
-                f"in_steps={self.in_steps} is above the usual ceiling of "
-                f"{IN_STEPS_WARN_THRESHOLD}. A longer context window costs "
-                "more memory per batch, and once it exceeds train_pred_steps "
-                "it hands the model, at rollout time, history it never saw "
-                "during training. Not rejected outright — the right window "
-                "length is dataset-specific.",
-                stacklevel=2,
-            )
+        check_lag_table("history", self.history)
+        warn_deep_window("history_steps", self.history_steps)
 
         if self.per_block and self.model not in PER_BLOCK_FAMILIES:
             extra = (" 2r2c is already per-block and needs no flag."
@@ -204,14 +229,14 @@ class ModelingConfig:
                 f"available: {list(PER_BLOCK_FAMILIES)}.{extra}"
             )
 
-        # The first in_steps of a test window are the seeded history, not
-        # predictions; a window no longer than that scores nothing and the
-        # run would fail only after training, in the test metrics.
-        if self.test_window <= self.in_steps:
+        # The first history_steps of a test window are the seeded history,
+        # not predictions; a window no longer than that scores nothing and
+        # the run would fail only after training, in the test metrics.
+        if self.test_window <= self.history_steps:
             raise ValueError(
-                f"test_window ({self.test_window}) must be > in_steps "
-                f"({self.in_steps}); the first in_steps of each test window "
-                "are seeded history, so nothing would be scored."
+                f"test_window ({self.test_window}) must be > history_steps "
+                f"({self.history_steps}); the first history_steps of each test "
+                "window are seeded history, so nothing would be scored."
             )
 
         if (self.grad_gain > 0) and (self.grad_path is None):
@@ -219,6 +244,13 @@ class ModelingConfig:
 
         for name in ("train_data_path", "dev_data_path", "test_data_path"):
             _check_paths_field(name, getattr(self, name))
+
+    @property
+    def history_steps(self) -> int:
+        """Rows of every column the model is handed: the deepest lag, plus
+        the current step. Data windows, the seeded history, the stride and
+        the model export all run at this depth."""
+        return max(self.history.values(), default=-1) + 1
 
     def asdict(self) -> dict:
         return asdict(self)

@@ -320,7 +320,7 @@ def sliding_windows(
         raise ValueError(
             f"Data has {x.shape[0]} rows but a window needs {steps}. Use a "
             "longer file or shorten the window (train_pred_steps/test_window/"
-            "in_steps)."
+            "history_steps)."
         )
     # Row w of `idx` holds the row numbers of window w: its start plus 0..steps-1.
     starts = torch.arange(0, x.shape[0] - steps + 1, stride, device=device)
@@ -340,21 +340,21 @@ def get_sw_dict(
 
     Args:
         df: Full normalized dataframe used to build sliding windows.
-        cfg: provides in_steps/train_pred_steps and device placement.
+        cfg: provides history_steps/train_pred_steps and device placement.
         nm_mapping: Column mapping that defines Y/U/D/t extraction order.
-        steps: window length. None uses in_steps + train_pred_steps; a
+        steps: window length. None uses history_steps + train_pred_steps; a
             negative value means one window spanning the whole frame.
-        stride: rows between window starts. None uses in_steps.
+        stride: rows between window starts. None uses history_steps.
     """
     if steps is None:
-        steps = cfg.in_steps + cfg.train_pred_steps
+        steps = cfg.history_steps + cfg.train_pred_steps
     elif steps < 0:
         steps = df.shape[0]
-    stride = stride or cfg.in_steps
+    stride = stride or cfg.history_steps
 
     Y, U, D, t = [sliding_windows(df, nm_mapping[key], steps, stride, cfg.device)
                   for key in ("Y", "U", "D", "t")]
-    return {"t": t, "Y": Y, "U": U, "D": D, "yn": Y[:, :cfg.in_steps, :]}
+    return {"t": t, "Y": Y, "U": U, "D": D, "yn": Y[:, :cfg.history_steps, :]}
 
 
 @beartype
@@ -384,7 +384,7 @@ def get_sw_dict_multi(
 
     # Resolve `steps` once so the per-file check sees the actual window length.
     if steps is None:
-        resolved_steps = cfg.in_steps + cfg.train_pred_steps
+        resolved_steps = cfg.history_steps + cfg.train_pred_steps
     elif steps < 0:
         # Per-file "full data window" only makes sense for one df.
         if len(dfs) > 1:
@@ -401,7 +401,7 @@ def get_sw_dict_multi(
             raise ValueError(
                 f"File {i} has {df.shape[0]} rows but window length is "
                 f"{resolved_steps}. Use a longer file or shorten the "
-                "window (train_pred_steps/test_window/in_steps)."
+                "window (train_pred_steps/test_window/history_steps)."
             )
 
     parts = [get_sw_dict(df, cfg, nm_mapping, resolved_steps, stride) for df in dfs]
@@ -432,7 +432,7 @@ def get_loader(
         cfg providing batch_size, device placement, and RNG seed.
         nm_mapping: Column mapping that defines Y/U/D/t extraction order.
         name: Split name stored on the DictDataset for logging/debugging.
-        steps: Optional override for window length (None uses in_steps + train_pred_steps).
+        steps: Optional override for window length (None uses history_steps + train_pred_steps).
     """
 
     data = get_sw_dict_multi(dfs, cfg, nm_mapping, steps)

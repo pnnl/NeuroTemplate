@@ -1,0 +1,43 @@
+"""
+Per-column windows: the gather that narrows a rectangular window to each
+column's own rows. A wrong index here is a silent misalignment — the model
+reads the wrong step of the wrong column and trains anyway.
+"""
+
+import torch
+
+from neurotemplate.modeling.dynamics import get_dynamics
+from neurotemplate.modeling.windows import window_gather
+from model_fixtures import model_cfg
+
+NM = {"Y": ["y0", "y1"], "U": ["u0"], "D": ["d0", "d1"], "t": ["sec_elapsed"]}
+
+
+def test_a_ragged_table_keeps_each_columns_own_rows_newest_last():
+    # One key, three rows (t = 0, 1, 2) of three columns: column 0 keeps
+    # every row, column 1 only the newest, column 2 none, column order
+    # reversed on the way out.
+    #   row 0: [0 1 2]   row 1: [3 4 5]   row 2: [6 7 8]
+    keep = ((2, 1, 0), (1, 2, 2), (0, 0, 2))
+    assert window_gather((3,), (3,), (keep,)) == [0, 3, 7, 6]
+
+
+def test_two_keys_are_gathered_key_major_from_their_own_offsets():
+    # Key 0: 2 rows of 1 column; key 1: 1 row of 2 columns, starting at 2.
+    keep = (((0, 0, 1),), ((1, 0, 0), (0, 0, 0)))
+    assert window_gather((1, 2), (2, 1), keep) == [0, 1, 3, 2]
+
+
+def test_a_ragged_table_feeds_each_column_at_its_lag_and_a_uniform_one_gathers_nothing():
+    history = {"y0": 2, "y1": 0, "u0": 1, "d0": 0, "d1": 2}
+    model = get_dynamics(model_cfg(model="lssm", history=history), NM).nodes[0].callable
+    # Window 3 deep. Y rows: [y0 y1] x 3; y0 keeps all three, y1 the newest.
+    y = torch.arange(6.0).unsqueeze(0)
+    assert model._narrow("Y", y).tolist() == [[0.0, 2.0, 4.0, 5.0]]
+    assert model.fy.linear.in_features == 4       # (2+1) + (0+1)
+    assert model.fu.linear.in_features == 2
+    assert model.fd.linear.in_features == 4
+
+    uniform = {c: 2 for c in history}
+    model = get_dynamics(model_cfg(model="lssm", history=uniform), NM).nodes[0].callable
+    assert model._gathered == []

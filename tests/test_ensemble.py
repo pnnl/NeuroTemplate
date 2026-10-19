@@ -41,7 +41,7 @@ def _synthetic_df(n: int = 80) -> pd.DataFrame:
 
 
 def _make_cfg(savedir, **over) -> Config:
-    return trainable_cfg(savedir, **{"seed": 123, **over})
+    return trainable_cfg(savedir, NM_MAPPING, **{"seed": 123, **over})
 
 
 def _run(cfg: Config) -> TrainedModel:

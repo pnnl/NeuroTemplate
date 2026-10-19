@@ -34,7 +34,7 @@ def _box(below, above):
 def _windows(s):
     cfg = s["cfg"]
     return build_window_dict(s["norm_df"], cfg, s["sysid_cfg"], s["nm"],
-                              P=cfg.train_pred_steps, stride=cfg.in_steps)
+                              P=cfg.train_pred_steps, stride=cfg.history_steps)
 
 
 def _rollout(s):

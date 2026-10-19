@@ -45,7 +45,7 @@ def build_spec(*, export_id: str, run_id: str, cfg, dyn_sys,
         "u_columns": nm_mapping["U"],
         "d_columns": nm_mapping["D"],
         "units": {c: norm_stats[c].get("unit") for c in columns},
-        "history_steps": int(cfg.in_steps),
+        "history_steps": int(cfg.history_steps),
         "timestep_seconds": float(timestep_seconds),
         # Frozen at trace time: only the batch axis of the graphs is dynamic.
         "state": {

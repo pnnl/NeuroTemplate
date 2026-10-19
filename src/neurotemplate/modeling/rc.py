@@ -5,7 +5,7 @@ The building the black-box families cannot see
 ==============================================
 
 `mlp`, `nssm`, `lssm` and `gru` all predict the next zone temperature from a
-window of the last `in_steps` observations. That is enough to be accurate
+window of the last few observations. That is enough to be accurate
 one step ahead, and it is why they can still be wrong about the thing that
 matters for load shifting: **how long a temperature difference survives.**
 A model scored over a four-hour rollout can re-derive the zone from the last
@@ -138,7 +138,7 @@ about a building is the user's to state.
 
 A box, not a free fit, because the slow mode is not identifiable from a
 training rollout. The mass temperature is unobserved, so every rollout seeds
-it from the `in_steps` window — an hour at most, against a mass that lags by
+it from the zone's history window — an hour at most, against a mass that lags by
 many. The seed is therefore wrong, and the optimizer has two ways to reduce
 the damage: fix the forcing, or shorten the slow mode so the wrong seed
 matters less. It picks the second. Measured on synthetic data from a known
@@ -378,8 +378,9 @@ def physical_parameters(module: nn.Module) -> list[nn.Parameter]:
 class RCBlock(nn.Module):
     """One 2R2C network per Y channel, sharing a learned heat-input map.
 
-    Reads the same flattened `in_steps` history window every other block
-    reads (see `windows`), and returns the **increment** `z_{k+1} - z_k`.
+    Reads a key-major window (see `windows`) of `y_steps` rows of its own
+    zones, which seed the mass, and the current step of U and D, which is
+    all the heat input reads. Returns the **increment** `z_{k+1} - z_k`.
     `SSMGrad` adds `z_k` back, which is why `2r2c` requires `residual=True`.
 
     Hidden state
@@ -400,7 +401,8 @@ class RCBlock(nn.Module):
 
     Args:
         ny / nu / nd: channel counts for this block's own slice of Y, U, D.
-        in_steps: history window length.
+        y_steps: rows of the zone window: the zones' lag, plus the current
+            step.
         steps_per_hour: timesteps per hour. Only ever used to convert the
             time constants from hours to steps.
         hidden_size / num_layers: size of the learned heat-input MLP.
@@ -420,7 +422,7 @@ class RCBlock(nn.Module):
         norm_stats: per-column norm stats, needed for any declared branch.
     """
 
-    def __init__(self, ny: int, nu: int, nd: int, in_steps: int,
+    def __init__(self, ny: int, nu: int, nd: int, y_steps: int,
                  steps_per_hour: float, hidden_size: int, num_layers: int,
                  taus: dict[str, tuple[float, float]],
                  channel_names: tuple[str, ...] = (),
@@ -433,15 +435,15 @@ class RCBlock(nn.Module):
         self.widths = (ny, nu, nd)
         self.ny = ny
         self.channel_names = channel_names or tuple(f"y{i}" for i in range(ny))
-        self.in_steps = in_steps
-        self.in_features = in_steps * (ny + nu + nd)
+        steps = (y_steps, 1, 1)
+        self.in_features = y_steps * ny + nu + nd
         self.out_features = ny
 
         self.steps_per_hour = steps_per_hour
 
-        y_block = windows.key_blocks(self.widths, in_steps)[0]
-        self._y_steps = windows.per_step(y_block, ny, in_steps)
-        _, self._u_last, self._d_last = windows.last_step(self.widths, in_steps)
+        y_block = windows.key_blocks(self.widths, steps)[0]
+        self._y_steps = windows.per_step(y_block, ny, y_steps)
+        _, self._u_last, self._d_last = windows.last_step(self.widths, steps)
 
         self.tau_fast, self.tau_ambient, self.tau_slow = (
             BoundedParameter(key[:-2], *taus[key], self.channel_names)

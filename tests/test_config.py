@@ -22,7 +22,7 @@ _OPTIONAL = ("norm_type", "device", "grad_path")
 def _filled(**overrides):
     """Config with every required-for-validate field populated."""
     base = {"train_data_path": "train.csv", "dev_data_path": "dev.csv",
-            "test_data_path": "test.csv"}
+            "test_data_path": "test.csv", "history": {"y": 0}}
     return dict_to_dataclass({**base, **overrides}, Config)
 
 
@@ -79,7 +79,7 @@ def test_set_parses_a_json_list():
     round-trips via the `ast.literal_eval` fallback."""
     merged = apply_overrides(
         {"train_data_path": "old.csv", "dev_data_path": "dev.csv",
-         "test_data_path": "test.csv"},
+         "test_data_path": "test.csv", "history": {"y": 0}},
         parse_set_args(['train_data_path=["a.csv","b.csv"]']))
     cfg = dict_to_dataclass(merged, Config)
     cfg.validate()
