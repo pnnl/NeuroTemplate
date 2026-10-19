@@ -122,7 +122,26 @@ def make_reference_df(plant: pd.DataFrame, segment: int = 6,
     return pd.DataFrame({LOW: low, HIGH: high, TARIFF: tariff}, index=plant.index)
 
 
-def make_control_cfg(**overrides) -> ControlConfig:
+def make_policy_window(cfg: ControlConfig, past: int = 2, u_past: int = 0,
+                       future: dict[str, int] | None = None) -> dict:
+    """A `policy_window` over the fixture's columns and `cfg`'s reference
+    columns: every Y and D column `past` steps back, every U column `u_past`,
+    and each D and reference column `future[column]` ahead (0 if unlisted)."""
+    nm = make_nm_mapping()
+    future = future or {}
+    table = {c: {"past": past} for c in nm["Y"]}
+    table.update({c: {"past": u_past} for c in nm["U"]})
+    table.update({c: {"past": past, "future": future.get(c, 0)} for c in nm["D"]})
+    table.update({c: {"past": 0, "future": future.get(c, 0)}
+                  for c in resolve_objective(cfg, nm).r_columns})
+    return table
+
+
+def make_control_cfg(future: dict[str, int] | None = None, u_past: int = 0,
+                     **overrides) -> ControlConfig:
+    """The fixture's control config. Unless `overrides` sets `policy_window`,
+    it is `make_policy_window` with `future` and `u_past`, built after the
+    overrides so it follows the objective they set."""
     cfg = ControlConfig()
     cfg.sysid_run_id = "test-run"
     cfg.losses = {k: dict(v) for k, v in BAND_LOSSES.items()}
@@ -133,7 +152,6 @@ def make_control_cfg(**overrides) -> ControlConfig:
     cfg.train_reference_path = "reference.csv"
     cfg.dev_reference_path = "reference.csv"
     cfg.test_reference_path = "reference.csv"
-    cfg.history_steps = 3
     cfg.train_pred_steps = 6
     # hmax = max(sysid_cfg.history_steps=4, cfg.history_steps=3) = 4; test_window includes warmup.
     cfg.test_window = 12
@@ -145,6 +163,8 @@ def make_control_cfg(**overrides) -> ControlConfig:
     cfg.device = torch.device("cpu")
     for k, v in overrides.items():
         setattr(cfg, k, v)
+    if "policy_window" not in overrides:
+        cfg.policy_window = make_policy_window(cfg, u_past=u_past, future=future)
     return cfg
 
 

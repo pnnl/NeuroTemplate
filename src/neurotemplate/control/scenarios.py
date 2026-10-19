@@ -3,8 +3,8 @@ Closed-loop training/eval data.
 
 A lean control-specific windower. Per window:
 
-    H_sys  = sysid_cfg.history_steps   (frozen thermal model's history window)
-    H_ctrl = cfg.in_steps         (policy's history window)
+    H_sys  = sysid_cfg.history_steps  (frozen thermal model's history window)
+    H_ctrl = cfg.history_steps        (policy's deepest `past`, plus the current step)
     Hmax   = max(H_sys, H_ctrl)
     P      = pure prediction length (train_pred_steps for train, test_window-Hmax for eval)
     W      = Hmax + P
@@ -54,9 +54,10 @@ from neurotemplate._typing import beartype
 
 @beartype
 def horizons(cfg, sysid_cfg) -> tuple[int, int, int]:
-    """(H_sys, H_ctrl, Hmax)."""
+    """(H_sys, H_ctrl, Hmax). Seeding Hmax - 1 recorded commands is what lets
+    a policy read `past` of them."""
     h_sys = sysid_cfg.history_steps
-    h_ctrl = cfg.in_steps
+    h_ctrl = cfg.history_steps
     return h_sys, h_ctrl, max(h_sys, h_ctrl)
 
 
@@ -68,7 +69,7 @@ def eval_pred_steps(cfg, hmax: int) -> int:
     if steps <= 0:
         raise ValueError(
             f"test_window ({cfg.test_window}) must be > hmax ({hmax}), the "
-            "longer of the surrogate's and the policy's in_steps; otherwise "
+            "longer of the surrogate's and the policy's history_steps; otherwise "
             "there is no rollout after the warmup."
         )
     return steps

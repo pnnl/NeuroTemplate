@@ -269,7 +269,12 @@ def test_a_model_that_blows_up_exports_unverified_only_when_asked(tmp_path, monk
 # ── policy ───────────────────────────────────────────────────────
 
 
-def _priced(**overrides):
+def _d_future(steps: int) -> dict[str, int]:
+    from control_fixtures import DIST
+    return {c: steps for c in DIST}
+
+
+def _priced(d_future: int, **overrides):
     """A policy reading the band and a tariff, each previewed differently."""
     from control_fixtures import (
         BAND_GAINS, BAND_LOSSES, LOW, POWER_LOSSES, TARIFF, TARIFF_SCALE,
@@ -277,16 +282,16 @@ def _priced(**overrides):
     return dict(losses={**BAND_LOSSES, "cost": POWER_LOSSES["cost"]},
                 gains={**BAND_GAINS, "cost": 1.0},
                 reference_scale={TARIFF: TARIFF_SCALE},
-                reference_preview={TARIFF: 3, LOW: 1}, **overrides)
+                future={TARIFF: 3, LOW: 1, **_d_future(d_future)}, **overrides)
 
 
 @pytest.mark.parametrize("overrides, graph_format", [
     # Plain policy: its D window runs past the present (preview), and every
     # key has several columns, so a wrong window layout shows up.
-    ({"d_preview": 2}, "torch"),
+    ({"future": _d_future(2)}, "torch"),
     # Everything a policy can wrap around its net: the residual anchored to
     # the reference rule, and a tariff it previews.
-    (_priced(residual_delta={"Zone Cooling Setpoint [°C]": [0.0, 1.0]}, d_preview=1),
+    (_priced(1, residual_delta={"Zone Cooling Setpoint [°C]": [0.0, 1.0]}),
      "onnx"),
 ], ids=["plain, torch", "residual, priced, onnx"])
 def test_trained_policy_exports_as_the_trained_policy(tmp_path, overrides, graph_format):
@@ -343,7 +348,7 @@ def test_c_runner_reproduces_the_reference(tmp_path, monkeypatch):
     from neurotemplate.export.policy import export_policy
 
     package = export(tmp_path, make_cfg(), MAPPING, RC_SPLIT, graph_format="c").out_dir
-    s = full_setup(**_priced(d_preview=1))
+    s = full_setup(**_priced(1))
     cfg, sysid_cfg, nm, ns = s["cfg"], s["sysid_cfg"], s["nm"], s["norm_stats"]
     policy = build_policy(cfg, sysid_cfg, nm, ns)
     export_policy(

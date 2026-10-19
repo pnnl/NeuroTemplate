@@ -85,22 +85,6 @@ def _summary_section(
     return _section("Summary", "\n".join(rows))
 
 
-def _preview_rows(label: str, depths: dict[str, int],
-                  always: bool = False) -> list[str]:
-    """Per-column preview depths, or nothing when no column declares one.
-
-    The input-width line cannot carry them, and a run previewing 2 steps of
-    outdoor temperature and none of irradiance is a different policy from one
-    previewing 2 of both — this is the line that tells them apart. Reference
-    columns are listed even at depth 0 (`always`), because each is a policy
-    input in its own right.
-    """
-    if not depths or not (always or any(depths.values())):
-        return []
-    return [f"- **{label}:**",
-            *(f"  - `{col}`: {depth}" for col, depth in depths.items())]
-
-
 def _box(below: float, above: float) -> str:
     if below == above:
         return f"±{above:g}"
@@ -123,10 +107,13 @@ def _policy_section(arch: dict) -> str:
         f"- **Bound method:** `{arch['bound_method']}`",
         f"- **Hidden sizes:** {hsizes}",
         f"- **Trainable params:** {arch['param_count']:,}",
-        f"- **Input width:** {arch['insize']} (H_ctrl={arch['h_ctrl']})",
-        *_preview_rows("D preview (per column)", arch["d_preview_by_column"]),
-        *_preview_rows("Reference columns (preview steps)",
-                       arch["r_preview_by_column"], always=True),
+        f"- **Input width:** {arch['insize']}, over "
+        + ", ".join(f"`{key}`" for key in arch["inputs"]),
+        "- **Window (steps before / after the current one; a U column's "
+        "window ends at the last command applied):**",
+        *(f"  - `{col}`: past {entry['past']}"
+          + (f", future {entry['future']}" if "future" in entry else "")
+          for col, entry in arch["window"].items()),
         f"- **Output width:** {arch['outsize']}",
         f"- **Observation:** Policy observes all {arch['ny']} Y channels — "
         "no measurement restriction.",

@@ -33,6 +33,11 @@ losses:
   comfort_lower: {column: lo, target: zone, map: relu, norm: 2}
   du:            {column: setpoint, map: first_difference, norm: 1}
 gains: {comfort_lower: 5.0, du: 1.0e3}
+policy_window:
+  zone:     {past: 3}
+  setpoint: {past: 1}
+  oat:      {past: 0, future: 12}
+  lo:       {past: 0, future: 0}
 """
 
 
@@ -72,11 +77,11 @@ def test_the_table_survives_the_mlflow_param_round_trip():
     — on reload, so the table must parse back to itself."""
     from neurotemplate.common.config import _parse_value, dict_to_dataclass
     cfg = make_control_cfg(reference_scale={TARIFF: 0.3},
-                           reference_preview={LOW: 2})
+                           policy_window={ZONE: {"past": 2}, LOW: {"past": 0, "future": 2}})
     logged = {k: _parse_value(str(v)) for k, v in cfg.asdict().items()
               if k != "device"}
     rebuilt = dict_to_dataclass(logged, ControlConfig)
-    for name in ("losses", "gains", "reference_scale", "reference_preview",
+    for name in ("losses", "gains", "reference_scale", "policy_window",
                  "train_reference_path"):
         assert getattr(rebuilt, name) == getattr(cfg, name)
 
@@ -154,7 +159,6 @@ _SUPPLY_GAINS = {**BAND_GAINS, "supply_lower": 1.0, "supply_upper": 1.0}
      "No loss term bounds a Y column"),
     ({"train_reference_path": None, "dev_reference_path": None,
       "test_reference_path": None}, "no reference files are set"),
-    ({"reference_preview": {DIST[0]: 2}}, "not reference columns"),
     # A shared band takes one target's stats; a normalised compare against
     # the other target would be on the wrong scale.
     ({"losses": {**BAND_LOSSES, **_SUPPLY_BAND,
@@ -162,7 +166,7 @@ _SUPPLY_GAINS = {**BAND_GAINS, "supply_lower": 1.0, "supply_upper": 1.0}
       "gains": _SUPPLY_GAINS}, "wrong scale"),
 ])
 def test_resolve_names_the_problem(fields, message):
-    cfg = make_control_cfg(**fields)
+    cfg = make_control_cfg(policy_window={}, **fields)   # not what is under test
     with pytest.raises(ValueError, match=message):
         resolve_objective(cfg, make_nm_mapping())
 

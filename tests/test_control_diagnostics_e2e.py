@@ -167,5 +167,5 @@ def test_peak_alone_is_flagged_as_raising_energy():
 def test_an_unpreviewed_tariff_is_flagged_as_reactive_only():
     d = _run_diagnostics(**_with_power("cost"))
     assert any("previews 0 future steps" in n for n in d["notes"])
-    d = _run_diagnostics(**_with_power("cost", reference_preview={TARIFF: 4}))
+    d = _run_diagnostics(**_with_power("cost", future={TARIFF: 4}))
     assert not any("previews 0 future steps" in n for n in d["notes"])

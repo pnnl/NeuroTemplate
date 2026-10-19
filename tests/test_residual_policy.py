@@ -189,26 +189,29 @@ def test_a_heating_and_cooling_pair_recover_from_their_closed_sides():
 def test_the_in_rollout_current_step_matches_the_bare_rule():
     """The rule inside the policy and the rule handed only the current step
     must agree, or the residual is measured against a fiction."""
-    s = full_setup(residual_delta=_box(1.0, 1.0),
-                   reference_preview={"Comfort Low [°C]": 2})
+    low = "Comfort Low [°C]"
+    s = full_setup(residual_delta=_box(1.0, 1.0), future={low: 2})
     cfg, sysid_cfg, nm, ns = s["cfg"], s["sysid_cfg"], s["nm"], s["norm_stats"]
+    cfg.policy_window[low]["past"] = 1      # R now has history too
     _, h_ctrl, _ = horizons(cfg, sysid_cfg)
     ny, nd, n_ref = len(nm["Y"]), len(nm["D"]), 2
 
     policy = build_policy(cfg, sysid_cfg, nm, ns)
     rule_in_policy = policy.callable.reference
-    bare = _reference_rule(cfg, load_control_hooks(cfg), nm, ns, h_ctrl=1,
+    keys = ["yn", "D", "R"]
+    bare = _reference_rule(cfg, load_control_hooks(cfg), nm, ns, keys,
+                           now={key: 0 for key in keys},
                            r_columns=resolve_objective(cfg, nm).r_columns)
 
     b = 3
     yn_win = torch.randn(b, ny * h_ctrl)
     d_win = torch.randn(b, nd * h_ctrl)
-    r_win = torch.randn(b, n_ref * 3)       # current step + 2 previewed
+    r_win = torch.randn(b, n_ref * 4)       # 1 past, current, 2 previewed
 
     windowed = rule_in_policy(yn_win, d_win, r_win)[SETPT]
     # The deploy path hands the rule the current step of each signal: the
-    # LAST block of the yn/D history, the FIRST block of the reference.
-    current = bare(yn_win[:, -ny:], d_win[:, -nd:], r_win[:, :n_ref])[SETPT]
+    # LAST block of the yn/D history, the block after R's one past step.
+    current = bare(yn_win[:, -ny:], d_win[:, -nd:], r_win[:, n_ref:2 * n_ref])[SETPT]
     assert torch.allclose(windowed, current)
 
 

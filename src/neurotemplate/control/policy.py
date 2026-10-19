@@ -3,10 +3,12 @@ DPC control policy.
 
 A bounded network wrapped in a Neuromancer Node:
 
-    [yn-window, D-window(, R-window)]  ->  U
+    [yn-window(, U-window), D-window(, R-window)]  ->  U
 
-R is the objective's reference columns (control.losses), present only when it
-names one.
+U is the commands already applied, present only when `policy_window` gives a
+U column a `past`; R is the objective's reference columns (control.losses),
+present only when it names one. Each column is read over its own `past` and
+`future` (see `build_policy`).
 
 Output is squashed into the actuator limits (normalized U space) by
 blocks.MLP_bounds; a U column `residual_delta` names is instead a bounded
@@ -39,7 +41,7 @@ from neuromancer.modules import blocks
 
 from neurotemplate.common.data_utils import NormStats
 from neurotemplate.control.losses import resolve_objective
-from neurotemplate.control.scenarios import horizons, scored_steps
+from neurotemplate.control.scenarios import scored_steps
 from neurotemplate.hooks import load_control_hooks
 from neurotemplate.modeling import windows
 
@@ -55,20 +57,14 @@ POLICY_NONLIN = {
     "silu": nn.SiLU,
 }
 
-# Positions of D and R among the policy net's positional inputs, fixed by the
-# input_keys build_policy constructs: ["yn", "D"], then "R" when there is one.
-_D_ARG_INDEX = 1
-_R_ARG_INDEX = 2
-
-
-class _PreviewGather(nn.Module):
-    """Narrow previewed windows to the (column, timestep) pairs declared.
+class _WindowGather(nn.Module):
+    """Narrow each input window to the (column, timestep) pairs declared.
 
     SystemPreview's input_map gives one window per key, so a key's window is
-    sized to the deepest preview any of its columns declared. A column that
-    asked for less would otherwise see future it never requested. This applies
-    the narrowing gather — one per positional input, keyed by its index — in
-    front of whatever net build_policy constructed.
+    sized to the deepest `past` and the deepest `future` any of its columns
+    declared. A column that asked for less would otherwise see steps it never
+    requested. This applies the narrowing gather — one per positional input,
+    keyed by its index — in front of whatever net build_policy constructed.
 
     A fixed permutation computed once at construction, applied with
     `index_select` against registered buffers — same discipline as
@@ -115,28 +111,32 @@ class _ReferenceRule(nn.Module):
     """
 
     def __init__(self, rule, nm_mapping: dict[str, list[str]],
-                 norm_stats: NormStats, h_ctrl: int, r_columns: list[str],
-                 anchored: list[str]):
+                 norm_stats: NormStats, keys: list[str], now: dict[str, int],
+                 r_columns: list[str], anchored: list[str]):
         super().__init__()
         self.rule = rule
         self.nm_mapping = nm_mapping
         self.norm_stats = norm_stats
         self.r_columns = r_columns
         self.anchored = anchored
-        # Which block of each flattened window holds the current step. yn and
-        # D look `h_ctrl - 1` steps back, so it is the last of their history;
-        # R has no history, so it is the first.
-        self.ny, self.nd = len(nm_mapping["Y"]), len(nm_mapping["D"])
-        self.now = h_ctrl - 1
+        # The policy's positional inputs, and which row of each flattened
+        # window is the current step: a key's deepest `past`, since every
+        # column of yn, D and R keeps its current step.
+        self.keys = keys
+        self.now = now
+        self.widths = {"yn": len(nm_mapping["Y"]), "D": len(nm_mapping["D"]),
+                       "R": len(r_columns)}
 
-    def forward(self, yn: torch.Tensor, d: torch.Tensor,
-                r: Optional[torch.Tensor] = None) -> dict[str, torch.Tensor]:
-        r_now = {} if r is None else {
-            name: r[:, j] for j, name in enumerate(self.r_columns)}
+    def forward(self, *args: torch.Tensor) -> dict[str, torch.Tensor]:
+        windows = dict(zip(self.keys, args))
+        now = {key: _current(windows[key], self.now[key], self.widths[key])
+               for key in ("yn", "D", "R") if key in windows}
+        r_now = {name: now["R"][:, j] for j, name in enumerate(self.r_columns)
+                 } if "R" in now else {}
         commands = self.rule(
-            _current(yn, self.now, self.ny),
+            now["yn"],
             r_now,
-            _current(d, self.now, self.nd),
+            now["D"],
             self.nm_mapping,
             self.norm_stats,
         )
@@ -247,84 +247,70 @@ def _zero_final_layer(net: nn.Module, rows: torch.Tensor) -> None:
             last.bias[rows] = 0.0
 
 
-def _validated_preview_spec(hooks, nm_mapping: dict[str, list[str]]
-                            ) -> Optional[dict[str, int]]:
-    """Read + validate control_user_defined.preview_config, or None if unset.
+def _window_table(cfg, nm_mapping: dict[str, list[str]],
+                  r_columns: list[str]) -> dict[str, list[tuple[int, int]]]:
+    """`cfg.policy_window` as `(past, future)` per column, per input key, in
+    the order each key carries its columns.
 
-    None (the hook is missing) is a different case from {} (the hook is
-    defined but names nothing): the former falls back to `cfg.d_preview`
-    below, the latter turns disturbance preview off entirely.
+    The table must name every Y, U, D and reference column and nothing else.
+    A Y column takes no `future` (it is not measured yet), nor does a U
+    column (it is the policy's own output); a D or reference column needs
+    one, because how far ahead to look at a forecast is the decision.
     """
-    preview = getattr(hooks, "preview_config", None)
-    if preview is None:
-        return None
+    columns = {"yn": nm_mapping["Y"], "U": nm_mapping["U"], "D": nm_mapping["D"],
+               "R": r_columns}
+    listed = [c for cols in columns.values() for c in cols]
+    missing = [c for c in listed if c not in cfg.policy_window]
+    extra = sorted(set(cfg.policy_window) - set(listed))
+    if missing or extra:
+        raise ValueError(
+            "policy_window must list every Y, U, D and reference column and "
+            f"nothing else. Missing: {missing}. Not a policy input: {extra}.")
+    wrong = [f"{c} ({'Y' if key == 'yn' else key}: "
+             f"{'takes no' if key in ('yn', 'U') else 'needs a'} `future`)"
+             for key, cols in columns.items() for c in cols
+             if ("future" in cfg.policy_window[c]) != (key in ("D", "R"))]
+    if wrong:
+        raise ValueError(
+            f"policy_window: {', '.join(wrong)}. A Y column is not measured "
+            "ahead and a U column is the policy's own output; a D or "
+            "reference column is a forecast, and its `future` says how far "
+            "ahead the policy sees it.")
+    return {key: [(cfg.policy_window[c]["past"], cfg.policy_window[c].get("future", 0))
+                  for c in cols]
+            for key, cols in columns.items()}
 
-    spec = preview(nm_mapping)
-    for key, steps in spec.items():
-        if key not in nm_mapping["D"]:
-            raise ValueError(
-                f"preview_config key '{key}' is not a D column. Allowed: "
-                f"{nm_mapping['D']}. A reference column's preview is "
-                "`reference_preview` in the control config."
-            )
-        if not isinstance(steps, int) or steps < 0:
-            raise ValueError(
-                f"preview_config['{key}'] must be a non-negative int, got {steps!r}"
-            )
-    return spec
+
+def _input_keys(table: dict[str, list[tuple[int, int]]]) -> list[str]:
+    """The policy's positional inputs: U only when some U column has a past,
+    R only when the objective names a reference column."""
+    reads_u = any(past > 0 for past, _ in table["U"])
+    return (["yn"] + (["U"] if reads_u else []) + ["D"]
+            + (["R"] if table["R"] else []))
 
 
-def _d_preview_by_column(hooks, cfg, nm_mapping: dict[str, list[str]]
-                         ) -> list[int]:
-    """Each D column's own preview depth, in nm_mapping["D"] order.
+def _input_window(key: str, spans: list[tuple[int, int]]) -> dict:
+    """The input_map entry for one key: its deepest `past` and `future`.
 
-    From the use case's `preview_config(nm_mapping) -> {D column: n_steps}`
-    hook; with no hook, `cfg.d_preview` for every column. How far ahead to
-    look at the weather is a property of the plant, shared by every run
-    against it, so it lives in the hooks file; how far ahead to look at a
-    reference column is per run, and is `cfg.reference_preview`.
+    A U window ends at the current step like every other, but U holds only
+    the commands already applied, so that last row is SystemPreview's
+    `nearest` copy of the previous command; `_key_gather` drops it.
     """
-    spec = _validated_preview_spec(hooks, nm_mapping)
-    if spec is None:
-        return [cfg.d_preview] * len(nm_mapping["D"])
-    return [spec.get(col, 0) for col in nm_mapping["D"]]
+    return {"past": max(past for past, _ in spans),
+            "future": 0 if key == "U" else max(future for _, future in spans),
+            "pad_mode": "nearest"}
 
 
-def _preview_gather(n: int, history: int, depths: list[int]
-                    ) -> Optional[torch.Tensor]:
-    """Indices narrowing a shared window to each column's own preview depth.
-
-    The tensor SystemPreview hands the policy for one key is one window,
-    time-major, covering `history - 1` past steps, the current step, and
-    `max(depths)` future steps (see `SystemPreview.get_mapped_data`) — the
-    deepest depth any single column declared, since the window can't vary by
-    column.
-
-    When every column declared the same depth (including the all-zero
-    default) that window already is what was asked for, so this returns None
-    and build_policy builds no gather. Otherwise it keeps, at every past and
-    current step, all `n` columns, and at future step k (1-indexed from the
-    current step) only the columns whose declared depth is >= k.
-
-    Reuses `windows.key_blocks`/`per_step` for the per-timestep offsets — the
-    same position arithmetic `BlockStack` uses — rather than re-deriving
-    `t * n + j` here.
-    """
-    future = max(depths, default=0)
-    if all(depth == future for depth in depths):
-        return None
-
-    in_steps = history + future
-    block = windows.key_blocks((n,), in_steps)[0]
-    steps = windows.per_step(block, n, in_steps)
-
-    indices = []
-    for t, step in enumerate(steps):
-        future_step = t - history + 1        # <= 0 for the past/current steps
-        cols = (range(n) if future_step <= 0 else
-                [j for j in range(n) if depths[j] >= future_step])
-        indices.extend(step.start + j for j in cols)
-    return torch.tensor(indices, dtype=torch.long)
+def _key_gather(key: str, spans: list[tuple[int, int]]) -> list[int]:
+    """Indices narrowing one key's window to each column's own steps:
+    `t` relative to the current step with `-past <= t <= future`, and
+    `-past <= t <= -1` for U."""
+    window = _input_window(key, spans)
+    now = window["past"]
+    keep = tuple((j, now - past, now - 1 if key == "U" else now + future)
+                 for j, (past, future) in enumerate(spans))
+    rows = window["past"] + 1 + window["future"]
+    return windows.window_gather((len(spans),), (rows,), (keep,))
 
 
 def _build_mlp_net(cfg, insize: int, nu: int, umin, umax) -> nn.Module:
@@ -371,7 +357,8 @@ policy_catalog = {
 POLICY_BOUND_METHODS = list(blocks.MLP_bounds.bound_methods)
 
 
-def _reference_rule(cfg, hooks, nm_mapping, norm_stats, h_ctrl: int,
+def _reference_rule(cfg, hooks, nm_mapping, norm_stats, keys: list[str],
+                    now: dict[str, int],
                     r_columns: list[str]) -> Optional[_ReferenceRule]:
     """The residual's anchor rule, or None when `residual_delta` is empty.
 
@@ -395,12 +382,8 @@ def _reference_rule(cfg, hooks, nm_mapping, norm_stats, h_ctrl: int,
             "is no rule for the residual to deviate from. Implement the hook, "
             "or leave residual_delta empty for a plain policy."
         )
-    return _ReferenceRule(rule, nm_mapping, norm_stats, h_ctrl, r_columns,
+    return _ReferenceRule(rule, nm_mapping, norm_stats, keys, now, r_columns,
                           anchored=list(cfg.residual_delta))
-
-
-def _input_keys(r_columns: list[str]) -> list[str]:
-    return ["yn", "D"] + (["R"] if r_columns else [])
 
 
 @beartype
@@ -428,8 +411,9 @@ def reference_over_horizon(
     reference that moves is a residual that never was.
     """
     r_columns = resolve_objective(cfg, nm_mapping).r_columns
+    keys = ["yn", "D"] + (["R"] if r_columns else [])
     rule = _reference_rule(cfg, load_control_hooks(cfg), nm_mapping, norm_stats,
-                           h_ctrl=1, r_columns=r_columns)
+                           keys, now={key: 0 for key in keys}, r_columns=r_columns)
     # The other keys run one step past U, so bound the slice by U's length.
     steps = slice(scored_steps("U", hmax).start, out["U"].shape[1])
     P = steps.stop - steps.start
@@ -456,40 +440,28 @@ def build_policy(
             f"Available: {list(policy_catalog.keys())}"
         )
 
-    ny = len(nm_mapping["Y"])
     nu = len(nm_mapping["U"])
-    nd = len(nm_mapping["D"])
     hooks = load_control_hooks(cfg)
-    _, h_ctrl, _ = horizons(cfg, sysid_cfg)
     r_columns = resolve_objective(cfg, nm_mapping).r_columns
     device = sysid_cfg.device
 
-    # How many future steps of each column the policy sees: per D column from
-    # the hooks' preview_config (or cfg.d_preview), per reference column from
-    # cfg.reference_preview.
-    d_depths = _d_preview_by_column(hooks, cfg, nm_mapping)
-    r_depths = [cfg.reference_preview.get(c, 0) for c in r_columns]
-
-    # Flattened window widths (see SystemPreview.get_mapped_data):
-    #   yn : past = H_ctrl-1, future = 0             -> ny * H_ctrl
-    #   D  : past+current = H_ctrl, plus each column's own future depth
-    #                                                 -> h_ctrl*nd + sum(d_depths)
-    #   R  : current, plus each column's own future   -> n_ref + sum(r_depths)
-    #
-    # A key's window is sized to its deepest column, and a column asking for
-    # less is gathered down to its own depth before the net sees it
-    # (_preview_gather below), so the widths are per-column sums.
-    insize = (
-        ny * h_ctrl
-        + h_ctrl * nd + sum(d_depths)
-        + len(r_columns) + sum(r_depths)
-    )
+    # Each key's window (see SystemPreview.get_mapped_data) is sized to its
+    # deepest column, and each column is gathered down to its own steps
+    # before the net sees it, so the input width is a per-column sum:
+    # past + 1 + future for yn, D and R, and past for U, whose window ends
+    # at the previous step.
+    table = _window_table(cfg, nm_mapping, r_columns)
+    keys = _input_keys(table)
+    input_map = {key: _input_window(key, table[key]) for key in keys}
+    key_gathers = {key: _key_gather(key, table[key]) for key in keys}
+    insize = sum(len(indices) for indices in key_gathers.values())
 
     umin, umax = hooks.actuation_bounds(nm_mapping, norm_stats)
     umin, umax = umin.to(device), umax.to(device)
 
-    reference = _reference_rule(cfg, hooks, nm_mapping, norm_stats, h_ctrl,
-                                r_columns)
+    reference = _reference_rule(
+        cfg, hooks, nm_mapping, norm_stats, keys,
+        now={key: input_map[key]["past"] for key in keys}, r_columns=r_columns)
     if reference is None:
         net_min, net_max = umin, umax
     else:
@@ -514,40 +486,27 @@ def build_policy(
     if reference is not None:
         _zero_final_layer(net, anchored)
 
-    # Per-column preview is a gather in front of whatever net was just built,
-    # applied before the residual wrapping below so the reference (which
-    # slices its own current step directly, see _ReferenceRule) and the
-    # trainable net see the same windows either way.
+    # The per-column windows are a gather in front of whatever net was just
+    # built, applied before the residual wrapping below so the reference
+    # (which slices its own current step from the raw windows, see
+    # _ReferenceRule) and the trainable net see the same windows either way.
+    # A key whose columns all read its whole window gathers nothing.
     gathers = {}
-    d_gather = _preview_gather(nd, h_ctrl, d_depths)
-    if d_gather is not None:
-        gathers[_D_ARG_INDEX] = d_gather.to(device)
-    r_gather = _preview_gather(len(r_columns), 1, r_depths)
-    if r_gather is not None:
-        gathers[_R_ARG_INDEX] = r_gather.to(device)
+    for i, key in enumerate(keys):
+        window = input_map[key]
+        width = len(table[key]) * (window["past"] + 1 + window["future"])
+        if key_gathers[key] != list(range(width)):
+            gathers[i] = torch.tensor(key_gathers[key], dtype=torch.long, device=device)
     if gathers:
-        net = _PreviewGather(net, gathers)
+        net = _WindowGather(net, gathers)
 
     if reference is not None:
         net = _ResidualPolicy(net, reference, list(u_cols), umin, umax,
                               below, above).to(device)
 
-    input_map = {
-        "yn": {"past": h_ctrl - 1, "future": 0, "pad_mode": "nearest"},
-        "D": {"past": h_ctrl - 1, "future": max(d_depths, default=0),
-              "pad_mode": "nearest"},
-    }
-    # A reference column is a known future schedule; previewing it lets the
-    # policy see what it is steering into (the dynamics have a one-step lag,
-    # so a bound at step i depends on the command chosen at i-1). Only add the
-    # window when previewing — future=0 is the single current step.
-    if max(r_depths, default=0) > 0:
-        input_map["R"] = {"past": 0, "future": max(r_depths),
-                          "pad_mode": "nearest"}
-
     return Node(
         net,
-        _input_keys(r_columns),
+        keys,
         ["U"],
         name="DPC Policy",
         input_map=input_map,
@@ -572,21 +531,19 @@ def describe_policy(
     the built module rather than re-deriving it from cfg, so a mismatch
     between config and reality shows up on the card.
 
-    Preview depths are reported alongside `insize` so a reader can re-check
-    the ny*H_ctrl + [h_ctrl*nd + sum(D depths)] + [n_ref + sum(R depths)] sum
-    by eye — a wrong window is otherwise an invisible failure.
+    The window table is reported alongside `insize` so a reader can re-check
+    the sum — past + 1 + future per Y, D and reference column, past per U
+    column — by eye: a wrong window is otherwise an invisible failure.
     """
-    # Unwrap: Node -> [_ResidualPolicy] -> [_PreviewGather] -> MLP_bounds
+    # Unwrap: Node -> [_ResidualPolicy] -> [_WindowGather] -> MLP_bounds
     raw = policy_node.callable
     residual = isinstance(raw, _ResidualPolicy)
     net = raw.base if residual else raw
-    if isinstance(net, _PreviewGather):
+    if isinstance(net, _WindowGather):
         net = net.base
 
-    hooks = load_control_hooks(cfg)
-    _, h_ctrl, _ = horizons(cfg, sysid_cfg)
-    d_depths = _d_preview_by_column(hooks, cfg, nm_mapping)
     r_columns = resolve_objective(cfg, nm_mapping).r_columns
+    columns = nm_mapping["Y"] + nm_mapping["U"] + nm_mapping["D"] + r_columns
 
     # Actuator limits are set in normalized U space by the actuation_bounds
     # hook; report them in physical units, which is what a reader can sanity
@@ -606,11 +563,9 @@ def describe_policy(
         "bound_method": cfg.policy_bound_method,
         "insize": int(net.in_features),
         "outsize": int(net.out_features),
-        "h_ctrl": h_ctrl,
+        "inputs": list(policy_node.input_keys),
         "ny": len(nm_mapping["Y"]),
-        "d_preview_by_column": dict(zip(nm_mapping["D"], d_depths)),
-        "r_preview_by_column": {c: cfg.reference_preview.get(c, 0)
-                                for c in r_columns},
+        "window": {c: dict(cfg.policy_window[c]) for c in columns},
         "hsizes": [int(lin.out_features) for lin in net.linear[:-1]],
         "param_count": sum(p.numel() for p in net.parameters()),
         "u_cols": list(u_cols),

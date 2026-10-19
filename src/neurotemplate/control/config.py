@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import warnings
 from dataclasses import asdict, dataclass, field
 from typing import Optional, Union
 
@@ -13,7 +12,10 @@ from neurotemplate.common.config import (
     check_positive,
     default_savedir,
 )
-from neurotemplate.modeling.config import HISTORY_WARN_THRESHOLD
+from neurotemplate.modeling.config import warn_deep_window
+
+#: The keys a `policy_window` entry may set.
+WINDOW_KEYS = ("past", "future")
 
 
 @dataclass
@@ -55,23 +57,22 @@ class ControlConfig:
     # zero stays a zero. A column that bounds a Y column uses that column's
     # normalisation instead, and must not be listed here.
     reference_scale: dict[str, float] = field(default_factory=dict)
-    # Future steps of each reference column the policy sees, beyond the
-    # current one. Shifting load means acting before the expensive hours,
-    # which a policy can only do if it sees them coming. A per-run knob, so it
-    # lives here rather than in the hooks' `preview_config`.
-    reference_preview: dict[str, int] = field(default_factory=dict)
 
     # Optional path or dotted module name for the control hooks file.
     # If unset, the library looks for `control_user_defined.py` in CWD.
     user_hooks_path: Optional[str] = None
 
-    # ── Control horizon / policy history ─────────────────────────
+    # ── Control horizon / policy window ──────────────────────────
     # Closed-loop training rollout length (pure prediction; window = hmax + train_pred_steps).
     train_pred_steps: int = 48
-    # Controller input history window (H_ctrl).
-    in_steps: int = 12
-    # Future-D steps the policy previews (0 = current only).
-    d_preview: int = 0
+    # What the policy reads, per Y, U, D and reference column:
+    # `{column: {past: n, future: m}}`, steps before and after the current
+    # one. Every column is listed. A Y or U column takes no `future` (not
+    # yet measured, or the policy's own output); a D or reference column
+    # requires one. A U column's window ends at the previous step, the last
+    # command applied, so `past: 0` means the policy does not read it. See
+    # control.policy.build_policy.
+    policy_window: dict[str, dict[str, int]] = field(default_factory=dict)
 
     # ── Objective ────────────────────────────────────────────────
     # A table of loss terms over named columns, and one gain per term — see
@@ -145,22 +146,10 @@ class ControlConfig:
         check_one_of(self, "policy_nonlin", list(POLICY_NONLIN))
         check_one_of(self, "policy_bound_method", POLICY_BOUND_METHODS)
 
-        # Advisory, not fatal — same threshold and reasoning as
-        # ModelingConfig.in_steps: this used to be a hard ValueError ceiling,
-        # which made the same value fatal here and merely advisory on the
-        # modeling side for no good reason. The real risks (memory, a window
-        # longer than the training horizon) don't justify refusing a value
-        # the user set on purpose; the right window length is dataset-specific.
-        if self.in_steps > HISTORY_WARN_THRESHOLD:
-            warnings.warn(
-                f"in_steps={self.in_steps} is above the usual ceiling of "
-                f"{HISTORY_WARN_THRESHOLD}. A longer context window costs "
-                "more memory per batch, and once it exceeds train_pred_steps "
-                "it hands the model, at rollout time, history it never saw "
-                "during training. Not rejected outright — the right window "
-                "length is dataset-specific.",
-                stacklevel=2,
-            )
+        # Which columns, and which may look ahead, is checked at policy
+        # build, against the surrogate's columns and the objective's.
+        check_policy_window(self.policy_window)
+        warn_deep_window("the policy's history_steps", self.history_steps)
 
         for name in ("train_data_path", "dev_data_path", "test_data_path"):
             _check_paths_field(name, getattr(self, name))
@@ -182,24 +171,19 @@ class ControlConfig:
                 raise ValueError(
                     f"reference_scale[{name!r}] must be a positive number, "
                     f"got {scale!r}")
-        for name, steps in self.reference_preview.items():
-            if not isinstance(steps, int) or steps < 0:
-                raise ValueError(
-                    f"reference_preview[{name!r}] must be a non-negative int, "
-                    f"got {steps!r}")
         # Names are resolved against the surrogate's columns at load time
         # (losses.resolve_objective); the table's own shape is checked now.
         parse_losses(self.losses, self.gains)
 
         for name in [
-            "batch_size", "train_pred_steps", "in_steps",
+            "batch_size", "train_pred_steps",
             "log2_policy_hidden", "policy_layers",
             "epochs", "epoch_verbose", "lr",
             "test_window", "test_stride",
         ]:
             check_positive(self, name)
 
-        for name in ["d_preview", "warmup", "patience"]:
+        for name in ["warmup", "patience"]:
             check_non_negative(self, name)
 
         # Column names are resolved against the surrogate's U at policy build.
@@ -213,6 +197,33 @@ class ControlConfig:
                     "[0, 0] emits the reference rule exactly."
                 )
 
+    @property
+    def history_steps(self) -> int:
+        """The policy's window depth: its deepest `past`, plus the current
+        step. The closed loop seeds at least this many steps, and training
+        windows start this far apart."""
+        return max((entry["past"] for entry in self.policy_window.values()),
+                   default=-1) + 1
+
     def asdict(self) -> dict:
         return asdict(self)
+
+
+def check_policy_window(table: dict) -> None:
+    """Each entry is `{past: int >= 0[, future: int >= 0]}`, and there is at
+    least one."""
+    if not table:
+        raise ValueError(
+            "policy_window is empty. List every Y, U, D and reference column "
+            "with its {past, future}; there is no default.")
+    for column, entry in table.items():
+        if not isinstance(entry, dict) or "past" not in entry or set(entry) - set(WINDOW_KEYS):
+            raise ValueError(
+                f"policy_window[{column!r}] must be a mapping with `past` and "
+                f"optionally `future`, got {entry!r}")
+        for key, steps in entry.items():
+            if isinstance(steps, bool) or not isinstance(steps, int) or steps < 0:
+                raise ValueError(
+                    f"policy_window[{column!r}][{key!r}] must be an int >= 0, "
+                    f"got {steps!r}")
 

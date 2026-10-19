@@ -283,9 +283,6 @@ def resolve_objective(cfg, nm_mapping: dict[str, list[str]]) -> Objective:
     stray = sorted(set(scales) - set(r_columns))
     _require(not stray, f"reference_scale names {stray}, which are not "
              f"reference columns of the objective ({r_columns}).")
-    stray = sorted(set(cfg.reference_preview) - set(r_columns))
-    _require(not stray, f"reference_preview names {stray}, which are not "
-             f"reference columns of the objective ({r_columns}).")
 
     return Objective(terms=terms, roles=roles, r_columns=r_columns,
                      bound_to=bound_to, bands=_bands(terms, nm_mapping))
