@@ -4,15 +4,17 @@
 from runtime import Policy
 
 policy = Policy("policy")
-u = policy.act(y, d, r)               # {u column: command}; r only if it reads one
+command = policy.act(y, u, d, r)      # {u column: command}; u and r only if it reads them
 ```
 
 One stateless graph, one call per control step. Each argument is a
 `[steps, n]` window in physical units, oldest row first; `current row` is
 where the present step sits, and rows after it are the known future
-(forecast disturbances; the reference schedule). `r` holds the reference
-columns the policy was trained against (a comfort band, a setpoint
-schedule, a tariff) in the order the table below lists them. `act_batch`
-scores many windows at once.
+(forecast disturbances; the reference schedule). `u` holds the commands
+applied over the last `steps` steps, so it ends the step before the current
+one (its current row is `steps`, one past its last); keep it as you apply
+them. `r` holds the reference columns the policy was trained against (a
+comfort band, a setpoint schedule, a tariff) in the order the table below
+lists them. `act_batch` scores many windows at once.
 
 $contract

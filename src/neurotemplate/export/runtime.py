@@ -310,7 +310,9 @@ class Policy:
     `policy.json` states (`inputs.<name>.steps` / `.columns` /
     `.current_row`): `y` and `d` end at the current step, and `d` and `r` may
     run past it into the known future (forecast weather; the reference
-    columns — a comfort band, a setpoint schedule, a tariff).
+    columns — a comfort band, a setpoint schedule, a tariff). `u`, for a
+    policy that reads past commands, holds the commands applied over the
+    last `steps` steps and ends the step before the current one.
     """
 
     def __init__(self, policy_dir: str | Path = "policy"):
@@ -320,17 +322,18 @@ class Policy:
         self.u_columns: list[str] = self.spec["u_columns"]
         self._graph = _graph(policy_dir, "policy", self.spec)
 
-    def act(self, y, d, r=None) -> dict[str, float]:
+    def act(self, y, u=None, d=None, r=None) -> dict[str, float]:
         """The command for one step: `{u column: value}`.
 
         Each argument is `[steps, n]` for that input (see `self.inputs`);
-        `r` only for a policy whose objective names reference columns.
+        `u` only for a policy that reads past commands, `r` only for one
+        whose objective names reference columns.
         """
-        windows = {"y": y, "d": d, "r": r}
-        u = self.act_batch({name: None if windows[name] is None
-                            else np.asarray(windows[name])[None]
-                            for name in self.inputs})[0]
-        return {c: float(v) for c, v in zip(self.u_columns, u)}
+        windows = {"y": y, "u": u, "d": d, "r": r}
+        command = self.act_batch({name: None if windows[name] is None
+                                  else np.asarray(windows[name])[None]
+                                  for name in self.inputs})[0]
+        return {c: float(v) for c, v in zip(self.u_columns, command)}
 
     def act_batch(self, windows: Mapping[str, np.ndarray]) -> np.ndarray:
         """Commands for a batch of windows, `{input: [batch, steps, n]}` ->

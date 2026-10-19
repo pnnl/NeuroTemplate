@@ -12,7 +12,7 @@ y_next, state = warm_start(y=y, u=u, d=d)            # the first step of a rollo
 y_next, state = step(y=y, u=u, d=d, state=state)     # every later step
 
 policy = torch.export.load("policy/policy.pt2").module()
-u = policy(y=y, d=d, r=r)                            # r only if it reads one
+command = policy(y=y, u=u, d=d, r=r)                 # u and r only if it reads them
 ```
 
 Each window is a `[batch, steps, n]` float32 tensor in physical units, laid

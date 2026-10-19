@@ -286,9 +286,10 @@ def _priced(d_future: int, **overrides):
 
 
 @pytest.mark.parametrize("overrides, graph_format", [
-    # Plain policy: its D window runs past the present (preview), and every
-    # key has several columns, so a wrong window layout shows up.
-    ({"future": _d_future(2)}, "torch"),
+    # Plain policy: its D window runs past the present (preview), it reads
+    # the last two commands, and every key has several columns, so a wrong
+    # window layout shows up.
+    ({"future": _d_future(2), "u_past": 2}, "torch"),
     # Everything a policy can wrap around its net: the residual anchored to
     # the reference rule, and a tariff it previews.
     (_priced(1, residual_delta={"Zone Cooling Setpoint [°C]": [0.0, 1.0]}),
@@ -300,7 +301,7 @@ def test_trained_policy_exports_as_the_trained_policy(tmp_path, overrides, graph
     from neurotemplate.control.losses import resolve_objective
     from neurotemplate.control.policy import build_policy
     from neurotemplate.export.policy import (
-        PolicyGraph, closed_loop_windows, export_policy, policy_inputs,
+        closed_loop_windows, export_policy, physical_windows, policy_graph, policy_inputs,
     )
 
     s = full_setup(**overrides)
@@ -314,21 +315,24 @@ def test_trained_policy_exports_as_the_trained_policy(tmp_path, overrides, graph
         exporter="legacy" if graph_format == "onnx" else "dynamo",
     )
     assert all(check.ok for check in check_reference(result.out_dir))
-    # The reference columns are named inputs, in the order the policy reads them.
+    # The reference columns are named inputs, in the order the policy reads
+    # them; the past commands are `u`, ending the step before the current one.
     spec = json.loads((result.out_dir / "policy" / "policy.json").read_text())
-    assert list(spec["inputs"]) == ["y", "d", "r"]
+    reads_u = "u_past" in overrides
+    assert list(spec["inputs"]) == ["y"] + (["u"] if reads_u else []) + ["d", "r"]
     assert spec["inputs"]["r"]["columns"] == resolve_objective(cfg, nm).r_columns
+    if reads_u:
+        assert spec["inputs"]["u"]["steps"] == spec["inputs"]["u"]["current_row"] == 2
 
     # The graph's physical windows are the closed loop's own windows: the
     # wrapper around the trained net must issue the net's own commands.
     inputs = policy_inputs(policy, cfg, nm, ns)
     flat = closed_loop_windows(closed_loop, policy, cfg, sysid_cfg, [s["norm_df"]], nm, ns)
-    physical = [flat[i.key].reshape(-1, i.steps, len(i.columns)) * torch.tensor(i.stretch)
-                + torch.tensor(i.shift) for i in inputs]
+    physical = physical_windows(flat, inputs).values()
     stretch = torch.tensor([ns[c]["stretch"] for c in nm["U"]])
     shift = torch.tensor([ns[c]["shift"] for c in nm["U"]])
     with torch.no_grad():
-        wrapped = PolicyGraph(policy.callable, inputs, nm, ns)(*physical)
+        wrapped = policy_graph(policy.callable, inputs, nm, ns)(*physical)
         direct = policy.callable(*flat.values()) * stretch + shift
     assert torch.allclose(wrapped, direct, atol=1e-4)
 
@@ -348,7 +352,7 @@ def test_c_runner_reproduces_the_reference(tmp_path, monkeypatch):
     from neurotemplate.export.policy import export_policy
 
     package = export(tmp_path, make_cfg(), MAPPING, RC_SPLIT, graph_format="c").out_dir
-    s = full_setup(**_priced(1))
+    s = full_setup(**_priced(1), u_past=1)
     cfg, sysid_cfg, nm, ns = s["cfg"], s["sysid_cfg"], s["nm"], s["norm_stats"]
     policy = build_policy(cfg, sysid_cfg, nm, ns)
     export_policy(
@@ -366,9 +370,8 @@ def test_c_runner_reproduces_the_reference(tmp_path, monkeypatch):
     # refuse a wrongly shaped window rather than hand it over.
     from neurotemplate.export.runtime import Policy
     with pytest.raises(ValueError, match="windows of shape"):
-        Policy(package / "policy").act_batch({"y": np.zeros((1, 1, 1)),
-                                              "d": np.zeros((1, 1, 1)),
-                                              "r": np.zeros((1, 1, 1))})
+        Policy(package / "policy").act_batch(
+            {name: np.zeros((1, 1, 1)) for name in ("y", "u", "d", "r")})
 
     _blow_up(monkeypatch)
     export(tmp_path, make_cfg(), MAPPING, RC_SPLIT, graph_format="c",

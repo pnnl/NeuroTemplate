@@ -15,7 +15,8 @@ state.outputs;                         /* [NT_MODEL_NY], one timestep later */
 
 #include "nt_policy.h"
 
-nt_policy_act(y, d, r, u);             /* windows in; u is [NT_POLICY_NU]; r only if NT_POLICY_HAS_R */
+nt_policy_act(y, u, d, r, command);    /* windows in, command [NT_POLICY_NU] out;
+                                          u only if NT_POLICY_HAS_U, r only if NT_POLICY_HAS_R */
 ```
 
 To build them into your own program, compile the runner and the generated

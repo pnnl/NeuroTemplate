@@ -281,5 +281,5 @@ def _policy_contract(spec: dict) -> str:
     for name, entry in spec["inputs"].items():
         columns = ", ".join(f"`{c}`" for c in entry["columns"])
         rows.append(f"| `{name}` | {entry['steps']} | {entry['current_row']} | {columns} |")
-    rows.append(f"| **output** `u` | | | {', '.join(f'`{c}`' for c in spec['u_columns'])} |")
+    rows.append(f"| **output** `command` | | | {', '.join(f'`{c}`' for c in spec['u_columns'])} |")
     return "\n".join(rows)

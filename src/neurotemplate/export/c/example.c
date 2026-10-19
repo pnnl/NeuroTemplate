@@ -53,14 +53,21 @@ static void run_model(void)
 static void run_policy(void)
 {
     float y[NT_POLICY_Y_STEPS][NT_POLICY_Y_N], d[NT_POLICY_D_STEPS][NT_POLICY_D_N];
+#if NT_POLICY_HAS_U
+    float u[NT_POLICY_U_STEPS][NT_POLICY_U_N];
+#endif
 #if NT_POLICY_HAS_R
     float r[NT_POLICY_R_STEPS][NT_POLICY_R_N];
 #endif
-    float u[NT_POLICY_NU];
+    float command[NT_POLICY_NU];
     double start;
 
     for (int t = 0; t < NT_POLICY_Y_STEPS; t++)
         for (int i = 0; i < NT_POLICY_Y_N; i++) y[t][i] = NT_POLICY_Y_TYPICAL[i];
+#if NT_POLICY_HAS_U
+    for (int t = 0; t < NT_POLICY_U_STEPS; t++)
+        for (int i = 0; i < NT_POLICY_U_N; i++) u[t][i] = NT_POLICY_U_TYPICAL[i];
+#endif
     for (int t = 0; t < NT_POLICY_D_STEPS; t++)
         for (int i = 0; i < NT_POLICY_D_N; i++) d[t][i] = NT_POLICY_D_TYPICAL[i];
 #if NT_POLICY_HAS_R
@@ -70,14 +77,18 @@ static void run_policy(void)
 
     start = seconds();
     for (int k = 0; k < STEPS; k++) {
-#if NT_POLICY_HAS_R
-        nt_policy_act(y, d, r, u);
-#else
-        nt_policy_act(y, d, u);
+        nt_policy_act(y,
+#if NT_POLICY_HAS_U
+                      u,
 #endif
+                      d,
+#if NT_POLICY_HAS_R
+                      r,
+#endif
+                      command);
     }
     printf("policy: %d commands, %.2f us per command\n", STEPS, (seconds() - start) / STEPS * 1e6);
-    for (int i = 0; i < NT_POLICY_NU; i++) printf("  %s = %.4g\n", NT_POLICY_U_COLUMNS[i], u[i]);
+    for (int i = 0; i < NT_POLICY_NU; i++) printf("  %s = %.4g\n", NT_POLICY_U_COLUMNS[i], command[i]);
 }
 #endif
 
