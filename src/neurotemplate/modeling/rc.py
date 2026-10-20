@@ -185,6 +185,11 @@ MIN_TAU_STEPS = 2.0
 #: they must be — `tau_fast < tau_ambient < tau_slow`.
 TAU_KEYS = ("tau_fast_h", "tau_ambient_h", "tau_slow_h")
 
+#: The largest factor a `modulated_by` context can scale a saturating branch by.
+#: The branch's slope bound is held at this factor, so a modulated branch keeps
+#: the stability guarantee for any context; its factor starts at 1.
+MODULATION_MAX = 2.0
+
 #: Raw parameter behind every learned branch coefficient at construction:
 #: `softplus(-4) ≈ 0.018`, so a fresh block starts as near-pure free decay
 #: for the same reason `g` starts at zero — an O(1) forcing would swamp the
@@ -322,7 +327,7 @@ class LinearTerm(nn.Module):
 
 
 class SaturatingTerm(nn.Module):
-    """`sign · cap · tanh(x / w)`: a staged coil's response to demand.
+    """`sign · cap · m(c) · tanh(x / w)`: a staged coil's response to demand.
 
     `cap = softplus(θ_c)` is °C per step at full stage; the slope at the
     origin is `headroom · sigmoid(θ_s)`, so `w = cap / slope` and the bound
@@ -330,33 +335,55 @@ class SaturatingTerm(nn.Module):
     `1 - a_m - a_o`, handed in each step so the bound follows the rates if
     they train. `θ_s = 0` starts at half the budget; `cap` starts near zero.
 
+    `m(c)` is 1 unless the declaration names `modulated_by` columns. Then it
+    is `MODULATION_MAX · sigmoid(a + b·c)` over those columns, normalised: how
+    much the same demand delivers under different conditions (a coil that
+    removes more heat when the air it rejects to is cooler). It starts at 1,
+    and `w` is widened by `MODULATION_MAX` so the slope bound holds at the
+    largest factor any context can reach.
+
     The input is the pre-stack's demand feature, scaled to about [0, 1] by
     `demand_scale`; this branch holds the same scale and undoes it, so `w`
     reads in °C of demand.
     """
 
-    def __init__(self, sign: int, control: dict, state: dict):
+    def __init__(self, sign: int, control: dict, state: dict, n_context: int = 0):
         super().__init__()
         self.sign = int(sign)
         self.theta_cap = nn.Parameter(torch.tensor(_NEAR_ZERO_THETA))
         self.theta_slope = nn.Parameter(torch.tensor(0.0))
         _buffer(self, "scale", demand_scale(sign, control, state))
         _buffer(self, "zone_stretch", state["stretch"])
+        self.modulation = nn.Linear(n_context, 1) if n_context else None
+        if self.modulation is not None:
+            # sigmoid(0) · MODULATION_MAX = 1: the branch starts unmodulated.
+            nn.init.zeros_(self.modulation.weight)
+            nn.init.zeros_(self.modulation.bias)
 
     def cap(self) -> torch.Tensor:
         return F.softplus(self.theta_cap)
 
     def slope_share(self) -> torch.Tensor:
-        """Fraction of the stability headroom the slope at the origin uses."""
+        """Fraction of the stability headroom the slope at the origin uses,
+        at the largest factor the context can reach."""
         return torch.sigmoid(self.theta_slope)
 
     def width(self, headroom: torch.Tensor) -> torch.Tensor:
         """`w`: °C of demand over which the response ramps from off to full."""
-        return self.cap() / (headroom * self.slope_share())
+        reach = 1.0 if self.modulation is None else MODULATION_MAX
+        return self.cap() * reach / (headroom * self.slope_share())
 
-    def forward(self, x: torch.Tensor, headroom: torch.Tensor) -> torch.Tensor:
+    def factor(self, context: torch.Tensor) -> torch.Tensor:
+        """`m(c)`, in (0, MODULATION_MAX), from the normalised context columns."""
+        return MODULATION_MAX * torch.sigmoid(self.modulation(context))
+
+    def forward(self, x: torch.Tensor, headroom: torch.Tensor,
+                context: Optional[torch.Tensor] = None) -> torch.Tensor:
         demand_c = x * self.scale
-        return self.sign * self.cap() * torch.tanh(demand_c / self.width(headroom)) / self.zone_stretch
+        response = self.sign * self.cap() * torch.tanh(demand_c / self.width(headroom))
+        if self.modulation is not None:
+            response = response * self.factor(context)
+        return response / self.zone_stretch
 
 
 def physical_parameters(module: nn.Module) -> list[nn.Parameter]:
@@ -478,8 +505,12 @@ class RCBlock(nn.Module):
             c for c in demands if inputs[c].get("branch", "saturating") == "saturating"]
         self._saturating_pos = [drive_names.index(c) for c in self.saturating_names]
         self.saturating = nn.ModuleList(
-            SaturatingTerm(inputs[c]["sign"], norm_stats[c], norm_stats[self.channel_names[0]])
+            SaturatingTerm(inputs[c]["sign"], norm_stats[c], norm_stats[self.channel_names[0]],
+                           n_context=len(inputs[c].get("modulated_by", ())))
             for c in self.saturating_names)
+        # Each saturating branch's context: positions of its `modulated_by` columns.
+        self.context_names = [list(inputs[c].get("modulated_by", ())) for c in self.saturating_names]
+        self._context_pos = [[drive_names.index(m) for m in names] for names in self.context_names]
         # Demand features routed into `g` by declaration: a ReLU MLP has no
         # slope bound, so the stability guarantee is off for this block.
         self.demand_in_mlp = [c for c in demands if c not in self.saturating_names]
@@ -609,8 +640,9 @@ class RCBlock(nn.Module):
             total = self.gain(drive.index_select(-1, self._mlp_pos))
         for pos, term in zip(self._linear_pos, self.linear):
             total = total + term(self._column(drive, pos))
-        for pos, term in zip(self._saturating_pos, self.saturating):
-            total = total + term(self._column(drive, pos), headroom)
+        for pos, context, term in zip(self._saturating_pos, self._context_pos, self.saturating):
+            total = total + term(self._column(drive, pos), headroom,
+                                 drive[..., context] if context else None)
         return total
 
     # ── description ─────────────────────────────────────────────
@@ -625,7 +657,9 @@ class RCBlock(nn.Module):
         (see `bounded`). `forcing` lists which column feeds which branch and
         what each learned: `k` in zone units per step per physical unit for
         `linear`; `cap` (°C/step), `w` (°C of demand) and `slope_share` (the
-        fraction of the stability budget the slope uses) for `saturating`.
+        fraction of the stability budget the slope uses) for `saturating`,
+        plus the bias and per-column weights of `m(c)` when it is modulated
+        (`MODULATION_MAX · sigmoid(bias + Σ weight · column)`, normalised).
         `demand_in_mlp` names the demand columns routed into `g` by
         declaration, for which the stability bound does not hold.
         """
@@ -642,8 +676,13 @@ class RCBlock(nn.Module):
                 "saturating": {
                     name: {"cap": round(float(term.cap()), 4),
                            "w": round(float(term.width(headroom)), 4),
-                           "slope_share": round(float(term.slope_share()), 3)}
-                    for name, term in zip(self.saturating_names, self.saturating)
+                           "slope_share": round(float(term.slope_share()), 3),
+                           **({} if term.modulation is None else {"modulated_by": {
+                               "bias": round(float(term.modulation.bias), 4),
+                               "weights": {c: round(float(wt), 4) for c, wt in
+                                           zip(context, term.modulation.weight[0])}}})}
+                    for name, context, term in zip(self.saturating_names, self.context_names,
+                                                   self.saturating)
                 },
                 "mlp": list(self.mlp_names),
                 # hsizes of the learned heat-input map `g` — the one hidden

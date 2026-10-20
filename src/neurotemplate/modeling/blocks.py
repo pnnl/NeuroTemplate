@@ -57,6 +57,11 @@ feature feeds a bounded `saturating` branch by default; `"branch": "mlp"`
 routes it into the learned residual instead, which gives up the stability
 bound and is reported as such.
 
+A `demand` entry may also name `"modulated_by": [columns]`: U or D columns
+(never a demand column) whose values scale the saturating branch's effect by
+a bounded factor, `m(c)` in `rc.SaturatingTerm`, for an actuator that delivers
+more under some conditions than others. Only `2r2c` acts on it.
+
 `linear` says the column enters the zone's heat balance as one sign-fixed
 coefficient times the physical value (measured power, solar irradiance).
 Only `2r2c` acts on it; other families see the column as usual.
@@ -266,6 +271,18 @@ def _resolve_inputs(spec: dict, block: str, y_names: list[str],
                 problems.append(f"`inputs[{column!r}]` has branch "
                                 f"{entry.get('branch')!r}; expected one of "
                                 f"{list(DEMAND_BRANCHES)}.")
+        context = entry.get("modulated_by", [])
+        if context and (kind != "demand" or entry.get("branch", "saturating") != "saturating"):
+            problems.append(f"`inputs[{column!r}]` names `modulated_by`, which scales a "
+                            "saturating `demand` branch and nothing else.")
+        for name in context:
+            if name not in u_names and name not in d_names:
+                problems.append(f"`inputs[{column!r}].modulated_by` names {name!r}, which is "
+                                f"not one of this block's U {u_names} or D {d_names} columns.")
+            elif inputs.get(name, {}).get("kind") == "demand" or name == column:
+                problems.append(f"`inputs[{column!r}].modulated_by` names {name!r}, a demand "
+                                "column: its feature reads the state, and a context that reads "
+                                "the state would break the branch's slope bound.")
 
     if problems:
         raise ValueError(

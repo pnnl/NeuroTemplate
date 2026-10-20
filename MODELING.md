@@ -158,7 +158,12 @@ physics instead of having to learn it:
 
 Inside `2r2c`, a `demand` column becomes a saturating branch, bounded in
 value and in slope, so the stability guarantee survives the one state read
-it admits. Nothing is inferred from column names. A declaration changes the
+it admits. When the same demand delivers more under some conditions than
+others (a coil removes more heat when the air it rejects heat to is cooler),
+name those columns in the entry's `modulated_by`: the branch's effect is then
+scaled by a learned factor between 0 and 2 of them, starting at 1, and the
+slope bound holds at any factor. The reportcard's branch lines give the
+factor's weights. Nothing is inferred from column names. A declaration changes the
 physics but not the shapes, so a wrong one shows only in the reportcard's
 branch lines.
 

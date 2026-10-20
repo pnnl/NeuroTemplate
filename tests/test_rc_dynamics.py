@@ -33,12 +33,13 @@ family with no per-block builder.
 import pytest
 import torch
 
+from neurotemplate.modeling.blocks import build_blocks
 from neurotemplate.modeling.config import ModelingConfig as Config
 from neurotemplate.export.state import clear_state
 from neurotemplate.modeling.dynamics import get_dynamics, stateful_blocks
 from neurotemplate.modeling.heads import BinaryHead, HeadStack, RegressionHead
 from neurotemplate.modeling.rc import (
-    MIN_TAU_STEPS, RCBlock, SaturatingTerm, mode_taus, time_constant_boxes,
+    MIN_TAU_STEPS, MODULATION_MAX, RCBlock, SaturatingTerm, mode_taus, time_constant_boxes,
 )
 from model_fixtures import model_cfg, uniform_history
 
@@ -541,3 +542,75 @@ def test_a_demand_setpoint_lagged_past_its_zone_is_refused():
     with pytest.raises(ValueError, match=r"history\['north sp'\] is 3, deeper"):
         get_dynamics(make_cfg(model="mlp", history=history), DECLARED_MAPPING,
                      block_spec=spec, norm_stats=STATS)
+
+
+# ── modulated_by: a demand branch whose effect depends on context ─────
+
+MODULATED_INPUTS = {
+    "north sp": {"kind": "demand", "sign": -1, "state": "north T", "modulated_by": ["oat"]},
+    "ahu fan": {"kind": "linear", "sign": +1},
+}
+
+
+def make_modulated_block() -> RCBlock:
+    return make_block(
+        1, 2, 2, channel_names=("north T",), u_names=("north sp", "ahu fan"),
+        d_names=("oat", "ghi"), inputs=MODULATED_INPUTS, ambient="oat", norm_stats=STATS,
+    )
+
+
+def test_a_modulated_branch_starts_as_a_factor_of_one():
+    """Untrained, `m(c) = 1` at every context, so the branch delivers what the
+    same branch would at the same cap and width."""
+    term = make_modulated_block().saturating[0]
+    context = torch.randn(5, 1) * 3
+    assert torch.allclose(term.factor(context), torch.ones(5, 1))
+
+
+def test_the_context_scales_the_same_demand():
+    """With a weight on the outdoor column, the same demand delivers more on
+    one side of it than the other, and never more than MODULATION_MAX times."""
+    block = make_modulated_block()
+    term = block.saturating[0]
+    with torch.no_grad():
+        term.theta_cap.fill_(1.0)
+        term.modulation.weight.fill_(-2.0)
+    a_o, a_m, _ = block.rates()
+    demand = torch.full((2, 1), 0.5)
+    cool, hot = torch.tensor([[-1.0]]), torch.tensor([[1.0]])
+    at_cool = term(demand[:1], 1 - a_m - a_o, cool)
+    at_hot = term(demand[:1], 1 - a_m - a_o, hot)
+    assert at_cool.abs() > at_hot.abs()
+    assert term.factor(torch.tensor([[-100.0]])).item() <= MODULATION_MAX
+
+
+@pytest.mark.parametrize("context", [-100.0, 0.0, 100.0])
+def test_a_modulated_slope_never_exceeds_the_headroom(context):
+    """The bound is held at the largest factor the context can reach, so it
+    holds at any context with the slope share at the whole budget."""
+    block = make_modulated_block()
+    term = block.saturating[0]
+    with torch.no_grad():
+        term.theta_cap.fill_(20.0)
+        term.theta_slope.fill_(20.0)
+        term.modulation.weight.fill_(-50.0)
+    a_o, a_m, _ = block.rates()
+    headroom = 1 - a_m - a_o
+    x = torch.zeros(1, 1, requires_grad=True)
+    term(x, headroom, torch.tensor([[context]])).sum().backward()
+    slope_in_state = x.grad.abs() * STATS["north T"]["stretch"] / term.scale
+    assert slope_in_state.item() <= headroom.item() * (1 + 1e-5)
+
+
+@pytest.mark.parametrize("entry,message", [
+    ({"kind": "linear", "sign": 1, "modulated_by": ["oat"]}, "nothing else"),
+    ({"kind": "demand", "sign": -1, "state": "north T", "modulated_by": ["nowhere"]},
+     "not one of this block's"),
+    ({"kind": "demand", "sign": -1, "state": "north T", "modulated_by": ["north sp"]},
+     "reads the state"),
+])
+def test_a_wrong_modulated_by_is_refused(entry, message):
+    column = "ahu fan" if entry["kind"] == "linear" else "north sp"
+    spec = {"north": {**DECLARED["north"], "inputs": {column: entry}}}
+    with pytest.raises(ValueError, match=message):
+        build_blocks(DECLARED_MAPPING, spec)
