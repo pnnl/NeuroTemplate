@@ -614,3 +614,17 @@ def test_a_wrong_modulated_by_is_refused(entry, message):
     spec = {"north": {**DECLARED["north"], "inputs": {column: entry}}}
     with pytest.raises(ValueError, match=message):
         build_blocks(DECLARED_MAPPING, spec)
+
+
+def test_a_modulated_declaration_builds_and_runs_end_to_end():
+    """Through get_dynamics, as training builds it: the pre-stack takes only
+    the feature's own keys, and the block reads the context column."""
+    spec = {"north": {**DECLARED["north"], "inputs": MODULATED_INPUTS}}
+    system = get_dynamics(make_cfg(history=DECLARED_HISTORY), DECLARED_MAPPING,
+                          block_spec=spec, norm_stats=STATS)
+    block = system.nodes[0].callable.fy.blocks[0]
+    assert block.context_names == [["oat"]]
+    x = torch.randn(2, HISTORY_STEPS * 5)
+    y, u, d = x[:, :HISTORY_STEPS], x[:, HISTORY_STEPS:HISTORY_STEPS * 3], x[:, HISTORY_STEPS * 3:]
+    clear_state(stateful_blocks(system))
+    assert torch.isfinite(system.nodes[0].callable(y, u, d)).all()
