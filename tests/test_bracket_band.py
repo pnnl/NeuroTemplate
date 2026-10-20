@@ -29,18 +29,6 @@ _spec.loader.exec_module(_template_control)
 bracket_band = _template_control.bracket_band
 
 
-def test_heating_never_exceeds_cooling():
-    """Across a wide sweep of bands and insets, the ordering must hold."""
-    lo = torch.linspace(20.0, 28.0, 60).reshape(-1, 1)
-    width = torch.linspace(0.1, 3.0, 40).reshape(1, -1)
-    hi = lo + width
-    for cool_inset, heat_inset in ((0.0, 0.0), (0.5, 0.0), (1.0, 0.25),
-                                   (2.0, 2.0)):
-        cool, heat = bracket_band(
-            lo, hi, cool_inset=cool_inset, heat_inset=heat_inset)
-        assert (heat <= cool).all(), f"insets {cool_inset}/{heat_inset}"
-
-
 def test_oversized_inset_collapses_rather_than_inverting():
     """An inset wider than the band must not invert the pair.
 

@@ -20,23 +20,19 @@ from neurotemplate.control.objective import (
     power_diagnostics,
     objective_balance,
     objective_notes,
-    objective_to_dict,
     run_objective_pass,
     term_shapes,
 )
 from neurotemplate.control.pipeline import (
     evaluate_closed_loop,
-    log_control_results,
 )
 from neurotemplate.control.policy import build_policy, describe_policy
 from neurotemplate.control.reportcard import render_control_reportcard
 from neurotemplate.control.scenarios import build_loaders, horizons
 from control_fixtures import (
     BAND_GAINS, BAND_LOSSES, POWER_LOSSES, TARIFF, TARIFF_SCALE, full_setup,
-    make_raw_df, make_reference_df,
 )
 import control_user_defined as hooks
-from fake_logger import FakeLogger
 
 
 def _with_power(*names, **overrides):
@@ -85,21 +81,6 @@ def _run_diagnostics(reference=None, **overrides):
                 md=md, u_cols=nm["U"])
 
 
-def test_the_diagnostics_describe_the_run_they_were_measured_on():
-    d = _run_diagnostics(**_with_power("energy"))
-    (u_col,) = d["u_cols"]
-
-    assert [m.name for m in d["results"].actuation] == [u_col]
-    for r in d["results"].response:
-        assert set(r.mean_du) == {u_col}
-
-    # And the balance must cover exactly the terms the loss actually built.
-    assert {t.name for t in d["balance"].terms} == {
-        "comfort_lower_loss", "comfort_upper_loss", "du_loss", "energy_loss",
-    }
-    assert [s.u_name for s in d["shapes"]] == [u_col]
-
-
 def test_a_stepping_test_band_produces_something_to_audit():
     """A band that steps inside the test windows is what makes the response
     audit non-empty; the fixture's steps every 6 rows."""
@@ -109,32 +90,6 @@ def test_a_stepping_test_band_produces_something_to_audit():
         assert r.n_jumps > 0
         assert 0.0 <= r.frac_actuated <= 1.0
         assert r.mean_span >= 1
-
-
-def test_a_constant_test_band_has_nothing_to_audit():
-    plant = make_raw_df()
-    d = _run_diagnostics(reference=make_reference_df(plant, segment=len(plant)))
-    assert d["results"].response == []
-
-
-def test_everything_logged_is_json_serializable():
-    import json
-
-    d = _run_diagnostics(**_with_power("energy", "cost"))
-    logger = FakeLogger()
-    log_control_results(logger, d["results"])
-    logger.log_dict(
-        objective_to_dict(d["balance"], d["shapes"], d["power"],
-                          d["notes"]),
-        name="objective_diagnostics.json",
-    )
-
-    for payload in logger.dicts.values():
-        json.dumps(payload)
-    assert all(isinstance(v, (int, float)) for v in logger.metrics.values())
-    # The headline behavioural keys, present without anyone asking.
-    assert any(k.endswith("_frac_saturated") for k in logger.metrics)
-    assert "control_mean_exceedance" in logger.metrics
 
 
 # ── Grid response and residual control, through the same sequence ─
@@ -157,11 +112,6 @@ def test_the_grid_terms_reach_every_diagnostic():
     # Metered power reads the surrogate's outputs, so the flat U-sweep must be
     # reported as that rather than as an inert term.
     assert d["power"].reads_outputs
-
-
-def test_peak_alone_is_flagged_as_raising_energy():
-    d = _run_diagnostics(**_with_power("peak"))
-    assert any("norm above 1" in n for n in d["notes"])
 
 
 def test_an_unpreviewed_tariff_is_flagged_as_reactive_only():

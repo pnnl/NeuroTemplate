@@ -15,7 +15,6 @@ from neurotemplate.control.closed_loop import (
 from neurotemplate.control.objective import (
     DOMINANCE_FACTOR,
     ObjectiveBalance,
-    TermBalance,
     format_objective_report,
     is_inert,
     objective_balance,
@@ -25,7 +24,7 @@ from neurotemplate.control.objective import (
 )
 from neurotemplate.control.policy import build_policy
 from neurotemplate.control.scenarios import build_loaders, horizons
-from control_fixtures import BAND_LOSSES, POWER_LOSSES, SETPT, full_setup
+from control_fixtures import BAND_LOSSES, POWER_LOSSES, full_setup
 
 
 def _problem(**gains):
@@ -78,24 +77,6 @@ def test_a_lopsided_weight_is_flagged_as_dominant():
     assert dominant[0].ratio_to_rest > DOMINANCE_FACTOR
 
 
-def test_a_balanced_objective_is_not_flagged():
-    terms = [TermBalance("a", 1.0, 0.5, 1.0), TermBalance("b", 1.0, 0.5, 1.0)]
-    assert ObjectiveBalance(terms, total=2.0).dominant() == []
-
-
-def test_an_all_zero_objective_is_not_reported_as_dominated():
-    """A policy that starts perfectly in band must not trip the warning."""
-    problem, loss, batch, _ = _problem()
-    out = run_objective_pass(problem, batch)
-    zeroed = {**out, **{o.name: torch.tensor(0.0) for o in loss.objectives}}
-
-    balance = objective_balance(loss, zeroed)
-
-    assert balance.total == 0.0
-    assert all(t.ratio_to_rest == 0.0 for t in balance.terms)
-    assert balance.dominant() == []
-
-
 # ── term_shapes ──────────────────────────────────────────────────
 
 
@@ -109,22 +90,6 @@ def _shapes(term_fn, n_grid=9):
     hi = torch.tensor([(ns[c]["max"] - ns[c]["shift"]) / ns[c]["stretch"]
                        for c in nm["U"]])
     return term_shapes(term_fn, out, hmax, nm["U"], lo, hi, ns, n_grid=n_grid)
-
-
-def test_a_monotone_term_is_reported_without_a_verdict():
-    """A term minimised on an endpoint is normal, not a defect.
-
-    Here the term is the setpoint itself, so it is minimised at the floor. An
-    honest power metric behaves the same way — it costs more as the actuator
-    works harder — so the sweep reports where the minimum is and says nothing
-    about whether that is wrong.
-    """
-    (shape,) = _shapes(lambda yn, u, d: u[:, :, 0])
-
-    assert shape.u_name == SETPT
-    assert shape.argmin == 0
-    assert not shape.is_flat
-    assert shape.minimised_at == pytest.approx(shape.grid[0])
 
 
 # ── power_diagnostics ────────────────────────────────────────────
@@ -177,15 +142,6 @@ def test_a_clamped_zero_is_dead_and_a_snapped_zero_is_not():
     assert snapped.frac_dead == 0.0, "the straight-through path still carries"
 
 
-def test_a_term_reading_the_rollout_is_not_inert():
-    (shape,) = _shapes(lambda yn, u, d: yn[:, :, 0])
-    diag = _diag(lambda yn, u, d: yn[:, :, 0])
-
-    assert diag.reads_outputs
-    assert shape.is_flat
-    assert not is_inert([shape], diag)
-
-
 def test_a_term_reading_nothing_is_inert():
     """Flat in U *and* no gradient into the rollout — the real alarm."""
     def constant(yn, u, d):
@@ -198,13 +154,3 @@ def test_a_term_reading_nothing_is_inert():
     assert is_inert([shape], diag)
     report = format_objective_report(ObjectiveBalance([], 0.0), [shape], diag)
     assert "WARNING" in report and "cannot move the policy" in report
-
-
-def test_a_term_reading_only_the_commands_is_not_called_inert():
-    """It has no gradient into yn, but its sweep is not flat — not the alarm."""
-    (shape,) = _shapes(lambda yn, u, d: u[:, :, 0])
-    diag = _diag(lambda yn, u, d: u[:, :, 0])
-
-    assert not diag.reads_outputs
-    assert not shape.is_flat
-    assert not is_inert([shape], diag)

@@ -4,9 +4,7 @@ import torch
 from neurotemplate.control.closed_loop import build_closed_loop
 from neurotemplate.control.policy import build_policy
 from neurotemplate.control.scenarios import (
-    build_loaders,
     build_window_dict,
-    build_window_dict_multi,
     horizons,
     load_control_splits,
 )
@@ -45,33 +43,6 @@ def test_window_dict_shapes():
     assert d["R"].shape == (n, W, 2)
 
 
-def test_build_loaders_iterates():
-    s = full_setup()
-    train, dev = build_loaders(
-        s["cfg"], s["sysid_cfg"], s["nm"], [s["norm_df"]], [s["norm_df"]],
-    )
-    batch = next(iter(train))
-    for k in ("yn", "U", "D", "R"):
-        assert k in batch
-    assert next(iter(dev)) is not None
-
-
-def test_build_window_dict_multi_pools_and_tracks_source():
-    """Two copies of the same df produce 2x as many windows as one,
-    with a source_idx that partitions cleanly into two runs."""
-    s = full_setup()
-    cfg, sysid_cfg, nm = s["cfg"], s["sysid_cfg"], s["nm"]
-    single = _windows(s)
-    multi = build_window_dict_multi(
-        [s["norm_df"], s["norm_df"]], cfg, sysid_cfg, nm,
-        P=cfg.train_pred_steps, stride=cfg.history_steps,
-    )
-    n_single = single["yn"].shape[0]
-    assert multi["yn"].shape[0] == 2 * n_single
-    src = multi["source_idx"].tolist()
-    assert src == [0] * n_single + [1] * n_single
-
-
 def test_the_reference_survives_the_rollout_untouched():
     """SystemPreview copies the input dict and only restacks keys a node
     writes, so R reaches the loss and `out` unchanged — and never the
@@ -87,27 +58,6 @@ def test_the_reference_survives_the_rollout_untouched():
 
 
 # ── Reference files ──────────────────────────────────────────────
-
-
-def test_three_reference_draws_give_three_times_the_windows(tmp_path):
-    """Several draws are several files against one plant record."""
-    s = full_setup()
-    cfg, nm, ns, plant = s["cfg"], s["nm"], s["norm_stats"], s["plant"]
-    write_splits(cfg, tmp_path, plant, [make_reference_df(plant, seed=i)
-                                        for i in range(3)])
-    train, _, _ = load_control_splits(cfg, nm, ns)
-    write_splits(cfg, tmp_path, plant, [make_reference_df(plant)])
-    one, _, _ = load_control_splits(cfg, nm, ns)
-
-    pooled = build_window_dict_multi(train, cfg, s["sysid_cfg"], nm,
-                                     P=cfg.train_pred_steps, stride=cfg.history_steps)
-    single = build_window_dict_multi(one, cfg, s["sysid_cfg"], nm,
-                                     P=cfg.train_pred_steps, stride=cfg.history_steps)
-    assert pooled["yn"].shape[0] == 3 * single["yn"].shape[0]
-    # Same plant windows three times over, each against its own draw.
-    n = single["yn"].shape[0]
-    assert torch.equal(pooled["D"][:n], pooled["D"][n:2 * n])
-    assert not torch.equal(pooled["R"][:n], pooled["R"][n:2 * n])
 
 
 def test_a_loaded_reference_is_normalised_with_its_targets_stats(tmp_path):

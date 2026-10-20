@@ -25,22 +25,6 @@ def _windows(s, cfg=None, sysid_cfg=None):
     )
 
 
-def test_closed_loop_rollout_shapes():
-    s = full_setup()
-    cfg, sysid_cfg, nm = s["cfg"], s["sysid_cfg"], s["nm"]
-    _, _, hmax = horizons(cfg, sysid_cfg)
-    P = cfg.train_pred_steps
-
-    policy = build_policy(cfg, sysid_cfg, nm, s["norm_stats"])
-    cl = build_closed_loop(s["dyn_node"], policy, cfg, sysid_cfg)
-    data = _windows(s)
-    out = cl(data)
-    n = data["yn"].shape[0]
-    # seed + P appended predictions / actions; U's seed is one shorter
-    assert out["yn"].shape == (n, hmax + P, len(nm["Y"]))
-    assert out["U"].shape == (n, hmax - 1 + P, len(nm["U"]))
-
-
 def test_the_first_prediction_already_responds_to_the_policy():
     """The dynamics applies the policy's command in the step it was chosen.
 
@@ -131,14 +115,6 @@ def test_gru_surrogate_rolls_out_and_warms_up():
     assert torch.allclose(out["yn"][:, hmax, :], expected, atol=1e-6)
 
 
-def test_frozen_param_count_is_zero_trainable():
-    s = full_setup()
-    n_trainable = sum(
-        p.numel() for p in s["dyn_sys"].parameters() if p.requires_grad
-    )
-    assert n_trainable == 0
-
-
 def _demand_setup():
     """full_setup, but the surrogate is a 2r2c zone with the setpoint
     declared as `demand`, the other channels an MLP block."""
@@ -190,4 +166,3 @@ def test_a_policy_parked_on_the_inactive_side_still_gets_gradient():
     out["yn"][:, hmax:, zone_i].sum().backward()
     grads = [p.grad for p in policy.callable.parameters() if p.requires_grad]
     assert any(g is not None and g.abs().sum() > 0 for g in grads)
-

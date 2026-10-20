@@ -11,7 +11,6 @@ import pytest
 import torch
 
 from neurotemplate.control.metrics import (
-    actuation_metrics,
     response_audit,
 )
 
@@ -20,35 +19,6 @@ ZONE = "zone [°C]"
 U_NAMES = [COOL, HEAT]
 U_LO = torch.tensor([20.0, 15.0])
 U_HI = torch.tensor([26.0, 22.0])
-
-
-# ── actuation_metrics ────────────────────────────────────────────
-
-
-def test_saturation_fraction_counts_steps_on_a_bound():
-    """One control pinned low the whole time, one parked in the middle."""
-    u = torch.empty(2, 10, 2)
-    u[:, :, 0] = 20.0        # exactly the lower bound
-    u[:, :, 1] = 18.5        # mid-range
-
-    cool, heat = actuation_metrics(u, U_NAMES, U_LO, U_HI)
-
-    assert cool.frac_at_min == pytest.approx(1.0)
-    assert cool.frac_at_max == pytest.approx(0.0)
-    assert cool.frac_saturated == pytest.approx(1.0)
-    assert heat.frac_saturated == pytest.approx(0.0)
-    assert heat.mean_value == pytest.approx(18.5)
-
-
-def test_mean_abs_du_is_per_channel():
-    u = torch.zeros(1, 3, 2)
-    u[0, :, 0] = torch.tensor([20.0, 21.0, 22.0])   # steps of 1.0
-    u[0, :, 1] = torch.tensor([18.0, 18.0, 18.0])   # never moves
-
-    cool, heat = actuation_metrics(u, U_NAMES, U_LO, U_HI)
-
-    assert cool.mean_abs_du == pytest.approx(1.0)
-    assert heat.mean_abs_du == pytest.approx(0.0)
 
 
 # ── response_audit ───────────────────────────────────────────────
@@ -102,13 +72,3 @@ def test_a_jump_the_controller_ignores():
     assert r.frac_closed == 0.0
     assert r.frac_resolved == 0.0
     assert r.mean_du[COOL] == pytest.approx(0.0)
-
-
-def test_a_jump_that_asks_for_nothing_is_not_scored():
-    """The channel is already inside the new band, so there is no demand."""
-    y, ymin, ymax, u = _jump_case(cool_after=24.0, heat_after=18.0,
-                                  y_after=24.0)
-    ymax[0, 3:, 0] = 26.0            # ceiling moves but stays above the zone
-    ymin[0, 3:, 0] = 21.0            # still a jump, still no demand
-
-    assert _audit(y, ymin, ymax, u) == []

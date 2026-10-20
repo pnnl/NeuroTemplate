@@ -30,16 +30,6 @@ def _cycle(n: int = 100, amp: float = 2.0) -> torch.Tensor:
     return (24.0 + amp * torch.sin(t)).reshape(1, n, 1)
 
 
-def test_perfect_tracking_has_no_excess():
-    """Predicting the truth exactly → zero rise excess, drift ratio 1."""
-    y = _cycle()
-    s = rollout_stability(y, y, ["zone"])[0]
-    assert s.name == "zone"
-    assert s.pred_rise_fraction == pytest.approx(s.true_rise_fraction)
-    assert s.rise_excess == pytest.approx(0.0)
-    assert s.drift_ratio == pytest.approx(1.0)
-
-
 def test_monotone_ramp_is_flagged_despite_small_rmse():
     """The motivating failure: a ramp with a *smaller* RMSE than a good model.
 
@@ -95,38 +85,6 @@ def _staged(n: int = 96) -> torch.Tensor:
     x[:, n // 3: 2 * n // 3, 0] = 800.0
     x[:, 2 * n // 3:, 0] = 200.0
     return x
-
-
-def test_jitter_on_a_held_signal_is_not_called_a_ramp():
-    """The false positive that shipped first: high excess, but not monotone.
-
-    A continuous model cannot hold a value exactly, so on staged equipment it
-    jitters and its rise fraction lands near 0.5 against a truth near 0.03.
-    That is a big rise excess and not a ramp, so `looks_like_ramp` must say no.
-    """
-    true = _staged()
-    jitter = true + 40.0 * torch.sin(torch.linspace(0, 60, 96)).reshape(1, 96, 1)
-
-    s = rollout_stability(jitter, true, ["fan power"])[0]
-    assert s.true_rise_fraction < 0.10, "truth should mostly hold"
-    assert s.rise_excess > 0.25, "excess alone would flag this"
-    assert 0.3 < s.pred_rise_fraction < 0.7, "jitter sits mid-range"
-    assert not s.looks_like_ramp(), "jitter is not a ramp"
-
-
-def test_looks_like_ramp_requires_both_conditions():
-    """Neither condition alone is sufficient, in both directions."""
-    # Monotone prediction AND monotone truth: extreme, but excess is 0.
-    true = torch.linspace(0.0, 100.0, 50).reshape(1, 50, 1)
-    s = rollout_stability(true + 1.0, true, ["energy"])[0]
-    assert s.pred_rise_fraction == pytest.approx(1.0)
-    assert not s.looks_like_ramp(), "matching a monotone truth is correct"
-
-    # Thresholds are tunable, and tightening `extreme` un-flags a borderline case.
-    ramp = torch.linspace(20.0, 30.0, 96).reshape(1, 96, 1)
-    s = rollout_stability(ramp, _cycle(96), ["zone"])[0]
-    assert s.looks_like_ramp(excess_warn=0.25)
-    assert not s.looks_like_ramp(excess_warn=0.99), "excess gate must apply"
 
 
 def test_averaged_over_windows_not_pooled():

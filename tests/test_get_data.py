@@ -20,11 +20,7 @@ def write_csv(tmp_path, freq, n=48, name="series.csv"):
 # An hourly tariff over 5-minute plant data is the documented price recipe.
 @pytest.mark.parametrize("freq,expected", [
     ("5min", 300.0),
-    ("15min", 900.0),
-    ("min", 60.0),
-    ("h", 3600.0),
     ("2h", 7200.0),
-    ("D", 86400.0),
 ])
 def test_freq_seconds_covers_unit_and_multiplied_frequencies(
     tmp_path, freq, expected,

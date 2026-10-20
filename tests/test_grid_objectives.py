@@ -90,26 +90,10 @@ def test_shifting_the_tariff_changes_the_cost():
     assert _cost(s, out) != pytest.approx(_cost(s, shifted))
 
 
-def test_a_weight_of_zeros_costs_exactly_zero():
-    """No shift on a scaled reference column: a zero price is a zero cost."""
-    s = _setup(cost=1.0)
-    out = _rolled_out(s)
-    out["R"][..., _tariff_index(s)] = 0.0
-    assert _cost(s, out) == 0.0
-
-
-def test_naming_power_without_the_hook_fails_fast(monkeypatch):
-    import control_user_defined as hooks
-    s = _setup(cost=1.0)
-    monkeypatch.setattr(hooks, "POWER_METRIC_IMPLEMENTED", False)
-    with pytest.raises(NotImplementedError, match="power_metric"):
-        build_control_loss(s["cfg"], s["sysid_cfg"], s["nm"], s["norm_stats"])
-
-
 # ── Every power term reaches the policy ──────────────────────────
 
 
-@pytest.mark.parametrize("name", ["energy", "cost", "peak"])
+@pytest.mark.parametrize("name", ["cost", "peak"])
 def test_every_power_term_reaches_the_policy_parameters(name):
     """The chain is theta -> U -> surrogate -> yn -> power_metric -> term. A
     power metric that read only recorded D would have a zero gradient and

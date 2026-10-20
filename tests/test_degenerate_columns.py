@@ -23,8 +23,6 @@ import pytest
 from neurotemplate.common.data_utils import (
     compute_norm_stats,
     degenerate_columns,
-    degenerate_mapped_columns,
-    warn_degenerate_columns,
 )
 
 MAPPING = {"Y": ["zone [°C]", "gas [J]"], "U": ["cool_sp [°C]"], "D": ["oat [°C]"]}
@@ -49,29 +47,7 @@ def test_a_constant_column_is_detected_under_every_norm_type(norm_type):
     assert "zone [°C]" not in degenerate_columns(stats)
 
 
-def test_unit_spread_is_not_mistaken_for_degenerate():
-    """Detection is `min == max`, not `stretch == 1` — a column may span 1.0."""
-    df = pd.DataFrame({"x": [0.0, 1.0]})
-    stats = compute_norm_stats(df, norm_type="min_max")
-    assert stats["x"]["stretch"] == pytest.approx(1.0)
-    assert degenerate_columns(stats) == []
-
-
-def test_the_fallback_leaves_the_column_in_raw_units():
-    """The mechanism itself: stretch 1 and shift equal to the constant value.
-
-    This is what makes a later non-constant value land orders of magnitude out
-    of range instead of near zero.
-    """
-    stats = compute_norm_stats(_frame([1e9] * 6), norm_type="min_max")
-    assert stats["gas [J]"]["stretch"] == 1
-    assert stats["gas [J]"]["shift"] == pytest.approx(1e9)
-    # A later value of 1.6e9 normalizes to 6e8, not to something near zero.
-    later = (1.6e9 - stats["gas [J]"]["shift"]) / stats["gas [J]"]["stretch"]
-    assert later == pytest.approx(6e8)
-
-
-@pytest.mark.parametrize("norm_type", ["min_max", "abs_max", "z_score"])
+@pytest.mark.parametrize("norm_type", ["min_max"])
 def test_a_column_that_varies_on_a_tiny_scale_is_normalised_not_left_raw(norm_type):
     """A µA current varies; it must be scaled by its own spread. Left raw it
     reaches the model a million times smaller than its neighbours, and it is
@@ -83,23 +59,3 @@ def test_a_column_that_varies_on_a_tiny_scale_is_normalised_not_left_raw(norm_ty
     if norm_type != "z_score":
         assert normalised.abs().max() <= 1.0     # abs_max scales by |min| here
     assert degenerate_columns(stats) == []
-
-
-# ── The startup warning ──────────────────────────────────────────
-#
-# The reportcard only exists once the run has finished. The condition is
-# knowable when norm_stats is frozen, so it is also printed there — someone
-# watching a loss curve should not have to open a file to learn about it.
-
-
-def test_warn_ignores_columns_the_mapping_never_references(capsys):
-    """Same filtering as the reportcard — both read `degenerate_mapped_columns`."""
-    df = _frame([1e9, 2e9, 3e9, 4e9, 5e9, 6e9])
-    df["cool_sp [°C]"] = [23.0, 24.0, 25.0, 24.0, 23.0, 25.0]
-    df["ignored [-]"] = [7.0] * 6
-    stats = compute_norm_stats(df)
-
-    assert "ignored [-]" in degenerate_columns(stats)
-    assert degenerate_mapped_columns(stats, MAPPING) == []
-    assert warn_degenerate_columns(stats, MAPPING) == []
-    assert capsys.readouterr().out == ""

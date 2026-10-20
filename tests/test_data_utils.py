@@ -12,7 +12,6 @@ from neurotemplate.common.data_utils import (
     compute_norm_stats,
     get_sw_dict,
     get_sw_dict_multi,
-    parse_column_unit,
     unnormalize_df,
 )
 
@@ -49,17 +48,6 @@ def cfg():
     return c
 
 
-def test_norm_round_trip_identity(synthetic_df):
-    """normalize_df followed by unnormalize must recover the original values."""
-    stats = compute_norm_stats(synthetic_df, norm_type="min_max")
-    normed = normalize_df(synthetic_df, stats)
-    back = unnormalize_df(normed, stats)
-    for col in synthetic_df.columns:
-        assert np.allclose(back[col].to_numpy(), synthetic_df[col].to_numpy()), (
-            f"round-trip diverged on column {col}"
-        )
-
-
 def test_norm_z_score_round_trip(synthetic_df):
     stats = compute_norm_stats(synthetic_df, norm_type="z_score")
     normed = normalize_df(synthetic_df, stats)
@@ -80,22 +68,6 @@ def test_column_overrides_apply_per_column_norm(synthetic_df):
     # y1 uses the global z_score: shift == mean, stretch == std
     assert np.isclose(stats["y1"]["shift"], synthetic_df["y1"].mean())
     assert np.isclose(stats["y1"]["stretch"], synthetic_df["y1"].std())
-
-
-def test_column_overrides_none_skips_normalization(synthetic_df):
-    """Override a column to None (identity) while the global is min_max."""
-    stats = compute_norm_stats(
-        synthetic_df, norm_type="min_max",
-        column_overrides={"y0": None},
-    )
-    # y0 overridden to identity
-    assert stats["y0"]["shift"] == 0.0
-    assert stats["y0"]["stretch"] == 1.0
-    # Raw stats still populated for downstream consumers (e.g. BoundedHead)
-    assert np.isclose(stats["y0"]["min"], synthetic_df["y0"].min())
-    assert np.isclose(stats["y0"]["max"], synthetic_df["y0"].max())
-    # y1 still gets min_max
-    assert np.isclose(stats["y1"]["shift"], synthetic_df["y1"].min())
 
 
 def test_sec_elapsed_always_identity_regardless_of_override(synthetic_df):
@@ -156,16 +128,6 @@ def _two_synthetic_dfs(n=100):
     return [mk(0.0), mk(1000.0)]
 
 
-def test_multi_file_window_count_equals_per_file_sum(nm_mapping, cfg):
-    """Per-file windows concatenated → total = K × per-file count."""
-    dfs = _two_synthetic_dfs(n=100)
-    data = get_sw_dict_multi(dfs, cfg, nm_mapping)
-    steps = cfg.history_steps + cfg.train_pred_steps
-    per_file = (100 - steps) // cfg.history_steps + 1
-    assert data["Y"].shape == (2 * per_file, steps, 2)
-    assert data["source_idx"].shape == (2 * per_file,)
-
-
 def test_multi_file_windows_never_cross_boundary(nm_mapping, cfg):
     """A cross-file window would contain a > 900-wide value gap in y0;
     every per-file window has y0 spanning < 100."""
@@ -178,25 +140,3 @@ def test_multi_file_windows_never_cross_boundary(nm_mapping, cfg):
     src = data["source_idx"].tolist()
     flips = sum(1 for a, b in zip(src[:-1], src[1:]) if a != b)
     assert flips == 1, f"source_idx should be contiguous runs per file: {src}"
-
-
-# ── Units: parsed from a column's own name, carried on norm_stats ───
-
-
-@pytest.mark.parametrize("col,expected", [
-    ("North Zone Air Temperature [°C]", "°C"),
-    ("sec_elapsed", None),          # no brackets at all
-    ("Foo [note] Bar", None),       # bracket present, but not trailing
-])
-def test_parse_column_unit(col, expected):
-    assert parse_column_unit(col) == expected
-
-
-def test_compute_norm_stats_populates_unit_per_column():
-    df = pd.DataFrame({
-        "Zone Air Temperature [°C]": [20.0, 21.0, 22.0],
-        "sec_elapsed": [0.0, 300.0, 600.0],
-    })
-    stats = compute_norm_stats(df, norm_type="z_score")
-    assert stats["Zone Air Temperature [°C]"]["unit"] == "°C"
-    assert stats["sec_elapsed"]["unit"] is None

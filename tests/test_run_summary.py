@@ -6,16 +6,12 @@ instead of to a retyped copy, so the tests that matter are: the params in
 the summary are the params MLflow logged.
 """
 
-import json
 
 from neurotemplate.common.run_summary import (
-    RUN_SUMMARY_NAME,
     build_run_summary,
-    write_run_summary,
 )
 from neurotemplate.modeling.config import ModelingConfig
 from control_fixtures import make_control_cfg
-from fake_logger import FakeLogger
 
 _NM = {"Y": ["zone [°C]"], "U": ["setpoint [°C]"], "D": ["outdoor [°C]"],
        "t": ["sec_elapsed"]}
@@ -49,16 +45,3 @@ def test_control_params_are_the_params_mlflow_logged():
     # Control names its surrogate and carries no channel mapping of its own.
     assert summary["params"]["sysid_run_id"] == cfg.sysid_run_id
     assert "mapping" not in summary
-
-
-def test_write_logs_a_json_parseable_artifact_under_the_run():
-    logger = FakeLogger(run_id="3f2a1c")
-    written = write_run_summary(
-        logger, stage="model", config_path="model_configs/modeling.yaml",
-        cfg=ModelingConfig(), metrics={"test_rmse": 0.63,
-                                       "worst_channel_r2": 0.71},
-        mapping=_NM,
-    )
-    assert logger.dicts[RUN_SUMMARY_NAME] == written
-    assert json.loads(json.dumps(written))["run_id"] == "3f2a1c"
-

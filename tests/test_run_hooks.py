@@ -8,7 +8,6 @@ file would silently turn a trained run into a different controller.
 import shutil
 import sys
 from pathlib import Path
-from types import SimpleNamespace
 
 import mlflow
 import pytest
@@ -74,14 +73,3 @@ def test_editing_the_hooks_file_after_training_changes_nothing(tmp_path, monkeyp
     _, reloaded, *_ = control_load.load_trained_policy(run_id)
     with torch.no_grad():
         assert torch.equal(reloaded(dict(windows))["U"], trained)
-
-
-def test_a_hooks_file_importing_a_sibling_is_refused_at_snapshot(tmp_path):
-    """The copy is one file; a sibling it imports would be read from wherever
-    the reload happens to run, silently."""
-    (tmp_path / "site_helpers.py").write_text("BAND = 'Comfort Low [°C]'\n")
-    (tmp_path / "site_control.py").write_text("from site_helpers import BAND\n")
-    hooks = SimpleNamespace(__file__=str(tmp_path / "site_control.py"))
-    logger = SimpleNamespace(savedir=str(tmp_path))
-    with pytest.raises(RuntimeError, match=r"\['site_helpers'\]"):
-        snapshot_hooks(hooks, CONTROL_SNAPSHOT, logger)

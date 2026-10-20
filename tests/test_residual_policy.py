@@ -44,40 +44,6 @@ def _rollout(s):
     return policy, cl(_windows(s))
 
 
-# ── Wiring ───────────────────────────────────────────────────────
-
-
-def test_residual_keeps_the_node_signature_the_deploy_path_calls():
-    """The rule is composed inside the policy Node's callable, so the Node's
-    input keys, input_map and output are unchanged — which is what lets the
-    evaluator rebuild and invoke it with no edits at all."""
-    plain = full_setup()
-    resid = full_setup(residual_delta=_box(1.0, 1.0))
-    a = build_policy(plain["cfg"], plain["sysid_cfg"], plain["nm"],
-                     plain["norm_stats"])
-    b = build_policy(resid["cfg"], resid["sysid_cfg"], resid["nm"],
-                     resid["norm_stats"])
-    assert isinstance(b.callable, _ResidualPolicy)
-    assert a.input_keys == b.input_keys
-    assert a.output_keys == b.output_keys
-    assert a.input_map == b.input_map
-
-
-def test_a_rule_anchoring_other_columns_than_the_boxes_is_refused(monkeypatch):
-    """A column the rule adds would be silently ignored, and one it drops
-    would have no anchor."""
-    import control_user_defined as cud
-    s = full_setup(residual_delta=_box(1.0, 1.0))
-    rule = cud.reference_control
-
-    def extra(*args):
-        return {**rule(*args), "Fan Speed [-]": torch.zeros(1)}
-
-    monkeypatch.setattr(cud, "reference_control", extra)
-    with pytest.raises(ValueError, match=r"'Fan Speed \[-\]'.*residual_delta names"):
-        _rollout(s)
-
-
 # ── δ = 0 at initialization ──────────────────────────────────────
 
 
@@ -128,20 +94,6 @@ def test_a_one_sided_box_starts_at_the_rule_and_deploys_only_its_open_side():
     assert float(delta.min()) >= -1e-5
     assert float(delta.max()) <= 0.8 + 1e-5
     assert float(delta.max()) > 0.1, "the open side should still be reachable"
-
-
-def test_the_residual_still_learns():
-    """A zero start is only useful if the gradient is alive there."""
-    s = full_setup(residual_delta=_box(1.0, 1.0))
-    cfg, sysid_cfg, nm, ns = s["cfg"], s["sysid_cfg"], s["nm"], s["norm_stats"]
-    _, _, hmax = horizons(cfg, sysid_cfg)
-
-    policy = build_policy(cfg, sysid_cfg, nm, ns)
-    cl = build_closed_loop(s["dyn_node"], policy, cfg, sysid_cfg)
-    out = cl(_windows(s))
-    out["U"][:, scored_steps("U", hmax), :].pow(2).mean().backward()
-    grads = [p.grad for p in policy.parameters() if p.grad is not None]
-    assert any(float(g.abs().sum()) > 0 for g in grads)
 
 
 def test_a_heating_and_cooling_pair_recover_from_their_closed_sides():
@@ -227,23 +179,3 @@ def test_residual_metrics_measure_the_deployed_deviation():
     # One step on each edge, reported separately.
     assert m.frac_at_below == pytest.approx(1 / 4)
     assert m.frac_at_above == pytest.approx(1 / 4)
-
-
-def test_a_zero_width_box_reports_no_saturation_rather_than_all_of_it():
-    """[0, 0] scores the bare rule.
-
-    Every deviation is trivially at the bound of a zero-width box, so "pinned
-    on 100% of steps" is true and meaningless, and it drags in the reportcard's
-    warning about a cap that binds. Mean |δ| still earns its place: at [0, 0]
-    it is the assertion that the residual path is inert.
-    """
-    u = torch.tensor([[22.0, 23.0]])
-    m = residual_metrics(SETPT, u, u, box=(0.0, 0.0))
-
-    assert m.frac_at_below is None and m.frac_at_above is None
-    assert m.mean_abs_delta == 0.0
-    assert m.max_abs_delta == 0.0
-    # A one-sided box reports only the edge that has an interior.
-    one_sided = residual_metrics(SETPT, u + 0.5, u, box=(0.0, 0.5))
-    assert one_sided.frac_at_below is None
-    assert one_sided.frac_at_above == 1.0

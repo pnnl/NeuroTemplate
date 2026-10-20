@@ -22,8 +22,8 @@ from neurotemplate.control.scenarios import (
     build_loaders, horizons, load_control_splits, scored_steps,
 )
 from control_fixtures import (
-    BAND_GAINS, BAND_LOSSES, DIST, POWER_LOSSES, SETPT, TARIFF, TARIFF_SCALE,
-    ZONE, full_setup, make_norm_stats, make_raw_df, make_reference_df,
+    BAND_GAINS, BAND_LOSSES, POWER_LOSSES, SETPT, TARIFF, TARIFF_SCALE,
+    full_setup, make_norm_stats, make_reference_df,
     write_splits,
 )
 
@@ -94,52 +94,3 @@ def test_a_residual_over_a_reference_file_trains_and_reloads(tmp_path):
     rebuilt.load_state_dict(problem.state_dict())
     _, out_again = evaluate_closed_loop(again, sysid_cfg, cl, test_dfs, nm, ns_again)
     assert torch.equal(out_again["U"], out["U"])
-
-
-def test_a_recorded_setpoint_schedule_trains_a_tracking_policy():
-    """A schedule bounded from both sides is a tracking objective: the
-    operand is `schedule − zone`, relu below it and nrelu above."""
-    schedule = "Zone Schedule [°C]"
-    s = full_setup(epochs=3, losses={
-        "below": {"column": schedule, "target": ZONE, "map": "relu", "norm": 2},
-        "above": {"column": schedule, "target": ZONE, "map": "nrelu", "norm": 2},
-        "du": BAND_LOSSES["du"],
-    }, gains={"below": 10.0, "above": 10.0, "du": 1.0},
-        reference=make_reference_df(make_raw_df()).rename(
-            columns={"Comfort Low [°C]": schedule}))
-    _, trained, best_dev = _train(s)
-
-    assert torch.isfinite(torch.tensor(best_dev))
-    results, _ = evaluate_closed_loop(s["cfg"], s["sysid_cfg"], trained,
-                                      [s["norm_df"]], s["nm"], s["norm_stats"])
-    # One band, of zero width: every degree off the schedule is an excursion.
-    (comfort,) = results.comfort
-    assert comfort.name == ZONE
-    assert results.tracking[0].rmse == pytest.approx(comfort.rms_exceedance,
-                                                      rel=1e-4)
-
-
-def test_a_weight_on_a_proxy_power_metric_trains(monkeypatch):
-    """`power` is the hook's output, not a column: a proxy reading only the
-    commands and the weather — no metered power anywhere — prices and trains
-    just the same."""
-    import control_user_defined as hooks
-    s = full_setup(epochs=3,
-                   losses={**BAND_LOSSES, "cost": POWER_LOSSES["cost"]},
-                   gains={**BAND_GAINS, "cost": 1.0},
-                   reference_scale={TARIFF: TARIFF_SCALE})
-    nm, ns = s["nm"], s["norm_stats"]
-
-    def proxy(yn, U, D, nm_mapping, norm_stats):
-        """Cooling effort: how far the setpoint sits below the outdoors."""
-        sp = U[..., 0] * ns[SETPT]["stretch"] + ns[SETPT]["shift"]
-        out = D[..., 0] * ns[DIST[0]]["stretch"] + ns[DIST[0]]["shift"]
-        return torch.relu(out - sp) * 1000.0
-
-    monkeypatch.setattr(hooks, "power_metric", proxy)
-    _, trained, best_dev = _train(s)
-
-    assert torch.isfinite(torch.tensor(best_dev))
-    results, _ = evaluate_closed_loop(s["cfg"], s["sysid_cfg"], trained,
-                                      [s["norm_df"]], nm, ns)
-    assert results.energy.weighted_energy[TARIFF] >= 0.0

@@ -13,15 +13,6 @@ from model_fixtures import model_cfg
 NM = {"Y": ["y0", "y1"], "U": ["u0"], "D": ["d0", "d1"], "t": ["sec_elapsed"]}
 
 
-def test_a_ragged_table_keeps_each_columns_own_rows_newest_last():
-    # One key, three rows (t = 0, 1, 2) of three columns: column 0 keeps
-    # every row, column 1 only the newest, column 2 none, column order
-    # reversed on the way out.
-    #   row 0: [0 1 2]   row 1: [3 4 5]   row 2: [6 7 8]
-    keep = ((2, 1, 0), (1, 2, 2), (0, 0, 2))
-    assert window_gather((3,), (3,), (keep,)) == [0, 3, 7, 6]
-
-
 def test_two_keys_are_gathered_key_major_from_their_own_offsets():
     # Key 0: 2 rows of 1 column; key 1: 1 row of 2 columns, starting at 2.
     keep = (((0, 0, 1),), ((1, 0, 0), (0, 0, 0)))

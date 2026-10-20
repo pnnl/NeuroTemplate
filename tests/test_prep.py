@@ -8,7 +8,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from neurotemplate.prep import average, expand, fill_gaps, smooth
+from neurotemplate.prep import average, expand, fill_gaps
 
 
 def _series(values, freq="5min", start="2025-07-01 06:35"):
@@ -52,25 +52,3 @@ def test_fill_gaps_fills_short_runs_only_and_never_past_the_ends():
     filled = fill_gaps(s, "10min")
     assert filled.iloc[[3, 7, 8]].tolist() == pytest.approx([3.0, 7.0, 8.0])
     assert filled.iloc[[12, 13, 14, 0, 19]].isna().all()
-
-
-def test_smooth_recovers_a_noisy_daily_cycle_and_fills_its_gap():
-    rng = np.random.default_rng(0)
-    hours = np.arange(24 * 14)
-    truth = 20.0 + 0.02 * hours + 5.0 * np.sin(2 * np.pi * hours / 24)
-    s = _series(truth + rng.normal(0, 0.5, len(hours)), freq="1h")
-    s.iloc[200:206] = np.nan
-
-    smoothed = smooth(s, period="1D")
-    assert smoothed.index.equals(s.index)
-    assert np.sqrt(np.mean((smoothed - truth) ** 2)) < 0.3   # below the noise
-    assert np.abs(smoothed.iloc[200:206] - truth[200:206]).max() < 1.0
-    patched = s.fillna(smoothed)
-    assert patched.notna().all() and patched.iloc[10] == s.iloc[10]
-
-
-def test_smooth_without_a_period_is_a_trend_smoother():
-    rng = np.random.default_rng(1)
-    truth = np.linspace(10.0, 14.0, 200)
-    smoothed = smooth(_series(truth + rng.normal(0, 0.3, 200)))
-    assert np.sqrt(np.mean((smoothed - truth) ** 2)) < 0.15

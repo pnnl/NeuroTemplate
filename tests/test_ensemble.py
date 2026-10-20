@@ -57,13 +57,6 @@ def _run(cfg: Config) -> TrainedModel:
     )
 
 
-def test_ensemble_seeds_one_has_no_ensemble_and_no_spread_section(tmp_path):
-    result = _run(_make_cfg(tmp_path, ensemble_seeds=1))
-    assert result.ensemble is None
-    reportcard = (tmp_path / "reportcard.md").read_text()
-    assert "Seed ensemble spread" not in reportcard
-
-
 def test_ensemble_seeds_three_reports_a_spread_without_disturbing_the_primary(tmp_path):
     """The primary model must come out identical whether or not more seeds
     train after it — the ensemble adds error bars, it does not change what

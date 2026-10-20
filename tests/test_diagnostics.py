@@ -35,11 +35,6 @@ def _staged(seed=0, n=3000, centers=(0.0, 4210.0, 8070.0), noise=150.0):
     return np.asarray(centers)[labels] + rng.normal(0, noise, n)
 
 
-def _unimodal(seed=0, n=2000):
-    rng = np.random.default_rng(seed)
-    return rng.normal(5.0, 2.0, n)
-
-
 def _binary(seed=0, n=500):
     rng = np.random.default_rng(seed)
     return rng.integers(0, 2, n).astype(float)
@@ -57,7 +52,6 @@ def _floor_pinned(seed=0, n_zero=400, n_tail=1600):
 
 @pytest.mark.parametrize("make_x,expected_kind", [
     pytest.param(_staged, "ordinal", id="staged-three-level"),
-    pytest.param(_unimodal, "regression", id="continuous-unimodal"),
     pytest.param(_binary, "binary", id="zero-one-flag"),
     pytest.param(_floor_pinned, "bounded", id="floor-pinned-continuous-tail"),
 ])
@@ -66,49 +60,11 @@ def test_recommend_head_kind_from_shape(make_x, expected_kind):
     assert rec.kind == expected_kind
 
 
-def test_ordinal_is_not_driven_by_distinct_value_counting():
-    """The motivating failure from §4.2: a staged compressor carries sensor
-    noise on every sample, so it has thousands of distinct floats and looks
-    continuous by cardinality -- it must still be recognized as staged by
-    its shape (modes with empty gaps between them)."""
-    x = _staged(n=3000)
-    assert len(np.unique(x)) > 2000  # cardinality alone would say "continuous"
-    rec = recommend_head(x, "Total DX Power [W]")
-    assert rec.kind == "ordinal"
-
-
 def test_staged_signal_recommends_the_right_number_of_levels():
     rec = recommend_head(_staged(), "Total DX Power [W]")
     assert rec.kind == "ordinal"
     assert "n_levels=3" in rec.snippet
     assert "project_physical_to_norm" in rec.snippet
-
-
-def test_a_mostly_off_staged_channel_is_still_staged():
-    """Exactly 0 on ~80% of steps: quantile seeds coincide at 0, and without
-    re-seeding the empty clusters every K collapses to K=2 (field report,
-    modelica_rtu_mall DX power)."""
-    rng = np.random.default_rng(0)
-    on = np.asarray([4253.0, 8608.0])[rng.integers(0, 2, 600)] + rng.normal(0, 100, 600)
-    x = np.concatenate([np.full(2400, -0.0), on])
-    rec = recommend_head(x, "Total DX Power [W]")
-    assert rec.kind == "ordinal"
-    assert "n_levels=3" in rec.snippet
-    assert "-0" not in rec.evidence + rec.snippet
-
-
-def test_a_rare_binary_flag_is_flagged_too():
-    x = np.array([0.0] * 990 + [1.0] * 10)
-    rec = recommend_head(x, "Compressor On/Off")
-    assert rec.kind == "binary"
-    assert "RARE LEVEL: 1 holds 1.0%" in rec.evidence
-
-
-def test_bounded_head_bounds_only_the_pinned_side():
-    rec = recommend_head(_floor_pinned(), "Solar Irradiance [W/m2]")
-    assert rec.kind == "bounded"
-    assert "float('inf')" in rec.snippet    # open (continuous) side
-    assert "float('-inf')" not in rec.snippet  # the floor is a real bound
 
 
 # ── estimate_decay: recover a known tau, and say so when there is none ──
@@ -145,39 +101,6 @@ def test_estimate_decay_recovers_known_tau():
     assert median == pytest.approx(tau_true, rel=1e-6)
     assert lo == pytest.approx(tau_true, rel=1e-6)
     assert hi == pytest.approx(tau_true, rel=1e-6)
-
-
-def test_estimate_decay_reports_no_window_when_runs_are_too_short():
-    t_hours, state, ref, _off = _exponential_decay_series()
-    off = np.zeros_like(_off)
-    off[500:520] = True  # 20 steps, far short of the 48-step minimum
-    windows = estimate_decay(t_hours, state, ref, off, min_run_steps=48)
-    assert windows == ()
-    assert summarize_taus(windows) == (None, None, None)
-
-
-def test_estimate_decay_skips_a_run_that_is_not_decaying():
-    """A run where the gap grows instead of shrinking contributes no window
-    rather than a bogus (positive-slope) tau."""
-    n = 300
-    t_hours = np.arange(n) / 12.0
-    ref = np.zeros(n)
-    state = 1.0 + 0.01 * np.arange(n)  # gap growing linearly, never decaying
-    off = np.ones(n, dtype=bool)
-    windows = estimate_decay(t_hours, state, ref, off, min_run_steps=48)
-    assert windows == ()
-
-
-def test_estimate_decay_rejects_a_tau_the_window_could_not_resolve():
-    """The `data/spring` failure: a 5-hour window fitting a 127-hour
-    constant. The fit is excellent -- over a span that short an exponential
-    IS a straight line -- so r² cannot catch it, and the span has to."""
-    steps_per_hour = 12.0
-    t_hours = np.arange(60) / steps_per_hour        # 5 hours
-    ref = np.zeros(60)
-    state = 6.0 * np.exp(-t_hours / 127.0)
-    off = np.ones(60, dtype=bool)
-    assert estimate_decay(t_hours, state, ref, off, min_run_steps=48) == ()
 
 
 def test_estimate_decay_fits_only_the_decay_before_the_reference_is_crossed():

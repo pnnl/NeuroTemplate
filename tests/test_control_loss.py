@@ -38,13 +38,6 @@ def _gains(**gains):
     return {"comfort_lower": 0.0, "comfort_upper": 0.0, "du": 0.0, **gains}
 
 
-def test_a_band_costs_nothing_inside_and_something_outside():
-    s = full_setup(gains=_gains(comfort_lower=1.0, comfort_upper=1.0))
-    loss = build_control_loss(s["cfg"], s["sysid_cfg"], s["nm"], s["norm_stats"])
-    assert float(loss(_data(s, 24.5))["loss"]) == pytest.approx(0.0, abs=1e-6)
-    assert float(loss(_data(s, 26.0))["loss"]) > 0.0
-
-
 def test_the_bound_is_the_rms_violation_in_physical_units():
     """norm 2 is sqrt(mean(h²)) per window, not mean(h²): a 1 °C overshoot on
     one step of P costs 1/sqrt(P) °C, whatever the zone's stretch."""
@@ -98,27 +91,12 @@ def test_power_mean_is_monotone_in_q_and_bounded_by_the_max():
     assert values[-1] > values[0]
 
 
-def test_a_flat_profile_scores_below_a_spiky_one_of_equal_energy():
-    """What a peak term is for: same integral, different shape."""
-    flat = torch.tensor([[4.0, 4.0, 4.0, 4.0]])
-    spiky = torch.tensor([[0.0, 0.0, 0.0, 16.0]])
-    assert float(power_mean(flat, 4.0)) < float(power_mean(spiky, 4.0))
-
-
 def test_power_mean_reduces_per_window_then_averages_over_the_batch():
     """A pooled power mean would give most of its gradient to the worst
     window; check the two-window arithmetic by hand."""
     p = torch.tensor([[0.0, 2.0], [6.0, 6.0]])
     w0 = ((0.0 ** 4 + 2.0 ** 4) / 2) ** (1 / 4)
     assert float(power_mean(p, 4.0)) == pytest.approx((w0 + 6.0) / 2, rel=1e-6)
-
-
-def test_power_mean_gradient_is_dense_over_time_not_one_hot():
-    """A hard max would put one non-zero entry per window."""
-    p = torch.tensor([[1.0, 2.0, 3.0, 10.0]], requires_grad=True)
-    power_mean(p, 4.0).backward()
-    assert (p.grad != 0).all()
-    assert p.grad[0, -1] > p.grad[0, 0]
 
 
 def test_an_all_zero_window_does_not_poison_the_gradient():

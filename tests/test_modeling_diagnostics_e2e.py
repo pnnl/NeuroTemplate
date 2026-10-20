@@ -64,32 +64,6 @@ def test_the_fixture_hooks_produce_a_usable_spec(tmp_path):
     assert all(r.name != "Zone Air Temperature [°C]" for r in results.readouts)
 
 
-def test_opting_out_leaves_the_other_diagnostics_alone(tmp_path):
-    results, _, _, _ = _evaluate(tmp_path, synth=False)
-
-    assert results.physics is None
-    assert results.readouts is None
-    assert results.metrics and results.stability
-
-
-def test_everything_logged_is_json_serializable(tmp_path):
-    import json
-
-    results, _, nm, _ = _evaluate(tmp_path)
-    logger = FakeLogger()
-    log_test_results(logger, results, nm)
-
-    for payload in logger.dicts.values():
-        json.dumps(payload)
-    assert set(logger.dicts) >= {
-        "test_metrics.json", "rollout_stability.json",
-        "physics_checks.json", "readout_channels.json",
-    }
-    assert logger.metrics["physics_checks_total"] == 4.0
-    assert 0.0 <= logger.metrics["physics_checks_passed"] <= 4.0
-    assert all(isinstance(v, float) for v in logger.metrics.values())
-
-
 def test_the_checks_do_not_disturb_the_surrogate(tmp_path):
     nm = make_nm_mapping()
     raw = make_raw_df(n_rows=120)

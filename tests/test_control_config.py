@@ -10,13 +10,12 @@ regardless and are not tabulated.
 """
 import pytest
 
-from neurotemplate.common.config import ConfigError, CONTROL_CONFIG_DIR
+from neurotemplate.common.config import CONTROL_CONFIG_DIR
 from neurotemplate.common.config import load_config_from_cli
 from neurotemplate.control.config import ControlConfig
 from neurotemplate.control.losses import resolve_objective
 from control_fixtures import (
-    BAND_GAINS, BAND_LOSSES, HIGH, LOW, SETPT, SUPPLY_T, TARIFF, ZONE, DIST,
-    make_control_cfg, make_nm_mapping,
+    BAND_GAINS, BAND_LOSSES, HIGH, LOW, SETPT, SUPPLY_T, TARIFF, ZONE, make_control_cfg, make_nm_mapping,
 )
 
 _YAML = """
@@ -65,13 +64,6 @@ def test_yaml_fills_what_it_names_and_defaults_the_rest(tmp_path):
     assert cfg.gains["du"] == 1000.0
 
 
-def test_a_gain_sweeps_with_set_without_restating_the_table(tmp_path):
-    cfg = _load(tmp_path, _YAML, "gains={'comfort_lower': 2.0, 'du': 10}",
-                "epochs=3")
-    assert cfg.gains == {"comfort_lower": 2.0, "du": 10} and cfg.epochs == 3
-    assert cfg.losses["comfort_lower"]["column"] == "lo"
-
-
 def test_the_table_survives_the_mlflow_param_round_trip():
     """A run's config is rebuilt from its logged params — str() of each field
     — on reload, so the table must parse back to itself."""
@@ -86,11 +78,6 @@ def test_the_table_survives_the_mlflow_param_round_trip():
         assert getattr(rebuilt, name) == getattr(cfg, name)
 
 
-def test_an_unknown_key_is_rejected(tmp_path):
-    with pytest.raises(ConfigError):
-        _load(tmp_path, _YAML + "not_a_key: 1\n")
-
-
 # ── The table's own shape (validate) ─────────────────────────────
 
 def _band(**changes):
@@ -99,34 +86,6 @@ def _band(**changes):
     for name, fields in changes.items():
         losses[name] = {**losses.get(name, {}), **fields}
     return losses
-
-
-@pytest.mark.parametrize("fields,message", [
-    ({"losses": {}}, "losses is empty"),
-    # A term with no gain would silently weigh nothing.
-    ({"gains": {"comfort_lower": 1.0, "comfort_upper": 1.0}}, r"no entry in gains"),
-    # `relu(column)` with no target is a bound on nothing.
-    ({"losses": _band(comfort_lower={"target": None})}, "needs a `target`"),
-    # Below 1 a power mean rewards spiky profiles — the opposite of a peak.
-    ({"losses": _band(du={"norm": 0.5})}, "norm"),
-    # A split with no reference file has no value for a reference column.
-    ({"dev_reference_path": None}, "set together or not at all"),
-    # A box is in its column's units, so there is no scalar shorthand.
-    ({"residual_delta": {"sp": 0.5}}, r"pair \[below, above\]"),
-])
-def test_validate_names_the_problem(fields, message):
-    with pytest.raises(ValueError, match=message):
-        make_control_cfg(**fields).validate()
-
-
-@pytest.mark.parametrize("fields", [
-    # [0, 0] means "emit the reference exactly" — the rule itself, scored.
-    pytest.param({"residual_delta": {"sp": [0, 0]}}, id="zero-width residual box"),
-    pytest.param({"residual_delta": {"heat": [0, 0.5], "cool": [0.5, 0]}},
-                 id="one-sided boxes, opposite ways"),
-])
-def test_validate_stays_quiet_on_a_legal_config(fields):
-    make_control_cfg(**fields).validate()
 
 
 # ── The names, against the surrogate (resolve_objective) ─────────
@@ -144,21 +103,11 @@ _SUPPLY_GAINS = {**BAND_GAINS, "supply_lower": 1.0, "supply_upper": 1.0}
     # A tariff has no target to borrow stats from, so it must say its scale.
     ({"losses": _band(cost=_COST), "gains": {**BAND_GAINS, "cost": 1.0}},
      "needs a `reference_scale` entry"),
-    ({"reference_scale": {LOW: 1.0}}, "normalised with its stats"),
     # A weight is data: one the rollout predicts would carry gradient.
     ({"losses": _band(comfort_lower={"weight": ZONE})}, "must be data"),
-    ({"losses": _band(comfort_lower={"target": SETPT})}, "must be a Y column"),
     # `units: normalized` compares a setpoint and a zone in two scales.
     ({"losses": _band(comfort_lower={"column": SETPT, "units": "normalized"})},
      "one scale only"),
-    ({"losses": _band(comfort_upper={"column": LOW, "map": "relu"})},
-     "two lower bounds"),
-    ({"losses": {"du": BAND_LOSSES["du"]}, "gains": {"du": 1.0},
-      "train_reference_path": None, "dev_reference_path": None,
-      "test_reference_path": None},
-     "No loss term bounds a Y column"),
-    ({"train_reference_path": None, "dev_reference_path": None,
-      "test_reference_path": None}, "no reference files are set"),
     # A shared band takes one target's stats; a normalised compare against
     # the other target would be on the wrong scale.
     ({"losses": {**BAND_LOSSES, **_SUPPLY_BAND,

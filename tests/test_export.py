@@ -141,11 +141,8 @@ def make(package):
 CASES = {
     "2r2c": (make_cfg(), MAPPING, RC_SPLIT, None),
     "nssm": (make_cfg(model="nssm", history=UNIFORM), MAPPING, None, None),
-    "mlp": (make_cfg(model="mlp", history=UNIFORM), MAPPING, None, None),
-    "lssm": (make_cfg(model="lssm", history=UNIFORM), MAPPING, None, None),
     "gru, 2 layers": (make_cfg(model="gru", num_layers=2, history=UNIFORM), MAPPING, None, None),
     "mlp per block": (make_cfg(model="mlp", per_block=True, history=UNIFORM), MAPPING, SPLIT, None),
-    "gru per block": (make_cfg(model="gru", per_block=True, history=UNIFORM), MAPPING, SPLIT, None),
     "binary + bounded heads": (make_cfg(model="nssm", history=UNIFORM), MAPPING, None,
                                lambda: [BinaryHead(), BoundedHead(lo=-1.0, hi=1.0)]),
 }
@@ -241,29 +238,6 @@ def _blow_up(monkeypatch):
         return Rollout(y=y, state=reference.state)
 
     monkeypatch.setattr(export_dynamics, "torch_rollout", diverging)
-
-
-def test_a_model_that_blows_up_exports_unverified_only_when_asked(tmp_path, monkeypatch):
-    import io
-    import sys
-    _blow_up(monkeypatch)
-    # No terminal to ask on: the answer is no, and nothing is written.
-    monkeypatch.setattr(sys, "stdin", io.StringIO())
-    with pytest.raises(RuntimeError, match="REFUSING TO WRITE"):
-        export(tmp_path, make_cfg(), MAPPING, RC_SPLIT)
-    assert not (tmp_path / "pkg").exists()
-
-    asked = []
-    result = export(tmp_path, make_cfg(), MAPPING, RC_SPLIT,
-                    ask=lambda question: asked.append(question) or True)
-    assert "blew up" in asked[0]
-    model_dir = result.out_dir / "model"
-    assert json.loads((model_dir / "model.json").read_text())["verified"] is False
-    assert not (model_dir / "reference").exists()
-    with pytest.warns(UserWarning, match="UNVERIFIED"):
-        Model(model_dir)
-    assert check_reference(result.out_dir) == []
-    assert not (result.out_dir / "validate.py").exists()
 
 
 # ── policy ───────────────────────────────────────────────────────

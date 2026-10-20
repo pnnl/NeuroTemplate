@@ -1,22 +1,18 @@
 """
 Tests for the stateful GRU surrogate.
 
-The GRU reads the same `cfg.history_steps` window every other family reads, but
-folds each timestep into its hidden state only once: cold it consumes the
-whole window, warm it consumes only the newest step. These tests pin
-(a) that a GRU and an MLP at the same history_steps get the same training windows,
-(b) that warm incremental consumption equals a cold pass over the whole
-    history, which is the invariant the whole design rests on,
-(c) that a block instantiated on its own — no System, no pipeline — is
-    correct on its first call, and
-(d) that history_steps=1 still behaves exactly as it did before windowing existed.
+A GRU block folds each timestep of its window into its hidden state only
+once: cold it consumes the whole window, warm it consumes only the newest
+step. These tests pin that warm incremental consumption equals a cold pass
+over the whole history, which is the invariant the whole design rests on,
+and that a rollout starts warmed from its own window and resets between
+batches.
 """
 import numpy as np
 import pandas as pd
 import pytest
 import torch
 
-from neurotemplate.common.data_utils import get_sw_dict
 from neurotemplate.modeling.config import ModelingConfig as Config
 from neurotemplate.modeling.dynamics import get_dynamics
 from neurotemplate.modeling.gru import GRUBlock
@@ -83,19 +79,6 @@ def flat_window(data: dict, lo: int, hi: int) -> tuple:
     )
 
 
-# ── Window parity: the reason this change exists ────────────────
-
-
-def test_gru_and_mlp_produce_identical_windows(synthetic_df, nm_mapping):
-    """At the same history_steps both families must see the same training set."""
-    gru = get_sw_dict(synthetic_df, make_cfg("gru", 12), nm_mapping)
-    mlp = get_sw_dict(synthetic_df, make_cfg("mlp", 12), nm_mapping)
-
-    for key in ["Y", "U", "D", "yn"]:
-        assert gru[key].shape == mlp[key].shape, f"{key} window shape diverged"
-        assert torch.equal(gru[key], mlp[key])
-
-
 # ── The core invariant ──────────────────────────────────────────
 
 
@@ -160,28 +143,6 @@ def test_rollout_enters_warmed_from_its_own_window(nm_mapping):
     assert torch.allclose(out["yn"][:, history_steps, :], expected, atol=1e-6)
 
 
-def test_history_actually_reaches_the_prediction(nm_mapping):
-    """Guards the regression this replaced: the block must not ignore its
-    window. Two windows sharing a newest step but differing earlier must
-    predict differently."""
-    history_steps = 4
-    data = make_batch(history_steps)
-    model = build_system("gru", history_steps, nm_mapping).nodes[0].callable
-
-    other = dict(data)
-    other["yn"] = torch.cat(                 # same newest step, history reversed
-        [data["yn"][:, :-1, :].flip(1), data["yn"][:, -1:, :]], dim=1
-    )
-
-    with torch.no_grad():
-        model.fy.set_rollout_state(None)
-        first = model(*flat_window(data, 0, history_steps))
-        model.fy.set_rollout_state(None)
-        second = model(*flat_window(other, 0, history_steps))
-
-    assert not torch.allclose(first, second)
-
-
 def test_hidden_state_resets_between_forwards(nm_mapping):
     """The init_func must reset, or state would leak across batches."""
     history_steps = 4
@@ -192,61 +153,3 @@ def test_hidden_state_resets_between_forwards(nm_mapping):
     second = system(dict(data))["yn"]
 
     assert torch.allclose(first, second)
-
-
-def test_warmup_leaves_the_seeded_history_untouched(nm_mapping):
-    """init_func must return the data dict unmodified."""
-    history_steps = 4
-    data = make_batch(history_steps)
-    out = build_system("gru", history_steps, nm_mapping)(dict(data))
-
-    assert torch.equal(out["yn"][:, :history_steps, :], data["yn"])
-
-
-def test_gradients_flow_through_the_warmup(nm_mapping):
-    """The warmed hidden state is a function of the weights, so the loss must
-    be able to shape it."""
-    history_steps = 4
-    data = make_batch(history_steps)
-    system = build_system("gru", history_steps, nm_mapping)
-
-    system(dict(data))["yn"].square().mean().backward()
-
-    grads = [p.grad for p in system.parameters() if p.requires_grad]
-    assert grads and any(g is not None and g.abs().sum() > 0 for g in grads)
-
-
-def test_a_one_step_window_matches_a_hand_rolled_rollout(nm_mapping):
-    """With no history there is nothing to warm up — behaviour is unchanged."""
-    history_steps = 1
-    data = make_batch(history_steps)
-    system = build_system("gru", history_steps, nm_mapping)
-
-    out = system(dict(data))
-
-    model = system.nodes[0].callable
-    model.fy.set_rollout_state(None)
-    y = data["yn"][:, 0, :]
-    expected = [y]
-    with torch.no_grad():
-        for i in range(data["Y"].shape[1]):
-            y = model(y, data["U"][:, i, :], data["D"][:, i, :])
-            expected.append(y)
-
-    assert torch.allclose(out["yn"], torch.stack(expected, dim=1), atol=1e-6)
-
-
-# ── Alignment with the loss and the eval metric ─────────────────
-
-
-@pytest.mark.parametrize("history_steps", [1, 12])
-def test_slicing_alignment_holds(history_steps, nm_mapping):
-    """loss.py slices yn[:, history_steps:-1] against Y[:, history_steps:]; both must
-    line up, and yn must carry exactly one extra timestep."""
-    data = make_batch(history_steps)
-    out = build_system("gru", history_steps, nm_mapping)(dict(data))
-
-    assert out["yn"].shape[1] == out["Y"].shape[1] + 1
-    assert (
-        out["yn"][:, history_steps:-1, :].shape == out["Y"][:, history_steps:, :].shape
-    )

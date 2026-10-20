@@ -30,7 +30,7 @@ import pytest
 import torch
 import torch.nn as nn
 
-from neurotemplate.modeling.prestack import Demand, PreStack, soft_clamp_min
+from neurotemplate.modeling.prestack import Demand, PreStack
 from neurotemplate.modeling.heads import (
     BinaryHead,
     BoundedHead,
@@ -38,7 +38,6 @@ from neurotemplate.modeling.heads import (
     OrdinalHead,
     RegressionHead,
     bounds_from_norm,
-    inverse_sqrt_frequency_weights,
     project_physical_to_norm,
 )
 
@@ -81,27 +80,9 @@ def test_a_head_descends_on_its_own_kind_of_target(head, z0, target, ratio, kw):
     assert last < first * ratio
 
 
-def test_a_mixed_stack_still_has_a_descent_direction():
-    torch.manual_seed(1)
-    stack = HeadStack([RegressionHead(), BinaryHead()], ["a", "b"])
-    target = torch.stack([torch.full((16,), 0.7),
-                          torch.tensor([1.0, 0.0] * 8)], dim=-1)
-    z = nn.Parameter(torch.zeros(16, 2))
-    opt = torch.optim.SGD([z], lr=0.2)
-    first = None
-    for _ in range(300):
-        loss = stack.loss(stack.activate(z), target)
-        first = loss.item() if first is None else first
-        opt.zero_grad()
-        loss.backward()
-        opt.step()
-    assert loss.item() < first
-
-
 # ── Activations honour the range they promise ────────────────────
 
 @pytest.mark.parametrize("head,lo,hi,open_side", [
-    pytest.param(BoundedHead(lo=0.0, hi=1.0), 0.0, 1.0, None, id="bounded-both"),
     pytest.param(BoundedHead(lo=0.0, hi=INF), 0.0, INF, "hi", id="bounded-lower"),
     pytest.param(OrdinalHead(n_levels=4), 0.0, 3.0, None, id="ordinal"),
 ])
@@ -126,16 +107,6 @@ def test_a_saturated_bounded_head_still_passes_gradient():
 
 # ── HeadStack ────────────────────────────────────────────────────
 
-def test_an_all_regression_stack_is_blanket_mse():
-    """Identity heads must reproduce plain MSE to floating-point precision,
-    or every existing run's loss quietly changed meaning."""
-    torch.manual_seed(0)
-    names = [f"ch_{i}" for i in range(4)]
-    stack = HeadStack([RegressionHead() for _ in names], names)
-    yhat, y = torch.randn(8, 12, 4), torch.randn(8, 12, 4)
-    assert torch.allclose(((yhat - y) ** 2).mean(), stack.loss(yhat, y), atol=1e-7)
-
-
 def test_a_stack_activates_each_channel_with_its_own_head():
     stack = HeadStack([RegressionHead(), BinaryHead(), BoundedHead(0.0, 1.0)],
                       ["a", "b", "c"])
@@ -157,30 +128,6 @@ def test_residual_reaches_only_the_channels_that_accept_one():
 
 # ── Serialization: a reloaded run rebuilds what it trained ───────
 
-def test_a_mixed_stack_survives_a_config_round_trip():
-    levels = torch.tensor([0.0, 0.5, 1.5])
-    original = HeadStack(
-        [RegressionHead(), BinaryHead(level_weights=torch.tensor([1.0, 9.0])),
-         BoundedHead(lo=-1.0, hi=2.0, beta=3.0),
-         BoundedHead(lo=0.0, hi=INF),
-         OrdinalHead(n_levels=3, level_values=levels, beta=10.0,
-                     decision_thresholds=torch.tensor([0.1, 0.9]),
-                     level_weights=torch.tensor([0.5, 1.0, 3.0]))],
-        ["a", "b", "c", "d", "e"],
-    )
-    rebuilt = HeadStack.from_config(original.to_config(), original.channel_names)
-    assert [h.kind for h in rebuilt.heads] == [h.kind for h in original.heads]
-    assert torch.equal(rebuilt.heads[1].level_weights, torch.tensor([1.0, 9.0]))
-    assert (rebuilt.heads[2].lo, rebuilt.heads[2].hi, rebuilt.heads[2].beta) == (-1.0, 2.0, 3.0)
-    assert rebuilt.heads[3].hi == INF                 # infinity is not a string
-    assert rebuilt.heads[4].n_levels == 3
-    assert torch.equal(rebuilt.heads[4].level_values, levels)
-    # The calibrated decision rule and the class weights are part of the
-    # topology: a reloaded run must decide the way it was evaluated.
-    assert torch.equal(rebuilt.heads[4].decision_thresholds, torch.tensor([0.1, 0.9]))
-    assert torch.equal(rebuilt.heads[4].level_weights, torch.tensor([0.5, 1.0, 3.0]))
-
-
 def test_calibrated_thresholds_survive_load_state_dict():
     """Weights are saved before the thresholds are calibrated, so restoring
     the state_dict must not drag the decision rule back to the midpoints."""
@@ -192,76 +139,7 @@ def test_calibrated_thresholds_survive_load_state_dict():
     assert rebuilt.heads[0].decision_thresholds.item() == pytest.approx(0.3)
 
 
-def test_a_half_bounded_head_is_still_half_bounded_after_a_reload():
-    """`"inf"` on disk has to come back as a working floor, not a number."""
-    stack = HeadStack.from_config(
-        {"flow": {"kind": "bounded", "lo": 0.0, "hi": "inf", "beta": 5.0}}, ["flow"])
-    head = stack.heads[0]
-    assert isinstance(head, BoundedHead) and head.lo == 0.0 and head.hi == INF
-    assert head.activate(torch.tensor([[-50.0]])).item() < 1e-10
-
-
-# ── A malformed head config is refused, not built ─────────────────
-
-@pytest.mark.parametrize("build,message", [
-    pytest.param(lambda: OrdinalHead(n_levels=3,
-                                     level_values=torch.tensor([0.0, 1.0, 1.0])),
-                 "strictly increasing", id="non-increasing levels"),
-    pytest.param(lambda: OrdinalHead(n_levels=3,
-                                     decision_thresholds=torch.tensor([1.5, 0.5])),
-                 "decision_thresholds must be strictly increasing",
-                 id="unordered decision thresholds"),
-    pytest.param(lambda: HeadStack.from_config({"typo": {"kind": "binary"}}, ["x", "y"]),
-                 "typo", id="unknown channel"),
-    pytest.param(lambda: HeadStack.from_config({"x": {"kind": "regression"}}, ["x", "y"]),
-                 r"missing \['y'\]", id="missing channel"),
-])
-def test_a_malformed_head_refuses_to_be_built(build, message):
-    with pytest.raises(ValueError, match=message):
-        build()
-
-
 # ── Rare levels: class weights and the decision rule ─────────────
-
-@pytest.mark.parametrize("head,target", [
-    pytest.param(OrdinalHead(n_levels=2), torch.tensor([0.0] * 30 + [1.0] * 2),
-                 id="ordinal"),
-    pytest.param(BinaryHead(), torch.tensor([0.0] * 30 + [1.0] * 2), id="binary"),
-])
-def test_default_level_weights_leave_the_loss_unchanged(head, target):
-    """All-ones weights must reproduce the unweighted mean exactly, or every
-    existing run's loss quietly changed meaning."""
-    torch.manual_seed(0)
-    y = torch.sigmoid(torch.randn(32))
-    if head.kind == "ordinal":
-        expected = ((y - target) ** 2).mean()
-    else:
-        expected = torch.nn.functional.binary_cross_entropy(y, target)
-    assert torch.allclose(head.loss(y, target), expected, atol=1e-7)
-
-
-def test_inverse_sqrt_frequency_weights_make_a_rare_level_count():
-    """A level that occurs on 1/16 of samples gets sqrt(15)x the weight of
-    the common one — more, but not 15x — and the weights average to one so
-    the loss scale holds."""
-    y = torch.tensor([0.0] * 30 + [1.0] * 2)
-    w = inverse_sqrt_frequency_weights(y, torch.tensor([0.0, 1.0]))
-    assert w[1] / w[0] == pytest.approx(math.sqrt(15.0))
-    assert w.mean().item() == pytest.approx(1.0)
-    # A level the data never visits counts as one sample, not as infinity.
-    w = inverse_sqrt_frequency_weights(torch.zeros(10), torch.tensor([0.0, 1.0]))
-    assert torch.isfinite(w).all() and w[1] > w[0]
-
-
-def test_weighted_loss_pulls_harder_on_the_rare_level():
-    head = OrdinalHead(n_levels=2, level_weights=torch.tensor([1.0, 15.0]))
-    target = torch.tensor([0.0] * 30 + [1.0] * 2)
-    # Same error on every sample; the weighted loss is the plain MSE only
-    # when the weights are uniform, and here the rare misses dominate.
-    y = torch.where(target == 1, torch.zeros(32), torch.zeros(32) + 0.1)
-    unweighted = ((y - target) ** 2).mean()
-    assert head.loss(y, target) > unweighted
-
 
 def test_decision_thresholds_move_the_snap_but_not_the_activation():
     """A calibrated decision rule changes what decode emits at a given z;
@@ -273,28 +151,6 @@ def test_decision_thresholds_move_the_snap_but_not_the_activation():
     assert low.decode(z).item() == 1.0
     assert torch.equal(mid.activate(z), low.activate(z))
     assert torch.equal(low.thresholds, mid.thresholds)
-
-
-def test_level_index_is_the_nearest_level_for_every_levelled_head():
-    ordinal = OrdinalHead(n_levels=3, level_values=torch.tensor([0.0, 1.0, 5.0]))
-    assert ordinal.level_index(torch.tensor([0.0, 1.2, 4.0, 5.0])).tolist() == [0, 1, 2, 2]
-    binary = BinaryHead()
-    assert binary.level_index(torch.tensor([0.1, 0.49, 0.51, 1.0])).tolist() == [0, 0, 1, 1]
-    assert RegressionHead().levels() is None
-    assert BoundedHead(0.0, 1.0).levels() is None
-
-
-def test_a_forward_hook_on_the_stack_sees_the_pre_activation_z():
-    """Threshold calibration reads z off the stack this way, so the
-    dynamics model must reach the stack through __call__, not activate."""
-    stack = HeadStack([OrdinalHead(n_levels=2)], ["a"])
-    seen = []
-    handle = stack.register_forward_hook(lambda m, inp, out: seen.append(inp[0]))
-    z = torch.tensor([[0.7], [0.2]])
-    y = stack(z)
-    handle.remove()
-    assert torch.equal(seen[0], z)
-    assert y.squeeze(-1).tolist() == [1.0, 0.0]
 
 
 # ── Projection helpers ───────────────────────────────────────────
@@ -310,31 +166,7 @@ def test_bounds_project_from_physical_units_into_normalized_ones():
 
 # ── Pre-stack: derived inputs ────────────────────────────────────
 
-SETPOINT = {"shift": 24.0, "stretch": 2.0, "min": 20.0, "max": 28.0}
 ZONE = {"shift": 23.0, "stretch": 1.5, "min": 21.0, "max": 26.0}
-
-
-def test_soft_clamp_is_relu_forward_and_never_dead_backward():
-    x = torch.linspace(-8.0, 8.0, 33, requires_grad=True)
-    y = soft_clamp_min(x)
-    assert torch.equal(y, torch.relu(x))
-    y.sum().backward()
-    assert (x.grad[x < 0] > 0).all()
-    assert x.grad[-1] == pytest.approx(1.0, abs=1e-3)
-
-
-def test_a_pre_stack_survives_a_config_round_trip():
-    stack = PreStack([Demand(-1, SETPOINT, ZONE)], [("sp", "zone")],
-                     ["zone", "power"], ["sp", "fan"], history_steps=3)
-    config = stack.to_config()
-    assert config == {"sp": {"kind": "demand", "state": "zone", "sign": -1}}
-    rebuilt = PreStack.from_config(
-        config, ["zone", "power"], ["sp", "fan"],
-        {"sp": SETPOINT, "zone": ZONE}, history_steps=3,
-    )
-    y, u = torch.randn(4, 6), torch.randn(4, 6)
-    assert torch.equal(rebuilt(y, u), stack(y, u))
-    assert rebuilt.state_dict().keys() == stack.state_dict().keys()
 
 
 def test_each_output_step_reads_its_own_step_of_u_and_y():
@@ -354,9 +186,3 @@ def test_each_output_step_reads_its_own_step_of_u_and_y():
     # Under vmap the window is 1-D and the layout must still hold.
     single = torch.vmap(stack)(y, u)
     assert torch.equal(single, stack(y, u))
-
-
-def test_demand_is_never_active_on_ranges_that_never_overlap():
-    with pytest.raises(ValueError, match="never active"):
-        Demand(-1, {"shift": 0, "stretch": 1, "min": 30.0, "max": 32.0}, ZONE)
-

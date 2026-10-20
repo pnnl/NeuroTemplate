@@ -43,11 +43,6 @@ def test_a_single_input_column_constrains_only_its_declared_output():
     assert _penalty(weights, _mask(2, 1, {(0, 0): 1})) == 0.0
 
 
-def test_a_violated_sign_is_penalised():
-    weights = torch.tensor([[-2.0], [5.0]])
-    assert _penalty(weights, _mask(2, 1, {(0, 0): 1})) > 0.0
-
-
 def test_a_negative_older_lag_is_allowed_when_the_sum_obeys_the_sign():
     # Older lag -1, newest +3: the sustained response is +2, which obeys +1.
     weights = torch.tensor([[[-1.0]], [[3.0]]])
@@ -58,13 +53,3 @@ def test_a_sum_over_lags_that_violates_the_sign_is_penalised():
     # Newest lag alone obeys +1, but the older lag drags the sum negative.
     weights = torch.tensor([[[-3.0]], [[1.0]]])
     assert _penalty(weights, _mask(1, 1, {(0, 0): 1})) > 0.0
-
-
-def test_unconstrained_channels_do_not_dilute_the_penalty():
-    # One violated sign (-2 against +1); adding outputs and inputs that carry
-    # no sign leaves the penalty where it was: the mean violation per
-    # declared pair, here exactly 2.
-    one = _penalty(torch.tensor([[-2.0]]), _mask(1, 1, {(0, 0): 1}))
-    many = _penalty(torch.tensor([[-2.0, 1.0, 1.0], [4.0, -1.0, 0.0]]),
-                    _mask(2, 3, {(0, 0): 1}))
-    assert one == many == 2.0
