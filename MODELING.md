@@ -163,7 +163,13 @@ others (a coil removes more heat when the air it rejects heat to is cooler),
 name those columns in the entry's `modulated_by`: the branch's effect is then
 scaled by a learned factor between 0 and 2 of them, starting at 1, and the
 slope bound holds at any factor. The reportcard's branch lines give the
-factor's weights. Nothing is inferred from column names. A declaration changes the
+factor's weights. When the equipment behind a setpoint latches (a thermostat
+that starts a stage above the setpoint and, once running, keeps it running
+until the zone is some way below), set `"hysteresis": true` on the entry: the
+branch then carries its stage between steps and learns the two thresholds,
+reported in °C. To see whether your equipment latches, compare how often it
+runs at the same zone-minus-setpoint when it was running the step before and
+when it was not. Nothing is inferred from column names. A declaration changes the
 physics but not the shapes, so a wrong one shows only in the reportcard's
 branch lines.
 

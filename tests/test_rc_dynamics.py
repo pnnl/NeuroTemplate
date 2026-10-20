@@ -39,7 +39,8 @@ from neurotemplate.export.state import clear_state
 from neurotemplate.modeling.dynamics import get_dynamics, stateful_blocks
 from neurotemplate.modeling.heads import BinaryHead, HeadStack, RegressionHead
 from neurotemplate.modeling.rc import (
-    MIN_TAU_STEPS, MODULATION_MAX, RCBlock, SaturatingTerm, mode_taus, time_constant_boxes,
+    MIN_TAU_STEPS, MODULATION_MAX, LatchedTerm, RCBlock, SaturatingTerm, mode_taus,
+    time_constant_boxes,
 )
 from model_fixtures import model_cfg, uniform_history
 
@@ -628,3 +629,82 @@ def test_a_modulated_declaration_builds_and_runs_end_to_end():
     y, u, d = x[:, :HISTORY_STEPS], x[:, HISTORY_STEPS:HISTORY_STEPS * 3], x[:, HISTORY_STEPS * 3:]
     clear_state(stateful_blocks(system))
     assert torch.isfinite(system.nodes[0].callable(y, u, d)).all()
+
+
+# ── hysteresis: a latched thermostat stage ────────────────────────
+
+LATCHED_INPUTS = {
+    "north sp": {"kind": "demand", "sign": -1, "state": "north T", "hysteresis": True},
+    "ahu fan": {"kind": "linear", "sign": +1},
+}
+
+
+def make_latched_block() -> RCBlock:
+    return make_block(
+        1, 2, 2, channel_names=("north T",), u_names=("north sp", "ahu fan"),
+        d_names=("oat", "ghi"), inputs=LATCHED_INPUTS, ambient="oat", norm_stats=STATS,
+    )
+
+
+def test_a_latched_stage_remembers_whether_it_was_running():
+    """Inside the band between its thresholds, a running stage keeps running
+    and a stopped one stays stopped; well past either threshold the past no
+    longer matters."""
+    block = make_latched_block()
+    term = block.saturating[0]
+    assert isinstance(term, LatchedTerm)
+    with torch.no_grad():
+        term.theta_cap.fill_(-3.0)              # cap ≈ 0.05 °C/step, as a fitted coil
+        term.theta_slope.fill_(3.0)             # most of the budget: a sharp switch
+    a_o, a_m, _ = block.rates()
+    headroom = 1 - a_m - a_o
+    error = lambda c: torch.tensor([[c / float(term.scale)]])  # noqa: E731
+    on, off = torch.ones(1, 1), torch.zeros(1, 1)
+    _, held = term(error(0.0), headroom, previous=on)
+    _, idle = term(error(0.0), headroom, previous=off)
+    assert held.item() > 0.9 and idle.item() < 0.1
+    _, far_below = term(error(-3.0), headroom, previous=on)
+    _, far_above = term(error(3.0), headroom, previous=off)
+    assert far_below.item() < 0.1 and far_above.item() > 0.9
+
+
+@pytest.mark.parametrize("previous", [0.0, 0.5, 1.0])
+@pytest.mark.parametrize("error_c", [-0.3, 0.0, 0.3])
+def test_a_latched_slope_never_exceeds_the_headroom(previous, error_c):
+    block = make_latched_block()
+    term = block.saturating[0]
+    with torch.no_grad():
+        term.theta_cap.fill_(20.0)
+        term.theta_slope.fill_(20.0)
+    a_o, a_m, _ = block.rates()
+    headroom = 1 - a_m - a_o
+    x = torch.full((1, 1), error_c / float(term.scale), requires_grad=True)
+    increment, _ = term(x, headroom, previous=torch.full((1, 1), previous))
+    increment.sum().backward()
+    slope_in_state = x.grad.abs() * STATS["north T"]["stretch"] / term.scale
+    assert slope_in_state.item() <= headroom.item() * (1 + 1e-5)
+
+
+def test_a_latched_block_carries_its_stage_in_the_rollout_state():
+    spec = {"north": {**DECLARED["north"], "inputs": LATCHED_INPUTS}}
+    system = get_dynamics(make_cfg(history=DECLARED_HISTORY), DECLARED_MAPPING,
+                          block_spec=spec, norm_stats=STATS)
+    block = system.nodes[0].callable.fy.blocks[0]
+    pre = system.nodes[0].callable.pre_stack
+    assert pre.transforms[0].clamped is False
+    x = torch.randn(3, HISTORY_STEPS * 5)
+    y, u, d = x[:, :HISTORY_STEPS], x[:, HISTORY_STEPS:HISTORY_STEPS * 3], x[:, HISTORY_STEPS * 3:]
+    clear_state(stateful_blocks(system))
+    system.nodes[0].callable(y, u, d)
+    state = block.rollout_state()
+    assert state.shape == (3, 2)
+    assert ((state[:, 1] >= 0) & (state[:, 1] <= 1)).all()
+    block.set_rollout_state(state)
+    assert torch.equal(block.rollout_state(), state)
+
+
+def test_hysteresis_on_anything_but_a_saturating_demand_is_refused():
+    spec = {"north": {**DECLARED["north"], "inputs": {
+        "ahu fan": {"kind": "linear", "sign": 1, "hysteresis": True}}}}
+    with pytest.raises(ValueError, match="latches a saturating"):
+        build_blocks(DECLARED_MAPPING, spec)

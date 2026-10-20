@@ -855,10 +855,12 @@ def _build_pre_stack(
     `(U column, Y channel)` pair — which is what lets one wiring point in
     `SSMGrad.forward` serve every family.
     """
-    # The transform carries only what defines the feature. `branch` and
-    # `modulated_by` say what a 2r2c block does with it, and stay there.
+    # The transform carries only what defines the feature: a hysteresis
+    # column's error is left signed. `branch` and `modulated_by` say what a
+    # 2r2c block does with it, and stay there.
     demands = {
-        column: {k: entry[k] for k in ("kind", "state", "sign")}
+        column: {**{k: entry[k] for k in ("kind", "state", "sign")},
+                 "clamped": not entry.get("hysteresis", False)}
         for block in blocks
         for column, entry in block.inputs.items() if entry["kind"] == "demand"
     }

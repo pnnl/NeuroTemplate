@@ -62,6 +62,11 @@ A `demand` entry may also name `"modulated_by": [columns]`: U or D columns
 a bounded factor, `m(c)` in `rc.SaturatingTerm`, for an actuator that delivers
 more under some conditions than others. Only `2r2c` acts on it.
 
+A `demand` entry may set `"hysteresis": true`: the branch is then a latched
+thermostat stage that switches on above the setpoint and, once on, runs until
+the zone is some way below it (`rc.LatchedTerm`), and the pre-stack hands it
+the signed error rather than the clamped one. Only `2r2c` acts on it.
+
 `linear` says the column enters the zone's heat balance as one sign-fixed
 coefficient times the physical value (measured power, solar irradiance).
 Only `2r2c` acts on it; other families see the column as usual.
@@ -271,6 +276,13 @@ def _resolve_inputs(spec: dict, block: str, y_names: list[str],
                 problems.append(f"`inputs[{column!r}]` has branch "
                                 f"{entry.get('branch')!r}; expected one of "
                                 f"{list(DEMAND_BRANCHES)}.")
+        hysteresis = entry.get("hysteresis", False)
+        if not isinstance(hysteresis, bool):
+            problems.append(f"`inputs[{column!r}].hysteresis` must be true or false, got "
+                            f"{hysteresis!r}.")
+        elif hysteresis and (kind != "demand" or entry.get("branch", "saturating") != "saturating"):
+            problems.append(f"`inputs[{column!r}]` sets `hysteresis`, which latches a "
+                            "saturating `demand` branch and nothing else.")
         context = entry.get("modulated_by", [])
         if context and (kind != "demand" or entry.get("branch", "saturating") != "saturating"):
             problems.append(f"`inputs[{column!r}]` names `modulated_by`, which scales a "

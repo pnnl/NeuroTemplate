@@ -386,6 +386,60 @@ class SaturatingTerm(nn.Module):
         return response / self.zone_stretch
 
 
+#: Raw parameter behind a latched stage's two thresholds at construction:
+#: `softplus(-1.25) ≈ 0.25 °C` either side of the setpoint.
+_INITIAL_BAND_THETA = -1.25
+
+
+class LatchedTerm(SaturatingTerm):
+    """A thermostat stage with hysteresis: `sign · cap · m(c) · s`, `s` carried between steps.
+
+    The stage switches on once the error is `on_at` past the setpoint and, once
+    on, stays on until the error is `off_at` back on the satisfied side:
+
+        s = on + (1 - on) · s_prev · hold,
+        on = sigmoid((e - on_at) / τ),   hold = sigmoid((e + off_at) / τ)
+
+    with `e` the signed error in °C (positive while the stage is called for;
+    the pre-stack does not clamp a hysteresis column) and both thresholds
+    `softplus` of a learned raw parameter, starting at about 0.25 °C. `s`
+    stays in [0, 1], and `ds/de ≤ 1 / (2τ)`, so `τ = cap · reach /
+    (2 · headroom · share)` keeps the slope bound `SaturatingTerm` keeps,
+    and the rollout stays bounded: the stage is a bounded state driving a
+    stable zone. A cold call has no carried stage and starts from `s_prev =
+    on`, the stage a memoryless thermostat would be in.
+    """
+
+    def __init__(self, sign: int, control: dict, state: dict, n_context: int = 0):
+        super().__init__(sign, control, state, n_context)
+        self.theta_on = nn.Parameter(torch.tensor(_INITIAL_BAND_THETA))
+        self.theta_off = nn.Parameter(torch.tensor(_INITIAL_BAND_THETA))
+
+    def thresholds(self) -> tuple[torch.Tensor, torch.Tensor]:
+        """`(on_at, off_at)` in °C of error, both ≥ 0."""
+        return F.softplus(self.theta_on), F.softplus(self.theta_off)
+
+    def width(self, headroom: torch.Tensor) -> torch.Tensor:
+        """`τ`: °C of error over which each switch ramps."""
+        return super().width(headroom) / 2
+
+    def forward(self, x: torch.Tensor, headroom: torch.Tensor,
+                context: Optional[torch.Tensor] = None,
+                previous: Optional[torch.Tensor] = None) -> tuple[torch.Tensor, torch.Tensor]:
+        """`(increment, stage)`: the branch's increment and the stage it leaves."""
+        error = x * self.scale
+        tau = self.width(headroom)
+        on_at, off_at = self.thresholds()
+        on = torch.sigmoid((error - on_at) / tau)
+        hold = torch.sigmoid((error + off_at) / tau)
+        previous = on if previous is None else previous
+        stage = on + (1 - on) * previous * hold
+        response = self.sign * self.cap() * stage
+        if self.modulation is not None:
+            response = response * self.factor(context)
+        return response / self.zone_stretch, stage
+
+
 def physical_parameters(module: nn.Module) -> list[nn.Parameter]:
     """Every grey-box physical scalar under `module`: the bounded time
     constants and the declared branches' coefficients.
@@ -505,9 +559,11 @@ class RCBlock(nn.Module):
             c for c in demands if inputs[c].get("branch", "saturating") == "saturating"]
         self._saturating_pos = [drive_names.index(c) for c in self.saturating_names]
         self.saturating = nn.ModuleList(
-            SaturatingTerm(inputs[c]["sign"], norm_stats[c], norm_stats[self.channel_names[0]],
-                           n_context=len(inputs[c].get("modulated_by", ())))
+            (LatchedTerm if inputs[c].get("hysteresis") else SaturatingTerm)(
+                inputs[c]["sign"], norm_stats[c], norm_stats[self.channel_names[0]],
+                n_context=len(inputs[c].get("modulated_by", ())))
             for c in self.saturating_names)
+        self.n_latched = sum(isinstance(t, LatchedTerm) for t in self.saturating)
         # Each saturating branch's context: positions of its `modulated_by` columns.
         self.context_names = [list(inputs[c].get("modulated_by", ())) for c in self.saturating_names]
         self._context_pos = [[drive_names.index(m) for m in names] for names in self.context_names]
@@ -550,6 +606,8 @@ class RCBlock(nn.Module):
             self.gain = None
 
         self._mass: torch.Tensor | None = None
+        # One stage per latched branch, [batch, n_latched]; carried like the mass.
+        self._stage: torch.Tensor | None = None
 
     # ── parameters ──────────────────────────────────────────────
 
@@ -574,12 +632,19 @@ class RCBlock(nn.Module):
     # into explicit graph I/O without knowing what this class calls it.
 
     def rollout_state(self) -> torch.Tensor | None:
-        """The mass temperature, [batch, ny], or None if cold."""
-        return self._mass
+        """The mass temperature, then any latched stages: [batch, ny + n_latched],
+        or None if cold."""
+        if self._mass is None or not self.n_latched:
+            return self._mass
+        return torch.cat([self._mass, self._stage], dim=-1)
 
     def set_rollout_state(self, state: torch.Tensor | None) -> None:
-        """Restore a mass temperature, or None to force a cold start."""
-        self._mass = state
+        """Restore a mass temperature and stages, or None to force a cold start."""
+        if state is None:
+            self._mass, self._stage = None, None
+            return
+        self._mass = state[..., :self.ny]
+        self._stage = state[..., self.ny:] if self.n_latched else None
 
     # ── forward ─────────────────────────────────────────────────
 
@@ -612,18 +677,22 @@ class RCBlock(nn.Module):
         # so every call is a cold one. Same convention as GRUBlock.
         batched = x.ndim > 1
         mass = self._mass if batched else None
+        stage = self._stage if batched else None
         if mass is None:
             mass = self._seed_mass(x, a_mass_zone)
+            stage = None
 
         if self.ambient is None:
             conduction = -a_ambient * zone
         else:
             conduction = self.ambient(zone, self._column(drive, self._ambient_pos),
                                       a_ambient)
-        increment = (a_zone_mass * (mass - zone) + conduction
-                     + self._heat_input(drive, headroom=1 - a_zone_mass - a_ambient))
+        heat, stage = self._heat_input(drive, headroom=1 - a_zone_mass - a_ambient,
+                                       stage=stage)
+        increment = a_zone_mass * (mass - zone) + conduction + heat
         if batched:
             self._mass = mass + a_mass_zone * (zone - mass)
+            self._stage = stage
         return increment
 
     @staticmethod
@@ -631,19 +700,30 @@ class RCBlock(nn.Module):
         """One column of the drive vector, keeping its trailing axis."""
         return drive[..., pos:pos + 1]
 
-    def _heat_input(self, drive: torch.Tensor, headroom: torch.Tensor) -> torch.Tensor:
-        """The declared branches plus `g`, summed. `headroom` is the zone's
-        remaining self-coefficient, which bounds every saturating slope."""
+    def _heat_input(self, drive: torch.Tensor, headroom: torch.Tensor,
+                    stage: Optional[torch.Tensor] = None
+                    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
+        """`(heat, stage)`: the declared branches plus `g`, summed, and the
+        stages the latched branches leave (None without one). `headroom` is
+        the zone's remaining self-coefficient, which bounds every saturating
+        slope; `stage` is the stages carried in, None on a cold call."""
         if self.gain is None:
             total = drive.new_zeros(*drive.shape[:-1], self.ny)
         else:
             total = self.gain(drive.index_select(-1, self._mlp_pos))
         for pos, term in zip(self._linear_pos, self.linear):
             total = total + term(self._column(drive, pos))
+        stages = []
         for pos, context, term in zip(self._saturating_pos, self._context_pos, self.saturating):
-            total = total + term(self._column(drive, pos), headroom,
-                                 drive[..., context] if context else None)
-        return total
+            ctx = drive[..., context] if context else None
+            if isinstance(term, LatchedTerm):
+                previous = None if stage is None else stage[..., len(stages):len(stages) + 1]
+                heat, new_stage = term(self._column(drive, pos), headroom, ctx, previous)
+                stages.append(new_stage)
+            else:
+                heat = term(self._column(drive, pos), headroom, ctx)
+            total = total + heat
+        return total, (torch.cat(stages, dim=-1) if stages else None)
 
     # ── description ─────────────────────────────────────────────
 
@@ -677,6 +757,9 @@ class RCBlock(nn.Module):
                     name: {"cap": round(float(term.cap()), 4),
                            "w": round(float(term.width(headroom)), 4),
                            "slope_share": round(float(term.slope_share()), 3),
+                           **({} if not isinstance(term, LatchedTerm) else {
+                               "on_at_C": round(float(term.thresholds()[0]), 3),
+                               "off_at_C": round(float(term.thresholds()[1]), 3)}),
                            **({} if term.modulation is None else {"modulated_by": {
                                "bias": round(float(term.modulation.bias), 4),
                                "weights": {c: round(float(wt), 4) for c, wt in

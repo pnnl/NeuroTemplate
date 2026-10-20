@@ -92,17 +92,22 @@ class Demand(PreTransform):
     whatever each column's normalisation did to them, and it is scaled but
     never shifted, so the clamped atom stays at exactly 0.
 
+    With `clamped=False` the error is passed through signed: a thermostat with
+    hysteresis (`rc.LatchedTerm`) needs to know how far the zone is on the
+    satisfied side, since that is where a running stage decides to stop.
+
     No learned parameters. The norm stats are persistent buffers, so a
     reloaded checkpoint keeps the numbers it trained with.
     """
 
     kind = "demand"
 
-    def __init__(self, sign: int, control: dict, state: dict):
+    def __init__(self, sign: int, control: dict, state: dict, clamped: bool = True):
         super().__init__()
         if sign not in (-1, 1):
             raise ValueError(f"Demand requires sign in (-1, 1), got {sign}")
         self.sign = int(sign)
+        self.clamped = bool(clamped)
         scale = demand_scale(sign, control, state)
         for name, value in (("u_shift", control["shift"]), ("u_stretch", control["stretch"]),
                             ("z_shift", state["shift"]), ("z_stretch", state["stretch"]),
@@ -112,10 +117,11 @@ class Demand(PreTransform):
     def forward(self, u: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
         u_phys = u * self.u_stretch + self.u_shift
         z_phys = y * self.z_stretch + self.z_shift
-        return soft_clamp_min(self.sign * (u_phys - z_phys)) / self.scale
+        error = self.sign * (u_phys - z_phys)
+        return (soft_clamp_min(error) if self.clamped else error) / self.scale
 
     def config(self) -> dict:
-        return {"sign": self.sign}
+        return {"sign": self.sign, "clamped": self.clamped}
 
     def describe(self) -> dict:
         return {**self.config(), "scale": round(float(self.scale), 4)}
