@@ -166,3 +166,28 @@ def test_a_policy_parked_on_the_inactive_side_still_gets_gradient():
     out["yn"][:, hmax:, zone_i].sum().backward()
     grads = [p.grad for p in policy.callable.parameters() if p.requires_grad]
     assert any(g is not None and g.abs().sum() > 0 for g in grads)
+
+
+def test_the_last_steps_preview_reads_real_forecast_rows():
+    """A `future` past the rollout's end is read from the data, not padded.
+
+    D and R used to be cut at Hmax + P, so at the late steps of every rollout
+    SystemPreview's `nearest` padding repeated the final row for the whole
+    preview. They are now F rows longer, and the closed loop trims them back.
+    """
+    future = 3
+    s = full_setup(future={DIST[0]: future})
+    cfg, sysid_cfg = s["cfg"], s["sysid_cfg"]
+    _, _, hmax = horizons(cfg, sysid_cfg)
+    windows = _windows(s)
+    rollout = hmax + cfg.train_pred_steps
+
+    assert windows["D"].shape[1] == rollout + future
+    tail = windows["D"][:, rollout - 1:, :]
+    assert not torch.equal(tail, tail[:, :1, :].expand_as(tail)), \
+        "the preview beyond the last step is the final row repeated"
+
+    policy = build_policy(cfg, sysid_cfg, s["nm"], s["norm_stats"])
+    out = build_closed_loop(s["dyn_node"], policy, cfg, sysid_cfg)(windows)
+    assert out["yn"].shape[1] == rollout
+    assert out["D"].shape[1] == out["t"].shape[1] == rollout

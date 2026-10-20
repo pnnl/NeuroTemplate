@@ -36,12 +36,30 @@ from neurotemplate.hooks import load_control_hooks
 from neurotemplate._typing import beartype
 
 
+class ForecastSystem(SystemPreview):
+    """A SystemPreview whose forecast keys are trimmed to the rollout after it runs.
+
+    D, t and R arrive `forecast_tail` rows longer than the rollout so the policy's
+    preview reads real rows to the end (see `scenarios`). Every loss, metric and plot
+    slices them with `scored_steps`, which runs to the end of the key, so they are cut
+    back to yn's length here, once.
+    """
+
+    def forward(self, input_dict):
+        out = super().forward(input_dict)
+        end = out["yn"].shape[1]
+        for key in ("D", "t", "R"):
+            if key in out:
+                out[key] = out[key][:, :end]
+        return out
+
+
 @beartype
 def build_closed_loop(dyn_node, policy_node, cfg, sysid_cfg) -> SystemPreview:
     """Policy + frozen dynamics, rolled out for cfg.train_pred_steps steps."""
     _, _, hmax = horizons(cfg, sysid_cfg)
 
-    return SystemPreview(
+    return ForecastSystem(
         [policy_node, dyn_node],
         name="closed_loop",
         nstep_key="D",

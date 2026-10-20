@@ -7,7 +7,8 @@ A lean control-specific windower. Per window:
     H_ctrl = cfg.history_steps        (policy's deepest `past`, plus the current step)
     Hmax   = max(H_sys, H_ctrl)
     P      = pure prediction length (train_pred_steps for train, test_window-Hmax for eval)
-    W      = Hmax + P
+    F      = the policy's deepest `future` in policy_window (`forecast_tail`)
+    W      = Hmax + P + F
 
     yn   : seed = first Hmax real Y steps   [n, Hmax,   ny]  (grows in rollout)
     U    : seed = first Hmax-1 real U steps [n, Hmax-1, nu]  (policy appends)
@@ -15,6 +16,11 @@ A lean control-specific windower. Per window:
     t    : full sec_elapsed (for plots)     [n, W,   1]
     R    : the reference columns            [n, W,   n_ref]  (normalized; only
            when the objective names one, see control.losses)
+
+D, t and R run F rows past the rollout so the policy's preview at the last
+steps reads real rows, not SystemPreview's `nearest` copy of the final one.
+The closed loop trims them back to Hmax + P after the rollout
+(`closed_loop.ForecastSystem`), so everything downstream sees P scored steps.
 
 R is read from each split's reference files, joined row for row onto the plant
 frame by `load_control_splits`, and windowed by the same `sliding_windows` call
@@ -179,6 +185,11 @@ def load_control_splits(
     return splits[0], splits[1], splits[2]
 
 
+def forecast_tail(cfg) -> int:
+    """F: how far past the rollout's last step the policy reads a forecast."""
+    return max((entry.get("future", 0) for entry in cfg.policy_window.values()), default=0)
+
+
 @beartype
 def build_window_dict(
     df: DataFrame,
@@ -191,7 +202,7 @@ def build_window_dict(
     """Lean closed-loop window dict for one normalized frame (see the module
     docstring for the keys)."""
     _, _, hmax = horizons(cfg, sysid_cfg)
-    W = hmax + P
+    W = hmax + P + forecast_tail(cfg)
     device = sysid_cfg.device
 
     Y = sliding_windows(df, nm_mapping["Y"], W, stride, device)
