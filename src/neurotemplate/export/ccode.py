@@ -29,7 +29,7 @@ SOURCES = Path(__file__).parent / "c"
 
 #: The onnx2c the C format is verified against: upstream 271d0e5 plus the fix
 #: for keepdims=0 reductions, which upstream onnx2c declares with the wrong
-#: shape (a pull request upstream at the time of writing). EXPORT.md repeats
+#: shape (a pull request upstream at the time of writing). docs/EXPORT.md repeats
 #: both; change them together, and move to upstream once the fix is merged.
 ONNX2C_REPOSITORY = "https://github.com/EladMichael/onnx2c"
 ONNX2C_COMMIT = "e2ee84b0f6451835fc6749b298c85c0af475220c"

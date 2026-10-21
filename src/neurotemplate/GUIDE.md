@@ -2,7 +2,7 @@
 
 `nt guide` prints this overview; `nt guide <step>` prints one step. Each step is a
 few decisions, each with the command whose output settles it. Read a step when you
-reach it. The reference docs (README, MODELING, CONTROL, EXPORT) and the hook
+reach it. The references in `docs/` (OVERVIEW, MODELING, CONTROL, EXPORT) and the hook
 docstrings go deeper; open them when a step points you there, not before.
 
 | step | decides | ends with |
@@ -46,7 +46,7 @@ reportcard before deciding the next run.
 ## model
 
 Decide the structure in `block_mapping`; it matters more than any hyperparameter.
-Every key below is in MODELING.md ("Blocks", "Declaring what a column is").
+Every key below is in docs/MODELING.md ("Blocks", "Declaring what a column is").
 
 1. **Family.** `2r2c` for a temperature you will plan against: a grey-box thermal
    network that is stable under any input, with storage you can read in hours. The
@@ -151,5 +151,5 @@ against that error. Fix the model, not the controller.
 
 `nt export policy --run_id <control run> --out <dir>/nt_package` writes the policy as
 a graph that runs with numpy and onnxruntime, and checks the package against the
-trained policy before writing it. EXPORT.md covers the package layout and the C and
+trained policy before writing it. docs/EXPORT.md covers the package layout and the C and
 torch targets.

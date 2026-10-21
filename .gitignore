@@ -1,10 +1,8 @@
 # Ignore markdown reports, except the user docs
 *.md
 !/README.md
-!/INSTALL.md
-!/MODELING.md
-!/CONTROL.md
-!/EXPORT.md
+!/GUIDE.md
+!/docs/*.md
 !/template/README.md
 !/src/neurotemplate/GUIDE.md
 
