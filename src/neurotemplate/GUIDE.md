@@ -12,6 +12,7 @@ docstrings go deeper; open them when a step points you there, not before.
 | `nt guide check` | whether the model is fit to plan against | the reference rule scored on the model next to the data |
 | `nt guide control` | the objective, what the policy sees, its bounds | a policy that beats the rule on the model, read from the plots |
 | `nt guide export` | the package that runs without the library | a verified export and a passing check |
+| `nt guide example` | (optional) the steps above as declarations, for one thermal zone | a starting point to adapt |
 
 Three things decide most outcomes, in this order:
 
@@ -84,8 +85,9 @@ Every key below is in docs/MODELING.md ("Blocks", "Declaring what a column is").
    "more demand never draws less power", goes in `grad_path` with `grad_gain` > 0.
    A `2r2c` zone's `history` lag is how much record seeds its hidden mass: an hour
    leaves the mass at about the zone's temperature and the fit shortens `tau_slow`
-   to compensate; half a day seeds it better. Measured, the longer history bought a
-   larger saving and more time outside the band, so read it as a trade, not a fix.
+   to compensate; half a day seeds it better. A better-seeded mass makes storage look
+   more valuable, which tends to buy a larger saving and more time outside the band:
+   read it as a trade, not a fix.
 6. **Physics checks**, `synth_cfg`: a few lines that test the model in states the
    data never visits. A failed step response means do not plan against this model.
 
@@ -127,11 +129,11 @@ against that error. Fix the model, not the controller.
    reference at each step: a cooling setpoint inside the comfort band, a heating
    setpoint under its floor, which also keeps the two from crossing. Keep a margin
    inside an edge the equipment overshoots (`[column, offset]`): a latching thermostat
-   starts only past its setpoint, and a policy pinned at the ceiling spent 2010
-   minutes of a week just over it. Where one
-   actuator is unpriced (gas heating under an electricity tariff), bound it: measured,
-   a policy with heating free and a meter that could dip below zero ran the furnace
-   against the compressor all night, at two to three times the bill. A rule-anchored
+   starts only past its setpoint, so a policy pinned at the ceiling rides just over
+   it. Where one
+   actuator is unpriced (gas heating under an electricity tariff), bound it: with
+   heating free, a policy can run the furnace against the compressor and let the cost
+   term see only the electricity. A rule-anchored
    residual (`reference_control` plus a `residual_delta` box) is an option for a
    small, trusted correction. It is not the way to make a policy behave: a box narrow
    enough to keep a wrong model safe is too narrow to reach what pays.
@@ -153,3 +155,70 @@ against that error. Fix the model, not the controller.
 a graph that runs with numpy and onnxruntime, and checks the package against the
 trained policy before writing it. docs/EXPORT.md covers the package layout and the C and
 torch targets.
+
+## example
+
+One thermal zone served by staged cooling and heating, with metered power, as the steps
+above declare it. Syntax, not values: the column names, the time-constant boxes and the
+gains belong to some other building, and every choice here is one the steps tell you how
+to check on yours.
+
+`modeling_user_defined.py`:
+
+```python
+def block_mapping(nm_mapping, cfg):
+    return {
+        # The zone claims heating only. Cooling stays shared, so the meter sees the
+        # cooling demand too, and nothing it does not draw from.
+        "zone": {"Y": ["Zone Temp"], "U": ["Heating Setpoint"], "model": "2r2c",
+                 "ambient": "Outdoor Temp",
+                 "params": {"tau_fast_h": [0.2, 1.5], "tau_ambient_h": [2.0, 20.0],
+                            "tau_slow_h": [24.0, 150.0]},
+                 "inputs": {
+                     "Cooling Setpoint": {"kind": "demand", "sign": -1, "state": "Zone Temp",
+                                          "hysteresis": True,            # nt data latch
+                                          "modulated_by": ["Outdoor Temp"]},
+                     "Heating Setpoint": {"kind": "demand", "sign": +1, "state": "Zone Temp"},
+                     "Solar": {"kind": "linear", "sign": +1}}},
+        "meter": {"Y": ["Compressor Power", "Fan Power"], "reads": ["Zone Temp"],
+                  "model": "mlp"},
+    }
+
+def data_head_config(nm_mapping, norm_stats):     # meters cannot read below zero
+    heads = [BoundedHead(project_physical_to_norm(0.0, norm_stats[c]), float("inf"))
+             if c in ("Compressor Power", "Fan Power") else RegressionHead()
+             for c in nm_mapping["Y"]]
+    return HeadStack(heads, nm_mapping["Y"])
+```
+
+with sign priors on the meter (`grad_path` → `{"Compressor Power": {"Cooling Setpoint": 1},
+"Fan Power": {"Cooling Setpoint": 1}}`, `grad_gain: 1.0`), and `power_channels` naming the
+two meters. `control_configs/control.yaml`:
+
+```yaml
+policy_window:                  # every column; a day of band and price ahead
+  "Zone Temp":        {past: 3}
+  "Compressor Power": {past: 0}
+  "Fan Power":        {past: 0}
+  "Cooling Setpoint": {past: 1}
+  "Heating Setpoint": {past: 1}
+  "Outdoor Temp":     {past: 0, future: 72}
+  "Solar":            {past: 0, future: 72}
+  "Band Low":         {past: 0, future: 287}
+  "Band High":        {past: 0, future: 287}
+  "Tariff":           {past: 0, future: 287}
+train_pred_steps: 288           # one rollout holds the action and its payoff
+losses:
+  comfort_lower: {column: "Band Low",  target: "Zone Temp", map: relu,  norm: 1}
+  comfort_upper: {column: "Band High", target: "Zone Temp", map: nrelu, norm: 1}
+  cost: {column: power, norm: 1, weight: "Tariff"}
+  du:   {column: "Cooling Setpoint", map: first_difference, norm: 1}
+gains: {comfort_lower: 100.0, comfort_upper: 100.0, cost: 1.0e-3, du: 0.5}
+command_bounds:                 # inside the band, a margin under its ceiling, heat under the floor
+  "Cooling Setpoint": ["Band Low", ["Band High", -0.5]]
+  "Heating Setpoint": [15.0, "Band Low"]
+policy: mlp
+```
+
+Size `epochs` from the cost line the run prints before training.
+
