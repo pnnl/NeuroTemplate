@@ -5,9 +5,10 @@ controller against that model, and ship either one as a small package that
 runs without this library. Built on
 [Neuromancer](https://github.com/pnnl/neuromancer).
 
-**Start with `nt guide`.** It is the whole flow in five short steps, each a few
-decisions and the command whose output settles them, and it says when to open
-the documents below.
+**Start with `nt guide`, before opening anything below.** It is the whole flow in
+five short steps, each a few decisions and the command whose output settles them,
+and each step names the document or hook to open when you need more. The documents
+below are references for those moments.
 
 | To | Read |
 |---|---|

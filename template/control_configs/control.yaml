@@ -92,13 +92,19 @@ policy_window:
 # charges for it, and an actuator that should mostly sit still wants a
 # heavy one.
 #
+# A band you must hold: norm 1 (a mean of the excess) behaves as a near-hard
+# constraint once its gain outweighs what an overshoot would save, and keeps
+# its gradient at the band edge. norm 2 (RMS) makes a small overshoot nearly
+# free: measured, a 0.3 °C excursion 2% of the time cost the objective less
+# than 1% of the bill, and the policies took it.
+#
 # Energy vs cost: an energy row rewards less power at every hour, and its
 # cheapest answer is to do less. Only a cost row (power weighted by a
 # tariff) rewards moving power to cheap hours. For load shifting, use cost
 # and leave energy off.
 losses:
-  comfort_lower: {column: "Comfort Low [°C]",  target: "Zone Air Temperature [°C]", map: relu,  norm: 2}
-  comfort_upper: {column: "Comfort High [°C]", target: "Zone Air Temperature [°C]", map: nrelu, norm: 2}
+  comfort_lower: {column: "Comfort Low [°C]",  target: "Zone Air Temperature [°C]", map: relu,  norm: 1}
+  comfort_upper: {column: "Comfort High [°C]", target: "Zone Air Temperature [°C]", map: nrelu, norm: 1}
   du:            {column: "Zone Cooling Setpoint [°C]", map: first_difference, norm: 1}
   # energy: {column: power, norm: 1}
   # cost:   {column: power, norm: 1, weight: "Tariff [$/kWh]"}

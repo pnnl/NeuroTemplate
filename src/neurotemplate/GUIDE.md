@@ -100,7 +100,9 @@ against that error. Fix the model, not the controller.
 
 1. **Objective**, in `control_configs/control.yaml`: the band as two terms (`relu`
    below, `nrelu` above), the cost as `power` weighted by the tariff, and a small
-   `first_difference` on each command. `power` is `power_metric`, by default the sum
+   `first_difference` on each command. For a band you must hold, use `norm: 1` with a
+   gain that makes a degree of mean excess outweigh any saving: a squared term makes a
+   small overshoot nearly free, and the policy takes it. `power` is `power_metric`, by default the sum
    of `power_channels`, the meters the model predicts. Before training, the run prints
    the share each term has of the objective. A term near 0% is not doing anything;
    size the gains from that print.
@@ -115,7 +117,10 @@ against that error. Fix the model, not the controller.
 3. **Bounds.** The policy writes each command inside `actuation_bounds` (by default
    the data's range). `command_bounds` narrows a command to a range that follows a
    reference at each step: a cooling setpoint inside the comfort band, a heating
-   setpoint under its floor, which also keeps the two from crossing. A rule-anchored
+   setpoint under its floor, which also keeps the two from crossing. Where one
+   actuator is unpriced (gas heating under an electricity tariff), bound it: measured,
+   a policy with heating free and a meter that could dip below zero ran the furnace
+   against the compressor all night, at two to three times the bill. A rule-anchored
    residual (`reference_control` plus a `residual_delta` box) is an option for a
    small, trusted correction. It is not the way to make a policy behave: a box narrow
    enough to keep a wrong model safe is too narrow to reach what pays.
