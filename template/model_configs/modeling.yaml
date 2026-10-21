@@ -72,7 +72,7 @@ history:
 
 # ── TRAIN ────────────────────────────────────────────────────────
 # epochs: 300
-# epoch_verbose: 1
+# epoch_verbose: 10      # print every Nth epoch
 # Epochs before early stopping may trigger, then epochs without improvement.
 # warmup: 5
 # patience: 25

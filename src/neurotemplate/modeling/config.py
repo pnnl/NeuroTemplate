@@ -111,7 +111,9 @@ class ModelingConfig:
 
     # ---- TRAIN ---------------------------------------------------------------
     epochs: int = 300
-    epoch_verbose: int = 1
+    # Print every Nth epoch (and the first). Every training call's output lands in
+    # an agent's context and stays there, and one line per epoch was most of it.
+    epoch_verbose: int = 10
     warmup: int = 5
     patience: int = 25
     train_pred_steps: int = 48
