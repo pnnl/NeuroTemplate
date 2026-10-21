@@ -147,8 +147,8 @@ def train_control(cfg: ControlConfig,
     else:
         # One sweep serves every term on power: each is a reduction of the
         # same signal, so sweeping them separately would just rescale this.
-        shapes = term_shapes(power, balance_out, hmax, nm_mapping["U"],
-                             *u_bounds, norm_stats)
+        shapes = term_shapes(power, problem, policy_node, balance_batch, hmax,
+                             nm_mapping["U"], *u_bounds, norm_stats)
         power_diag = power_diagnostics(power, balance_out, hmax)
     notes = objective_notes(objective, cfg)
     print(format_objective_report(balance, shapes, power_diag, notes))

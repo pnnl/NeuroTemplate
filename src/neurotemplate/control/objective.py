@@ -13,8 +13,10 @@ The worked example: a power proxy of `(cooling_setpoint - outdoor)^2` that
 came out at 1.7x the entire comfort objective. The numbers were on screen from
 epoch 1; nobody was comparing them.
 
-`term_shapes` sweeps the power signal across each actuation box and reports what
-it looks like there — the value at each grid point and where the minimum lands.
+`term_shapes` sweeps the power signal across each actuation box, through the
+model: the rollout is re-run with one control held at each grid value, so a
+metered power the model predicts moves as the model says it would. It reports
+the value at each grid point and where the minimum lands.
 This is **reported, not judged**. A monotone power term is normal and usually
 correct: a real power meter costs more as an actuator works harder, so it has
 no interior optimum of its own. The trade-off that produces an interior optimum
@@ -25,6 +27,7 @@ the scale of the term they are weighting, and decide for themselves.
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Optional
 
@@ -104,13 +107,10 @@ class TermShape:
 
     @property
     def is_flat(self) -> bool:
-        """The term does not read this control directly.
-
-        On its own this says nothing about whether the term works: metered
-        power is flat here and perfectly live (it reads the surrogate's
-        outputs), and an inert term is flat here too. `PowerDiagnostics.
-        reads_outputs` is what separates them.
-        """
+        """Holding this control anywhere in its box does not move the term,
+        through the model. For metered power that is a model whose meters do
+        not see this control; `PowerDiagnostics.reads_outputs` separates it
+        from a term that reads nothing at all."""
         scale = max(abs(sum(self.values) / len(self.values)), 1.0)
         return self.spread <= FLAT_TOL * scale
 
@@ -269,10 +269,28 @@ def objective_notes(objective: Objective, cfg) -> list[str]:
     return notes
 
 
+@contextmanager
+def _pinned(module: torch.nn.Module, column: int, value: float):
+    """While open, every command `module` emits has `column` held at `value`
+    (normalized), after anything the module does to its output."""
+    def hook(_module, _inputs, output):
+        pinned = output.clone()
+        pinned[..., column] = value
+        return pinned
+
+    handle = module.register_forward_hook(hook)
+    try:
+        yield
+    finally:
+        handle.remove()
+
+
 @beartype
 def term_shapes(
     term_fn,
-    out: dict,
+    problem,
+    policy_node,
+    batch: dict,
     hmax: int,
     u_names: list[str],
     u_min: torch.Tensor,
@@ -280,42 +298,41 @@ def term_shapes(
     norm_stats: NormStats,
     n_grid: int = SHAPE_GRID,
 ) -> list[TermShape]:
-    """Sweep each control across its actuation box and record the term's shape.
+    """Sweep each control across its actuation box, through the model.
 
     Args:
         term_fn: `(yn, U, D) -> [batch, time]`, already bound to nm_mapping and
             norm_stats — the same callable the loss evaluates.
-        out:     a closed-loop problem output (see `run_objective_pass`).
+        problem: the DPC problem; its closed loop is re-run per grid point.
+        policy_node: the policy Node inside it, whose command is pinned.
+        batch:   the batch the balance report used.
         hmax:    warmup steps to skip, so the sweep covers the scored horizon.
         u_min/u_max: actuation box in NORMALIZED space, one entry per control.
 
-    Every other control keeps its recorded trajectory, so this is the same
-    one-at-a-time reading the step-response scenario uses: what does this term
-    ask *this* actuator to do, holding the rest of the rollout fixed.
+    At each grid point the rollout runs with this control held at that value
+    for every step and the others as the (untrained) policy commands them, so
+    the term is read where the model takes the state, not with the state held
+    at a rollout that never saw the command. A metered power the model
+    predicts then moves with the command, as it will in training.
     """
-    yn = out["yn"][:, scored_steps("yn", hmax), :]
-    u = out["U"][:, scored_steps("U", hmax), :]
-    d = out["D"][:, scored_steps("D", hmax), :]
-    device = u.device
-    u_min, u_max = u_min.to(device), u_max.to(device)
-
+    device = u_min.device
     shapes = []
-    with torch.no_grad():
-        for j, name in enumerate(u_names):
-            s = norm_stats[name]
-            grid_n = torch.linspace(float(u_min[j]), float(u_max[j]), n_grid,
-                                    device=device)
-            values = []
-            for point in grid_n:
-                swept = u.clone()
-                swept[:, :, j] = point
-                values.append(float(term_fn(yn, swept, d).mean()))
-            shapes.append(TermShape(
-                u_name=name,
-                grid=[float(p) * s["stretch"] + s["shift"] for p in grid_n],
-                values=values,
-                argmin=min(range(n_grid), key=values.__getitem__),
-            ))
+    for j, name in enumerate(u_names):
+        s = norm_stats[name]
+        grid_n = torch.linspace(float(u_min[j]), float(u_max[j]), n_grid, device=device)
+        values = []
+        for point in grid_n:
+            with _pinned(policy_node.callable, j, float(point)):
+                out = run_objective_pass(problem, batch)
+            with torch.no_grad():
+                values.append(float(term_fn(*(out[k][:, scored_steps(k, hmax), :]
+                                              for k in ("yn", "U", "D"))).mean()))
+        shapes.append(TermShape(
+            u_name=name,
+            grid=[float(p) * s["stretch"] + s["shift"] for p in grid_n],
+            values=values,
+            argmin=min(range(n_grid), key=values.__getitem__),
+        ))
     return shapes
 
 
@@ -356,7 +373,7 @@ def flat_sweep_reading(reads_outputs: Optional[bool]) -> str:
     if reads_outputs is None:
         return "flat in U"
     if reads_outputs:
-        return "flat in U — reads model outputs"
+        return "flat in U — the model's outputs it reads do not respond to this control"
     return "INERT — reads neither U nor model outputs"
 
 

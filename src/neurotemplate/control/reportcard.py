@@ -204,8 +204,9 @@ def _objective_section(balance: ObjectiveBalance,
     if shapes:
         body += [
             "",
-            "The power signal swept across each actuation box, with the rest "
-            "of the rollout held at its recorded values. One sweep serves all "
+            "The power signal swept across each actuation box, through the "
+            "model: the rollout re-run with that control held at each value and "
+            "the others as the untrained policy commands them. One sweep serves all "
             "three power-derived terms — cost and peak are reductions of this "
             "same signal — so this is the magnitude and shape they all "
             "multiply, reported so it can be weighed against the terms above. "

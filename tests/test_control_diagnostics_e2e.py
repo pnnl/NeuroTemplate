@@ -65,7 +65,8 @@ def _run_diagnostics(reference=None, **overrides):
     if term is None or not objective.reads_power:
         shapes, power_diag = [], None
     else:
-        shapes = term_shapes(term, out, hmax, nm["U"], *u_bounds, ns)
+        shapes = term_shapes(term, problem, policy, next(iter(train_loader)), hmax,
+                             nm["U"], *u_bounds, ns)
         power_diag = power_diagnostics(term, out, hmax)
 
     arch = describe_policy(policy, cfg, sysid_cfg, nm, ns)

@@ -82,14 +82,15 @@ def test_a_lopsided_weight_is_flagged_as_dominant():
 
 def _shapes(term_fn, n_grid=9):
     problem, _, batch, s = _problem()
-    out = run_objective_pass(problem, batch)
+    policy = problem.nodes[0].nodes[0]          # the closed loop's policy node
     _, _, hmax = horizons(s["cfg"], s["sysid_cfg"])
     nm, ns = s["nm"], s["norm_stats"]
     lo = torch.tensor([(ns[c]["min"] - ns[c]["shift"]) / ns[c]["stretch"]
                        for c in nm["U"]])
     hi = torch.tensor([(ns[c]["max"] - ns[c]["shift"]) / ns[c]["stretch"]
                        for c in nm["U"]])
-    return term_shapes(term_fn, out, hmax, nm["U"], lo, hi, ns, n_grid=n_grid)
+    return term_shapes(term_fn, problem, policy, batch, hmax, nm["U"], lo, hi, ns,
+                       n_grid=n_grid)
 
 
 # ── power_diagnostics ────────────────────────────────────────────
@@ -154,3 +155,14 @@ def test_a_term_reading_nothing_is_inert():
     assert is_inert([shape], diag)
     report = format_objective_report(ObjectiveBalance([], 0.0), [shape], diag)
     assert "WARNING" in report and "cannot move the policy" in report
+
+
+def test_a_metered_power_moves_in_the_sweep_through_the_model():
+    """A power that reads only the model's outputs used to sweep flat, since the
+    sweep held the rollout fixed; agents read that as a dead meter and replaced
+    it with a proxy. Through the model, holding a command elsewhere moves the
+    meter the model predicts."""
+    def metered(yn, u, d):
+        return yn[:, :, -1]
+    shapes = _shapes(metered)
+    assert any(not shape.is_flat for shape in shapes)
