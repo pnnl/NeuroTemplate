@@ -131,9 +131,9 @@ def power_metric(
     them. What the policy learns from is this signal's gradient, so the
     meters must respond to the commands: model them in a block that sees the
     actuation (a declared `demand` the meter block can see; `nt guide model`,
-    step 3). The pre-training print sweeps this signal across the actuation
-    box with the model outputs held fixed, so a sum of meters reads "flat in
-    U" there by construction; read the objective balance instead.
+    step 3). The pre-training print sweeps this signal across each actuation
+    box through the model; a meter that does not see a command reads flat
+    there.
 
     Replace the body when nothing meters the power: a proxy from the physics
     of when the equipment runs, which does not decrease as the demand on it
