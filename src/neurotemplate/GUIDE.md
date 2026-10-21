@@ -125,7 +125,10 @@ against that error. Fix the model, not the controller.
 3. **Bounds.** The policy writes each command inside `actuation_bounds` (by default
    the data's range). `command_bounds` narrows a command to a range that follows a
    reference at each step: a cooling setpoint inside the comfort band, a heating
-   setpoint under its floor, which also keeps the two from crossing. Where one
+   setpoint under its floor, which also keeps the two from crossing. Keep a margin
+   inside an edge the equipment overshoots (`[column, offset]`): a latching thermostat
+   starts only past its setpoint, and a policy pinned at the ceiling spent 2010
+   minutes of a week just over it. Where one
    actuator is unpriced (gas heating under an electricity tariff), bound it: measured,
    a policy with heating free and a meter that could dip below zero ran the furnace
    against the compressor all night, at two to three times the bill. A rule-anchored

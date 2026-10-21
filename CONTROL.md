@@ -133,9 +133,14 @@ column's units or a reference or disturbance column the policy reads:
 
 ```yaml
 command_bounds:                     # syntax, not values
-  "Cooling Setpoint": ["Comfort Low", "Comfort High"]
+  "Cooling Setpoint": ["Comfort Low", ["Comfort High", -0.5]]
   "Heating Setpoint": [15.0, "Comfort Low"]
 ```
+
+A side `[column, offset]` is that column plus a fixed offset in the command's
+units. Equipment that starts only once the state is past its setpoint (a
+latching thermostat) overshoots a setpoint held at the band edge, so keep the
+command a margin inside it.
 
 The policy's whole output range is mapped onto `[low, high]`, so every
 command in it is reachable and none outside it is. Bounding cooling inside

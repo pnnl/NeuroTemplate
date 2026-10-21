@@ -228,6 +228,16 @@ class _ResidualPolicy(nn.Module):
         return torch.stack(columns, dim=-1)
 
 
+def _bound_side(side) -> tuple[Optional[str], float]:
+    """`(column or None, offset)` for one side of a `command_bounds` pair: a
+    number is `(None, value)`, a name `(name, 0)`, `[name, offset]` itself."""
+    if isinstance(side, list):
+        return side[0], float(side[1])
+    if isinstance(side, str):
+        return side, 0.0
+    return None, float(side)
+
+
 class _ReferenceBounds(nn.Module):
     """Map bounded columns' commands from their actuation box onto a per-step range.
 
@@ -256,12 +266,13 @@ class _ReferenceBounds(nn.Module):
         for column, pair in bounds.items():
             u = norm_stats[column]
             for side in pair:
-                if isinstance(side, str):
-                    v = norm_stats[side]
-                    sides.append((sources[side], v["stretch"] / u["stretch"],
-                                  (v["shift"] - u["shift"]) / u["stretch"]))
+                name, margin = _bound_side(side)
+                if name is not None:
+                    v = norm_stats[name]
+                    sides.append((sources[name], v["stretch"] / u["stretch"],
+                                  (v["shift"] + margin - u["shift"]) / u["stretch"]))
                 else:
-                    sides.append((None, 0.0, (float(side) - u["shift"]) / u["stretch"]))
+                    sides.append((None, 0.0, (margin - u["shift"]) / u["stretch"]))
         self.sides = sides
 
     def _side(self, k: int, args: tuple, like: torch.Tensor) -> torch.Tensor:
@@ -581,8 +592,9 @@ def _reference_bounds(net, cfg, nm_mapping, norm_stats, keys, input_map, r_colum
     for column, pair in cfg.command_bounds.items():
         if column not in nm_mapping["U"]:
             problems.append(f"{column!r} is not a U column ({nm_mapping['U']})")
-        for side in pair:
-            if not isinstance(side, str):
+        for raw in pair:
+            side, _ = _bound_side(raw)
+            if side is None:
                 continue
             key = next((k for k in ("R", "D") if side in readable[k] and k in keys), None)
             if key is None:

@@ -161,8 +161,10 @@ gains: {comfort_lower: 1.0, comfort_upper: 1.0, du: 1.0}
 # each step, each side a number in the column's units or a reference or
 # disturbance column the policy reads. Inside the band for cooling and under its floor for
 # heating keeps them from crossing. Not with residual_delta on the same column.
+# A side [column, offset] keeps a margin inside an edge: equipment that starts
+# only past its setpoint overshoots a setpoint held at the band's ceiling.
 # command_bounds:
-#   Cooling Setpoint [°C]: ["Comfort Low [°C]", "Comfort High [°C]"]
+#   Cooling Setpoint [°C]: ["Comfort Low [°C]", ["Comfort High [°C]", -0.5]]
 #   Heating Setpoint [°C]: [15.0, "Comfort Low [°C]"]
 
 # ── TRAINING ─────────────────────────────────────────────────────

@@ -105,8 +105,9 @@ class ControlConfig:
     residual_delta: dict[str, list[float]] = field(default_factory=dict)
 
     # A per-step range for a U column, `{column: [low, high]}`: each side a
-    # number in the column's units or the name of a reference or disturbance
-    # column the policy reads. The policy commands inside its actuation box as usual,
+    # number in the column's units, the name of a reference or disturbance
+    # column the policy reads, or `[column, offset]`, that column plus a fixed
+    # offset in the U column's units (a margin inside a band edge). The policy commands inside its actuation box as usual,
     # and that box is mapped onto [low, high] at each step, so a cooling
     # setpoint can be held inside the comfort band and a heating setpoint
     # under its floor, which also keeps the two from crossing. A column cannot
@@ -206,13 +207,18 @@ class ControlConfig:
                     "[0, 0] emits the reference rule exactly."
                 )
 
+        def side_ok(side) -> bool:
+            if isinstance(side, list):
+                return (len(side) == 2 and isinstance(side[0], str)
+                        and isinstance(side[1], (int, float)) and not isinstance(side[1], bool))
+            return isinstance(side, (int, float, str)) and not isinstance(side, bool)
+
         for column, pair in self.command_bounds.items():
-            if not (isinstance(pair, list) and len(pair) == 2 and all(
-                    isinstance(side, (int, float, str)) and not isinstance(side, bool)
-                    for side in pair)):
+            if not (isinstance(pair, list) and len(pair) == 2 and all(map(side_ok, pair))):
                 raise ValueError(
                     f"command_bounds[{column!r}] must be a pair [low, high], each a "
-                    f"number in the column's units or a reference column, got {pair!r}.")
+                    "number in the column's units, a column the policy reads, or "
+                    f"[column, offset] in the column's units, got {pair!r}.")
             if column in self.residual_delta:
                 raise ValueError(
                     f"{column!r} is in both residual_delta and command_bounds; a "

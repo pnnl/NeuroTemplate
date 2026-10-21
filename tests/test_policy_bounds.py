@@ -70,3 +70,16 @@ def test_a_bound_may_read_a_disturbance_column():
     low = _physical(s, out["D"][:, hmax - 1:, nm["D"].index(DIST[0])], DIST[0])
     steps = min(u.shape[1], low.shape[1])
     assert (u[:, :steps] >= low[:, :steps] - 1e-4).all()
+
+
+def test_a_bound_may_sit_a_margin_inside_a_band_edge():
+    """[column, offset]: the command stays at least the margin under the band's
+    ceiling, so equipment that starts past its setpoint does not overshoot."""
+    s, out = _rollout(command_bounds={SETPT: [LOW, [HIGH, -0.5]]})
+    _, _, hmax = horizons(s["cfg"], s["sysid_cfg"])
+    nm = s["nm"]
+    u = _physical(s, out["U"][:, hmax - 1:, nm["U"].index(SETPT)], SETPT)
+    r_columns = resolve_objective(s["cfg"], nm).r_columns
+    high = _physical(s, out["R"][:, hmax - 1:, r_columns.index(HIGH)], HIGH)
+    steps = min(u.shape[1], high.shape[1])
+    assert (u[:, :steps] <= high[:, :steps] - 0.5 + 1e-4).all()
