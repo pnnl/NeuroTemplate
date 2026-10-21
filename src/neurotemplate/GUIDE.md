@@ -75,8 +75,8 @@ Every key below is in MODELING.md ("Blocks", "Declaring what a column is").
    more on a cool night than on a hot afternoon), name those columns in the demand
    entry's `modulated_by`. **When the equipment latches** (it starts above the
    setpoint and, once running, runs until the zone is some way below), set
-   `hysteresis: true`. To check, compare how often it runs at the same
-   zone-minus-setpoint when it was running the step before and when it was not.
+   `hysteresis: true`. `nt data latch` checks: it prints how often the equipment runs
+   at the same error, after a step running and after a step idle.
 5. **Priors.** Time constants come from `nt data decay`. Output heads come from
    `nt data heads`. For a black-box block, a sign the physics is sure of, such as
    "more demand never draws less power", goes in `grad_path` with `grad_gain` > 0.

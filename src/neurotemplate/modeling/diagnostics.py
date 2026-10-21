@@ -508,3 +508,61 @@ def summarize_taus(
         return None, None, None
     taus = [w.tau_h for w in windows]
     return float(np.median(taus)), min(taus), max(taus)
+
+
+# ── Latching: does the equipment remember whether it was running? ──
+
+#: Bin edges for `latch_table`, in the state's units of error. Fine near zero,
+#: where a thermostat's deadband lives.
+LATCH_EDGES = (-math.inf, -1.0, -0.5, -0.25, 0.0, 0.25, 0.5, 1.0, math.inf)
+
+
+@dataclass(frozen=True)
+class LatchRow:
+    """How often the equipment runs in one bin of error, by its previous step."""
+    low: float
+    high: float
+    p_after_running: Optional[float]
+    n_after_running: int
+    p_after_idle: Optional[float]
+    n_after_idle: int
+
+
+def latch_table(running: np.ndarray, error: np.ndarray,
+                edges: tuple[float, ...] = LATCH_EDGES) -> list[LatchRow]:
+    """P(running now) at the same error, split by whether it ran the step before.
+
+    `running` is a boolean per step, `error` the thermostat's error (positive
+    while the equipment is called for), both over one contiguous record. A
+    memoryless response gives the same probability in both columns of a bin;
+    a latch gives a high one after running and a low one after idling, across
+    the bins either side of zero.
+    """
+    running = np.asarray(running, dtype=bool)
+    error = np.asarray(error, dtype=float)
+    now, before, e = running[1:], running[:-1], error[1:]
+    rows = []
+    for low, high in zip(edges, edges[1:]):
+        in_bin = (e > low) & (e <= high)
+        after_on, after_off = in_bin & before, in_bin & ~before
+        rows.append(LatchRow(
+            low, high,
+            float(now[after_on].mean()) if after_on.any() else None, int(after_on.sum()),
+            float(now[after_off].mean()) if after_off.any() else None, int(after_off.sum()),
+        ))
+    return rows
+
+
+def pool_latch_tables(tables: list[list[LatchRow]]) -> list[LatchRow]:
+    """Bin-wise counts and probabilities pooled across several records."""
+    pooled = []
+    for rows in zip(*tables):
+        def pooled_p(p_key, n_key):
+            n = sum(getattr(r, n_key) for r in rows)
+            if not n:
+                return None, 0
+            return sum((getattr(r, p_key) or 0.0) * getattr(r, n_key) for r in rows) / n, n
+        p_on, n_on = pooled_p("p_after_running", "n_after_running")
+        p_off, n_off = pooled_p("p_after_idle", "n_after_idle")
+        pooled.append(LatchRow(rows[0].low, rows[0].high, p_on, n_on, p_off, n_off))
+    return pooled

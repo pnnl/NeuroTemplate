@@ -1,6 +1,6 @@
 """
-`nt data heads` and `nt data decay` -- offline diagnostics that read a
-dataset and print a recommendation. Both load the dataset the same way
+`nt data heads`, `nt data decay` and `nt data latch` -- offline diagnostics
+that read a dataset and print a recommendation. Both load the dataset the same way
 `nt model train` does (see `train.py`'s first ~80 lines) and hand the raw
 numbers to the pure functions in `modeling/diagnostics.py`; this file is
 only argument parsing and printing.
@@ -21,6 +21,8 @@ Usage:
         --state "North Zone Air Temperature [°C]" --ref "Ambient Temperature [°C]"
     nt data decay --config model_configs/modeling.yaml \
         --state "Zone [°C]" --ref "Outdoor [°C]" --off-by "Total DX Power [W]"
+    nt data latch --config model_configs/modeling.yaml --running "DX Power [W]" \
+        --setpoint "Cooling Setpoint [°C]" --state "Zone [°C]" --sign -1
 """
 
 from __future__ import annotations
@@ -41,10 +43,13 @@ from neurotemplate.modeling.dynamics import family_by_channel
 from neurotemplate.modeling.pipeline import resolve_block_spec, resolve_nm_mapping
 from neurotemplate.modeling.diagnostics import (
     K_MAX_DEFAULT,
+    LATCH_EDGES,
     MIN_RUN_HOURS_DEFAULT,
     OFF_TOLERANCE_FRAC,
     actuator_off_mask,
     estimate_decay,
+    latch_table,
+    pool_latch_tables,
     recommend_head,
     summarize_taus,
 )
@@ -223,3 +228,49 @@ def decay_main() -> None:
         "tau_slow: the range is the natural `tau_slow_h` box in the block's "
         "params, then read back off the reportcard where the fit landed in it."
     )
+
+
+def latch_main() -> None:
+    flags = argparse.ArgumentParser(add_help=False)
+    flags.add_argument("--running", type=str, required=True,
+                       help="A column that reads above its minimum while the equipment "
+                            "runs: a meter, or a stage signal.")
+    flags.add_argument("--setpoint", type=str, required=True,
+                       help="The setpoint that calls the equipment.")
+    flags.add_argument("--state", type=str, required=True,
+                       help="The state the setpoint is compared with.")
+    flags.add_argument("--sign", type=int, choices=(-1, 1), required=True,
+                       help="The direction the state moves while the equipment runs, as "
+                            "in a demand declaration: -1 for cooling, +1 for heating.")
+    cfg, args = load_config_from_cli(
+        sys.argv[1:], cls=ModelingConfig, config_dir=MODEL_CONFIG_DIR,
+        default_config_path=MODEL_CONFIG_DIR / "modeling.yaml",
+        command_flags=flags,
+    )
+    train_raws, _dev_raws, _test_raws, _freq_s = get_data_splits(cfg)
+    missing = [c for c in (args.running, args.setpoint, args.state)
+               if c not in train_raws[0].columns]
+    if missing:
+        raise SystemExit(f"column(s) {missing} are not in the training data.")
+
+    # The error is positive while the equipment is called for, as the demand
+    # feature is; each file on its own, since "the step before" needs contiguity.
+    tables = []
+    for raw in train_raws:
+        meter = raw[args.running].to_numpy(dtype=float)
+        floor = meter.min() + OFF_TOLERANCE_FRAC * (meter.max() - meter.min())
+        error = args.sign * (raw[args.setpoint] - raw[args.state]).to_numpy(dtype=float)
+        tables.append(latch_table(meter > floor, error))
+    rows = pool_latch_tables(tables)
+
+    print(f"How often {args.running!r} runs, by {args.state!r} minus "
+          f"{args.setpoint!r} (sign {args.sign:+d}: positive while it is called for)")
+    print("  error bin          after running        after idle")
+    for r in rows:
+        def cell(p, n):
+            return f"{p:6.2f}  (n={n:5d})" if p is not None else f"{'-':>6s}  (n={n:5d})"
+        print(f"  ({r.low:+5.2f}, {r.high:+5.2f}]   {cell(r.p_after_running, r.n_after_running)}"
+              f"   {cell(r.p_after_idle, r.n_after_idle)}")
+    print("  The same column twice means the equipment answers the error alone. A high "
+          "'after running' beside a low 'after idle' in the bins around zero means it "
+          "latches: declare `hysteresis: true` on the setpoint's demand entry.")

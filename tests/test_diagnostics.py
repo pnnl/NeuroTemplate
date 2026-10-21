@@ -129,3 +129,20 @@ def test_actuator_off_mask_true_only_when_every_actuator_is_at_rest():
     # row 0: both at rest. row 1: u1 within tol. row 2: u2 at rest but u1 isn't.
     # row 3: u1 at rest but u2 (9.0) is 1.0 away, tol=0.02*(10.0-9.0)=0.02.
     assert mask.tolist() == [True, True, False, False]
+
+
+def test_a_latch_shows_up_as_two_columns_and_a_memoryless_switch_as_one():
+    """A thermostat that starts above +0.3 and stops below -0.3 runs, at an
+    error of zero, if and only if it ran the step before; a switch at zero
+    runs on the error alone."""
+    import numpy as np
+    from neurotemplate.modeling.diagnostics import latch_table
+    rng = np.random.default_rng(0)
+    error = np.cumsum(rng.normal(0, 0.08, 20_000)).clip(-2, 2)
+    latched = np.zeros_like(error, dtype=bool)
+    for k in range(1, len(error)):
+        latched[k] = error[k] > 0.3 or (latched[k - 1] and error[k] > -0.3)
+    middle = [r for r in latch_table(latched, error) if r.low == -0.25][0]
+    assert middle.p_after_running > 0.9 and middle.p_after_idle < 0.1
+    memoryless = [r for r in latch_table(error > 0, error) if r.low == 0.0][0]
+    assert memoryless.p_after_running == memoryless.p_after_idle == 1.0
