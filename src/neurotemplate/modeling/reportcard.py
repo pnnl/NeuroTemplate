@@ -293,8 +293,17 @@ def _forcing_lines(forcing: Optional[dict], indent: str) -> list[str]:
     for column, term in forcing.get("linear", {}).items():
         lines.append(f"{indent}- linear: {column}, k={term['k']:.4g} °C/step per unit")
     for column, term in forcing.get("saturating", {}).items():
-        lines.append(f"{indent}- saturating: {column}, cap={term['cap']:.3g} °C/step, "
-                     f"w={term['w']:.3g} °C, slope_share={term['slope_share']:.2f}")
+        line = (f"{indent}- saturating: {column}, cap={term['cap']:.3g} °C/step, "
+                f"w={term['w']:.3g} °C, slope_share={term['slope_share']:.2f}")
+        if "on_at_C" in term:
+            line += (f"; latched: on {term['on_at_C']:.2f} °C past the setpoint, "
+                     f"off {term['off_at_C']:.2f} °C back")
+        if "modulated_by" in term:
+            weights = ", ".join(f"{c} {w:+.3g}"
+                                for c, w in term["modulated_by"]["weights"].items())
+            line += (f"; factor = 2·sigmoid({term['modulated_by']['bias']:+.3g} + "
+                     f"{weights}, normalised)")
+        lines.append(line)
     if forcing.get("mlp"):
         hsizes = forcing.get("mlp_hsizes") or []
         size_s = f", hsizes={hsizes}" if hsizes else ""
