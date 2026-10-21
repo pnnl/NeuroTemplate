@@ -166,3 +166,24 @@ def test_a_metered_power_moves_in_the_sweep_through_the_model():
         return yn[:, :, -1]
     shapes = _shapes(metered)
     assert any(not shape.is_flat for shape in shapes)
+
+
+def test_a_preview_shorter_than_the_reference_changes_is_noted():
+    """The fixture's band steps every 6 rows: a preview of 2 cannot see the
+    next step coming, one of 8 can; a rollout shorter than the preview is
+    noted either way."""
+    from neurotemplate.control.losses import resolve_objective
+    from neurotemplate.control.objective import median_change_gap, objective_notes
+    from control_fixtures import full_setup
+    s = full_setup()
+    cfg, nm = s["cfg"], s["nm"]
+    objective = resolve_objective(cfg, nm)
+    band = next(t.column for t in objective.terms if objective.roles[t.column] == "R")
+    assert median_change_gap([s["norm_df"]], band) == 6
+    for future, flagged in ((2, True), (8, False)):
+        cfg.policy_window[band] = {"past": 0, "future": future}
+        notes = objective_notes(objective, cfg, [s["norm_df"]])
+        assert any("cannot see the next change" in n and band in n for n in notes) == flagged
+    cfg.policy_window[band] = {"past": 0, "future": cfg.train_pred_steps + 1}
+    assert any("never gives it a gradient" in n
+               for n in objective_notes(objective, cfg, [s["norm_df"]]))

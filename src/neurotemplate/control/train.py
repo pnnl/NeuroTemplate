@@ -150,7 +150,7 @@ def train_control(cfg: ControlConfig,
         shapes = term_shapes(power, problem, policy_node, balance_batch, hmax,
                              nm_mapping["U"], *u_bounds, norm_stats)
         power_diag = power_diagnostics(power, balance_out, hmax)
-    notes = objective_notes(objective, cfg)
+    notes = objective_notes(objective, cfg, train_dfs)
     print(format_objective_report(balance, shapes, power_diag, notes))
 
     cfg.run = "DPC " + cfg.run
