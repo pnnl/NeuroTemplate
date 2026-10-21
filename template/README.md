@@ -87,9 +87,8 @@ Add the dependency to your `pyproject.toml` and `uv sync` — see
    two model configs, set `ensemble_seeds` to a few: one seed is one draw.
 7. **Control** — a reference file per plant file (`python
    make_references.py --help`), the `losses` and `gains` in
-   `control_configs/control.yaml` naming your columns, and, where you have
-   one, `reference_control`: a rule you trust, which `residual_delta` then
-   anchors the policy to. Then
+   `control_configs/control.yaml` naming your columns, and the meters the
+   objective prices in `power_channels`. Then
    `nt control train --set sysid_run_id=<run_id>`.
 
 Check any config without running anything:
@@ -102,15 +101,14 @@ nt model train --config model_configs/modeling.yaml --print-config
 
 Each run is read against the one before it.
 
-1. **The rule** — `reference_control` with every `residual_delta` box
-   `[0, 0]`. This scores your rule on your surrogate. It is also the
-   cheapest check of the surrogate there is: if the surrogate says a rule
-   cannot hold a band the plant holds easily, the surrogate is wrong about
-   the actuators, and every policy trained on it will optimise against
-   that error.
-2. **The band terms only**, boxes open. This should not come out much
-   worse than the rule. If it does, a model iteration is worth more than
-   any gain.
+1. **The rule, scored on the model** — `reference_control` with every
+   `residual_delta` box `[0, 0]`, the band terms only. It is the cheapest
+   check of the model there is: if the model says a rule cannot hold a band
+   the plant holds easily, the model is wrong about the actuators, and every
+   policy trained on it will optimise against that error.
+2. **The band terms only**, the policy free inside `actuation_bounds`. This
+   should not come out much worse than the rule. If it does, a model
+   iteration is worth more than any gain.
 3. **The full objective** — cost, peak, whatever you are after.
 4. **Its blind twin** — the same config with the price gain at 0 and
    nothing else changed (keep the price references so the draws match).
@@ -123,10 +121,10 @@ Each is off until you ask for it — see [CONTROL.md](../CONTROL.md).
 
 | Want | Implement | Then declare |
 |---|---|---|
-| an energy objective, and the energy section of the reportcard | `power_metric` + `POWER_METRIC_IMPLEMENTED` | a `{column: power, norm: 1}` row |
-| price-driven load shifting | `power_metric`, and a tariff column in the reference files (`make_references.py --price`) | a `{column: power, norm: 1, weight: <tariff>}` row, `reference_scale`, a `future` on the tariff in `policy_window` |
-| peak shaving | `power_metric` | a `{column: power, norm: 4}` row |
-| a policy bounded to a rule, per U column | `reference_control` | `residual_delta` |
+| an energy objective, and the energy section of the reportcard | `power_channels` (or a proxy in `power_metric`) | a `{column: power, norm: 1}` row |
+| price-driven load shifting | `power_channels`, and a tariff column in the reference files (`make_references.py --price`) | a `{column: power, norm: 1, weight: <tariff>}` row, `reference_scale`, a `future` on the tariff in `policy_window` |
+| peak shaving | `power_channels` | a `{column: power, norm: 4}` row |
+| a small correction to a trusted rule, per U column | `reference_control` | `residual_delta` |
 | the rule itself, scored | `reference_control` | `residual_delta` with every box `[0, 0]` |
 
 ## Reading a run

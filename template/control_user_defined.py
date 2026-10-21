@@ -103,12 +103,10 @@ def plot_context_channels(nm_mapping: dict[str, list[str]]) -> list[str]:
 
 
 # ---------------------------------------------------------------------
-# Required when a loss term names `power`: the signal they all reduce
+# The signal every loss term naming `power` reduces
 # ---------------------------------------------------------------------
-# Set to True once `power_metric` below is implemented. Until then a loss
-# term naming `power` fails at problem build, rather than silently optimizing
-# something you did not write.
-POWER_METRIC_IMPLEMENTED = False
+# By default the sum of `power_channels`: the meters the model predicts.
+POWER_METRIC_IMPLEMENTED = True
 
 
 @beartype
@@ -125,50 +123,31 @@ def power_metric(
     cost, a power mean for a peak), and what the reportcard integrates.
 
     Inputs are the normalized trajectories: yn [batch, time, ny],
-    U [batch, time, nu], D [batch, time, nd]. Denormalize what you use
-    (`x * stretch + shift`, or `_denorm` below). The library converts no
-    units: return Watts and the integral is in Wh. At each step, U is the
-    command that drove the plant into that step's yn.
+    U [batch, time, nu], D [batch, time, nd]. At each step, U is the command
+    that drove the plant into that step's yn. The library converts no units:
+    return Watts and the integral is in Wh.
 
-    What the policy learns from is this signal's *gradient*: when a move
-    costs something. Two shapes work.
+    The default sums the meters `power_channels` names, as the model predicts
+    them. What the policy learns from is this signal's gradient, so the
+    meters must respond to the commands: model them in a block that sees the
+    actuation (a declared `demand` the meter block can see; `nt guide model`,
+    step 3). The pre-training print sweeps this signal across the actuation
+    box with the model outputs held fixed, so a sum of meters reads "flat in
+    U" there by construction; read the objective balance instead.
 
-    If the surrogate predicts metered power well, sum it:
-
-        total = sum(_denorm(yn, c, nm_mapping, norm_stats)
-                    for c in power_channels(nm_mapping))
-        return total.clamp_min(0.0)
-
-    If the equipment is staged or on/off, a predicted power channel usually
-    fits near its mean (judge such a channel by balanced accuracy against
-    persistence on the sys-id reportcard, not by R²), and the policy then
-    cannot tell *when* power is drawn. Write a proxy instead, from the
-    physics of when the equipment runs. Two properties make one sensible: it
-    does not decrease as the demand on the equipment grows, and it is zero
-    whenever the equipment would not be called — that zero is what lets a
-    policy learn that coasting is cheap. Read its levels off your own data
-    (`nt data heads`, and a scatter of power against what calls it). A
-    proxy's units can be relative: absolute energy is the meter's job.
-
-    A `relu` makes that zero and also stops all gradient there, so the
-    policy never learns what leaving the coast would cost. `soft_clamp_min`
-    (`from neurotemplate.modeling.prestack import soft_clamp_min`) gives the
-    same zero forward and a gradient back toward the active side. Its
-    backward is softplus's, so apply it to an O(1) quantity — a temperature
-    difference, not Watts.
-
-    Before training, the run prints this signal swept across the actuation
-    box, the share of steps where it sits at exactly zero, and how many of
-    those pass no gradient back. A large dead share on a cost term means no
-    gradient in the cheap hours, which is where load should move to. It is
-    a clamp on the signal's path — a power head predicting negative values,
-    or a hard clamp in this function — and a weight cannot fix it.
+    Replace the body when nothing meters the power: a proxy from the physics
+    of when the equipment runs, which does not decrease as the demand on it
+    grows and is zero when it would not be called. A `relu` there stops the
+    gradient on the inactive side; `soft_clamp_min`
+    (`from neurotemplate.modeling.prestack import soft_clamp_min`) keeps the
+    zero forward and a gradient back toward the active side.
     """
-    raise NotImplementedError(
-        "power_metric is not implemented. Name no `power` in the control "
-        "config's losses, or implement this and set "
-        "POWER_METRIC_IMPLEMENTED = True."
-    )
+    channels = power_channels(nm_mapping)
+    if not channels:
+        raise NotImplementedError(
+            "power_metric sums the meters power_channels names, and it names none. "
+            "List the metered Y columns there, or write a proxy in power_metric.")
+    return sum(_denorm(yn, c, nm_mapping, norm_stats) for c in channels)
 
 
 def _denorm(x: torch.Tensor, col: str, nm_mapping: dict[str, list[str]],

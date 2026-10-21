@@ -14,6 +14,7 @@ before. Groups mirror the package layout:
     nt control train        # neurotemplate.control.cli.train
     nt export model         # neurotemplate.export.cli (trained dynamics -> ONNX package)
     nt export policy        # neurotemplate.export.cli (trained DPC policy -> ONNX package)
+    nt guide [step]         # neurotemplate.guide (the guided flow; takes no verb)
 """
 from __future__ import annotations
 
@@ -38,7 +39,9 @@ COMMANDS: dict[tuple[str, str], str] = {
 
 
 def _help_text() -> str:
-    lines = ["Usage: nt <group> <verb> [args...]", "", "Commands:"]
+    lines = ["Usage: nt <group> <verb> [args...]", "",
+             "Start with `nt guide`: the flow, one step at a time.", "", "Commands:",
+             "  nt guide [step]"]
     for group, verb in COMMANDS:
         lines.append(f"  nt {group} {verb}")
     lines.append("")
@@ -58,6 +61,12 @@ def main(argv: Optional[list[str]] = None) -> None:
 
     if not argv or argv[0] in ("-h", "--help"):
         print(_help_text())
+        return
+
+    if argv[0] == "guide":
+        from neurotemplate.guide import main as guide_main
+        sys.argv = ["nt guide", *argv[1:]]
+        guide_main()
         return
 
     if len(argv) < 2:

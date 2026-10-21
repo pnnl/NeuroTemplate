@@ -5,6 +5,10 @@ controller against that model, and ship either one as a small package that
 runs without this library. Built on
 [Neuromancer](https://github.com/pnnl/neuromancer).
 
+**Start with `nt guide`.** It is the whole flow in five short steps, each a few
+decisions and the command whose output settles them, and it says when to open
+the documents below.
+
 | To | Read |
 |---|---|
 | install the library and set up an application | [INSTALL.md](INSTALL.md) |

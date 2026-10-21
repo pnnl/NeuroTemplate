@@ -22,9 +22,9 @@ The hooks in `control_user_defined.py`, scaffolded in
 | Hook | Says | |
 |---|---|---|
 | `actuation_bounds` | the box each control may command | required |
-| `power_channels` | which outputs meter power, for the plots | required |
+| `power_channels` | which outputs meter power: the plots, and `power_metric`'s default | required |
 | `plot_context_channels` | disturbances drawn on the closed-loop plot | required |
-| `power_metric` | the power signal that energy, cost and peak terms reduce | when a term names `power` |
+| `power_metric` | the power signal that energy, cost and peak terms reduce; by default the sum of `power_channels` | to replace the default with a proxy |
 | `reference_control` | a rule to anchor a residual policy to | with `residual_delta` |
 
 The surrogate is a config field, `sysid_run_id`. Column roles and
