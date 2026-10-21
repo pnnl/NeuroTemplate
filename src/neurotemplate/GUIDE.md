@@ -77,7 +77,9 @@ Every key below is in MODELING.md ("Blocks", "Declaring what a column is").
    setpoint and, once running, runs until the zone is some way below), set
    `hysteresis: true`. `nt data latch` checks: it prints how often the equipment runs
    at the same error, after a step running and after a step idle.
-5. **Priors.** Time constants come from `nt data decay`. Output heads come from
+5. **Priors.** Time constants come from `nt data decay`; a `2r2c` block's
+   `tau_fast_h` box cannot start below two data steps (0.17 h on 5-minute data), the
+   floor its stability guarantee needs. Output heads come from
    `nt data heads`. For a black-box block, a sign the physics is sure of, such as
    "more demand never draws less power", goes in `grad_path` with `grad_gain` > 0.
    A `2r2c` zone's `history` lag is how much record seeds its hidden mass: an hour
