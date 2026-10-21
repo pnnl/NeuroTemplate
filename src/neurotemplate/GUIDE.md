@@ -80,6 +80,10 @@ Every key below is in MODELING.md ("Blocks", "Declaring what a column is").
 5. **Priors.** Time constants come from `nt data decay`. Output heads come from
    `nt data heads`. For a black-box block, a sign the physics is sure of, such as
    "more demand never draws less power", goes in `grad_path` with `grad_gain` > 0.
+   A `2r2c` zone's `history` lag is how much record seeds its hidden mass: an hour
+   leaves the mass at about the zone's temperature and the fit shortens `tau_slow`
+   to compensate; half a day seeds it better. Measured, the longer history bought a
+   larger saving and more time outside the band, so read it as a trade, not a fix.
 6. **Physics checks**, `synth_cfg`: a few lines that test the model in states the
    data never visits. A failed step response means do not plan against this model.
 
