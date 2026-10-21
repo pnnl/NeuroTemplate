@@ -151,6 +151,14 @@ gains: {comfort_lower: 1.0, comfort_upper: 1.0, du: 1.0}
 #   Heating Setpoint [°C]: [0.0, 0.0]
 #   Cooling Setpoint [°C]: [below, above]
 
+# Per-step bounds: the policy's range for a column, mapped onto [low, high] at
+# each step, each side a number in the column's units or a reference column
+# the objective reads. Inside the band for cooling and under its floor for
+# heating keeps them from crossing. Not with residual_delta on the same column.
+# command_bounds:
+#   Cooling Setpoint [°C]: ["Comfort Low [°C]", "Comfort High [°C]"]
+#   Heating Setpoint [°C]: [15.0, "Comfort Low [°C]"]
+
 # ── TRAINING ─────────────────────────────────────────────────────
 # Train to convergence and no further: past it the policy learns the
 # surrogate's quirks, which the plant does not have.

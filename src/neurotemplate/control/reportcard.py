@@ -127,6 +127,11 @@ def _policy_section(arch: dict) -> str:
         )
         rows += [f"  - `{col}`: {_box(*box)}"
                  for col, box in arch["residual_box"].items()]
+    if arch.get("command_bounds"):
+        rows.append("- **Per-step bounds** *(the actuation box mapped onto [low, high] "
+                    "at each step; a name is a reference column)*:")
+        rows += [f"  - `{col}`: [{low}, {high}]"
+                 for col, (low, high) in arch["command_bounds"].items()]
     rows += [
         "- **Actuation bounds (physical units):**",
         bounds,

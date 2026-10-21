@@ -228,6 +228,60 @@ class _ResidualPolicy(nn.Module):
         return torch.stack(columns, dim=-1)
 
 
+class _ReferenceBounds(nn.Module):
+    """Map bounded columns' commands from their actuation box onto a per-step range.
+
+    For each column `command_bounds` names, the base policy's command `u`, in
+    `[umin, umax]`, becomes `low + (u - umin) / (umax - umin) · (high - low)`,
+    with `low` and `high` either fixed or read from a reference column at the
+    current step (the R window's present row). `high` is held at least `low`.
+    A linear map rather than a clamp, so the whole range keeps a gradient.
+    """
+
+    def __init__(self, base: nn.Module, u_columns: list[str], bounds: dict[str, list],
+                 umin: torch.Tensor, umax: torch.Tensor, norm_stats: NormStats,
+                 r_columns: list[str], r_key: Optional[int], r_row: int):
+        super().__init__()
+        self.base = base
+        self.bounds = {c: list(pair) for c, pair in bounds.items()}
+        self.columns = [u_columns.index(c) for c in bounds]
+        self.register_buffer("umin", umin)
+        self.register_buffer("umax", umax)
+        self.r_key, self.r_row, self.r_width = r_key, r_row, len(r_columns)
+        # Each side as (reference index or -1, scale, offset) from the side's
+        # source (a reference column, normalized, or the constant 1) to the
+        # U column's normalized space.
+        sides = []
+        for column, pair in bounds.items():
+            u = norm_stats[column]
+            for side in pair:
+                if isinstance(side, str):
+                    r = norm_stats[side]
+                    sides.append((r_columns.index(side), r["stretch"] / u["stretch"],
+                                  (r["shift"] - u["shift"]) / u["stretch"]))
+                else:
+                    sides.append((-1, 0.0, (float(side) - u["shift"]) / u["stretch"]))
+        self.sides = sides
+
+    def _side(self, k: int, r_now: Optional[torch.Tensor], like: torch.Tensor) -> torch.Tensor:
+        index, scale, offset = self.sides[k]
+        if index < 0:
+            return torch.full_like(like, offset)
+        return r_now[:, index] * scale + offset
+
+    def forward(self, *args: torch.Tensor) -> torch.Tensor:
+        u = self.base(*args)
+        r_now = (None if self.r_key is None
+                 else _current(args[self.r_key], self.r_row, self.r_width))
+        columns = list(u.unbind(-1))
+        for n, j in enumerate(self.columns):
+            low = self._side(2 * n, r_now, u[:, j])
+            high = torch.maximum(self._side(2 * n + 1, r_now, u[:, j]), low)
+            share = (u[:, j] - self.umin[j]) / (self.umax[j] - self.umin[j])
+            columns[j] = low + share * (high - low)
+        return torch.stack(columns, dim=-1)
+
+
 def _zero_final_layer(net: nn.Module, rows: torch.Tensor) -> None:
     """Start each anchored column's residual at δ ≡ 0, exactly.
 
@@ -503,6 +557,9 @@ def build_policy(
     if reference is not None:
         net = _ResidualPolicy(net, reference, list(u_cols), umin, umax,
                               below, above).to(device)
+    if cfg.command_bounds:
+        net = _reference_bounds(net, cfg, nm_mapping, norm_stats, keys, input_map,
+                                r_columns, umin, umax).to(device)
 
     return Node(
         net,
@@ -511,6 +568,25 @@ def build_policy(
         name="DPC Policy",
         input_map=input_map,
     )
+
+
+def _reference_bounds(net, cfg, nm_mapping, norm_stats, keys, input_map, r_columns,
+                      umin, umax) -> _ReferenceBounds:
+    """`_ReferenceBounds` from `cfg.command_bounds`, every name checked first."""
+    problems = []
+    for column, pair in cfg.command_bounds.items():
+        if column not in nm_mapping["U"]:
+            problems.append(f"{column!r} is not a U column ({nm_mapping['U']})")
+        for side in pair:
+            if isinstance(side, str) and side not in r_columns:
+                problems.append(f"{column!r} is bounded by {side!r}, which is not a "
+                                f"reference column the objective reads ({r_columns})")
+    if problems:
+        raise ValueError("command_bounds: " + "; ".join(problems) + ".")
+    r_key = keys.index("R") if "R" in keys else None
+    r_row = input_map["R"]["past"] if r_key is not None else 0
+    return _ReferenceBounds(net, list(nm_mapping["U"]), cfg.command_bounds, umin, umax,
+                            norm_stats, r_columns, r_key, r_row)
 
 
 # ── Policy description (for reportcard) ──────────────────────────
@@ -535,8 +611,11 @@ def describe_policy(
     the sum — past + 1 + future per Y, D and reference column, past per U
     column — by eye: a wrong window is otherwise an invisible failure.
     """
-    # Unwrap: Node -> [_ResidualPolicy] -> [_WindowGather] -> MLP_bounds
+    # Unwrap: Node -> [_ReferenceBounds] -> [_ResidualPolicy] -> [_WindowGather] -> MLP_bounds
     raw = policy_node.callable
+    bounded = isinstance(raw, _ReferenceBounds)
+    if bounded:
+        raw = raw.base
     residual = isinstance(raw, _ResidualPolicy)
     net = raw.base if residual else raw
     if isinstance(net, _WindowGather):
@@ -573,4 +652,5 @@ def describe_policy(
         "umax_phys": umax_phys,
         "residual_box": ({c: tuple(box) for c, box in cfg.residual_delta.items()}
                          if residual else None),
+        "command_bounds": dict(cfg.command_bounds) if bounded else None,
     }

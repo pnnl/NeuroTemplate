@@ -104,6 +104,15 @@ class ControlConfig:
     # returns exactly the columns named here.
     residual_delta: dict[str, list[float]] = field(default_factory=dict)
 
+    # A per-step range for a U column, `{column: [low, high]}`: each side a
+    # number in the column's units or the name of a reference column the
+    # objective reads. The policy commands inside its actuation box as usual,
+    # and that box is mapped onto [low, high] at each step, so a cooling
+    # setpoint can be held inside the comfort band and a heating setpoint
+    # under its floor, which also keeps the two from crossing. A column cannot
+    # be both here and in residual_delta.
+    command_bounds: dict[str, list] = field(default_factory=dict)
+
     # ── Training ─────────────────────────────────────────────────
     epochs: int = 300
     epoch_verbose: int = 1
@@ -196,6 +205,18 @@ class ControlConfig:
                     f"of numbers >= 0 in the column's units, got {box!r}. "
                     "[0, 0] emits the reference rule exactly."
                 )
+
+        for column, pair in self.command_bounds.items():
+            if not (isinstance(pair, list) and len(pair) == 2 and all(
+                    isinstance(side, (int, float, str)) and not isinstance(side, bool)
+                    for side in pair)):
+                raise ValueError(
+                    f"command_bounds[{column!r}] must be a pair [low, high], each a "
+                    f"number in the column's units or a reference column, got {pair!r}.")
+            if column in self.residual_delta:
+                raise ValueError(
+                    f"{column!r} is in both residual_delta and command_bounds; a "
+                    "column is either a residual around the rule or bounded per step.")
 
     @property
     def history_steps(self) -> int:

@@ -124,7 +124,24 @@ already carry. Train on a real price record sliced at random offsets
 reference with the peak moved (see below) and check that the load moves
 with it, and compare against the same config with the cost gain at 0.
 
-## Residual control: a policy bounded to a rule
+## Bounds: where each command may go
+
+By default each control commands anywhere inside `actuation_bounds`, the
+data's range. `command_bounds` narrows a control to a range that moves with
+the reference at each step, `{column: [low, high]}`, each side a number in the
+column's units or a reference column the objective reads:
+
+```yaml
+command_bounds:                     # syntax, not values
+  "Cooling Setpoint": ["Comfort Low", "Comfort High"]
+  "Heating Setpoint": [15.0, "Comfort Low"]
+```
+
+The policy's whole output range is mapped onto `[low, high]`, so every
+command in it is reachable and none outside it is. Bounding cooling inside
+the band and heating under its floor also keeps the two from crossing.
+
+## Residual control: a correction to a trusted rule
 
 With `residual_delta`, an anchored control commands
 `reference_control(...) + δ`, with `δ` kept inside a per-column box, rather
@@ -135,10 +152,11 @@ Training starts exactly at the rule. A box of `[0, 0]` locks a control to
 the rule, and every box `[0, 0]` scores the rule itself on your surrogate,
 which is the run to read every later one against.
 
-The two features combine naturally: the rule holds comfort, `δ` answers the
-tariff, and each box is a knob an operator can read: how far from the rule
-it is worth moving for money. Anchoring is also what keeps coupled
-actuators, such as heating and cooling setpoints, from crossing.
+Use it for a small correction to a rule you trust. It is not the way to
+make a policy behave on a model that is wrong: a box narrow enough to make
+that safe is too narrow to reach what pays (a night pre-cool from a setback
+rule is several degrees away). Fix the model instead; `nt guide check` is the
+test. A column is either anchored or in `command_bounds`, not both.
 
 Nothing is rounded to an actuator's resolution; that is the building
 management system's job. Smoothness comes from a `first_difference` row.
