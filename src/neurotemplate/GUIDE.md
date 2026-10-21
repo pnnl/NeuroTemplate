@@ -108,7 +108,10 @@ against that error. Fix the model, not the controller.
    forecasts a `future`. To move load in time, the policy must see the expensive
    period coming. The tariff's and the band's `future` must cover the stretch from
    when the action pays off to when it is taken, and `train_pred_steps` must hold
-   both the action and its payoff in one rollout (a day, for daily cycles).
+   both the action and its payoff in one rollout (a day, for daily cycles). No
+   `future` can be longer than the forecast available at run time (a 288-row
+   forecast that includes the current row supplies 287 ahead): the exported
+   policy refuses to act without it.
 3. **Bounds.** The policy writes each command inside `actuation_bounds` (by default
    the data's range). `command_bounds` narrows a command to a range that follows a
    reference at each step: a cooling setpoint inside the comfort band, a heating
