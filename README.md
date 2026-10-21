@@ -23,14 +23,17 @@ below are references for those moments.
 - **Modeling.** Trains a surrogate `y[k+1] = f(y, u, d)` over the named
   columns of a CSV: outputs `Y`, controls `U` and disturbances `D`. You can
   choose black-box families or a grey-box thermal network, and mix them in
-  one model, one family per group of outputs. Every run is also scored on
+  one model, one family per group of outputs. The thermal network can say
+  what a setpoint is (a thermostat's demand, optionally latched), what
+  conditions change its effect, and what its equipment draws. Every run is also scored on
   how it behaves in a long rollout and, if you describe the physics, in
   states the data never visited.
 - **Control.** Trains a differentiable predictive control (DPC) policy
   through the frozen surrogate. The objective is a table over named
   columns: bands to stay in, schedules to track, energy, cost, peak demand.
-  A policy can be anchored to a rule you already trust, within a box per
-  control.
+  Each command stays inside bounds that may follow a forecast at every step
+  (a setpoint inside the comfort band), or, as an option, within a box
+  around a rule you already trust.
 - **Export.** Ships a model or a policy as ONNX graphs run by onnxruntime,
   as torch programs run by torch, or as plain C with no runtime library at
   all. Before anything is written, the export checks that the package
