@@ -47,7 +47,7 @@ def test_a_bounded_setpoint_stays_inside_the_band_at_every_step():
 
 
 def test_bounds_name_columns_the_policy_can_read():
-    with pytest.raises(ValueError, match="not a reference column"):
+    with pytest.raises(ValueError, match="not a reference or disturbance column"):
         _rollout(command_bounds={SETPT: ["Nowhere [°C]", HIGH]})
 
 
@@ -57,3 +57,16 @@ def test_a_column_is_not_both_a_residual_and_bounded():
     cfg.command_bounds = {SETPT: [20.0, 25.0]}
     with pytest.raises(ValueError, match="both residual_delta and command_bounds"):
         cfg.validate()
+
+
+def test_a_bound_may_read_a_disturbance_column():
+    """A forecast the model reads as D bounds a command the same way a
+    reference does: read at the present row of its window."""
+    from control_fixtures import DIST
+    s, out = _rollout(command_bounds={SETPT: [DIST[0], 40.0]})
+    _, _, hmax = horizons(s["cfg"], s["sysid_cfg"])
+    nm = s["nm"]
+    u = _physical(s, out["U"][:, hmax - 1:, nm["U"].index(SETPT)], SETPT)
+    low = _physical(s, out["D"][:, hmax - 1:, nm["D"].index(DIST[0])], DIST[0])
+    steps = min(u.shape[1], low.shape[1])
+    assert (u[:, :steps] >= low[:, :steps] - 1e-4).all()

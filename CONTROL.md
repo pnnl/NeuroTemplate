@@ -128,8 +128,8 @@ with it, and compare against the same config with the cost gain at 0.
 
 By default each control commands anywhere inside `actuation_bounds`, the
 data's range. `command_bounds` narrows a control to a range that moves with
-the reference at each step, `{column: [low, high]}`, each side a number in the
-column's units or a reference column the objective reads:
+a forecast at each step, `{column: [low, high]}`, each side a number in the
+column's units or a reference or disturbance column the policy reads:
 
 ```yaml
 command_bounds:                     # syntax, not values

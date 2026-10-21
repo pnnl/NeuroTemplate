@@ -105,8 +105,8 @@ class ControlConfig:
     residual_delta: dict[str, list[float]] = field(default_factory=dict)
 
     # A per-step range for a U column, `{column: [low, high]}`: each side a
-    # number in the column's units or the name of a reference column the
-    # objective reads. The policy commands inside its actuation box as usual,
+    # number in the column's units or the name of a reference or disturbance
+    # column the policy reads. The policy commands inside its actuation box as usual,
     # and that box is mapped onto [low, high] at each step, so a cooling
     # setpoint can be held inside the comfort band and a heating setpoint
     # under its floor, which also keeps the two from crossing. A column cannot

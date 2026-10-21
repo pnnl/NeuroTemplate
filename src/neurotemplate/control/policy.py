@@ -233,50 +233,50 @@ class _ReferenceBounds(nn.Module):
 
     For each column `command_bounds` names, the base policy's command `u`, in
     `[umin, umax]`, becomes `low + (u - umin) / (umax - umin) · (high - low)`,
-    with `low` and `high` either fixed or read from a reference column at the
-    current step (the R window's present row). `high` is held at least `low`.
-    A linear map rather than a clamp, so the whole range keeps a gradient.
+    with `low` and `high` either fixed or read at the current step from a
+    column the policy reads: a reference (R) or a disturbance (D), each window's
+    present row. `high` is held at least `low`. A linear map rather than a
+    clamp, so the whole range keeps a gradient.
     """
 
     def __init__(self, base: nn.Module, u_columns: list[str], bounds: dict[str, list],
                  umin: torch.Tensor, umax: torch.Tensor, norm_stats: NormStats,
-                 r_columns: list[str], r_key: Optional[int], r_row: int):
+                 sources: dict[str, tuple[int, int, int, int]]):
         super().__init__()
         self.base = base
         self.bounds = {c: list(pair) for c, pair in bounds.items()}
         self.columns = [u_columns.index(c) for c in bounds]
         self.register_buffer("umin", umin)
         self.register_buffer("umax", umax)
-        self.r_key, self.r_row, self.r_width = r_key, r_row, len(r_columns)
-        # Each side as (reference index or -1, scale, offset) from the side's
-        # source (a reference column, normalized, or the constant 1) to the
-        # U column's normalized space.
+        # Each side as (source or None, scale, offset): a source is (positional
+        # input, present row, window width, column) for a named column, whose
+        # normalized value maps to the U column's normalized space by
+        # `value · scale + offset`; a number is the constant `offset`.
         sides = []
         for column, pair in bounds.items():
             u = norm_stats[column]
             for side in pair:
                 if isinstance(side, str):
-                    r = norm_stats[side]
-                    sides.append((r_columns.index(side), r["stretch"] / u["stretch"],
-                                  (r["shift"] - u["shift"]) / u["stretch"]))
+                    v = norm_stats[side]
+                    sides.append((sources[side], v["stretch"] / u["stretch"],
+                                  (v["shift"] - u["shift"]) / u["stretch"]))
                 else:
-                    sides.append((-1, 0.0, (float(side) - u["shift"]) / u["stretch"]))
+                    sides.append((None, 0.0, (float(side) - u["shift"]) / u["stretch"]))
         self.sides = sides
 
-    def _side(self, k: int, r_now: Optional[torch.Tensor], like: torch.Tensor) -> torch.Tensor:
-        index, scale, offset = self.sides[k]
-        if index < 0:
+    def _side(self, k: int, args: tuple, like: torch.Tensor) -> torch.Tensor:
+        source, scale, offset = self.sides[k]
+        if source is None:
             return torch.full_like(like, offset)
-        return r_now[:, index] * scale + offset
+        key, row, width, column = source
+        return _current(args[key], row, width)[:, column] * scale + offset
 
     def forward(self, *args: torch.Tensor) -> torch.Tensor:
         u = self.base(*args)
-        r_now = (None if self.r_key is None
-                 else _current(args[self.r_key], self.r_row, self.r_width))
         columns = list(u.unbind(-1))
         for n, j in enumerate(self.columns):
-            low = self._side(2 * n, r_now, u[:, j])
-            high = torch.maximum(self._side(2 * n + 1, r_now, u[:, j]), low)
+            low = self._side(2 * n, args, u[:, j])
+            high = torch.maximum(self._side(2 * n + 1, args, u[:, j]), low)
             share = (u[:, j] - self.umin[j]) / (self.umax[j] - self.umin[j])
             columns[j] = low + share * (high - low)
         return torch.stack(columns, dim=-1)
@@ -572,21 +572,30 @@ def build_policy(
 
 def _reference_bounds(net, cfg, nm_mapping, norm_stats, keys, input_map, r_columns,
                       umin, umax) -> _ReferenceBounds:
-    """`_ReferenceBounds` from `cfg.command_bounds`, every name checked first."""
-    problems = []
+    """`_ReferenceBounds` from `cfg.command_bounds`, every name checked first.
+
+    A named side is read from the R window if it is a reference column, else
+    from the D window: each at its present row (the key's deepest `past`)."""
+    readable = {"R": r_columns, "D": list(nm_mapping["D"])}
+    sources, problems = {}, []
     for column, pair in cfg.command_bounds.items():
         if column not in nm_mapping["U"]:
             problems.append(f"{column!r} is not a U column ({nm_mapping['U']})")
         for side in pair:
-            if isinstance(side, str) and side not in r_columns:
+            if not isinstance(side, str):
+                continue
+            key = next((k for k in ("R", "D") if side in readable[k] and k in keys), None)
+            if key is None:
                 problems.append(f"{column!r} is bounded by {side!r}, which is not a "
-                                f"reference column the objective reads ({r_columns})")
+                                f"reference or disturbance column the policy reads "
+                                f"(R {r_columns}, D {nm_mapping['D']})")
+                continue
+            sources[side] = (keys.index(key), input_map[key]["past"], len(readable[key]),
+                             readable[key].index(side))
     if problems:
         raise ValueError("command_bounds: " + "; ".join(problems) + ".")
-    r_key = keys.index("R") if "R" in keys else None
-    r_row = input_map["R"]["past"] if r_key is not None else 0
     return _ReferenceBounds(net, list(nm_mapping["U"]), cfg.command_bounds, umin, umax,
-                            norm_stats, r_columns, r_key, r_row)
+                            norm_stats, sources)
 
 
 # ── Policy description (for reportcard) ──────────────────────────
