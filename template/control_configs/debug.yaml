@@ -24,8 +24,8 @@ dev_reference_path: data/dev_reference.csv
 test_reference_path: data/test_reference.csv
 
 losses:
-  comfort_lower: {column: "Comfort Low [°C]",  target: "Zone Air Temperature [°C]", map: relu,  norm: 2}
-  comfort_upper: {column: "Comfort High [°C]", target: "Zone Air Temperature [°C]", map: nrelu, norm: 2}
+  comfort_lower: {column: "Comfort Low [°C]",  target: "Zone Air Temperature [°C]", map: relu,  norm: 1}
+  comfort_upper: {column: "Comfort High [°C]", target: "Zone Air Temperature [°C]", map: nrelu, norm: 1}
 gains: {comfort_lower: 1.0, comfort_upper: 1.0}
 
 epochs: 2
