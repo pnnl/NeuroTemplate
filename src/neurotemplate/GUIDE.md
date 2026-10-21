@@ -132,10 +132,15 @@ against that error. Fix the model, not the controller.
    residual (`reference_control` plus a `residual_delta` box) is an option for a
    small, trusted correction. It is not the way to make a policy behave: a box narrow
    enough to keep a wrong model safe is too narrow to reach what pays.
-4. **Read the run**, plots first. Does the action come before the expensive period,
+4. **Time before you train.** Each control run prints, before its first epoch, about
+   how long one epoch takes on this machine and what the configured epochs will cost.
+   On a fixed budget, size `epochs`, `train_pred_steps` and the previews from that
+   line, not after the run has eaten the time: a long preview and a day-long rollout
+   are what pay, and they are also what costs.
+5. **Read the run**, plots first. Does the action come before the expensive period,
    with the relief through it? Is a command pinned at a bound, jittering, or crossing
    another? Then the reportcard's objective balance.
-5. **Its blind twin.** Train the same config with the price gain at 0. The difference
+6. **Its blind twin.** Train the same config with the price gain at 0. The difference
    between the two is what the price bought; a cost number alone is mostly a fact
    about the test week.
 

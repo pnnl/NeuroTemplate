@@ -75,6 +75,27 @@ class ControlResults:
 # ── Train (policy only) ──────────────────────────────────────────
 
 
+def epoch_seconds(problem, train_loader, dev_loader) -> float:
+    """About how long one training epoch takes, from one timed step.
+
+    One forward and backward pass on a training batch, one forward pass on a
+    dev batch, each scaled by its loader's batch count. The gradients are
+    cleared afterwards, so training starts from the same state.
+    """
+    batch = next(iter(train_loader))
+    t0 = tic()
+    out = problem(dict(batch))
+    out[f"{batch['name']}_loss"].backward()
+    train_s = tic() - t0
+    problem.zero_grad()
+    dev_batch = next(iter(dev_loader))
+    t0 = tic()
+    with torch.no_grad():
+        problem(dict(dev_batch))
+    dev_s = tic() - t0
+    return train_s * len(train_loader) + dev_s * len(dev_loader)
+
+
 @beartype
 def train_policy(
     cfg,
@@ -106,6 +127,14 @@ def train_policy(
         eval_metric="mean_dev_loss",
     )
 
+    if cfg.verbose:
+        # A wall-clock budget is decided before training, not after it: one
+        # timed step says what the configuration costs on this machine.
+        per_epoch = epoch_seconds(problem, train_loader, dev_loader)
+        print(f"One epoch takes about {per_epoch:.1f} s here ({len(train_loader)} train, "
+              f"{len(dev_loader)} dev batches); {cfg.epochs} epochs: about "
+              f"{per_epoch * cfg.epochs / 60:.1f} min at most, sooner if patience "
+              f"({cfg.patience}) stops it.")
     t0 = tic()
     trainer.train()  # leaves the best weights loaded
     train_time_s = tic() - t0
