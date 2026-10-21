@@ -17,7 +17,7 @@ winner on the plant.
 ## What you provide
 
 The hooks in `control_user_defined.py`, scaffolded in
-[template/](template/) with a docstring each:
+[template/](../template/) with a docstring each:
 
 | Hook | Says | |
 |---|---|---|
@@ -61,7 +61,7 @@ and the reportcard scores bands and band changes against exactly those.
 a surrogate column nor `power`, such as a band, a schedule or a tariff, is
 read from reference files: one per plant file, row-aligned with it and
 carrying exactly its timestamps. The policy sees them; the surrogate never
-does. [template/make_references.py](template/make_references.py) writes
+does. [template/make_references.py](../template/make_references.py) writes
 such files, and it is example code to edit. Listing one plant file against
 several reference files trains on several draws.
 
@@ -124,6 +124,15 @@ already carry. Train on a real price record sliced at random offsets
 reference with the peak moved (see below) and check that the load moves
 with it, and compare against the same config with the cost gain at 0.
 
+## Train on several draws of the price
+
+A policy trained against one tariff learns that tariff's hours as much as
+its prices. Listing the plant file several times against several reference
+files (the tariff shifted earlier and later, its contrast changed) makes it
+read the price instead, and it then holds the band better on a tariff it has
+not seen. `make_references.py` writes draws from a price history; any
+transformation of your own reference file works the same way.
+
 ## Bounds: where each command may go
 
 By default each control commands anywhere inside `actuation_bounds`, the
@@ -185,7 +194,11 @@ against the rule or a previous run.
   move into.
 - **Objective notes**: legal configurations that cannot do what they were
   switched on for. Examples are a weight column the policy does not
-  preview, and power terms that are all peak.
+  preview, a band or price previewed for less than the gap between its
+  changes in the training data, a preview longer than the training rollout,
+  and power terms that are all peak.
+- **Epoch cost**: about how long one epoch takes on this machine and what
+  the configured epochs will cost, timed on one real step.
 
 **After the closed-loop evaluation on the test split:**
 
@@ -200,7 +213,7 @@ against the rule or a previous run.
   means the rule is wrong for this plant, or the optimizer is riding a
   surrogate error into the wall.
 
-[template/README.md](template/README.md) describes the run-by-run ladder
+[template/README.md](../template/README.md) describes the run-by-run ladder
 (the rule, the band terms only, the full objective, its price-blind twin),
 and how to read the plots.
 

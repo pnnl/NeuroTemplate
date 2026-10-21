@@ -142,10 +142,15 @@ against that error. Fix the model, not the controller.
    On a fixed budget, size `epochs`, `train_pred_steps` and the previews from that
    line, not after the run has eaten the time: a long preview and a day-long rollout
    are what pay, and they are also what costs.
-5. **Read the run**, plots first. Does the action come before the expensive period,
+5. **Train on several draws of the price.** List the plant file once per reference
+   file and give each a different tariff: the same one shifted a few hours each way,
+   or with its contrast changed. A policy trained on one tariff learns its hours; one
+   trained on several learns to read the price, and holds the band on a tariff it has
+   not seen.
+6. **Read the run**, plots first. Does the action come before the expensive period,
    with the relief through it? Is a command pinned at a bound, jittering, or crossing
    another? Then the reportcard's objective balance.
-6. **Its blind twin.** Train the same config with the price gain at 0. The difference
+7. **Its blind twin.** Train the same config with the price gain at 0. The difference
    between the two is what the price bought; a cost number alone is mostly a fact
    about the test week.
 
@@ -207,6 +212,8 @@ policy_window:                  # every column; a day of band and price ahead
   "Band Low":         {past: 0, future: 287}
   "Band High":        {past: 0, future: 287}
   "Tariff":           {past: 0, future: 287}
+train_data_path: [data/train.csv, data/train.csv, data/train.csv]   # one per price draw
+train_reference_path: [data/train_ref.csv, data/train_ref_later.csv, data/train_ref_earlier.csv]
 train_pred_steps: 288           # one rollout holds the action and its payoff
 losses:
   comfort_lower: {column: "Band Low",  target: "Zone Temp", map: relu,  norm: 1}

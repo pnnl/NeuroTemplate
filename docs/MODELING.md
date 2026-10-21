@@ -15,7 +15,7 @@ without the plant, such as weather or schedules, since a policy is later fed
 ## What you provide
 
 The hooks in `modeling_user_defined.py`, scaffolded in
-[template/](template/) with a docstring each:
+[template/](../template/) with a docstring each:
 
 | Hook | Says | |
 |---|---|---|
@@ -167,9 +167,9 @@ factor's weights. When the equipment behind a setpoint latches (a thermostat
 that starts a stage above the setpoint and, once running, keeps it running
 until the zone is some way below), set `"hysteresis": true` on the entry: the
 branch then carries its stage between steps and learns the two thresholds,
-reported in °C. To see whether your equipment latches, compare how often it
-runs at the same zone-minus-setpoint when it was running the step before and
-when it was not. Nothing is inferred from column names. A declaration changes the
+reported in °C. `nt data latch` shows whether your equipment latches: how
+often it runs at the same zone-minus-setpoint after a step running and after
+a step idle. Nothing is inferred from column names. A declaration changes the
 physics but not the shapes, so a wrong one shows only in the reportcard's
 branch lines.
 

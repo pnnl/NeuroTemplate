@@ -66,7 +66,7 @@ cp -r /path/to/neurotemplate/template/. my_app/
 
 This gives you both hook files, both config directories with every field
 annotated, and a smoke-run config per side.
-[template/README.md](template/README.md) is the fill-in order.
+[template/README.md](../template/README.md) is the fill-in order.
 
 Run `nt` from the application's root. The library finds
 `modeling_user_defined.py` and `control_user_defined.py` there, or wherever

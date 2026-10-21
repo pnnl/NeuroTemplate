@@ -56,12 +56,14 @@ show the calls.
 
 | Command | Purpose |
 |---|---|
+| `nt guide [step]` | the guided flow, one step at a time |
 | `nt model train` | train a surrogate |
 | `nt model optuna` | hyperparameter search, then retrain the best |
 | `nt model load` | score a trained surrogate on other data |
 | `nt model debug-heads` | inspect how the output heads behave |
 | `nt data heads` | before training: which output head a column wants |
 | `nt data decay` | before training: a state's free-decay time constant |
+| `nt data latch` | before training: whether the equipment behind a setpoint latches |
 | `nt control train` | train a policy against a trained surrogate |
 | `nt export model` | ship a surrogate |
 | `nt export policy` | ship a policy |

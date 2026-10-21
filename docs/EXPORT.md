@@ -80,7 +80,7 @@ cmake -S . -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build --target o
 ```
 
 Then put `build/onnx2c` on PATH. The pin lives in
-[export/ccode.py](src/neurotemplate/export/ccode.py) (`ONNX2C_COMMIT`).
+[export/ccode.py](../src/neurotemplate/export/ccode.py) (`ONNX2C_COMMIT`).
 
 ## What the package holds
 
@@ -157,12 +157,12 @@ runner (C) or direct use from torch (torch).
 `neurotemplate.export.policy.export_policy` take the objects
 `load_trained_dynamics` and `load_trained_policy` return, with the same
 options as the command line (`graph_format`, `exporter`, `onnx2c`, ...).
-[export/cli.py](src/neurotemplate/export/cli.py) shows the calls.
+[export/cli.py](../src/neurotemplate/export/cli.py) shows the calls.
 
 ## Extending the library
 
 - **The operator list is a contract.** `ALLOWED_OPS` in
-  [export/trace.py](src/neurotemplate/export/trace.py) lists every ONNX
+  [export/trace.py](../src/neurotemplate/export/trace.py) lists every ONNX
   operator the template's models trace to, and an export using any other
   fails. A new entry is a new requirement on every recipient's runtime, and
   for C, onnx2c has to implement it, along with any casts it brings. That is
