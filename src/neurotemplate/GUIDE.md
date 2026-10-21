@@ -58,19 +58,19 @@ Every key below is in MODELING.md ("Blocks", "Declaring what a column is").
    - `linear` for a delivered power or irradiance.
    - `ambient` for the outdoor temperature the zone conducts to.
 3. **Meters the objective prices** go in their own block (`model: mlp`, `reads` the
-   zone). For a meter to respond to the actuator, it must see the actuator. A U
-   column that no block claims is shared, and a declared `demand` reaches every
-   block that sees it. So list the setpoint the meter draws from in no block's `U`,
-   declare it in the zone block's `inputs`, and claim every other actuator in the
-   block it drives (a heating setpoint in the zone block's `U`): the meter then sees
-   the same demand the zone does, and nothing it does not draw from. A meter that
-   sees another actuator learns the data's correlations, such as "heating on, so
-   cooling off", and the policy exploits them, here by running the heating to make
-   the modelled cooling power fall. A meter cannot
-   read below zero, so give it a head that cannot either
-   (`BoundedHead(project_physical_to_norm(0.0, stats), float("inf"))` in
-   `data_head_config`): a regression head that dips negative tells the cost term
-   that running the equipment earns money.
+   zone).
+   - A meter responds to an actuator only if it sees it. A U column no block claims
+     is shared, and a declared `demand` reaches every block that sees it. So leave
+     the setpoint the meter draws from out of every block's `U`, and declare it in
+     the zone block's `inputs`.
+   - Claim every other actuator in the block it drives (a heating setpoint in the
+     zone block's `U`). A meter that sees an actuator it does not draw from learns
+     the data's correlations ("heating on, so cooling off"), and the policy exploits
+     them: it runs the heating to make the modelled cooling power fall.
+   - A meter cannot read below zero, so give it a head that cannot either:
+     `BoundedHead(project_physical_to_norm(0.0, stats), float("inf"))` in
+     `data_head_config`. A regression head that dips negative tells the cost term
+     that running the equipment earns money.
 4. **When the actuator's effect depends on conditions** (equipment that delivers
    more on a cool night than on a hot afternoon), name those columns in the demand
    entry's `modulated_by`. **When the equipment latches** (it starts above the
