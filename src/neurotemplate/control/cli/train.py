@@ -15,6 +15,7 @@ import sys
 from neurotemplate._typing import beartype
 
 from neurotemplate.common.config import CONTROL_CONFIG_DIR, load_config_from_cli
+from neurotemplate.common.tracking import artifact_file
 from neurotemplate.control.config import ControlConfig
 from neurotemplate.control.train import train_control
 
@@ -33,6 +34,7 @@ def main() -> None:
           f"{run.results.comfort_violation_rate * 100:.2f}%")
     print(f"Mean |ΔU| (all U columns, physical units): {run.results.mean_abs_du:.4g}")
     print(f"Finished DPC run: {run.run_id}")
+    print(f"Reportcard: {artifact_file(run.run_id, 'control_reportcard.md')}")
 
 
 if __name__ == "__main__":

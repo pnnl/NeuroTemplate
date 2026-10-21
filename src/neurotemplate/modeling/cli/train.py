@@ -16,6 +16,7 @@ from neurotemplate._typing import beartype
 
 from neurotemplate.common.config import load_config_from_cli, MODEL_CONFIG_DIR
 from neurotemplate.common.metrics import ChannelMetrics
+from neurotemplate.common.tracking import artifact_file
 from neurotemplate.modeling.config import ModelingConfig
 from neurotemplate.modeling.train import train_model
 
@@ -31,6 +32,7 @@ def print_finished(run_id: str, metrics: list[ChannelMetrics]) -> None:
     width = max(len(m.name) for m in metrics)
     for m in metrics:
         print(f"  test RMSE  {m.name:<{width}s}  {m.rmse:.4g}")
+    print(f"Reportcard: {artifact_file(run_id, 'reportcard.md')}")
     print("MLflow UI:  uv run mlflow ui")
     print(f"Load model: uv run nt model load --run_id {run_id} --data <test csv>")
 

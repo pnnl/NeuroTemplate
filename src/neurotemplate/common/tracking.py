@@ -101,6 +101,18 @@ def tracked_run(
     logger.clean_up()
 
 
+def artifact_file(run_id: str, name: str) -> Path:
+    """Where a finished run's artifact `name` is on disk, for a closing summary.
+
+    Training writes the reportcard in a scratch `savedir` that the run removes
+    once it is logged, so the artifact directory is the one place it stays.
+    """
+    import mlflow
+
+    uri = mlflow.get_run(run_id).info.artifact_uri
+    return Path(uri.removeprefix("file://")) / name
+
+
 #: The one checkpoint a run carries: the trained Problem's state_dict.
 CHECKPOINT = "best_model_state_dict.pth"
 
