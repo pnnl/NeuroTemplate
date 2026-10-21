@@ -6,6 +6,7 @@
 !/CONTROL.md
 !/EXPORT.md
 !/template/README.md
+!/src/neurotemplate/GUIDE.md
 
 # Ignore configuration files
 *.yaml
