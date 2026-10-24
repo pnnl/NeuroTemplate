@@ -668,16 +668,38 @@ class RCBlock(nn.Module):
         return mass
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # Under vmap the batch dimension is gone and state cannot be stored,
+        # so every call is a cold one. Same convention as GRUBlock.
+        if x.ndim == 1:
+            return self.step(x, None, None)[0]
+        increment, self._mass, self._stage = self.step(x, self._mass, self._stage)
+        return increment
+
+    def layout(self) -> tuple:
+        """Everything `step` reads that is not a tensor: two blocks with the
+        same layout and parameter shapes compute the same function of their
+        own parameters, so `BlockStack` can run them as one batched call."""
+        return (self.in_features, self.ny, self.steps_per_hour, self.n_latched,
+                tuple((s.start, s.stop) for s in self._y_steps),
+                (self._u_last.start, self._u_last.stop),
+                (self._d_last.start, self._d_last.stop),
+                self._ambient_pos, tuple(self._linear_pos),
+                tuple(self._saturating_pos), tuple(map(tuple, self._context_pos)),
+                tuple(t.sign for t in self.linear),
+                tuple((type(t), t.sign, t.modulation is None) for t in self.saturating),
+                self.gain is None)
+
+    def step(self, x: torch.Tensor, mass: Optional[torch.Tensor],
+             stage: Optional[torch.Tensor]
+             ) -> tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
+        """`(increment, mass, stage)` after one step, from the state carried
+        in; `mass` None is a cold call that seeds it from the window. Pure:
+        `forward` is what stores the state."""
         a_ambient, a_zone_mass, a_mass_zone = self.rates()
 
         zone = x[..., self._y_steps[-1]]
         drive = torch.cat([x[..., self._u_last], x[..., self._d_last]], dim=-1)
 
-        # Under vmap the batch dimension is gone and state cannot be stored,
-        # so every call is a cold one. Same convention as GRUBlock.
-        batched = x.ndim > 1
-        mass = self._mass if batched else None
-        stage = self._stage if batched else None
         if mass is None:
             mass = self._seed_mass(x, a_mass_zone)
             stage = None
@@ -690,10 +712,7 @@ class RCBlock(nn.Module):
         heat, stage = self._heat_input(drive, headroom=1 - a_zone_mass - a_ambient,
                                        stage=stage)
         increment = a_zone_mass * (mass - zone) + conduction + heat
-        if batched:
-            self._mass = mass + a_mass_zone * (zone - mass)
-            self._stage = stage
-        return increment
+        return increment, mass + a_mass_zone * (zone - mass), stage
 
     @staticmethod
     def _column(drive: torch.Tensor, pos: int) -> torch.Tensor:
@@ -785,3 +804,133 @@ class RCBlock(nn.Module):
             },
             "forcing": forcing,
         }
+
+
+# ── Running same-shaped blocks as one call ───────────────────────
+
+def rc_groups(modules: list[nn.Module]) -> list[list[int]]:
+    """Positions of the `RCBlock`s that can run as one batched call: two or
+    more with the same `layout` and the same tensor shapes. A building's
+    per-zone blocks declared from one template land in one group."""
+    by_key: dict[tuple, list[int]] = {}
+    for i, module in enumerate(modules):
+        if isinstance(module, RCBlock):
+            shapes = tuple((name, tuple(t.shape)) for name, t in _tensors(module).items())
+            by_key.setdefault((module.layout(), shapes), []).append(i)
+    return [group for group in by_key.values() if len(group) > 1]
+
+
+def _tensors(module: nn.Module) -> dict[str, torch.Tensor]:
+    """Every parameter and buffer, persistent or not, by name."""
+    return {**dict(module.named_parameters()), **dict(module.named_buffers())}
+
+
+class _Step(nn.Module):
+    """`block.step` as a module's forward, so `functional_call` can run it
+    against another block's tensors."""
+
+    def __init__(self, block: RCBlock):
+        super().__init__()
+        self.block = block
+
+    def forward(self, x, mass, stage):
+        return self.block.step(x, mass, stage)
+
+
+class RCGroup:
+    """One step of several same-layout `RCBlock`s as a single call.
+
+    Their parameters and buffers are stacked on a new leading axis and
+    `vmap` runs `RCBlock.step` once over it, so a building of N zones costs
+    the ops of one zone rather than N times them. The blocks still own
+    their parameters and their state: each block is handed its own mass
+    back, so `describe`, the checkpoint, the reset hook and the exporter's
+    state lifting see N ordinary blocks.
+
+    The stack is built on a rollout's cold first call and reused for its
+    warm steps, where the parameters cannot change, so gradients from every
+    step flow back through one stack. A warm call also rebuilds it if the
+    grad mode or any parameter's version (an optimizer step, a
+    `load_state_dict`) differs from when it was built, so it can never read
+    stale weights or a stack without a graph. `Parameter` objects survive
+    `.to` and `load_state_dict`, so the list checked is fixed; buffers are
+    constant within a rollout.
+
+    A plain object, not a module: it holds the blocks without registering
+    them a second time. It checks itself on construction (`_check`), so a
+    `layout` that misses something `step` reads fails at build time rather
+    than training every zone on block 0's value of it.
+    """
+
+    def __init__(self, blocks: list[RCBlock]):
+        self.blocks = blocks
+        self._step = _Step(blocks[0])
+        self._names = list(_tensors(blocks[0]))
+        self._params = [p for b in blocks for p in b.parameters()]
+        self._key: Optional[tuple] = None
+        self._stacked: dict[str, torch.Tensor] = {}
+        self._check()
+
+    def _check(self) -> None:
+        """One cold step, grouped and block by block, on a random window."""
+        width = self.blocks[0].in_features
+        device = next(iter(_tensors(self.blocks[0]).values())).device
+        x = torch.randn(2, len(self.blocks), width, device=device,
+                        generator=torch.Generator(device).manual_seed(0))
+        def cold():
+            for block in self.blocks:
+                block.set_rollout_state(None)
+
+        with torch.no_grad():
+            cold()
+            grouped = self(x).reshape(2, len(self.blocks), -1)
+            cold()
+            alone = torch.stack([b(x[:, i]) for i, b in enumerate(self.blocks)], dim=1)
+            cold()
+        if not torch.allclose(grouped, alone, rtol=1e-4, atol=1e-6):
+            raise RuntimeError(
+                "RCGroup: these blocks share a `layout()` but compute different "
+                "functions, so `RCBlock.step` reads something `layout()` leaves "
+                "out. Add it there.")
+
+    def __call__(self, x: torch.Tensor) -> torch.Tensor:
+        """`x` [batch, G, width] -> increments [batch, G * ny]."""
+        mass = self._stacked_state("_mass")
+        latched = self.blocks[0].n_latched > 0
+        stage = self._stacked_state("_stage") if latched else None
+        stacked = self._tensors_stacked(cold=mass is None)
+        state_dims = None if mass is None else 0
+
+        def call(tensors, x, mass, stage):
+            out = torch.func.functional_call(self._step, tensors, (x, mass, stage))
+            return out if latched else out[:2]
+
+        out = torch.func.vmap(
+            call, in_dims=(0, 1, state_dims, state_dims if latched else None),
+            out_dims=(1, 0, 0) if latched else (1, 0))(stacked, x, mass, stage)
+        for block, block_mass in zip(self.blocks, out[1].unbind(0)):
+            block._mass = block_mass
+        if latched:
+            for block, block_stage in zip(self.blocks, out[2].unbind(0)):
+                block._stage = block_stage
+        increment = out[0]
+        return increment.reshape(*increment.shape[:-2], -1)
+
+    def _tensors_stacked(self, cold: bool) -> dict[str, torch.Tensor]:
+        key = (torch.is_grad_enabled(), tuple(p._version for p in self._params))
+        if cold or key != self._key:
+            tensors = [_tensors(b) for b in self.blocks]
+            self._stacked = {f"block.{n}": torch.stack([ts[n] for ts in tensors])
+                             for n in self._names}
+            self._key = key
+        return self._stacked
+
+    def _stacked_state(self, name: str) -> Optional[torch.Tensor]:
+        """The blocks' carried `name`, stacked, or None when all are cold.
+        They are reset together, so a mix is a broken reset."""
+        states = [getattr(b, name) for b in self.blocks]
+        if all(s is None for s in states):
+            return None
+        if any(s is None for s in states):
+            raise RuntimeError(f"RCGroup: some blocks carry {name} and some are cold")
+        return torch.stack(states)

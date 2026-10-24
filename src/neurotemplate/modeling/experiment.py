@@ -12,7 +12,7 @@ import os
 import random
 from dataclasses import replace
 from datetime import datetime
-from typing import Optional
+from typing import Optional, Union
 
 import numpy as np
 import torch
@@ -46,7 +46,7 @@ def set_seeds(seed: int) -> int:
 
 
 @beartype
-def resolve_device(requested: Optional[str] = None) -> torch.device:
+def resolve_device(requested: Optional[Union[str, torch.device]] = None) -> torch.device:
     """
     Resolve the torch device to use, and make it torch's default device
     (`torch.set_default_device`) for the rest of the process: tensors the
@@ -64,8 +64,19 @@ def resolve_device(requested: Optional[str] = None) -> torch.device:
         device = torch.device("cuda")
     else:
         device = torch.device("cpu")
-    torch.set_default_device(device)
+    # CPU is torch's own default, and installing it anyway costs a Python
+    # hook on every torch call (~15% of a 2r2c training step); None also
+    # clears a device an earlier call set.
+    torch.set_default_device(None if device.type == "cpu" else device)
     return device
+
+
+def set_threads(threads: Optional[int]) -> None:
+    """Torch's CPU thread count for the rest of the process, or torch's own
+    choice when None. Process-wide, which is why each run sets it from its
+    own config rather than any library code deciding it."""
+    if threads is not None:
+        torch.set_num_threads(threads)
 
 
 # ── Build Trainer ────────────────────────────────────────────────

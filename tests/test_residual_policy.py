@@ -114,7 +114,8 @@ def test_a_heating_and_cooling_pair_recover_from_their_closed_sides():
     policy = _ResidualPolicy(
         net, lambda x: rule, ["heat", "cool"],
         umin=torch.tensor([0.0, 0.0]), umax=torch.tensor([50.0, 50.0]),
-        below=torch.tensor([0.0, 0.5]), above=torch.tensor([0.5, 0.0]))
+        below=torch.tensor([0.0, 0.5]), above=torch.tensor([0.5, 0.0]),
+        anchored=torch.tensor([True, True]))
     x = torch.randn(32, 4)
     optimizer = torch.optim.Adam(net.parameters(), lr=0.05)
 

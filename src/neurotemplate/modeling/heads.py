@@ -688,6 +688,26 @@ class HeadStack(nn.Module):
         self._slices = offsets
         self.raw_width = cursor
         self.n_channels = len(heads)
+        # A plain RegressionHead passes its raw output through (`activate`
+        # is a squeeze, `decode` is `activate`), so a stack of nothing else
+        # is the identity. The exact class: a subclass may activate.
+        self._all_identity = all(type(h) is RegressionHead for h in heads)
+
+        # Which channels take the residual, as one mask over the output, so
+        # the residual is a single `where` rather than a slice per channel.
+        # It lines raw positions up with state channels, which holds while
+        # every head is width 1 — all of them are today.
+        for name, h in zip(channel_names, heads):
+            if h.residual_compatible and h.width != 1:
+                raise ValueError(
+                    f"Residual on width>1 head not supported (channel "
+                    f"{name}, width={h.width})"
+                )
+        if any(h.residual_compatible for h in heads) and self.raw_width != self.n_channels:
+            raise ValueError("A residual needs every head width 1: raw positions "
+                             "must line up with the state channels.")
+        self.register_buffer("_residual", torch.tensor(
+            [h.residual_compatible for h in heads]), persistent=False)
 
     def z_for(self, z_raw: torch.Tensor, i: int) -> torch.Tensor:
         """Channel i's slice of the raw model output."""
@@ -711,12 +731,16 @@ class HeadStack(nn.Module):
         Heads without a `decode` override have `decode == activate`, so
         STE is a no-op regardless of the flag.
         """
+        if self._all_identity:
+            return z_raw
         outs = []
         for i in range(self.n_channels):
             z = self.z_for(z_raw, i)
             head = self.heads[i]
             y_soft = head.activate(z)
-            if head.use_ste:
+            # A head that keeps `Head.decode` snaps to nothing, so its
+            # straight-through combine would only add ops.
+            if head.use_ste and type(head).decode is not Head.decode:
                 outs.append(straight_through(y_soft, head.decode(z)))
             else:
                 outs.append(y_soft)
@@ -736,18 +760,7 @@ class HeadStack(nn.Module):
         Returns:
             z_raw with residual added on the residual-compatible channels.
         """
-        out = z_raw.clone()
-        for i, head in enumerate(self.heads):
-            if not head.residual_compatible:
-                continue
-            if head.width != 1:
-                raise ValueError(
-                    f"Residual on width>1 head not supported (channel "
-                    f"{self.channel_names[i]}, width={head.width})"
-                )
-            lo, hi = self._slices[i]
-            out[..., lo:hi] = out[..., lo:hi] + y_prev[..., i:i + 1]
-        return out
+        return torch.where(self._residual, z_raw + y_prev, z_raw)
 
     def loss(self, y_state: torch.Tensor, y_true: torch.Tensor) -> torch.Tensor:
         """

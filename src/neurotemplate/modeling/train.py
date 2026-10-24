@@ -25,7 +25,7 @@ from neurotemplate.common.run_summary import write_run_summary
 from neurotemplate.common.tracking import tracked_run
 from neurotemplate.hooks import MODELING_SNAPSHOT, load_modeling_hooks, snapshot_hooks
 from neurotemplate.modeling.config import ModelingConfig
-from neurotemplate.modeling.experiment import resolve_device, set_seeds
+from neurotemplate.modeling.experiment import resolve_device, set_seeds, set_threads
 from neurotemplate.modeling.pipeline import (
     TrainedModel, prepare_data, run_summary_metrics, train_and_evaluate,
 )
@@ -51,6 +51,7 @@ def train_model(cfg: ModelingConfig,
     cfg = deepcopy(cfg)
     cfg.validate()
     cfg.device = resolve_device(cfg.device)
+    set_threads(cfg.threads)
     cfg.seed = set_seeds(cfg.seed)
     hooks = load_modeling_hooks(cfg)
 

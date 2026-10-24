@@ -32,16 +32,18 @@ def load_frozen_dynamics(
     run_id: str,
     run_dir=None,
     weights=None,
+    device=None,
 ):
     """
-    Returns (dyn_sys, dyn_node, sysid_cfg, nm_mapping, norm_stats).
+    Returns (dyn_sys, dyn_node, sysid_cfg, nm_mapping, norm_stats), on
+    `device` (see `load_trained_dynamics`).
 
     dyn_sys  : the loaded SystemPreview (frozen, eval mode).
     dyn_node : its single inner Node — reused inside the closed-loop System.
     sysid_cfg: the sys-id run's Config (history_steps, model, device, ...).
     """
     dyn_sys, sysid_cfg, nm_mapping, norm_stats = load_trained_dynamics(
-        run_id=run_id, run_dir=run_dir, weights=weights,
+        run_id=run_id, run_dir=run_dir, weights=weights, device=device,
     )
 
     for p in dyn_sys.parameters():
@@ -58,7 +60,7 @@ def load_frozen_dynamics(
     return dyn_sys, dyn_node, sysid_cfg, nm_mapping, norm_stats
 
 
-def load_trained_policy(run_id: str, run_dir=None, sysid_run_dir=None):
+def load_trained_policy(run_id: str, run_dir=None, sysid_run_dir=None, device=None):
     """Rebuild a trained control run's policy and closed loop, weights loaded.
 
     Returns (policy_node, cl_system, cfg, sysid_cfg, nm_mapping, norm_stats).
@@ -67,7 +69,8 @@ def load_trained_policy(run_id: str, run_dir=None, sysid_run_dir=None):
     surrogate's, each overriding where MLflow says that run's artifacts are —
     for a run tree that has moved (a container, another machine). Without
     `sysid_run_dir` the surrogate is found through the `run_dir` the control
-    run logged.
+    run logged. `device` is as for `load_trained_dynamics`: this process's,
+    never the one the run logged.
 
     The closed loop is assembled exactly as `nt control train` assembled it —
     same builders, from the run's own logged config and the copy of the
@@ -81,10 +84,10 @@ def load_trained_policy(run_id: str, run_dir=None, sysid_run_dir=None):
     artifacts_dir = resolve_artifacts_dir(run_dir, run_id)
     cfg.user_hooks_path = run_hooks_path(artifacts_dir, CONTROL_SNAPSHOT)
     cfg.validate()
-    cfg.device = resolve_device(cfg.device)
+    cfg.device = resolve_device(device)
     _, dyn_node, sysid_cfg, nm_mapping, sysid_stats = load_frozen_dynamics(
         cfg.sysid_run_id, cfg.run_dir if sysid_run_dir is None else sysid_run_dir,
-        cfg.weights)
+        cfg.weights, device=cfg.device)
     norm_stats = extend_norm_stats(resolve_objective(cfg, nm_mapping), cfg,
                                    sysid_stats)
 

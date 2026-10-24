@@ -10,7 +10,7 @@ command line.
 import json
 from dataclasses import fields
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Union
 from urllib.parse import urlparse
 
 import mlflow
@@ -122,6 +122,7 @@ def load_trained_dynamics(
     run_id: str,
     run_dir: Optional[str] = None,
     weights: Optional[str] = None,
+    device: Optional[Union[str, torch.device]] = None,
 ):
     """
     Load a trained dynamics SystemPreview from an MLflow run.
@@ -133,14 +134,18 @@ def load_trained_dynamics(
     `weights` overrides the run's own `best_model_state_dict.pth`; it must be
     a checkpoint in the same format.
 
-    cfg.device is resolved here so the returned system is on a valid device,
+    `device` is where this process runs the model: `resolve_device`'s
+    choice when None, as for training. The device the run logged is where it
+    trained, which says nothing about this machine, so it is never read —
+    and resolving it would also reset torch's default device under a caller
+    that had already chosen one. cfg.device is set to the resolved device,
     and cfg.user_hooks_path points at the hooks file the run trained with.
     """
     artifacts_dir = resolve_artifacts_dir(run_dir, run_id)
     cfg = config_from_run_params(run_id)
     cfg.user_hooks_path = run_hooks_path(artifacts_dir, MODELING_SNAPSHOT)
     cfg.validate()
-    cfg.device = resolve_device(cfg.device)
+    cfg.device = resolve_device(device)
 
     norm_stats = _load_json(artifacts_dir / "norm_stats.json")
     nm_mapping = _load_json(artifacts_dir / "nm_mapping.json")

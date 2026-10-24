@@ -32,7 +32,7 @@ from neurotemplate.common.tracking import tracked_run
 from neurotemplate.hooks import MODELING_SNAPSHOT, load_modeling_hooks, snapshot_hooks
 from neurotemplate.modeling.cli.train import print_finished
 from neurotemplate.modeling.config import ModelingConfig
-from neurotemplate.modeling.experiment import resolve_device, set_seeds, train_with_curriculum
+from neurotemplate.modeling.experiment import resolve_device, set_seeds, set_threads, train_with_curriculum
 from neurotemplate.modeling.heads import HeadStack
 from neurotemplate.modeling.pipeline import (
     prepare_data, run_summary_metrics, train_and_evaluate,
@@ -113,6 +113,7 @@ def main() -> None:
         raise ValueError("n_trials must be > 0")
 
     cfg.device = resolve_device(cfg.device)
+    set_threads(cfg.threads)
     cfg.seed = set_seeds(cfg.seed)
     hooks = load_modeling_hooks(cfg)
 

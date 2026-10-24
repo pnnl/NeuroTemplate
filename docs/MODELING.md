@@ -254,6 +254,12 @@ dyn_sys, cfg, nm_mapping, norm_stats = load_trained_dynamics(run.run_id)
 `load_config` is `--config` plus `--set`. Scoring always uses the run's own
 normalization, never statistics fitted to the new data.
 
+A training call sets two process-wide torch settings from its config, as the
+command line does: the CPU thread count (`threads`, 1 unless set; `null`
+leaves torch's own) and, off the CPU, the default device. A reload runs on
+this machine, not wherever the run trained: `load_trained_dynamics(run_id,
+device="cuda")`, or no `device` for CUDA if present and the CPU otherwise.
+
 A script that retrains on a schedule, or across several sites, should know
 three things:
 

@@ -232,6 +232,10 @@ policy_node, cl_system, cfg, sysid_cfg, nm_mapping, norm_stats = (
     load_trained_policy(run.run_id))
 ```
 
+As in modeling, `train_control` sets torch's thread count from `threads` and
+the default device for the process, and `load_trained_policy` takes the same
+`device=` as `load_trained_dynamics`: this machine's, never the run's.
+
 To evaluate a trained policy against another reference without retraining,
 for example the same week with the price peak moved:
 

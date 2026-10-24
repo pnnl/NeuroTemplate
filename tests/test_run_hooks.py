@@ -68,7 +68,7 @@ def test_editing_the_hooks_file_after_training_changes_nothing(tmp_path, monkeyp
         if name.startswith("site_control"):
             del sys.modules[name]
 
-    monkeypatch.setattr(control_load, "load_frozen_dynamics", lambda *args: (
+    monkeypatch.setattr(control_load, "load_frozen_dynamics", lambda *args, **kwargs: (
         s["dyn_sys"], s["dyn_node"], sysid_cfg, nm, make_norm_stats(s["plant"])))
     _, reloaded, *_ = control_load.load_trained_policy(run_id)
     with torch.no_grad():

@@ -78,8 +78,9 @@ def get_policy_args(argv) -> argparse.Namespace:
 
 def model_main() -> None:
     args = get_model_args(sys.argv[1:])
+    # Export and verification run on the CPU, whatever this machine has.
     dyn_sys, cfg, nm_mapping, norm_stats = load_trained_dynamics(
-        args.run_id, run_dir=args.run_dir)
+        args.run_id, run_dir=args.run_dir, device="cpu")
     frame, timestep_seconds = get_data(args.data)
 
     result = export_model(
@@ -108,7 +109,7 @@ def model_main() -> None:
 def policy_main() -> None:
     args = get_policy_args(sys.argv[1:])
     policy_node, cl_system, cfg, sysid_cfg, nm_mapping, norm_stats = (
-        load_trained_policy(args.run_id, run_dir=args.run_dir))
+        load_trained_policy(args.run_id, run_dir=args.run_dir, device="cpu"))
     _, _, test_dfs = load_control_splits(cfg, nm_mapping, norm_stats)
 
     result = export_policy(

@@ -186,6 +186,9 @@ gains: {comfort_lower: 1.0, comfort_upper: 1.0, du: 1.0}
 # before believing a difference between two configs, train each on a few.
 # seed: -1
 # device: null
+# Torch CPU threads; null keeps torch's one per core. One was fastest for
+# every model measured: the tensors are too small to share out.
+# threads: 1
 # verbose: true
 
 # ── LOGGING ──────────────────────────────────────────────────────

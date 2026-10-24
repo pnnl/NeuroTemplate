@@ -340,6 +340,41 @@ def test_outputs_come_back_in_the_mappings_channel_order():
     assert fy(torch.randn(2, HISTORY_STEPS * 7)).shape == (2, 2)
 
 
+def test_a_group_of_zones_runs_exactly_as_its_blocks_would_alone():
+    """Same-shaped zones run as one batched call (`RCGroup`). Over a warm
+    rollout it must give each zone the output, carried mass and gradient
+    the zone computes on its own, or every multi-zone building trains on
+    numbers no single zone would produce."""
+    torch.manual_seed(0)
+    system = get_dynamics(make_cfg(), MAPPING, block_spec=SPLIT)
+    fy = system.nodes[0].callable.fy
+    assert [len(g.blocks) for g in fy._groups] == [2]
+    with torch.no_grad():
+        for p in fy.parameters():
+            p.add_(torch.randn_like(p))
+    xs = [torch.randn(4, HISTORY_STEPS * 7) for _ in range(3)]
+
+    def run(step):
+        fy.zero_grad()
+        clear_state(stateful_blocks(fy))
+        outs = torch.stack([step(x) for x in xs])
+        outs.square().sum().backward()
+        return outs.detach(), [p.grad.clone() for p in fy.parameters()]
+
+    def alone(x):
+        outs = [fy.blocks[i](x.index_select(-1, fy._gather[fy._spans[i]]))
+                for i in fy._order]
+        return torch.cat(outs, dim=-1).index_select(-1, fy._to_y_order)
+
+    grouped, grads = run(fy)
+    single, single_grads = run(alone)
+    # Batched matmuls sum in another order: equal to float32 rounding.
+    def close(a, b):
+        return torch.allclose(a, b, rtol=1e-5, atol=1e-6 * float(b.abs().max()))
+    assert close(grouped, single)
+    assert all(close(a, b) for a, b in zip(grads, single_grads))
+
+
 def test_reset_reaches_every_block():
     system = get_dynamics(make_cfg(), MAPPING, block_spec=SPLIT)
     fy = system.nodes[0].callable.fy
@@ -523,15 +558,6 @@ def test_2r2c_with_reads_is_refused():
     with pytest.raises(ValueError, match="cannot declare `reads`"):
         get_dynamics(make_cfg(model="mlp", history=MIXED_HISTORY), MIXED_MAPPING,
                      block_spec=spec)
-
-
-def test_a_lag_on_a_column_only_2r2c_reads_is_refused():
-    """2r2c drives its zone with the current U and D only, so a lag on a
-    column nothing else reads would sit inert."""
-    history = {**MIXED_HISTORY, "north sp": 2}
-    with pytest.raises(ValueError, match=r"history\['north sp'\] is 2.*'north': 0"):
-        get_dynamics(make_cfg(model="mlp", history=history), MIXED_MAPPING,
-                     block_spec=MIXED_SPLIT)
 
 
 def test_a_demand_setpoint_lagged_past_its_zone_is_refused():

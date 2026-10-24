@@ -109,6 +109,9 @@ history:
 # ensemble_seeds: 1
 # cpu | cuda | mps; unset auto-detects.
 # device: null
+# Torch CPU threads; null keeps torch's one per core. One was fastest for
+# every model measured: the tensors are too small to share out.
+# threads: 1
 # verbose: true
 
 # ── LOGGING ──────────────────────────────────────────────────────

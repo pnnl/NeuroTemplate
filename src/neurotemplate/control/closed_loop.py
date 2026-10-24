@@ -31,13 +31,14 @@ from neurotemplate.control.losses import (
 )
 from neurotemplate.control.scenarios import horizons, scored_series, scored_steps
 from neurotemplate.modeling.dynamics import make_reset_init
+from neurotemplate.modeling.rollout import WindowedSystem
 from neurotemplate.hooks import load_control_hooks
 
 from neurotemplate._typing import beartype
 
 
-class ForecastSystem(SystemPreview):
-    """A SystemPreview whose forecast keys are trimmed to the rollout after it runs.
+class ForecastSystem(WindowedSystem):
+    """A WindowedSystem whose forecast keys are trimmed to the rollout after it runs.
 
     D, t and R arrive `forecast_tail` rows longer than the rollout so the policy's
     preview reads real rows to the end (see `scenarios`). Every loss, metric and plot

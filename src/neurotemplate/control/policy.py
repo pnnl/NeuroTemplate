@@ -203,7 +203,7 @@ class _ResidualPolicy(nn.Module):
     def __init__(self, base: nn.Module, reference: nn.Module,
                  u_columns: list[str],
                  umin: torch.Tensor, umax: torch.Tensor,
-                 below: torch.Tensor, above: torch.Tensor):
+                 below: torch.Tensor, above: torch.Tensor, anchored: torch.Tensor):
         super().__init__()
         self.base = base
         self.reference = reference
@@ -212,20 +212,20 @@ class _ResidualPolicy(nn.Module):
         self.register_buffer("umax", umax)
         self.register_buffer("below", below)
         self.register_buffer("above", above)
+        # Which columns the rule anchors, [nu] bool: `_ReferenceRule`
+        # refuses a rule that returns any other set.
+        self.register_buffer("anchored", anchored, persistent=False)
 
     def forward(self, *args: torch.Tensor) -> torch.Tensor:
         raw = self.base(*args)
         rule = self.reference(*args)
-        columns = []
-        for j, column in enumerate(self.u_columns):
-            if column in rule:
-                delta = _clamp_straight_through(raw[:, j], -self.below[j],
-                                                self.above[j])
-                columns.append(torch.clamp(rule[column] + delta,
-                                           self.umin[j], self.umax[j]))
-            else:
-                columns.append(raw[:, j])
-        return torch.stack(columns, dim=-1)
+        # Every column at once: a free column carries its raw output as a
+        # stand-in rule, and the `where` hands it the raw output untouched.
+        rule_now = torch.stack([rule[c] if c in rule else raw[:, j]
+                                for j, c in enumerate(self.u_columns)], dim=-1)
+        delta = _clamp_straight_through(raw, -self.below, self.above)
+        commanded = torch.clamp(rule_now + delta, self.umin, self.umax)
+        return torch.where(self.anchored, commanded, raw)
 
 
 def _bound_side(side) -> tuple[Optional[str], float]:
@@ -378,9 +378,24 @@ def _key_gather(key: str, spans: list[tuple[int, int]]) -> list[int]:
     return windows.window_gather((len(spans),), (rows,), (keep,))
 
 
+def _bounds_follow_device(net: nn.Module) -> nn.Module:
+    """Re-register `MLP_bounds`' `min`/`max` as buffers.
+
+    Neuromancer keeps them as plain attributes, which `.to(device)` never
+    moves, so a policy on MPS or CUDA squashed against CPU bounds and
+    failed on its first call. Non-persistent: they are rebuilt from the
+    config on every load, so the checkpoint keys stay as they were.
+    """
+    for name in ("min", "max"):
+        value = getattr(net, name)
+        delattr(net, name)
+        net.register_buffer(name, value, persistent=False)
+    return net
+
+
 def _build_mlp_net(cfg, insize: int, nu: int, umin, umax) -> nn.Module:
     """Bounded MLP with `policy_layers` hidden layers of equal width."""
-    return blocks.MLP_bounds(
+    return _bounds_follow_device(blocks.MLP_bounds(
         insize=insize,
         outsize=nu,
         bias=True,
@@ -390,7 +405,7 @@ def _build_mlp_net(cfg, insize: int, nu: int, umin, umax) -> nn.Module:
         min=umin,
         max=umax,
         method=cfg.policy_bound_method,
-    )
+    ))
 
 
 def _build_linear_net(cfg, insize: int, nu: int, umin, umax) -> nn.Module:
@@ -399,7 +414,7 @@ def _build_linear_net(cfg, insize: int, nu: int, umin, umax) -> nn.Module:
     hsizes=[] makes blocks.MLP build a single linear_map(insize, nu) with an
     Identity nonlinearity, so this is u = sat(K @ x + b) — no hidden layer.
     """
-    return blocks.MLP_bounds(
+    return _bounds_follow_device(blocks.MLP_bounds(
         insize=insize,
         outsize=nu,
         bias=True,
@@ -409,7 +424,7 @@ def _build_linear_net(cfg, insize: int, nu: int, umin, umax) -> nn.Module:
         min=umin,
         max=umax,
         method=cfg.policy_bound_method,
-    )
+    ))
 
 
 policy_catalog = {
@@ -567,7 +582,7 @@ def build_policy(
 
     if reference is not None:
         net = _ResidualPolicy(net, reference, list(u_cols), umin, umax,
-                              below, above).to(device)
+                              below, above, anchored).to(device)
     if cfg.command_bounds:
         net = _reference_bounds(net, cfg, nm_mapping, norm_stats, keys, input_map,
                                 r_columns, umin, umax).to(device)
@@ -651,8 +666,8 @@ def describe_policy(
     # is ±Δ on an anchored column, so the limits the commands actually live in
     # are the clamp's.
     u_cols = nm_mapping["U"]
-    stretch = torch.tensor([norm_stats[c]["stretch"] for c in u_cols])
-    shift = torch.tensor([norm_stats[c]["shift"] for c in u_cols])
+    stretch = torch.tensor([norm_stats[c]["stretch"] for c in u_cols], device="cpu")
+    shift = torch.tensor([norm_stats[c]["shift"] for c in u_cols], device="cpu")
     lo, hi = (raw.umin, raw.umax) if residual else (net.min, net.max)
     umin_phys = (lo.detach().cpu() * stretch + shift).tolist()
     umax_phys = (hi.detach().cpu() * stretch + shift).tolist()

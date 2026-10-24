@@ -30,7 +30,7 @@ import mlflow
 from neurotemplate.common.run_summary import write_run_summary
 from neurotemplate.common.tracking import tracked_run
 from neurotemplate.modeling.dynamics import describe_dynamics
-from neurotemplate.modeling.experiment import resolve_device, set_seeds
+from neurotemplate.modeling.experiment import resolve_device, set_seeds, set_threads
 
 from neurotemplate.control.config import ControlConfig
 from neurotemplate.control.load import load_frozen_dynamics
@@ -87,6 +87,7 @@ def train_control(cfg: ControlConfig,
     cfg = deepcopy(cfg)
     cfg.validate()
     cfg.device = resolve_device(cfg.device)
+    set_threads(cfg.threads)
     cfg.seed = set_seeds(cfg.seed)
 
     # Point MLflow at the sys-id tracking store *before* loading the run.
@@ -98,7 +99,8 @@ def train_control(cfg: ControlConfig,
         print(f"Loading frozen surrogate (run {cfg.sysid_run_id})...")
 
     dyn_sys, dyn_node, sysid_cfg, nm_mapping, sysid_stats = (
-        load_frozen_dynamics(cfg.sysid_run_id, cfg.run_dir, cfg.weights)
+        load_frozen_dynamics(cfg.sysid_run_id, cfg.run_dir, cfg.weights,
+                             device=cfg.device)
     )
     surrogate_arch = describe_dynamics(dyn_sys, sysid_cfg)
     # The objective's names resolve against the surrogate's columns, so this

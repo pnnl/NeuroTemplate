@@ -62,7 +62,8 @@ from neurotemplate.modeling.heads import HeadStack
 from neurotemplate.modeling.prestack import PreStack
 from neurotemplate.modeling.bounded import bounded_parameters
 from neurotemplate.modeling.gru import GRUBlock
-from neurotemplate.modeling.rc import TAU_KEYS, RCBlock, time_constant_boxes
+from neurotemplate.modeling.rollout import WindowedSystem
+from neurotemplate.modeling.rc import TAU_KEYS, RCBlock, RCGroup, rc_groups, time_constant_boxes
 from neurotemplate.modeling.blocks import Block, build_blocks
 
 
@@ -259,26 +260,49 @@ class BlockStack(nn.Module):
         self.register_buffer(
             "_gather", torch.tensor(gathers, dtype=torch.long), persistent=False)
 
-        # Sub-block outputs concatenate in block order; this puts them back
-        # in the order nm_mapping["Y"] lists, which is the order the loss and
-        # the autoregressive feedback both assume.
-        block_order = [i for block in blocks for i in block.y_idx]
+        # Same-shaped 2r2c blocks run as one batched call each (`RCGroup`);
+        # the rest one by one. Groups run first, then the solo blocks, and
+        # `_order` is that execution order, block by block.
+        groups = rc_groups(list(self.blocks))
+        grouped = {i for group in groups for i in group}
+        self._groups = [RCGroup([self.blocks[i] for i in group]) for group in groups]
+        self._solo = [i for i in range(len(blocks)) if i not in grouped]
+        self._order = [i for group in groups for i in group] + self._solo
+        for k, group in enumerate(groups):
+            self.register_buffer(
+                f"_group_gather_{k}",
+                torch.cat([self._gather[self._spans[i]] for i in group]),
+                persistent=False)
+
+        # Sub-block outputs concatenate in execution order; this puts them
+        # back in the order nm_mapping["Y"] lists, which is the order the
+        # loss and the autoregressive feedback both assume.
+        exec_order = [i for b in self._order for i in blocks[b].y_idx]
         self.register_buffer(
             "_to_y_order",
             torch.tensor(
-                [block_order.index(i) for i in range(ny)], dtype=torch.long
+                [exec_order.index(i) for i in range(ny)], dtype=torch.long
             ),
             persistent=False,
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         dim = x.ndim - 1                    # the feature axis, batched or not
-        out = torch.cat(
-            [block(x.index_select(dim, self._gather[span]))
-             for block, span in zip(self.blocks, self._spans)],
-            dim=-1,
-        )
-        return out.index_select(dim, self._to_y_order)
+        # Under vmap (the sampled gradient penalty) there is no batch for a
+        # group to share, and a trace for export cannot run `vmap` over
+        # swapped parameters: in both, every block runs alone. Same
+        # function, same per-block state.
+        if dim == 0 or torch.jit.is_tracing() or torch.compiler.is_compiling():
+            outs = [self.blocks[i](x.index_select(dim, self._gather[self._spans[i]]))
+                    for i in self._order]
+        else:
+            outs = []
+            for k, group in enumerate(self._groups):
+                xg = x.index_select(dim, getattr(self, f"_group_gather_{k}"))
+                outs.append(group(xg.reshape(*x.shape[:-1], len(group.blocks), -1)))
+            outs += [self.blocks[i](x.index_select(dim, self._gather[self._spans[i]]))
+                     for i in self._solo]
+        return torch.cat(outs, dim=-1).index_select(dim, self._to_y_order)
 
 
 
@@ -990,7 +1014,7 @@ def get_dynamics(
         input_map=input_map,
     )
 
-    return SystemPreview(
+    return WindowedSystem(
         [node],
         name=cfg.model.upper() + " System",
         nstep_key="Y",               # rollout length from ground truth
