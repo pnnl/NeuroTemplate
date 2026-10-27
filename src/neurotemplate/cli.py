@@ -68,6 +68,9 @@ def main(argv: Optional[list[str]] = None) -> None:
     for package in ("tensorly", "neuromancer", "neuralop", "torch_harmonics"):
         warnings.filterwarnings("ignore", category=DeprecationWarning, module=package)
         warnings.filterwarnings("ignore", category=FutureWarning, module=package)
+    # Neuromancer hands its LR scheduler the loss tensor, and torch warns once per run.
+    warnings.filterwarnings("ignore", message="Converting a tensor with requires_grad",
+                            module="torch.optim.lr_scheduler")
 
     if not argv or argv[0] in ("-h", "--help"):
         print(_help_text())
