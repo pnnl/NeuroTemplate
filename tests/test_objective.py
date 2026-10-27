@@ -1,9 +1,6 @@
 """
-Tests for the objective diagnostics — term balance and term shape.
-
-These are the two answers to "the weight is wrong": mis-scaled, which a
-balance report catches, and mis-shaped, which only a sweep catches because no
-weight fixes it.
+Tests for the objective diagnostics: term balance, and where the power
+signal's clamp cuts the gradient.
 """
 
 import pytest
@@ -14,16 +11,12 @@ from neurotemplate.control.closed_loop import (
 )
 from neurotemplate.control.objective import (
     DOMINANCE_FACTOR,
-    ObjectiveBalance,
-    format_objective_report,
-    is_inert,
     objective_balance,
     power_diagnostics,
     run_objective_pass,
-    term_shapes,
 )
 from neurotemplate.control.policy import build_policy
-from neurotemplate.control.scenarios import build_loaders, horizons
+from neurotemplate.control.scenarios import build_loaders
 from control_fixtures import BAND_LOSSES, POWER_LOSSES, full_setup
 
 
@@ -77,22 +70,6 @@ def test_a_lopsided_weight_is_flagged_as_dominant():
     assert dominant[0].ratio_to_rest > DOMINANCE_FACTOR
 
 
-# ── term_shapes ──────────────────────────────────────────────────
-
-
-def _shapes(term_fn, n_grid=9):
-    problem, _, batch, s = _problem()
-    policy = problem.nodes[0].nodes[0]          # the closed loop's policy node
-    _, _, hmax = horizons(s["cfg"], s["sysid_cfg"])
-    nm, ns = s["nm"], s["norm_stats"]
-    lo = torch.tensor([(ns[c]["min"] - ns[c]["shift"]) / ns[c]["stretch"]
-                       for c in nm["U"]])
-    hi = torch.tensor([(ns[c]["max"] - ns[c]["shift"]) / ns[c]["stretch"]
-                       for c in nm["U"]])
-    return term_shapes(term_fn, problem, policy, batch, hmax, nm["U"], lo, hi, ns,
-                       n_grid=n_grid)
-
-
 # ── power_diagnostics ────────────────────────────────────────────
 
 
@@ -141,29 +118,3 @@ def test_a_clamped_zero_is_dead_and_a_snapped_zero_is_not():
     assert clamped.frac_zero == snapped.frac_zero == 0.5
     assert clamped.frac_dead == 0.5, "the clamp cut the chain at every zero"
     assert snapped.frac_dead == 0.0, "the straight-through path still carries"
-
-
-def test_a_term_reading_nothing_is_inert():
-    """Flat in U *and* no gradient into the rollout — the real alarm."""
-    def constant(yn, u, d):
-        return torch.ones(yn.shape[0], yn.shape[1])
-
-    (shape,) = _shapes(constant)
-    diag = _diag(constant)
-
-    assert not diag.reads_outputs
-    assert is_inert([shape], diag)
-    report = format_objective_report(ObjectiveBalance([], 0.0), [shape], diag)
-    assert "WARNING" in report and "cannot move the policy" in report
-
-
-def test_a_metered_power_moves_in_the_sweep_through_the_model():
-    """A power that reads only the model's outputs used to sweep flat, since the
-    sweep held the rollout fixed; agents read that as a dead meter and replaced
-    it with a proxy. Through the model, holding a command elsewhere moves the
-    meter the model predicts."""
-    def metered(yn, u, d):
-        return yn[:, :, -1]
-    shapes = _shapes(metered)
-    assert any(not shape.is_flat for shape in shapes)
-

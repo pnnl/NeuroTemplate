@@ -53,10 +53,7 @@ from neurotemplate.control.metrics import (
 from neurotemplate.control.objective import (
     ObjectiveBalance,
     PowerDiagnostics,
-    TermShape,
     balance_to_markdown,
-    is_inert,
-    shapes_to_markdown,
 )
 from neurotemplate.control.losses import Objective, resolve_objective
 from neurotemplate.control.scenarios import horizons
@@ -173,7 +170,6 @@ def _scenario_section(cfg, sysid_cfg, nm_mapping: dict,
 
 
 def _objective_section(balance: ObjectiveBalance,
-                       shapes: list[TermShape],
                        power: Optional[PowerDiagnostics] = None,
                        notes: Optional[list[str]] = None,
                        trained: Optional[ObjectiveBalance] = None) -> str:
@@ -205,31 +201,6 @@ def _objective_section(balance: ObjectiveBalance,
             + ". Re-derive its weight against the magnitude of the quantity "
             "it multiplies. A weight that was right on the last dataset is "
             "not evidence about this one.",
-        ]
-    if shapes:
-        body += [
-            "",
-            "The power signal swept across each actuation box, through the "
-            "model: the rollout re-run with that control held at each value and "
-            "the others as the untrained policy commands them. One sweep serves all "
-            "three power-derived terms — cost and peak are reductions of this "
-            "same signal — so this is the magnitude and shape they all "
-            "multiply, reported so it can be weighed against the terms above. "
-            "A minimum on an endpoint is not a defect: an honest power metric "
-            "is monotone in actuator effort, and the trade-off that produces "
-            "an interior optimum belongs to the summed objective, not to this "
-            "term alone.\n",
-            shapes_to_markdown(shapes,
-                               None if power is None else power.reads_outputs),
-        ]
-    if is_inert(shapes, power):
-        body += [
-            "",
-            "**⚠️ The power term reads neither the commands nor the "
-            "surrogate's outputs.** Its sweep is flat because nothing it "
-            "depends on is being varied, and its gradient w.r.t. the rollout "
-            "is identically zero — so whatever weight it carries, it cannot "
-            "move the policy. Check `power_metric` against `nm_mapping`.",
         ]
     if power is not None:
         body += [
@@ -419,7 +390,6 @@ def render_control_reportcard(
     surrogate_arch: Optional[dict] = None,
     balance: Optional[ObjectiveBalance] = None,
     trained_balance: Optional[ObjectiveBalance] = None,
-    shapes: Optional[list[TermShape]] = None,
     power: Optional[PowerDiagnostics] = None,
     objective_notes: Optional[list[str]] = None,
     run_name: Optional[str] = None,
@@ -441,10 +411,9 @@ def render_control_reportcard(
                      forward pass; the section is skipped without it.
         trained_balance: Optional ObjectiveBalance of the same batch through
                      the trained policy, shown beside `balance`.
-        shapes:      Optional objective.term_shapes(...) for the power signal.
         power:       Optional objective.power_diagnostics(...): how often the
-                     power signal reads zero, how much of that is a dead
-                     gradient, and whether the term reads the rollout at all.
+                     power signal reads zero, and how much of that is a dead
+                     gradient.
         objective_notes: Optional objective.objective_notes(...) prose.
 
     Returns:
@@ -468,8 +437,7 @@ def render_control_reportcard(
                           resolve_objective(cfg, nm_mapping)),
     ]
     if balance is not None:
-        parts.append(_objective_section(balance, shapes or [],
-                                        power, objective_notes, trained_balance))
+        parts.append(_objective_section(balance, power, objective_notes, trained_balance))
     parts += [
         _performance_section(results),
         _actuation_section(results),

@@ -190,8 +190,6 @@ against the rule or a previous run.
   taken at the starting point, the rule for a residual policy, so it says a
   term is present, not that it is strong enough. The same print after
   training says more.
-- **Power term shape**: the power signal swept across each actuation box,
-  so its size sits next to the gains you are choosing.
 - **Power clamped to zero**: the share of steps where power is exactly 0
   and gives no gradient. Those are often the cheap hours that load should
   move into.

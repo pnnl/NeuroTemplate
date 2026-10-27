@@ -2,7 +2,7 @@
 End-to-end wiring test for the control diagnostics.
 
 `nt control train` runs several checks the pooled metrics cannot make — the
-objective balance, the power-signal sweep, the closed-loop behaviour audit,
+objective balance, the power clamp, the closed-loop behaviour audit,
 the residual box and the learned-vs-reference call — and threads all of them
 into one reportcard. Each piece has unit tests; this walks the same sequence
 the CLI does, so a signature that drifts out of step fails here rather than an
@@ -21,7 +21,6 @@ from neurotemplate.control.objective import (
     objective_balance,
     objective_notes,
     run_objective_pass,
-    term_shapes,
 )
 from neurotemplate.control.pipeline import (
     evaluate_closed_loop,
@@ -32,7 +31,6 @@ from neurotemplate.control.scenarios import build_loaders, horizons
 from control_fixtures import (
     BAND_GAINS, BAND_LOSSES, POWER_LOSSES, TARIFF, TARIFF_SCALE, full_setup,
 )
-import control_user_defined as hooks
 
 
 def _with_power(*names, **overrides):
@@ -51,7 +49,6 @@ def _run_diagnostics(reference=None, **overrides):
     objective = resolve_objective(cfg, nm)
     test_dfs = [s["norm_df"]]
 
-    u_bounds = hooks.actuation_bounds(nm, ns)
 
     policy = build_policy(cfg, sysid_cfg, nm, ns)
     cl = build_closed_loop(s["dyn_node"], policy, cfg, sysid_cfg)
@@ -62,23 +59,19 @@ def _run_diagnostics(reference=None, **overrides):
     out = run_objective_pass(problem, next(iter(train_loader)))
     balance = objective_balance(loss, out)
     term = power_term(cfg, nm, ns)
-    if term is None or not objective.reads_power:
-        shapes, power_diag = [], None
-    else:
-        shapes = term_shapes(term, problem, policy, next(iter(train_loader)), hmax,
-                             nm["U"], *u_bounds, ns)
-        power_diag = power_diagnostics(term, out, hmax)
+    power_diag = (power_diagnostics(term, out, hmax)
+                  if term is not None and objective.reads_power else None)
 
     arch = describe_policy(policy, cfg, sysid_cfg, nm, ns)
     notes = objective_notes(objective, cfg)
     results, _ = evaluate_closed_loop(cfg, sysid_cfg, cl, test_dfs, nm, ns)
     md = render_control_reportcard(
         cfg, sysid_cfg, arch, nm, results,
-        balance=balance, shapes=shapes,
+        balance=balance,
         power=power_diag, objective_notes=notes,
     )
     return dict(results=results, balance=balance,
-                shapes=shapes, notes=notes, power=power_diag,
+                notes=notes, power=power_diag,
                 md=md, u_cols=nm["U"])
 
 
@@ -107,12 +100,7 @@ def test_the_grid_terms_reach_every_diagnostic():
     }
     assert set(d["results"].energy.weighted_energy) == {TARIFF}
     assert TARIFF in d["md"]
-    # The power sweep is bound to the shared signal, not to the three terms.
-    assert [s.u_name for s in d["shapes"]] == d["u_cols"]
     assert d["power"] is not None
-    # Metered power reads the surrogate's outputs, so the flat U-sweep must be
-    # reported as that rather than as an inert term.
-    assert d["power"].reads_outputs
 
 
 def test_an_unpreviewed_tariff_is_flagged_as_reactive_only():

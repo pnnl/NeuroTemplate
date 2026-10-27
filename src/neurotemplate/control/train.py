@@ -50,7 +50,6 @@ from neurotemplate.control.objective import (
     objective_warnings,
     power_diagnostics,
     run_objective_pass,
-    term_shapes,
 )
 from neurotemplate.control.reportcard import render_control_reportcard
 from neurotemplate.control.pipeline import (
@@ -118,7 +117,6 @@ def train_control(cfg: ControlConfig,
     # the reachability scenario on the surrogate's own reportcard. Read it
     # there before spending an hour training against a band nothing can hold.
     hooks = load_control_hooks(cfg)
-    u_bounds = hooks.actuation_bounds(nm_mapping, norm_stats)
 
     policy_node = build_policy(cfg, sysid_cfg, nm_mapping, norm_stats)
     arch = describe_policy(policy_node, cfg, sysid_cfg, nm_mapping, norm_stats)
@@ -133,17 +131,11 @@ def train_control(cfg: ControlConfig,
     balance_out = run_objective_pass(problem, balance_batch)
     balance = objective_balance(loss, balance_out)
     power = power_term(cfg, nm_mapping, norm_stats)
-    if power is None or not objective.reads_power:
-        shapes, power_diag = [], None
-    else:
-        # One sweep serves every term on power: each is a reduction of the
-        # same signal, so sweeping them separately would just rescale this.
-        shapes = term_shapes(power, problem, policy_node, balance_batch, hmax,
-                             nm_mapping["U"], *u_bounds, norm_stats)
-        power_diag = power_diagnostics(power, balance_out, hmax)
+    power_diag = (power_diagnostics(power, balance_out, hmax)
+                  if power is not None and objective.reads_power else None)
     notes = objective_notes(objective, cfg)
     if cfg.progress in ("live", "log"):
-        print(format_objective_report(balance, shapes, power_diag, notes))
+        print(format_objective_report(balance, power_diag, notes))
     elif cfg.progress == "summary":
         for line in objective_warnings(balance) + [f"NOTE: {n}" for n in notes]:
             print(line)
@@ -185,12 +177,12 @@ def train_control(cfg: ControlConfig,
             surrogate_arch=surrogate_arch,
             best_dev_loss=best_dev,
             train_time_s=train_time_s,
-            balance=balance, trained_balance=trained_balance, shapes=shapes,
+            balance=balance, trained_balance=trained_balance,
             power=power_diag, objective_notes=notes,
         )
         write_reportcard(md, Path(cfg.savedir), logger=logger)
         log_control_results(logger, results)
-        logger.log_dict(objective_to_dict(balance, shapes, power_diag, notes,
+        logger.log_dict(objective_to_dict(balance, power_diag, notes,
                                           trained_balance),
                         name="objective_diagnostics.json")
 

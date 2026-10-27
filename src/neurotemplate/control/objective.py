@@ -1,5 +1,5 @@
 """
-Objective diagnostics: how big is each term, and what does it look like?
+Objective diagnostics: how big is each term?
 
 `build_control_loss` sums the declared loss terms, each scaled by its gain,
 and nothing checks that a gain suits the magnitude of what it multiplies.
@@ -12,28 +12,15 @@ contribution and share.
 The worked example: a power proxy of `(cooling_setpoint - outdoor)^2` that
 came out at 1.7x the entire comfort objective. The numbers were on screen from
 epoch 1; nobody was comparing them.
-
-`term_shapes` sweeps the power signal across each actuation box, through the
-model: the rollout is re-run with one control held at each grid value, so a
-metered power the model predicts moves as the model says it would. It reports
-the value at each grid point and where the minimum lands.
-This is **reported, not judged**. A monotone power term is normal and usually
-correct: a real power meter costs more as an actuator works harder, so it has
-no interior optimum of its own. The trade-off that produces an interior optimum
-belongs to the *summed* objective, where energy meets comfort — not to the
-power term in isolation. The sweep is here so a reader can see the shape and
-the scale of the term they are weighting, and decide for themselves.
 """
 
 from __future__ import annotations
 
-from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Optional
 
 import torch
 
-from neurotemplate.common.data_utils import NormStats
 from neurotemplate.control.losses import POWER, Objective
 from neurotemplate.control.scenarios import scored_steps
 from neurotemplate._typing import beartype
@@ -42,16 +29,6 @@ from neurotemplate._typing import beartype
 # A term worth more than this multiple of everything else put together is
 # running the show, whatever the other weights say.
 DOMINANCE_FACTOR = 2.0
-
-# Sweep resolution per control for the shape check. Odd, so the midpoint of
-# the actuation box is always one of the samples.
-SHAPE_GRID = 9
-
-# A sweep whose spread is below this share of its own magnitude is flat: the
-# term does not read that control directly, which is the normal case for
-# metered power (the control reaches it through the dynamics instead).
-FLAT_TOL = 1e-6
-
 
 @dataclass
 class TermBalance:
@@ -81,48 +58,9 @@ class PowerDiagnostics:
     `frac_dead` is the number that carries a warning: power reading zero *and*
     no gradient reaching the surrogate, which is the clamp having cut the
     chain. `frac_zero` alone says nothing — see `power_diagnostics`.
-
-    `reads_outputs` is what makes a flat sweep readable. A term that is flat
-    across every actuation box is either metered power (which reads the
-    surrogate's outputs, and reaches the controls only through the dynamics)
-    or genuinely inert. Those look identical in the sweep and are opposite
-    findings.
     """
     frac_zero: float
     frac_dead: float
-    reads_outputs: bool
-
-
-@dataclass
-class TermShape:
-    """How an objective term varies as one control sweeps its actuation box."""
-    u_name: str
-    grid: list[float]     # commanded values swept, in physical units
-    values: list[float]   # mean term value at each grid point
-    argmin: int
-
-    @property
-    def spread(self) -> float:
-        return max(self.values) - min(self.values)
-
-    @property
-    def is_flat(self) -> bool:
-        """Holding this control anywhere in its box does not move the term,
-        through the model. For metered power that is a model whose meters do
-        not see this control; `PowerDiagnostics.reads_outputs` separates it
-        from a term that reads nothing at all."""
-        scale = max(abs(sum(self.values) / len(self.values)), 1.0)
-        return self.spread <= FLAT_TOL * scale
-
-    @property
-    def minimised_at(self) -> float:
-        """Where over the swept box this term is smallest, in physical units.
-
-        Carries no verdict. A minimum on an endpoint means the term is monotone
-        over the actuation range, which is what an honest power metric looks
-        like — the interior optimum belongs to the summed objective.
-        """
-        return self.grid[self.argmin]
 
 
 @beartype
@@ -184,9 +122,7 @@ def power_gradient(term_fn, out: dict, hmax: int) -> tuple[torch.Tensor, torch.T
     `yn`, so this measures what the power term itself passes back to the
     surrogate's outputs — the only place a clamp can silently cut the chain.
 
-    A term that does not read `yn` at all has no gradient to take, and gets an
-    all-zero one. That is the honest answer rather than an error: whether the
-    term reads the rollout is exactly what the caller is asking.
+    A term that does not read `yn` at all gets an all-zero gradient.
     """
     with torch.enable_grad():
         yn = (out["yn"][:, scored_steps("yn", hmax), :]
@@ -203,8 +139,7 @@ def power_gradient(term_fn, out: dict, hmax: int) -> tuple[torch.Tensor, torch.T
 
 @beartype
 def power_diagnostics(term_fn, out: dict, hmax: int) -> PowerDiagnostics:
-    """How often the power signal reads zero, how often that costs a gradient,
-    and whether the term reads the surrogate's outputs at all.
+    """How often the power signal reads zero, and how often that costs a gradient.
 
     A metered `power_metric` ends in `.clamp_min(0.0)`, and wherever the
     surrogate predicts negative power that clamp zeroes the gradient; a
@@ -233,7 +168,6 @@ def power_diagnostics(term_fn, out: dict, hmax: int) -> PowerDiagnostics:
     return PowerDiagnostics(
         frac_zero=float(is_zero.float().mean()),
         frac_dead=float((is_zero & (grad == 0)).float().mean()),
-        reads_outputs=bool((grad != 0).any()),
     )
 
 
@@ -270,73 +204,6 @@ def objective_notes(objective: Objective, cfg) -> list[str]:
     return notes
 
 
-@contextmanager
-def _pinned(module: torch.nn.Module, column: int, value: float):
-    """While open, every command `module` emits has `column` held at `value`
-    (normalized), after anything the module does to its output."""
-    def hook(_module, _inputs, output):
-        pinned = output.clone()
-        pinned[..., column] = value
-        return pinned
-
-    handle = module.register_forward_hook(hook)
-    try:
-        yield
-    finally:
-        handle.remove()
-
-
-@beartype
-def term_shapes(
-    term_fn,
-    problem,
-    policy_node,
-    batch: dict,
-    hmax: int,
-    u_names: list[str],
-    u_min: torch.Tensor,
-    u_max: torch.Tensor,
-    norm_stats: NormStats,
-    n_grid: int = SHAPE_GRID,
-) -> list[TermShape]:
-    """Sweep each control across its actuation box, through the model.
-
-    Args:
-        term_fn: `(yn, U, D) -> [batch, time]`, already bound to nm_mapping and
-            norm_stats — the same callable the loss evaluates.
-        problem: the DPC problem; its closed loop is re-run per grid point.
-        policy_node: the policy Node inside it, whose command is pinned.
-        batch:   the batch the balance report used.
-        hmax:    warmup steps to skip, so the sweep covers the scored horizon.
-        u_min/u_max: actuation box in NORMALIZED space, one entry per control.
-
-    At each grid point the rollout runs with this control held at that value
-    for every step and the others as the (untrained) policy commands them, so
-    the term is read where the model takes the state, not with the state held
-    at a rollout that never saw the command. A metered power the model
-    predicts then moves with the command, as it will in training.
-    """
-    device = u_min.device
-    shapes = []
-    for j, name in enumerate(u_names):
-        s = norm_stats[name]
-        grid_n = torch.linspace(float(u_min[j]), float(u_max[j]), n_grid, device=device)
-        values = []
-        for point in grid_n:
-            with _pinned(policy_node.callable, j, float(point)):
-                out = run_objective_pass(problem, batch)
-            with torch.no_grad():
-                values.append(float(term_fn(*(out[k][:, scored_steps(k, hmax), :]
-                                              for k in ("yn", "U", "D"))).mean()))
-        shapes.append(TermShape(
-            u_name=name,
-            grid=[float(p) * s["stretch"] + s["shift"] for p in grid_n],
-            values=values,
-            argmin=min(range(n_grid), key=values.__getitem__),
-        ))
-    return shapes
-
-
 # ── Rendering ────────────────────────────────────────────────────
 
 
@@ -365,53 +232,7 @@ def balance_to_markdown(balance: ObjectiveBalance,
 
 
 @beartype
-def flat_sweep_reading(reads_outputs: Optional[bool]) -> str:
-    """What a flat row means, given whether the term reads the surrogate.
-
-    Shared by both renderers so the markdown and the stdout report cannot
-    drift into saying different things about the same measurement.
-    """
-    if reads_outputs is None:
-        return "flat in U"
-    if reads_outputs:
-        return "flat in U — the model's outputs it reads do not respond to this control"
-    return "INERT — reads neither U nor model outputs"
-
-
-@beartype
-def is_inert(shapes: list[TermShape],
-             power: Optional[PowerDiagnostics]) -> bool:
-    """The power term cannot move the policy: flat in every control *and* no
-    gradient into the surrogate's outputs.
-
-    Both halves are needed. Flat-in-U alone is the normal reading for metered
-    power, and no-gradient-into-yn alone is normal for a term computed from
-    the commands.
-    """
-    if power is None or not shapes:
-        return False
-    return not power.reads_outputs and all(s.is_flat for s in shapes)
-
-
-@beartype
-def shapes_to_markdown(shapes: list[TermShape],
-                       reads_outputs: Optional[bool] = None) -> str:
-    rows = ["| Control | Term at lo | at mid | at hi | Minimised at |",
-            "|---|---:|---:|---:|---:|"]
-    for s in shapes:
-        mid = len(s.values) // 2
-        where = (flat_sweep_reading(reads_outputs) if s.is_flat
-                 else f"{s.minimised_at:.4g}")
-        rows.append(
-            f"| {s.u_name} | {s.values[0]:.4g} | {s.values[mid]:.4g} | "
-            f"{s.values[-1]:.4g} | {where} |"
-        )
-    return "\n".join(rows)
-
-
-@beartype
 def objective_to_dict(balance: ObjectiveBalance,
-                      shapes: list[TermShape],
                       power: Optional[PowerDiagnostics] = None,
                       notes: Optional[list[str]] = None,
                       trained: Optional[ObjectiveBalance] = None) -> dict:
@@ -427,15 +248,8 @@ def objective_to_dict(balance: ObjectiveBalance,
         "terms": terms(balance),
         "trained_total": None if trained is None else trained.total,
         "trained_terms": None if trained is None else terms(trained),
-        "power_shape": {
-            s.u_name: {"grid": s.grid, "values": s.values,
-                       "flat": s.is_flat,
-                       "minimised_at": s.minimised_at}
-            for s in shapes
-        },
         "frac_power_zero": None if power is None else power.frac_zero,
         "frac_power_dead": None if power is None else power.frac_dead,
-        "power_reads_outputs": None if power is None else power.reads_outputs,
         "notes": list(notes or []),
     }
 
@@ -450,7 +264,6 @@ def objective_warnings(balance: ObjectiveBalance) -> list[str]:
 
 @beartype
 def format_objective_report(balance: ObjectiveBalance,
-                            shapes: list[TermShape],
                             power: Optional[PowerDiagnostics] = None,
                             notes: Optional[list[str]] = None) -> str:
     """Plain-text version for stdout, printed before training starts."""
@@ -461,21 +274,6 @@ def format_objective_report(balance: ObjectiveBalance,
         lines.append(f"  {t.name:<22s} {t.value:>12.4g}  "
                      f"{t.share * 100:>3.0f}%  {ratio:>8s} the rest{note}")
     lines += [f"  {w}" for w in objective_warnings(balance)]
-    if shapes:
-        reads = None if power is None else power.reads_outputs
-        lines.append("Power term across each actuation box (no verdict "
-                     "attached — read it against the weights above):")
-        for s in shapes:
-            where = (flat_sweep_reading(reads) if s.is_flat
-                     else f"minimised at {s.minimised_at:.4g}")
-            lines.append(f"  {s.u_name:<22s} {s.values[0]:>12.4g} .. "
-                         f"{s.values[-1]:<12.4g} {where}")
-        if is_inert(shapes, power):
-            lines.append(
-                "  WARNING: the power term reads neither the commands nor the "
-                "surrogate's outputs. Whatever its weight, it cannot move the "
-                "policy — check `power_metric` against nm_mapping."
-            )
     if power is not None:
         lines.append(f"  power exactly zero on {power.frac_zero * 100:.1f}% of "
                      "scored steps")
