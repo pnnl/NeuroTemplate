@@ -237,68 +237,16 @@ def power_diagnostics(term_fn, out: dict, hmax: int) -> PowerDiagnostics:
     )
 
 
-def median_change_gap(frames: list, column: str) -> Optional[float]:
-    """The median number of steps between changes of `column`, over `frames`
-    (each contiguous), or None if it never changes."""
-    gaps = []
-    for frame in frames:
-        values = frame[column].to_numpy()
-        changes = [i for i in range(1, len(values)) if values[i] != values[i - 1]]
-        gaps += [b - a for a, b in zip(changes, changes[1:])]
-    if not gaps:
-        return None
-    gaps.sort()
-    return float(gaps[len(gaps) // 2])
-
-
-def _preview_notes(objective: Objective, cfg, frames: Optional[list]) -> list[str]:
-    """A forecast the objective reads, previewed too short to act on.
-
-    Two ways, both measured rather than assumed: a preview shorter than the
-    typical gap between the column's changes in the data, so the next change
-    is usually out of sight; and a training rollout shorter than the preview,
-    so what the policy sees past the rollout's end is never scored and never
-    gives it a gradient.
-    """
-    read = []
-    for term in objective.terms:
-        if term.gain <= 0:
-            continue
-        for name in (term.column, term.target, term.weight):
-            if name and objective.roles.get(name) in ("R", "D") and name not in read:
-                read.append(name)
-    notes = []
-    longest = 0
-    for name in read:
-        future = cfg.policy_window.get(name, {}).get("future", 0)
-        longest = max(longest, future)
-        gap = median_change_gap(frames, name) if frames else None
-        if gap is not None and future < gap:
-            notes.append(
-                f"`{name}` changes every {gap:.0f} steps (median, training data) and the "
-                f"policy previews {future}, so it usually cannot see the next change "
-                "coming. To prepare for a change, preview it: a `future` in "
-                "`policy_window` at least that long.")
-    if longest > cfg.train_pred_steps:
-        notes.append(
-            f"The policy previews up to {longest} steps but trains on rollouts of "
-            f"{cfg.train_pred_steps}: nothing past a rollout's end is scored, so what it "
-            "sees beyond that never gives it a gradient. Make `train_pred_steps` at "
-            "least the preview, so one rollout holds an action and its payoff.")
-    return notes
-
-
 @beartype
-def objective_notes(objective: Objective, cfg, frames: Optional[list] = None) -> list[str]:
-    """Objective diagnostics that need the config (and, for the preview, the
-    training frames), not a forward pass.
+def objective_notes(objective: Objective, cfg) -> list[str]:
+    """Objective diagnostics that need the config, not a forward pass.
 
     All the same kind of failure: a term that is switched on but cannot do
     the thing it was switched on for. Reported as prose rather than raised,
     because every one of these configurations is legal and occasionally
     deliberate.
     """
-    notes = _preview_notes(objective, cfg, frames)
+    notes = []
     for term in objective.terms:
         if (term.gain > 0 and term.weight is not None
                 and objective.roles[term.weight] == "R"

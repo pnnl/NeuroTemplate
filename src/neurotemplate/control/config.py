@@ -167,6 +167,13 @@ class ControlConfig:
         # Which columns, and which may look ahead, is checked at policy
         # build, against the surrogate's columns and the objective's.
         check_policy_window(self.policy_window)
+        deepest = max(e.get("future", 0) for e in self.policy_window.values())
+        if deepest > self.train_pred_steps:
+            raise ValueError(
+                f"policy_window previews {deepest} steps but train_pred_steps is "
+                f"{self.train_pred_steps}: nothing past a training rollout is scored, so "
+                "the policy would read a preview it is never rewarded for using. Make "
+                "train_pred_steps at least the deepest `future`.")
         warn_deep_window("the policy's history_steps", self.history_steps)
 
         for name in ("train_data_path", "dev_data_path", "test_data_path"):

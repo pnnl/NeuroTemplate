@@ -118,9 +118,10 @@ against that error. Fix the model, not the controller.
    forecasts a `future`. To move load in time, the policy must see the expensive
    period coming. The tariff's and the band's `future` must cover the stretch from
    when the action pays off to when it is taken, and `train_pred_steps` must hold
-   both the action and its payoff in one rollout (a day, for daily cycles). Before
-   training, the run notes any band or price it reads whose preview is shorter than
-   the gap between its changes in your data, or longer than a rollout. No
+   both the action and its payoff in one rollout (a day, for daily cycles); a
+   `future` longer than `train_pred_steps` is refused. How far ahead is enough is
+   set by how long the plant takes to respond: compare the preview with the
+   surrogate's time constants on its reportcard. No
    `future` can be longer than the forecast available at run time (a 288-row
    forecast that includes the current row supplies 287 ahead): the exported
    policy refuses to act without it.

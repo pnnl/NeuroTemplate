@@ -64,6 +64,11 @@ def test_yaml_fills_what_it_names_and_defaults_the_rest(tmp_path):
     assert cfg.gains["du"] == 1000.0
 
 
+def test_a_preview_past_the_training_rollout_is_refused(tmp_path):
+    with pytest.raises(ValueError, match="never rewarded"):
+        _load(tmp_path, _YAML, "train_pred_steps=6")   # `oat` previews 12
+
+
 def test_the_table_survives_the_mlflow_param_round_trip():
     """A run's config is rebuilt from its logged params — str() of each field
     — on reload, so the table must parse back to itself."""

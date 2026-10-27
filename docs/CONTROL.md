@@ -78,7 +78,9 @@ policy_window:                       # syntax, not values
 Every column the policy could read is listed: each `Y`, `U` and `D` column
 of the surrogate and each reference column the objective names. `past`
 counts steps before the current one; `future` counts steps after it, and only
-a forecast has one. A `D` or reference column requires it, and a `Y` column
+a forecast has one. No `future` may exceed `train_pred_steps`, since nothing
+past a training rollout is scored. Training windows carry the rows a
+preview reads past the rollout's end, so a file needs those rows too. A `D` or reference column requires it, and a `Y` column
 cannot take it. A `U` column's window ends at the previous step, the last
 command applied. `past: 0` there means the policy does not read its own
 commands; with `past: 1` it sees the move a `first_difference` row is pricing.
@@ -194,10 +196,8 @@ against the rule or a previous run.
   and gives no gradient. Those are often the cheap hours that load should
   move into.
 - **Objective notes**: legal configurations that cannot do what they were
-  switched on for. Examples are a weight column the policy does not
-  preview, a band or price previewed for less than the gap between its
-  changes in the training data, a preview longer than the training rollout,
-  and power terms that are all peak.
+  switched on for: a weight column the policy does not preview, and power
+  terms that are all peak.
 
 **After the closed-loop evaluation on the test split:**
 

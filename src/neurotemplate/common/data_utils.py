@@ -320,7 +320,7 @@ def sliding_windows(
         raise ValueError(
             f"Data has {x.shape[0]} rows but a window needs {steps}. Use a "
             "longer file or shorten the window (train_pred_steps/test_window/"
-            "history_steps)."
+            "history_steps, and for a policy the deepest `future` it previews)."
         )
     # Row w of `idx` holds the row numbers of window w: its start plus 0..steps-1.
     starts = torch.arange(0, x.shape[0] - steps + 1, stride, device=device)
