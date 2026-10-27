@@ -384,7 +384,7 @@ class SaturatingTerm(nn.Module):
         super().__init__()
         self.sign = int(sign)
         self.steps_per_hour = float(steps_per_hour)
-        self.capacity = BoundedParameter(f"{column} capacity_C_per_h",
+        self.capacity = BoundedParameter(f"{column}: capacity_C_per_h",
                                          *boxes["capacity"], (column,))
         self.theta_slope = nn.Parameter(torch.tensor(0.0))
         _buffer(self, "scale", demand_scale(sign, control, state))
@@ -429,9 +429,9 @@ class LatchedTerm(SaturatingTerm):
     def __init__(self, sign: int, control: dict, state: dict, column: str,
                  boxes: dict, steps_per_hour: float):
         super().__init__(sign, control, state, column, boxes, steps_per_hour)
-        self.on_at = BoundedParameter(f"{column} on_at_C", *boxes["on_at"], (column,),
+        self.on_at = BoundedParameter(f"{column}: on_at_C", *boxes["on_at"], (column,),
                                       log=False)
-        self.off_at = BoundedParameter(f"{column} off_at_C", *boxes["off_at"], (column,),
+        self.off_at = BoundedParameter(f"{column}: off_at_C", *boxes["off_at"], (column,),
                                        log=False)
 
     def thresholds(self) -> tuple[torch.Tensor, torch.Tensor]:

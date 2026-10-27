@@ -271,8 +271,9 @@ def _bounded_lines(bounded: dict, indent: str) -> list[str]:
         for label, value in b["value"].items():
             fraction = b["fraction"][label]
             note = edge_note(name, fraction)
+            which = f" ({label})" if len(b["value"]) > 1 else ""
             lines.append(
-                f"{indent}- {name} ({label}): {value:.3g} in [{b['low']:g}, "
+                f"{indent}- {name}{which}: {value:.3g} in [{b['low']:g}, "
                 f"{b['high']:g}], {fraction * 100:.0f}% of the way up"
                 + ("" if note is None else f" — ⚠️ {note}"))
     return lines
