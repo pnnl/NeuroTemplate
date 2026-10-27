@@ -72,10 +72,13 @@ Every key below is in docs/MODELING.md ("Blocks", "Declaring what a column is").
      `BoundedHead(project_physical_to_norm(0.0, stats), float("inf"))` in
      `data_head_config`. A regression head that dips negative tells the cost term
      that running the equipment earns money.
-4. **When the equipment latches** (it starts above the
-   setpoint and, once running, runs until the zone is some way below), set
-   `hysteresis: true`. `nt data latch` checks: it prints how often the equipment runs
-   at the same error, after a step running and after a step idle.
+4. **Capacity and latching.** A `2r2c` demand declares its `capacity`, °C per hour at
+   full stage, as a scalar or a box. When the equipment latches (it starts above the
+   setpoint and, once running, runs until the zone is some way below), declare
+   `hysteresis: {on_at: box, off_at: box}` in °C of error. `nt data latch` checks
+   both: it prints how often the equipment runs at the same error, after a step
+   running and after a step idle, then the thresholds and the capacity those imply.
+   Centre each box on its estimate, wide enough to hold what the estimate cannot see.
 5. **Priors.** Time constants come from `nt data decay`; a `2r2c` block's
    `tau_fast_h` box cannot start below two data steps (0.17 h on 5-minute data), the
    floor its stability guarantee needs. Output heads come from
@@ -181,8 +184,11 @@ def block_mapping(nm_mapping, cfg):
                             "tau_slow_h": [24.0, 150.0]},
                  "inputs": {
                      "Cooling Setpoint": {"kind": "demand", "sign": -1, "state": "Zone Temp",
-                                          "hysteresis": True},           # nt data latch
-                     "Heating Setpoint": {"kind": "demand", "sign": +1, "state": "Zone Temp"},
+                                          "capacity": [1.0, 6.0],        # °C/h; nt data latch
+                                          "hysteresis": {"on_at": [0.0, 1.5],
+                                                         "off_at": [0.0, 1.0]}},
+                     "Heating Setpoint": {"kind": "demand", "sign": +1, "state": "Zone Temp",
+                                          "capacity": [1.0, 6.0]},
                      "Solar": {"kind": "linear", "sign": +1}}},
         "meter": {"Y": ["Compressor Power", "Fan Power"], "reads": ["Zone Temp"],
                   "model": "mlp"},

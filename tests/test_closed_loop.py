@@ -126,7 +126,8 @@ def _demand_setup():
     spec = {
         "zone": {"Y": [ZONE], "U": [SETPT], "model": "2r2c", "ambient": DIST[0],
                  "params": {"tau_fast_h": 0.6, "tau_ambient_h": 2.0, "tau_slow_h": 13.4},
-                 "inputs": {SETPT: {"kind": "demand", "sign": -1, "state": ZONE}}},
+                 "inputs": {SETPT: {"kind": "demand", "sign": -1, "state": ZONE,
+                                    "capacity": [0.5, 3.0]}}},
         "rtu": {"Y": [c for c in Y_COLS if c != ZONE], "model": "mlp"},
     }
     dyn_sys = get_dynamics(sysid_cfg, nm, block_spec=spec, norm_stats=norm_stats)

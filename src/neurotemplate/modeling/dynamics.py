@@ -63,7 +63,9 @@ from neurotemplate.modeling.prestack import PreStack
 from neurotemplate.modeling.bounded import bounded_parameters
 from neurotemplate.modeling.gru import GRUBlock
 from neurotemplate.modeling.rollout import WindowedSystem
-from neurotemplate.modeling.rc import TAU_KEYS, RCBlock, RCGroup, rc_groups, time_constant_boxes
+from neurotemplate.modeling.rc import (
+    TAU_KEYS, RCBlock, RCGroup, demand_boxes, rc_groups, time_constant_boxes,
+)
 from neurotemplate.modeling.blocks import Block, build_blocks
 
 
@@ -568,6 +570,7 @@ def _2r2c_block(cfg: ModelingConfig, block: Block, lags: Lags,
         channel_names=block.y_names,
         u_names=block.u_names, d_names=block.d_names,
         inputs=block.inputs, ambient=block.ambient, norm_stats=norm_stats,
+        branch_boxes=demand_boxes(block.inputs, block.name),
     )
 
 

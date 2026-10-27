@@ -39,7 +39,7 @@ from neurotemplate.export.state import clear_state
 from neurotemplate.modeling.dynamics import get_dynamics, stateful_blocks
 from neurotemplate.modeling.heads import BinaryHead, HeadStack, RegressionHead
 from neurotemplate.modeling.rc import (
-    MIN_TAU_STEPS, LatchedTerm, RCBlock, SaturatingTerm, mode_taus,
+    MIN_TAU_STEPS, LatchedTerm, RCBlock, SaturatingTerm, demand_boxes, mode_taus,
     time_constant_boxes,
 )
 from model_fixtures import model_cfg, uniform_history
@@ -94,7 +94,8 @@ DECLARED = {
         "Y": ["north T"], "U": ["north sp", "ahu fan"], "D": ["oat", "ghi"],
         "model": "2r2c", "ambient": "oat", "params": PINNED,
         "inputs": {
-            "north sp": {"kind": "demand", "sign": -1, "state": "north T"},
+            "north sp": {"kind": "demand", "sign": -1, "state": "north T",
+                         "capacity": [0.5, 2.0]},
             "ahu fan": {"kind": "linear", "sign": +1},
         },
     },
@@ -124,7 +125,8 @@ def make_cfg(**over) -> Config:
 def make_block(ny=1, nu=1, nd=1, params=PINNED, **over) -> RCBlock:
     torch.manual_seed(0)
     return RCBlock(ny, nu, nd, HISTORY_STEPS, SPH, hidden_size=8, num_layers=1,
-                   taus=time_constant_boxes(params, SPH, "b"), **over)
+                   taus=time_constant_boxes(params, SPH, "b"),
+                   branch_boxes=demand_boxes(over.get("inputs", {}), "b"), **over)
 
 
 def set_thetas(block: RCBlock, value: float) -> None:
@@ -444,16 +446,16 @@ def test_demand_is_zero_on_the_inactive_side_and_positive_on_the_active():
     assert torch.allclose(active, torch.full((HISTORY_STEPS,), 2.0 / (27.0 - 21.0)))
 
 
-@pytest.mark.parametrize("theta_cap,theta_slope", [(20.0, 20.0)])
-def test_the_saturating_slope_never_exceeds_the_headroom(theta_cap, theta_slope):
+def test_the_saturating_slope_never_exceeds_the_headroom():
     """`cap / w ≤ 1 - a_m - a_o` by construction, so the zone's own
     coefficient stays nonnegative wherever the parameters go. Measured as
     the gradient of the branch's increment with respect to the zone, in
     normalised units, at the origin where the tanh is steepest."""
-    term = SaturatingTerm(-1, STATS["north sp"], STATS["north T"])
+    term = SaturatingTerm(-1, STATS["north sp"], STATS["north T"], "north sp",
+                          {"capacity": (0.5, 50.0)}, SPH)
     with torch.no_grad():
-        term.theta_cap.fill_(theta_cap)
-        term.theta_slope.fill_(theta_slope)
+        term.capacity.theta.fill_(20.0)          # the top of the box
+        term.theta_slope.fill_(20.0)             # the whole budget
     block = make_block()
     a_o, a_m, _ = block.rates()
     headroom = 1 - a_m - a_o
@@ -498,7 +500,7 @@ def test_a_declared_block_persists_its_stats_and_reloads_by_config():
                           norm_stats=STATS)
     state = system.state_dict()
     assert any("pre_stack" in k for k in state)
-    assert any("saturating.0.theta_cap" in k for k in state)
+    assert any("saturating.0.capacity.theta" in k for k in state)
     rebuilt = get_dynamics(make_cfg(history=DECLARED_HISTORY), DECLARED_MAPPING, block_spec=DECLARED,
                            norm_stats=STATS)
     rebuilt.load_state_dict(state)
@@ -518,7 +520,7 @@ def test_a_week_of_adversarial_setpoints_does_not_diverge_with_demand_on():
     block = system.nodes[0].callable.fy.blocks[0]
     set_thetas(block, -20.0)                          # the fastest rates
     with torch.no_grad():
-        block.saturating[0].theta_cap.fill_(5.0)
+        block.saturating[0].capacity.theta.fill_(20.0)
         block.saturating[0].theta_slope.fill_(20.0)   # the whole headroom
         for p in block.gain.parameters():
             p.normal_(0, 1.0)
@@ -574,7 +576,8 @@ def test_a_demand_setpoint_lagged_past_its_zone_is_refused():
 # ── hysteresis: a latched thermostat stage ────────────────────────
 
 LATCHED_INPUTS = {
-    "north sp": {"kind": "demand", "sign": -1, "state": "north T", "hysteresis": True},
+    "north sp": {"kind": "demand", "sign": -1, "state": "north T", "capacity": [0.5, 2.0],
+                 "hysteresis": {"on_at": [0.0, 0.5], "off_at": [0.0, 0.5]}},
     "ahu fan": {"kind": "linear", "sign": +1},
 }
 
@@ -594,7 +597,7 @@ def test_a_latched_stage_remembers_whether_it_was_running():
     term = block.saturating[0]
     assert isinstance(term, LatchedTerm)
     with torch.no_grad():
-        term.theta_cap.fill_(-3.0)              # cap ≈ 0.05 °C/step, as a fitted coil
+        term.capacity.theta.fill_(0.0)          # 1 °C/h, the middle of its box
         term.theta_slope.fill_(3.0)             # most of the budget: a sharp switch
     a_o, a_m, _ = block.rates()
     headroom = 1 - a_m - a_o
@@ -614,7 +617,7 @@ def test_a_latched_slope_never_exceeds_the_headroom(previous, error_c):
     block = make_latched_block()
     term = block.saturating[0]
     with torch.no_grad():
-        term.theta_cap.fill_(20.0)
+        term.capacity.theta.fill_(20.0)
         term.theta_slope.fill_(20.0)
     a_o, a_m, _ = block.rates()
     headroom = 1 - a_m - a_o
@@ -645,6 +648,7 @@ def test_a_latched_block_carries_its_stage_in_the_rollout_state():
 
 def test_hysteresis_on_anything_but_a_saturating_demand_is_refused():
     spec = {"north": {**DECLARED["north"], "inputs": {
-        "ahu fan": {"kind": "linear", "sign": 1, "hysteresis": True}}}}
-    with pytest.raises(ValueError, match="latches a saturating"):
+        "ahu fan": {"kind": "linear", "sign": 1,
+                    "hysteresis": {"on_at": 0.2, "off_at": 0.2}}}}}
+    with pytest.raises(ValueError, match="belongs to a saturating"):
         build_blocks(DECLARED_MAPPING, spec)

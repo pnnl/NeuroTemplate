@@ -158,13 +158,33 @@ physics instead of having to learn it:
 
 Inside `2r2c`, a `demand` column becomes a saturating branch, bounded in
 value and in slope, so the stability guarantee survives the one state read
-it admits. When the equipment behind a setpoint latches (a thermostat
-that starts a stage above the setpoint and, once running, keeps it running
-until the zone is some way below), set `"hysteresis": true` on the entry: the
-branch then carries its stage between steps and learns the two thresholds,
-reported in °C. `nt data latch` shows whether your equipment latches: how
-often it runs at the same zone-minus-setpoint after a step running and after
-a step idle. Nothing is inferred from column names. A declaration changes the
+it admits. Its `capacity`, how fast full stage moves the zone in °C per
+hour, is declared like a time constant: a scalar pins it, `[min, max]` fits
+it inside, and there is no default. When the equipment behind a setpoint
+latches (a thermostat that starts a stage above the setpoint and, once
+running, keeps it running until the zone is some way below), declare
+`"hysteresis": {"on_at": [min, max], "off_at": [min, max]}` in °C of error:
+the branch then carries its stage between steps and fits the two thresholds
+inside those boxes, which may start at 0. The reportcard lists capacities
+and thresholds with the time constants, and flags one pressed against an
+edge.
+
+```python
+"Cooling Setpoint": {"kind": "demand", "sign": -1, "state": "Zone Temp",
+                     "capacity": [lo, hi],                                # °C/h
+                     "hysteresis": {"on_at": [lo, hi], "off_at": [lo, hi]}}   # °C
+```
+
+`nt data latch` estimates all three from the record. It prints how often the
+equipment runs at the same zone-minus-setpoint after a step running and
+after a step idle: equal columns mean a memoryless thermostat, columns that
+split around zero mean a latch. Under the table it prints where each column
+crosses one half, the error at which the stage starts and stops, and the
+zone's rate running against idle at the same error, a capacity. These are
+measurements of memory at a fixed measured error, which a deadband, a
+minimum run time or a thermostat that reads another temperature than the
+logged zone all produce, so use them to centre a box, not to pin a value.
+Nothing is inferred from column names. A declaration changes the
 physics but not the shapes, so a wrong one shows only in the reportcard's
 branch lines.
 

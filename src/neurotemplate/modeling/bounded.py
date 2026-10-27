@@ -1,14 +1,17 @@
 """
 A physical parameter fitted inside a declared box.
 
-    value = exp(log_low + (log_high − log_low) · σ(θ))
+    value = exp(log low + (log high − log low) · σ(θ))     a log box
+    value = low + (high − low) · σ(θ)                       a linear box
 
 A box rather than a free parameter or a frozen one: the prior is held where
 it is known — "this building's slow mode is 20 to 60 hours" — and training
-moves the parameter only inside it. Log-space, because the parameters that
-want a box are scales (8 h → 16 h is the same move as 30 h → 60 h), and it
-keeps Adam's travel to a few units of θ. A box with `low == high` pins the
-parameter, and a scalar declaration means exactly that.
+moves the parameter only inside it. θ starts at 0, the middle of the box, so
+a box centred on a data estimate starts the fit there; σ flattens toward
+either edge, so small moves are cheap and large ones are not. Log-space for
+scales (8 h → 16 h is the same move as 30 h → 60 h); linear for a quantity
+that may sit at zero, such as a thermostat threshold. A box with `low ==
+high` pins the parameter, and a scalar declaration means exactly that.
 
 A box is a guardrail, not a cure. A parameter the data pulls against its
 bound sits there, and that is the diagnostic worth printing: `fraction` is
@@ -30,31 +33,35 @@ import torch.nn as nn
 NEAR_EDGE = 0.1
 
 
-def parse_box(name: str, value) -> tuple[float, float]:
-    """`[low, high]`, or a scalar meaning `low == high`, as positive floats."""
+def parse_box(name: str, value, log: bool = True) -> tuple[float, float]:
+    """`[low, high]`, or a scalar meaning `low == high`: positive for a log
+    box, non-negative for a linear one."""
     pair = value if isinstance(value, (list, tuple)) else [value, value]
-    if (len(pair) != 2
-            or any(isinstance(v, bool) or not isinstance(v, (int, float)) for v in pair)
-            or not 0 < pair[0] <= pair[1]):
-        raise ValueError(f"{name} must be a positive number, or [min, max] with "
-                         f"0 < min <= max; got {value!r}.")
+    numbers = len(pair) == 2 and not any(
+        isinstance(v, bool) or not isinstance(v, (int, float)) for v in pair)
+    if not numbers or not (0 < pair[0] if log else 0 <= pair[0]) or pair[0] > pair[1]:
+        sign, op = ("positive", "<") if log else ("non-negative", "<=")
+        raise ValueError(f"{name} must be a {sign} number, or [min, max] with "
+                         f"0 {op} min <= max; got {value!r}.")
     return float(pair[0]), float(pair[1])
 
 
 class BoundedParameter(nn.Module):
-    """One positive value per label, each inside the same box `[low, high]`.
-
-    θ starts at 0, the geometric middle of the box.
+    """One value per label, each inside the same box `[low, high]`, in log
+    space (positive scales) or linear space (`log=False`).
     """
 
-    def __init__(self, name: str, low: float, high: float, labels: tuple[str, ...]):
+    def __init__(self, name: str, low: float, high: float, labels: tuple[str, ...],
+                 log: bool = True):
         super().__init__()
         self.name = name
         self.low, self.high = float(low), float(high)
         self.labels = tuple(labels)
+        self.log = log
         self.theta = nn.Parameter(torch.zeros(len(labels)))
-        self.register_buffer("log_low", torch.tensor(math.log(low)))
-        self.register_buffer("log_high", torch.tensor(math.log(high)))
+        to_space = math.log if log else float
+        self.register_buffer("lower", torch.tensor(to_space(low)))
+        self.register_buffer("upper", torch.tensor(to_space(high)))
 
     @property
     def pinned(self) -> bool:
@@ -65,7 +72,8 @@ class BoundedParameter(nn.Module):
         return torch.sigmoid(self.theta)
 
     def value(self) -> torch.Tensor:
-        return torch.exp(self.log_low + (self.log_high - self.log_low) * self.fraction())
+        inside = self.lower + (self.upper - self.lower) * self.fraction()
+        return torch.exp(inside) if self.log else inside
 
     def describe(self) -> dict:
         """The box and, per label, the value and its position in the box."""

@@ -85,7 +85,8 @@ MIXED = {
     "north": {
         "Y": ["north T"], "U": ["north sp", "ahu fan"], "model": "2r2c",
         "ambient": "oat", "params": TAUS,
-        "inputs": {"north sp": {"kind": "demand", "sign": -1, "state": "north T"},
+        "inputs": {"north sp": {"kind": "demand", "sign": -1, "state": "north T",
+                                "capacity": [0.5, 3.0]},
                    "ahu fan": {"kind": "linear", "sign": +1}},
     },
     "power": {"Y": ["power"], "reads": ["north T"], "model": "mlp"},

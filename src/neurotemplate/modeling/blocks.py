@@ -55,12 +55,15 @@ another block's channel is refused: that is what `reads` is for. A block
 with a `demand` entry has exactly one Y channel. Inside a `2r2c` block the
 feature feeds a bounded `saturating` branch by default; `"branch": "mlp"`
 routes it into the learned residual instead, which gives up the stability
-bound and is reported as such.
+bound and is reported as such. A saturating branch declares its `capacity`,
+°C per hour at full stage, as a scalar or a box (`rc.demand_boxes`).
 
-A `demand` entry may set `"hysteresis": true`: the branch is then a latched
-thermostat stage that switches on above the setpoint and, once on, runs until
-the zone is some way below it (`rc.LatchedTerm`), and the pre-stack hands it
-the signed error rather than the clamped one. Only `2r2c` acts on it.
+A saturating `demand` entry may set `"hysteresis": {"on_at": box, "off_at":
+box}`, in °C of error: the branch is then a latched thermostat stage that
+switches on `on_at` past the setpoint and, once on, runs until the zone is
+`off_at` back on the satisfied side (`rc.LatchedTerm`), and the pre-stack
+hands it the signed error rather than the clamped one. Only `2r2c` acts on
+`capacity` and `hysteresis`.
 
 `linear` says the column enters the zone's heat balance as one sign-fixed
 coefficient times the physical value (measured power, solar irradiance).
@@ -271,13 +274,11 @@ def _resolve_inputs(spec: dict, block: str, y_names: list[str],
                 problems.append(f"`inputs[{column!r}]` has branch "
                                 f"{entry.get('branch')!r}; expected one of "
                                 f"{list(DEMAND_BRANCHES)}.")
-        hysteresis = entry.get("hysteresis", False)
-        if not isinstance(hysteresis, bool):
-            problems.append(f"`inputs[{column!r}].hysteresis` must be true or false, got "
-                            f"{hysteresis!r}.")
-        elif hysteresis and (kind != "demand" or entry.get("branch", "saturating") != "saturating"):
-            problems.append(f"`inputs[{column!r}]` sets `hysteresis`, which latches a "
-                            "saturating `demand` branch and nothing else.")
+        saturating = kind == "demand" and entry.get("branch", "saturating") == "saturating"
+        for key in ("capacity", "hysteresis"):
+            if key in entry and not saturating:
+                problems.append(f"`inputs[{column!r}]` sets `{key}`, which belongs to a "
+                                "saturating `demand` branch and nothing else.")
 
     if problems:
         raise ValueError(

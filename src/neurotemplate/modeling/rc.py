@@ -76,8 +76,9 @@ genuinely unknown.
                pre-stack has already replaced the column with the
                thermostat's clamped error (see `prestack.Demand`); this branch
                turns it into a staged coil's response, `cap · tanh(x / w)`:
-               `cap` is °C per step at full stage and `w` the °C of demand
-               over which it ramps from off to full. `tanh` is bounded in
+               `cap` is the declared `capacity`, °C per hour at full stage,
+               fitted inside its box, and `w` the °C of demand over which it
+               ramps from off to full. `tanh` is bounded in
                value and in slope, and its derivative never reaches zero —
                a hard clamp past the knee would be the dead-zone problem
                again.
@@ -185,7 +186,7 @@ MIN_TAU_STEPS = 2.0
 #: they must be — `tau_fast < tau_ambient < tau_slow`.
 TAU_KEYS = ("tau_fast_h", "tau_ambient_h", "tau_slow_h")
 
-#: Raw parameter behind every learned branch coefficient at construction:
+#: Raw parameter behind a `linear` branch's coefficient at construction:
 #: `softplus(-4) ≈ 0.018`, so a fresh block starts as near-pure free decay
 #: for the same reason `g` starts at zero — an O(1) forcing would swamp the
 #: RC dynamics for the first epochs. Far enough from softplus's flat side
@@ -232,6 +233,48 @@ def time_constant_boxes(params: dict, steps_per_hour: float,
                 f"({floor_h:g} h) that keeps the rollout stable")
     if problems:
         raise ValueError(f"2r2c block {block!r} has invalid `params`:\n  - "
+                         + "\n  - ".join(problems))
+    return boxes
+
+
+def demand_boxes(inputs: dict[str, dict], block: str) -> dict[str, dict]:
+    """Each saturating `demand` entry's boxes, validated:
+    `{column: {"capacity": (lo, hi)[, "on_at": (lo, hi), "off_at": (lo, hi)]}}`.
+
+    `capacity` (°C per hour at full stage) is required: like the time
+    constants, it is a prior about the building with no library default. A
+    `hysteresis` entry is `{"on_at": box, "off_at": box}` in °C of error.
+    Every problem is named at once.
+    """
+    boxes, problems = {}, []
+    for column, entry in inputs.items():
+        if entry["kind"] != "demand" or entry.get("branch", "saturating") != "saturating":
+            continue
+        box = {}
+        if "capacity" not in entry:
+            problems.append(f"{column!r} declares no `capacity`: °C per hour the zone "
+                            "moves at full stage, a scalar or [min, max] (`nt data latch` "
+                            "estimates it)")
+        else:
+            try:
+                box["capacity"] = parse_box(f"{column!r} capacity", entry["capacity"])
+            except ValueError as error:
+                problems.append(str(error))
+        latch = entry.get("hysteresis")
+        if latch is not None:
+            if not isinstance(latch, dict) or set(latch) != {"on_at", "off_at"}:
+                problems.append(f"{column!r} hysteresis must be {{on_at: box, off_at: box}} "
+                                f"in °C of error, got {latch!r}")
+            else:
+                for key in ("on_at", "off_at"):
+                    try:
+                        box[key] = parse_box(f"{column!r} hysteresis {key}", latch[key],
+                                             log=False)
+                    except ValueError as error:
+                        problems.append(str(error))
+        boxes[column] = box
+    if problems:
+        raise ValueError(f"2r2c block {block!r} has an invalid `demand` declaration:\n  - "
                          + "\n  - ".join(problems))
     return boxes
 
@@ -324,27 +367,32 @@ class LinearTerm(nn.Module):
 class SaturatingTerm(nn.Module):
     """`sign · cap · tanh(x / w)`: a staged coil's response to demand.
 
-    `cap = softplus(θ_c)` is °C per step at full stage; the slope at the
-    origin is `headroom · sigmoid(θ_s)`, so `w = cap / slope` and the bound
-    `cap / w ≤ headroom` holds by construction — `headroom` is the block's
-    `1 - a_m - a_o`, handed in each step so the bound follows the rates if
-    they train. `θ_s = 0` starts at half the budget; `cap` starts near zero.
+    `cap` is the declared `capacity` (°C per hour at full stage), fitted
+    inside its box and used per step; the slope at the origin is `headroom ·
+    sigmoid(θ_s)`, so `w = cap / slope` and the bound `cap / w ≤ headroom`
+    holds by construction — `headroom` is the block's `1 - a_m - a_o`, handed
+    in each step so the bound follows the rates if they train. `θ_s = 0`
+    starts at half the budget.
 
     The input is the pre-stack's demand feature, scaled to about [0, 1] by
     `demand_scale`; this branch holds the same scale and undoes it, so `w`
     reads in °C of demand.
     """
 
-    def __init__(self, sign: int, control: dict, state: dict):
+    def __init__(self, sign: int, control: dict, state: dict, column: str,
+                 boxes: dict, steps_per_hour: float):
         super().__init__()
         self.sign = int(sign)
-        self.theta_cap = nn.Parameter(torch.tensor(_NEAR_ZERO_THETA))
+        self.steps_per_hour = float(steps_per_hour)
+        self.capacity = BoundedParameter(f"{column} capacity_C_per_h",
+                                         *boxes["capacity"], (column,))
         self.theta_slope = nn.Parameter(torch.tensor(0.0))
         _buffer(self, "scale", demand_scale(sign, control, state))
         _buffer(self, "zone_stretch", state["stretch"])
 
     def cap(self) -> torch.Tensor:
-        return F.softplus(self.theta_cap)
+        """°C per step at full stage."""
+        return self.capacity.value() / self.steps_per_hour
 
     def slope_share(self) -> torch.Tensor:
         """Fraction of the stability headroom the slope at the origin uses."""
@@ -360,11 +408,6 @@ class SaturatingTerm(nn.Module):
         return response / self.zone_stretch
 
 
-#: Raw parameter behind a latched stage's two thresholds at construction:
-#: `softplus(-1.25) ≈ 0.25 °C` either side of the setpoint.
-_INITIAL_BAND_THETA = -1.25
-
-
 class LatchedTerm(SaturatingTerm):
     """A thermostat stage with hysteresis: `sign · cap · s`, `s` carried between steps.
 
@@ -376,22 +419,24 @@ class LatchedTerm(SaturatingTerm):
 
     with `e` the signed error in °C (positive while the stage is called for;
     the pre-stack does not clamp a hysteresis column) and both thresholds
-    `softplus` of a learned raw parameter, starting at about 0.25 °C. `s`
-    stays in [0, 1], and `ds/de ≤ 1 / (2τ)`, so `τ = cap /
-    (2 · headroom · share)` keeps the slope bound `SaturatingTerm` keeps,
-    and the rollout stays bounded: the stage is a bounded state driving a
-    stable zone. A cold call has no carried stage and starts from `s_prev =
-    on`, the stage a memoryless thermostat would be in.
+    fitted inside their declared linear boxes. `s` stays in [0, 1], and
+    `ds/de ≤ 1 / (2τ)`, so `τ = cap / (2 · headroom · share)` keeps the slope
+    bound `SaturatingTerm` keeps, and the rollout stays bounded: the stage is
+    a bounded state driving a stable zone. A cold call has no carried stage
+    and starts from `s_prev = on`, the stage a memoryless thermostat would be in.
     """
 
-    def __init__(self, sign: int, control: dict, state: dict):
-        super().__init__(sign, control, state)
-        self.theta_on = nn.Parameter(torch.tensor(_INITIAL_BAND_THETA))
-        self.theta_off = nn.Parameter(torch.tensor(_INITIAL_BAND_THETA))
+    def __init__(self, sign: int, control: dict, state: dict, column: str,
+                 boxes: dict, steps_per_hour: float):
+        super().__init__(sign, control, state, column, boxes, steps_per_hour)
+        self.on_at = BoundedParameter(f"{column} on_at_C", *boxes["on_at"], (column,),
+                                      log=False)
+        self.off_at = BoundedParameter(f"{column} off_at_C", *boxes["off_at"], (column,),
+                                       log=False)
 
     def thresholds(self) -> tuple[torch.Tensor, torch.Tensor]:
-        """`(on_at, off_at)` in °C of error, both ≥ 0."""
-        return F.softplus(self.theta_on), F.softplus(self.theta_off)
+        """`(on_at, off_at)` in °C of error."""
+        return self.on_at.value(), self.off_at.value()
 
     def width(self, headroom: torch.Tensor) -> torch.Tensor:
         """`τ`: °C of error over which each switch ramps."""
@@ -424,7 +469,7 @@ def physical_parameters(module: nn.Module) -> list[nn.Parameter]:
     terms = (LinearTerm, SaturatingTerm)
     params = [p for m in module.modules() if isinstance(m, terms) for p in m.parameters()]
     params += [b.theta for b in bounded_parameters(module)]
-    return params
+    return list({id(p): p for p in params}.values())
 
 
 class RCBlock(nn.Module):
@@ -461,6 +506,8 @@ class RCBlock(nn.Module):
         taus: the storage prior, `{tau key: (min_h, max_h)}` for every key in
             `TAU_KEYS`, as `time_constant_boxes` validates it. Every channel
             of the block fits its own values inside the same boxes.
+        branch_boxes: each saturating demand column's boxes, as
+            `demand_boxes` validates them.
         channel_names: Y column names, for labelling `describe`.
         u_names / d_names: this block's U and D column names, in the order
             its window carries them; what `inputs` and `ambient` refer to.
@@ -482,7 +529,8 @@ class RCBlock(nn.Module):
                  d_names: tuple[str, ...] = (),
                  inputs: Optional[dict[str, dict]] = None,
                  ambient: Optional[str] = None,
-                 norm_stats: Optional[dict[str, dict]] = None):
+                 norm_stats: Optional[dict[str, dict]] = None,
+                 branch_boxes: Optional[dict[str, dict]] = None):
         super().__init__()
         self.widths = (ny, nu, nd)
         self.ny = ny
@@ -530,8 +578,9 @@ class RCBlock(nn.Module):
             c for c in demands if inputs[c].get("branch", "saturating") == "saturating"]
         self._saturating_pos = [drive_names.index(c) for c in self.saturating_names]
         self.saturating = nn.ModuleList(
-            (LatchedTerm if inputs[c].get("hysteresis") else SaturatingTerm)(
-                inputs[c]["sign"], norm_stats[c], norm_stats[self.channel_names[0]])
+            (LatchedTerm if "on_at" in branch_boxes[c] else SaturatingTerm)(
+                inputs[c]["sign"], norm_stats[c], norm_stats[self.channel_names[0]],
+                c, branch_boxes[c], steps_per_hour)
             for c in self.saturating_names)
         self.n_latched = sum(isinstance(t, LatchedTerm) for t in self.saturating)
         # Demand features routed into `g` by declaration: a ReLU MLP has no
@@ -721,8 +770,9 @@ class RCBlock(nn.Module):
         each fit landed in its box are reported with every bounded parameter
         (see `bounded`). `forcing` lists which column feeds which branch and
         what each learned: `k` in zone units per step per physical unit for
-        `linear`; `cap` (°C/step), `w` (°C of demand) and `slope_share` (the
-        fraction of the stability budget the slope uses) for `saturating`.
+        `linear`; `w` (°C of demand) and `slope_share` (the fraction of the
+        stability budget the slope uses) for `saturating`, whose capacity and
+        thresholds are bounded parameters.
         `demand_in_mlp` names the demand columns routed into `g` by
         declaration, for which the stability bound does not hold.
         """
@@ -737,12 +787,9 @@ class RCBlock(nn.Module):
                     for name, term in zip(self.linear_names, self.linear)
                 },
                 "saturating": {
-                    name: {"cap": round(float(term.cap()), 4),
-                           "w": round(float(term.width(headroom)), 4),
+                    name: {"w": round(float(term.width(headroom)), 4),
                            "slope_share": round(float(term.slope_share()), 3),
-                           **({} if not isinstance(term, LatchedTerm) else {
-                               "on_at_C": round(float(term.thresholds()[0]), 3),
-                               "off_at_C": round(float(term.thresholds()[1]), 3)})}
+                           "latched": isinstance(term, LatchedTerm)}
                     for name, term in zip(self.saturating_names, self.saturating)
                 },
                 "mlp": list(self.mlp_names),

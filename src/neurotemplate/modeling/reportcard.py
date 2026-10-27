@@ -283,7 +283,8 @@ def _forcing_lines(forcing: Optional[dict], indent: str) -> list[str]:
 
     `slope_share` is the fraction of the stability headroom a saturating
     branch's slope uses; at 1.0 the coil has arrived at the bound the
-    parameterization enforces.
+    parameterization enforces. Capacities and latch thresholds are bounded
+    parameters, listed with the time constants.
     """
     if not forcing:
         return []
@@ -293,12 +294,9 @@ def _forcing_lines(forcing: Optional[dict], indent: str) -> list[str]:
     for column, term in forcing.get("linear", {}).items():
         lines.append(f"{indent}- linear: {column}, k={term['k']:.4g} °C/step per unit")
     for column, term in forcing.get("saturating", {}).items():
-        line = (f"{indent}- saturating: {column}, cap={term['cap']:.3g} °C/step, "
-                f"w={term['w']:.3g} °C, slope_share={term['slope_share']:.2f}")
-        if "on_at_C" in term:
-            line += (f"; latched: on {term['on_at_C']:.2f} °C past the setpoint, "
-                     f"off {term['off_at_C']:.2f} °C back")
-        lines.append(line)
+        lines.append(f"{indent}- {'latched' if term['latched'] else 'saturating'}: "
+                     f"{column}, w={term['w']:.3g} °C, "
+                     f"slope_share={term['slope_share']:.2f}")
     if forcing.get("mlp"):
         hsizes = forcing.get("mlp_hsizes") or []
         size_s = f", hsizes={hsizes}" if hsizes else ""

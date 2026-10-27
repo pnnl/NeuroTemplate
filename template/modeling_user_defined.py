@@ -238,7 +238,8 @@ def block_mapping(
             "ambient": "Outdoor Temp [degC]",
             "inputs": {
                 "Zone A Setpoint [degC]": {"kind": "demand", "sign": -1,
-                                           "state": "Zone A Temp [degC]"},
+                                           "state": "Zone A Temp [degC]",
+                                           "capacity": [lo, hi]},
                 "Solar [W/m2]":           {"kind": "linear", "sign": +1},
             },
         }
@@ -251,8 +252,13 @@ def block_mapping(
                as a smooth, always-active push, and a controller trained on
                it inherits that. Declare every setpoint that drives the
                block. In `2r2c` it drives a bounded, saturating heat input
-               (`"branch": "mlp"` routes it into the learned residual
-               instead, losing the stability bound).
+               whose `capacity`, °C per hour at full stage, is a declared
+               scalar or [lo, hi] (`nt data latch` estimates it); `"branch":
+               "mlp"` routes it into the learned residual instead, losing the
+               stability bound. Equipment that latches (starts past its
+               setpoint and runs until the state is some way back) also sets
+               `"hysteresis": {"on_at": [lo, hi], "off_at": [lo, hi]}`, in
+               °C of error; `nt data latch` estimates both.
       linear   one sign-fixed coefficient times the physical value: metered
                heat or power delivered, irradiance. An actuator that is a
                power rather than a setpoint is `linear`, never `demand`.
