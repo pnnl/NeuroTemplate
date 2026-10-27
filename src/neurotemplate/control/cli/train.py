@@ -29,7 +29,8 @@ def main() -> None:
         default_config_path=CONTROL_CONFIG_DIR / "control.yaml",
     )
     run = train_control(cfg, config_path=cli.config)
-
+    if cfg.progress == "silent":
+        return
     print(f"Comfort violation rate: "
           f"{run.results.comfort_violation_rate * 100:.2f}%")
     print(f"Mean |ΔU| (all U columns, physical units): {run.results.mean_abs_du:.4g}")

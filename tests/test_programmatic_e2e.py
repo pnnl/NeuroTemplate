@@ -70,7 +70,7 @@ test_stride: 24
 batch_size: 8
 norm_type: z_score
 plot: false
-verbose: false
+progress: silent
 device: cpu
 """)
     model_cfg = load_config(config_path, ModelingConfig, {
@@ -92,7 +92,7 @@ device: cpu
 
     control_cfg = make_control_cfg(
         sysid_run_id=model_run.run_id, location=location,
-        savedir=str(tmp_path / "control"), verbose=False, plot=False,
+        savedir=str(tmp_path / "control"), progress="silent", plot=False,
         user_hooks_path=str(FIXTURES / "control_user_defined.py"),
     )
     write_splits(control_cfg, tmp_path, plant, [make_reference_df(plant)])

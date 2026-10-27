@@ -43,7 +43,7 @@ def test_editing_the_hooks_file_after_training_changes_nothing(tmp_path, monkeyp
     shutil.copyfile(FIXTURE_HOOKS, hooks_file)
     s = full_setup(residual_delta={SETPT: [1.0, 1.0]}, user_hooks_path=str(hooks_file),
                    location=f"sqlite:///{tmp_path / 'mlflow.db'}",
-                   savedir=str(tmp_path / "scratch"), verbose=False)
+                   savedir=str(tmp_path / "scratch"), progress="silent")
     cfg, sysid_cfg, nm, ns = s["cfg"], s["sysid_cfg"], s["nm"], s["norm_stats"]
     policy = build_policy(cfg, sysid_cfg, nm, ns)
     closed_loop = build_closed_loop(s["dyn_node"], policy, cfg, sysid_cfg)

@@ -53,6 +53,11 @@ class RunLogger(MLFlowLogger):
         prints each field's type to stdout, a leftover debug line."""
         self._mlflow.log_params({k: getattr(self.args, k) for k in vars(self.args)})
 
+    def log_weights(self, model) -> None:
+        """Log the trainable parameter count, without Neuromancer's print."""
+        n = sum(p.numel() for p in model.parameters() if p.requires_grad)
+        self._mlflow.log_metric("nparams", float(n))
+
     def fail(self) -> None:
         """Close the run as FAILED."""
         self._mlflow.end_run(status="FAILED")
@@ -87,7 +92,7 @@ def tracked_run(
         args=args,
         savedir=cfg.savedir,
         stdout=stdout,
-        verbosity=cfg.epoch_verbose if cfg.verbose else 0,
+        verbosity=0,  # `common.progress` prints instead
         logout=logout,
         nested=False,
         save_weights=False,

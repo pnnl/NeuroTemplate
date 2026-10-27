@@ -8,7 +8,6 @@ import json
 import sys
 from datetime import datetime
 from pathlib import Path
-from time import perf_counter as tic
 
 from neurotemplate.common.data_utils import get_grad_masks
 from neurotemplate.modeling.experiment import set_seeds
@@ -85,9 +84,6 @@ def main() -> None:
 
     set_seeds(cfg.seed)
 
-    if cfg.verbose:
-        print(f"Using device: {cfg.device}")
-
     grad_path_for_eval = args.grad_path or cfg.grad_path
     grad_masks = get_grad_masks(grad_path=grad_path_for_eval, nm_mapping=nm_mapping)
 
@@ -107,21 +103,14 @@ def main() -> None:
         plot_run_dir = Path(cfg.plots_dir) / datetime.now().strftime("%b%d_%H_%M")
     plot_run_dir.mkdir(parents=True, exist_ok=True)
 
-    if cfg.verbose:
-        print("Evaluating...")
-
     data_paths = _parse_data_arg(args.data)
 
-    eval_t0 = tic()
     test_results, raw_dfs = evaluate_trained(
         cfg, dyn_sys, data_paths, norm_stats, nm_mapping,
         synth_cfg, plot_run_dir,
     )
-    eval_time_s = tic() - eval_t0
 
     print(f"Normalized RMSE: {test_results.normalized_rmse:.4f}")
-    if cfg.verbose:
-        print(f"Evaluation time: {eval_time_s:.2f} sec")
 
     print("\nPer-channel metrics (physical units):")
     for m in test_results.metrics:

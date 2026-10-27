@@ -31,7 +31,7 @@ def test_a_finished_run_carries_its_state_dict_and_no_pickled_model(
 
     monkeypatch.chdir(tmp_path)   # MLflow's default artifact root is ./mlruns
     s = full_setup(location=f"sqlite:///{tmp_path / 'mlflow.db'}",
-                   savedir=str(tmp_path / "scratch"), verbose=False)
+                   savedir=str(tmp_path / "scratch"), progress="silent")
     cfg, sysid_cfg, nm, ns = s["cfg"], s["sysid_cfg"], s["nm"], s["norm_stats"]
     policy = build_policy(cfg, sysid_cfg, nm, ns)
     problem = build_problem(build_closed_loop(s["dyn_node"], policy, cfg, sysid_cfg),

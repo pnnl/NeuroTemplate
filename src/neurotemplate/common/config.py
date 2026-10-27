@@ -169,6 +169,10 @@ def check_positive(obj: Any, name: str) -> None:
         raise ValueError(f"{name} must be positive, got {x}")
 
 
+#: `cfg.progress`: what a training run prints (see `common.progress`).
+PROGRESS_LEVELS = ("silent", "summary", "live", "log")
+
+
 def check_non_negative(obj: Any, name: str) -> None:
     x = getattr(obj, name)
     if x < 0:

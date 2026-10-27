@@ -156,7 +156,6 @@ def plot_synthetic(
     norm_stats: dict,
     freq_s: float = 300.0,
     n_plot: int = 4,
-    verbose: bool = False,
 ) -> None:
     """
     One figure per synthetic-scenario instance: the state channels against the
@@ -223,8 +222,6 @@ def plot_synthetic(
             fig.tight_layout()
             fname = safe_name(name)
             fig.savefig(plot_dir / f"{fname}_{row}.pdf")
-            if verbose:
-                print(f"Saved synthetic plot: {plot_dir / f'{fname}_{row}.pdf'}")
             plt.close(fig)
 
             csv_data = {"time_min": t_minutes}

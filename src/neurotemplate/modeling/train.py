@@ -55,17 +55,6 @@ def train_model(cfg: ModelingConfig,
     cfg.seed = set_seeds(cfg.seed)
     hooks = load_modeling_hooks(cfg)
 
-    if cfg.verbose:
-        print(f"Device: {cfg.device}")
-        print(f"Seed:   {cfg.seed}")
-        if cfg.ensemble_seeds > 1:
-            print(f"Ensemble: {cfg.ensemble_seeds} seeds "
-                  f"({cfg.seed}..{cfg.seed + cfg.ensemble_seeds - 1})")
-        if cfg.grad_gain > 0:
-            print(f"Gradient penalty: gain={cfg.grad_gain}, "
-                  f"samples={cfg.grad_n_samples}")
-        print("Loading data...")
-
     data = prepare_data(cfg, hooks)
 
     # With a curriculum, each step is a nested child run under this parent.

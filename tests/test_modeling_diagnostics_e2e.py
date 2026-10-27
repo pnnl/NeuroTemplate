@@ -34,7 +34,7 @@ def _evaluate(tmp_path, synth: bool = True):
     cfg = make_sysid_cfg()
     cfg.test_window, cfg.test_stride = 24, 24
     cfg.synth_n_scenarios, cfg.synth_hours = 4, 0.5
-    cfg.plot, cfg.verbose = False, False
+    cfg.plot, cfg.progress = False, "silent"
     dyn_sys, _ = make_frozen_dynamics(cfg, nm)
 
     spec = hooks.synth_cfg(nm, norm_stats) if synth else None
@@ -71,7 +71,7 @@ def test_the_checks_do_not_disturb_the_surrogate(tmp_path):
     cfg = make_sysid_cfg()
     cfg.test_window, cfg.test_stride = 24, 24
     cfg.synth_n_scenarios, cfg.synth_hours = 4, 0.5
-    cfg.plot, cfg.verbose = False, False
+    cfg.plot, cfg.progress = False, "silent"
     dyn_sys, _ = make_frozen_dynamics(cfg, nm)
     before = [p.clone() for p in dyn_sys.parameters()]
 
@@ -103,7 +103,7 @@ def test_a_staged_channel_is_scored_as_a_classifier_and_against_persistence(tmp_
     norm_stats = make_norm_stats(raw)
     cfg = make_sysid_cfg()
     cfg.test_window, cfg.test_stride = 24, 24
-    cfg.plot, cfg.verbose = False, False
+    cfg.plot, cfg.progress = False, "silent"
 
     stats = norm_stats[STAGE]
     levels = torch.tensor([(v - stats["shift"]) / stats["stretch"] for v in (0.0, 1.0, 2.0)])

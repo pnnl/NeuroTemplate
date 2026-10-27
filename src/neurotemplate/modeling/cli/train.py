@@ -46,7 +46,7 @@ def main() -> None:
         default_config_path=MODEL_CONFIG_DIR / "modeling.yaml",
     )
     result = train_model(cfg, config_path=cli.config)
-    if cfg.verbose:
+    if cfg.progress != "silent":
         print_finished(result.run_id, result.test_results.metrics)
 
 

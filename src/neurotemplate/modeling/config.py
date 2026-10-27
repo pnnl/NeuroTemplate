@@ -5,6 +5,7 @@ from dataclasses import asdict, dataclass, field
 from typing import Optional, Union
 
 from neurotemplate.common.config import (
+    PROGRESS_LEVELS,
     _check_paths_field,
     check_non_negative,
     check_one_of,
@@ -111,9 +112,10 @@ class ModelingConfig:
 
     # ---- TRAIN ---------------------------------------------------------------
     epochs: int = 300
-    # Print every Nth epoch (and the first). Every training call's output lands in
-    # an agent's context and stays there, and one line per epoch was most of it.
-    epoch_verbose: int = 10
+    # What training prints: silent | summary | live | log (`common.progress`).
+    progress: str = "summary"
+    # How often `live` and `log` update, in epochs.
+    update_every: int = 10
     warmup: int = 5
     patience: int = 25
     train_pred_steps: int = 48
@@ -154,7 +156,6 @@ class ModelingConfig:
     # torch's own choice, one per core. These models are small enough that
     # one thread was fastest for every family and batch size measured.
     threads: Optional[int] = 1
-    verbose: bool = True
     # How many independently-seeded models train_and_evaluate trains (each at
     # cfg.seed + i) and evaluates, reporting the min/median/max spread across
     # them instead of a single seed's draw. 1 reproduces today's single-model
@@ -194,7 +195,7 @@ class ModelingConfig:
     def validate(self) -> None:
         for name in [
             "batch_size", "log2_hidden_size", "num_layers",
-            "epochs", "epoch_verbose", "train_pred_steps",
+            "epochs", "update_every", "train_pred_steps",
             "dev_pred_steps", "test_window", "test_stride",
             "curriculum_ratio", "ensemble_seeds", "trial_seeds",
         ]:
@@ -223,6 +224,7 @@ class ModelingConfig:
         from neurotemplate.modeling.dynamics import VALID_MODEL_NAMES, PER_BLOCK_FAMILIES
 
         check_one_of(self, "model", list(VALID_MODEL_NAMES))
+        check_one_of(self, "progress", list(PROGRESS_LEVELS))
         check_one_of(self, "norm_type", ["min_max", "abs_max", "z_score", None])
         check_one_of(self, "save_config", ["last_step", "all", "None", None])
 

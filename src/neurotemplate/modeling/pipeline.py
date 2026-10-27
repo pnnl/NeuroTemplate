@@ -222,7 +222,7 @@ def _train(cfg, *, train_dfs, dev_dfs, nm_mapping, grad_masks, norm_stats,
     calibration: dict[str, Calibration] = {}
     if cfg.calibrate_thresholds:
         calibration = calibrate_decision_thresholds(dyn_sys, cfg, dev_dfs, nm_mapping)
-        if cfg.verbose and calibration:
+        if cfg.progress in ("live", "log") and calibration:
             for name, c in calibration.items():
                 print(f"Calibrated decision thresholds for {name!r} (head-space): "
                       + ", ".join(f"{t:.4f}" for t in c.thresholds)
@@ -460,12 +460,10 @@ def _run_physics_checks(
         grad_masks=grad_masks,
     )
     if scenarios is None:
-        if cfg.verbose:
-            print("Physics checks disabled (synth_cfg=None); skipping.")
         return None
 
     outcome = run_scenarios(scenarios)
-    if cfg.verbose:
+    if cfg.progress in ("live", "log"):
         print(format_checks(outcome.verdicts))
 
     if cfg.plot:
@@ -473,7 +471,7 @@ def _run_physics_checks(
         plot_synthetic(
             [s.trace(cfg.synth_n_plot) for s in scenarios],
             run_dir=str(synth_dir), norm_stats=norm_stats,
-            freq_s=freq_s, n_plot=cfg.synth_n_plot, verbose=cfg.verbose,
+            freq_s=freq_s, n_plot=cfg.synth_n_plot,
         )
         if logger is not None:
             logger.log_artifact(synth_dir, artifact_path="plots")
@@ -745,7 +743,7 @@ def _run_ensemble_members(
     artifacts are kept (see ModelingConfig.ensemble_seeds) — these extra
     members exist purely to widen the spread this function returns.
     """
-    quiet_cfg = replace(cfg, plot=False, verbose=False)
+    quiet_cfg = replace(cfg, plot=False, progress="silent")
 
     per_seed_metrics = [primary_test_results.metrics]
     per_seed_physics = [primary_test_results.physics]
@@ -753,7 +751,7 @@ def _run_ensemble_members(
     per_seed_levels = [primary_test_results.levels]
 
     for i in range(1, cfg.ensemble_seeds):
-        if cfg.verbose:
+        if cfg.progress != "silent":
             print(f"Training ensemble member {i + 1}/{cfg.ensemble_seeds} "
                   f"(seed={cfg.seed + i})...")
         set_seeds(cfg.seed + i)
@@ -867,9 +865,6 @@ def train_and_evaluate(
         grad_masks=grad_masks,
     )
     log_test_results(logger, test_results, nm_mapping)
-
-    if cfg.verbose:
-        print(f"Test inference time: {test_results.test_time_s:.2f}s")
 
     ensemble = None
     if cfg.ensemble_seeds > 1:

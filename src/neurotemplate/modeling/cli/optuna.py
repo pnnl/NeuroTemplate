@@ -55,15 +55,14 @@ def objective(
     """Train under suggested hyperparameters across multiple seeds; return mean dev loss.
 
     Prints the seeds' min/median/max dev loss (via `spread_stats`) when
-    `cfg.verbose` — free, since the losses are already in hand, and it says
+    `cfg.progress` is not silent — free, since the losses are already in hand, and it says
     whether the search is discriminating between trials or chasing noise.
     """
     # The hook gets a copy, so the trial settings below (and anything the
     # hook sets) never leak into the base config the phase-2 retrain uses.
     trial_cfg = load_modeling_hooks(cfg).hyper_args(trial, deepcopy(cfg))
     trial_cfg.epochs = trial_cfg.trial_epochs
-    trial_cfg.verbose = False
-    trial_cfg.epoch_verbose = trial_cfg.epochs + 1
+    trial_cfg.progress = "silent"
     trial_cfg.plot = False
 
     trial_grad_masks = get_grad_masks(
@@ -91,7 +90,7 @@ def objective(
         if trial.should_prune():
             raise TrialPruned()
 
-    if cfg.verbose:
+    if cfg.progress != "silent":
         spread = spread_stats(losses)
         print(f"  trial {trial.number}: dev_loss across {len(losses)} seeds "
               f"min={spread.min:.4f} median={spread.median:.4f} "
@@ -117,13 +116,8 @@ def main() -> None:
     cfg.seed = set_seeds(cfg.seed)
     hooks = load_modeling_hooks(cfg)
 
-    if cfg.verbose:
-        print(f"Device: {cfg.device}")
-        print(f"Seed:   {cfg.seed}")
-        print("=" * 60)
+    if cfg.progress != "silent":
         print("PHASE 1: Hyperparameter Search (Optuna)")
-        print("=" * 60)
-        print("Loading data...")
 
     # Shared by every trial and the final retrain.
     data = prepare_data(cfg, hooks)
@@ -142,10 +136,8 @@ def main() -> None:
         pruner=MedianPruner(n_startup_trials=10, n_warmup_steps=0),
     )
 
-    if cfg.verbose:
-        print(f"Study: {cfg.study_name}")
-        print(f"DB:    {db_path}")
-        print(f"Trials: {cfg.n_trials}")
+    if cfg.progress != "silent":
+        print(f"Study {cfg.study_name}: {cfg.n_trials} trials, {db_path}")
 
     search_t0 = tic()
     study.optimize(
@@ -155,11 +147,11 @@ def main() -> None:
         ),
         n_trials=cfg.n_trials,
         n_jobs=1,
-        show_progress_bar=cfg.verbose,
+        show_progress_bar=cfg.progress == "live",
     )
     search_time_s = tic() - search_t0
 
-    if cfg.verbose:
+    if cfg.progress != "silent":
         print(f"\nSearch time: {search_time_s:.1f}s")
         print(f"Best dev loss: {study.best_value:.6f}")
         print("Best params:")
@@ -170,7 +162,7 @@ def main() -> None:
     unknown = [k for k in study.best_params if not hasattr(cfg, k)]
     if unknown:
         raise ValueError(f"Best params not in ModelingConfig: {unknown}")
-    cfg = replace(cfg, **study.best_params, verbose=True,
+    cfg = replace(cfg, **study.best_params,
                   run=cfg.study_name + "_result")
     cfg.validate()
     data.grad_masks = get_grad_masks(grad_path=cfg.grad_path, nm_mapping=data.nm_mapping)

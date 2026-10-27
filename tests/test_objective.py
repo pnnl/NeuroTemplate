@@ -188,12 +188,3 @@ def test_a_preview_shorter_than_the_reference_changes_is_noted():
     assert any("never gives it a gradient" in n
                for n in objective_notes(objective, cfg, [s["norm_df"]]))
 
-
-def test_an_epoch_estimate_is_positive_and_leaves_no_gradient():
-    """The pre-training timing runs one real step and clears what it computed."""
-    from neurotemplate.control.pipeline import epoch_seconds
-    problem, _, _, s = _problem()
-    cfg, sysid_cfg, nm = s["cfg"], s["sysid_cfg"], s["nm"]
-    train, dev = build_loaders(cfg, sysid_cfg, nm, [s["norm_df"]], [s["norm_df"]])
-    assert epoch_seconds(problem, train, dev) > 0
-    assert all(p.grad is None or not p.grad.abs().sum() for p in problem.parameters())

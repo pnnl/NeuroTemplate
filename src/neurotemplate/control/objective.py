@@ -493,6 +493,14 @@ def objective_to_dict(balance: ObjectiveBalance,
 
 
 @beartype
+def objective_warnings(balance: ObjectiveBalance) -> list[str]:
+    """One line per term that outweighs every other term combined."""
+    return [f"WARNING: {t.name} is {t.ratio_to_rest:.1f}x every other term combined. "
+            "Whatever the other weights say, this is the objective being optimised."
+            for t in balance.dominant()]
+
+
+@beartype
 def format_objective_report(balance: ObjectiveBalance,
                             shapes: list[TermShape],
                             power: Optional[PowerDiagnostics] = None,
@@ -504,12 +512,7 @@ def format_objective_report(balance: ObjectiveBalance,
         note = "  <-- dominates" if t.dominates() else ""
         lines.append(f"  {t.name:<22s} {t.value:>12.4g}  "
                      f"{t.share * 100:>3.0f}%  {ratio:>8s} the rest{note}")
-    for t in balance.dominant():
-        lines.append(
-            f"  WARNING: {t.name} is {t.ratio_to_rest:.1f}x every other term "
-            "combined. Whatever the other weights say, this is the objective "
-            "being optimised."
-        )
+    lines += [f"  {w}" for w in objective_warnings(balance)]
     if shapes:
         reads = None if power is None else power.reads_outputs
         lines.append("Power term across each actuation box (no verdict "

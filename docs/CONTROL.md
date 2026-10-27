@@ -96,7 +96,8 @@ hook on the same steps, they cannot end up pricing different quantities.
 `power_metric` can sum metered channels the surrogate predicts well, or be
 a physics proxy that grows with the demand on the equipment. What the
 policy learns from is its gradient, and its scale is what has cost
-campaigns, so read the objective-balance print before training.
+campaigns, so read the objective balance before training: printed in full at
+`progress: live` or `log`, and as its warnings alone at `summary`.
 
 Shifting load in time takes more than a cost term. The worked case is
 pre-cooling: drive the zone down through cheap hours, then coast through
@@ -197,8 +198,6 @@ against the rule or a previous run.
   preview, a band or price previewed for less than the gap between its
   changes in the training data, a preview longer than the training rollout,
   and power terms that are all peak.
-- **Epoch cost**: about how long one epoch takes on this machine and what
-  the configured epochs will cost, timed on one real step.
 
 **After the closed-loop evaluation on the test split:**
 

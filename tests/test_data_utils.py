@@ -42,7 +42,7 @@ def cfg():
         "history": {"y0": 3, "y1": 3, "u0": 3, "d0": 3},
         "train_pred_steps": 6,
         "device": "cpu",
-        "verbose": False,
+        "progress": "silent",
     }, Config)
     c.device = torch.device("cpu")
     return c

@@ -47,6 +47,7 @@ from neurotemplate.control.objective import (
     objective_balance,
     objective_notes,
     objective_to_dict,
+    objective_warnings,
     power_diagnostics,
     run_objective_pass,
     term_shapes,
@@ -93,11 +94,6 @@ def train_control(cfg: ControlConfig,
     # Point MLflow at the sys-id tracking store *before* loading the run.
     mlflow.set_tracking_uri(cfg.location)
 
-    if cfg.verbose:
-        print(f"Device: {cfg.device}  Seed: {cfg.seed}")
-        print(f"Tracking URI: {cfg.location}")
-        print(f"Loading frozen surrogate (run {cfg.sysid_run_id})...")
-
     dyn_sys, dyn_node, sysid_cfg, nm_mapping, sysid_stats = (
         load_frozen_dynamics(cfg.sysid_run_id, cfg.run_dir, cfg.weights,
                              device=cfg.device)
@@ -108,13 +104,8 @@ def train_control(cfg: ControlConfig,
     objective = resolve_objective(cfg, nm_mapping)
     norm_stats = extend_norm_stats(objective, cfg, sysid_stats)
 
-    h_sys, h_ctrl, hmax = horizons(cfg, sysid_cfg)
+    _, _, hmax = horizons(cfg, sysid_cfg)
     eval_pred_steps(cfg, hmax)   # fail now, not after the policy has trained
-    if cfg.verbose:
-        print(f"Horizons: H_sys={h_sys} H_ctrl={h_ctrl} "
-              f"train_pred_steps={cfg.train_pred_steps}")
-        print("Loading data...")
-
     # One list per split (length >= 1), each plant file joined with its
     # reference file and normalized; the loaders window each file in
     # isolation — no rollout spans two files.
@@ -129,8 +120,6 @@ def train_control(cfg: ControlConfig,
     hooks = load_control_hooks(cfg)
     u_bounds = hooks.actuation_bounds(nm_mapping, norm_stats)
 
-    if cfg.verbose:
-        print("Building policy + closed loop + loss...")
     policy_node = build_policy(cfg, sysid_cfg, nm_mapping, norm_stats)
     arch = describe_policy(policy_node, cfg, sysid_cfg, nm_mapping, norm_stats)
     cl_system = build_closed_loop(dyn_node, policy_node, cfg, sysid_cfg)
@@ -153,7 +142,11 @@ def train_control(cfg: ControlConfig,
                              nm_mapping["U"], *u_bounds, norm_stats)
         power_diag = power_diagnostics(power, balance_out, hmax)
     notes = objective_notes(objective, cfg, train_dfs)
-    print(format_objective_report(balance, shapes, power_diag, notes))
+    if cfg.progress in ("live", "log"):
+        print(format_objective_report(balance, shapes, power_diag, notes))
+    elif cfg.progress == "summary":
+        for line in objective_warnings(balance) + [f"NOTE: {n}" for n in notes]:
+            print(line)
 
     cfg.run = "DPC " + cfg.run
     term_keys = [term.key for term in objective.terms]
@@ -163,8 +156,6 @@ def train_control(cfg: ControlConfig,
         logout=["train_loss", "dev_loss", "time"] + term_keys,
     ) as logger:
         snapshot_hooks(hooks, CONTROL_SNAPSHOT, logger)
-        if cfg.verbose:
-            print("Training policy (dynamics frozen)...")
         cl_system, best_dev, train_time_s = train_policy(
             cfg, problem, train_loader, dev_loader, logger=logger,
         )
@@ -172,12 +163,10 @@ def train_control(cfg: ControlConfig,
         # be tuned against (a residual's Δu term is exactly zero before).
         trained_balance = objective_balance(
             loss, run_objective_pass(problem, balance_batch))
-        if cfg.verbose:
+        if cfg.progress in ("live", "log"):
             print("Objective shares after training: " + ", ".join(
                 f"{t.name} {t.share * 100:.0f}%" for t in trained_balance.terms))
 
-        if cfg.verbose:
-            print("Evaluating closed loop on test split...")
         results, out = evaluate_closed_loop(
             cfg, sysid_cfg, cl_system, test_dfs, nm_mapping, norm_stats,
         )

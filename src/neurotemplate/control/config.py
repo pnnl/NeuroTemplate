@@ -6,6 +6,7 @@ from dataclasses import asdict, dataclass, field
 from typing import Optional, Union
 
 from neurotemplate.common.config import (
+    PROGRESS_LEVELS,
     _check_paths_field,
     check_non_negative,
     check_one_of,
@@ -116,9 +117,10 @@ class ControlConfig:
 
     # ── Training ─────────────────────────────────────────────────
     epochs: int = 300
-    # Print every Nth epoch (and the first). Every training call's output lands in
-    # an agent's context and stays there, and one line per epoch was most of it.
-    epoch_verbose: int = 10
+    # What training prints: silent | summary | live | log (`common.progress`).
+    progress: str = "summary"
+    # How often `live` and `log` update, in epochs.
+    update_every: int = 10
     warmup: int = 5
     patience: int = 25
     lr: float = 0.001
@@ -136,7 +138,6 @@ class ControlConfig:
     # torch's own choice, one per core. These models are small enough that
     # one thread was fastest for every family and batch size measured.
     threads: Optional[int] = 1
-    verbose: bool = True
 
     # ── Logging ──────────────────────────────────────────────────
     savedir: str = field(default_factory=default_savedir)
@@ -159,6 +160,7 @@ class ControlConfig:
                              "trained dynamics surrogate)")
 
         check_one_of(self, "policy", list(policy_catalog))
+        check_one_of(self, "progress", list(PROGRESS_LEVELS))
         check_one_of(self, "policy_nonlin", list(POLICY_NONLIN))
         check_one_of(self, "policy_bound_method", POLICY_BOUND_METHODS)
 
@@ -194,7 +196,7 @@ class ControlConfig:
         for name in [
             "batch_size", "train_pred_steps",
             "log2_policy_hidden", "policy_layers",
-            "epochs", "epoch_verbose", "lr",
+            "epochs", "update_every", "lr",
             "test_window", "test_stride",
         ]:
             check_positive(self, name)

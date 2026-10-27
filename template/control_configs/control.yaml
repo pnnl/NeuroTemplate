@@ -170,7 +170,6 @@ gains: {comfort_lower: 1.0, comfort_upper: 1.0, du: 1.0}
 # Train to convergence and no further: past it the policy learns the
 # surrogate's quirks, which the plant does not have.
 # epochs: 300
-# epoch_verbose: 10      # print every Nth epoch
 # warmup: 5
 # patience: 25
 # lr: 0.001
@@ -189,7 +188,11 @@ gains: {comfort_lower: 1.0, comfort_upper: 1.0, du: 1.0}
 # Torch CPU threads; null keeps torch's one per core. One was fastest for
 # every model measured: the tensors are too small to share out.
 # threads: 1
-# verbose: true
+# What training prints: summary (seconds per epoch, then why it stopped and
+# the best dev loss), live (one line updated in place), log (the same line,
+# kept), or silent. live and log update every `update_every` epochs.
+# progress: summary
+# update_every: 10
 
 # ── LOGGING ──────────────────────────────────────────────────────
 # savedir: temp_<random>

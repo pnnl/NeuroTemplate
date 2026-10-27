@@ -11,7 +11,7 @@ def model_cfg(**over) -> ModelingConfig:
     cfg.log2_hidden_size = 3
     cfg.num_layers = 1
     cfg.device = torch.device("cpu")
-    cfg.verbose = False
+    cfg.progress = "silent"
     for key, value in over.items():
         setattr(cfg, key, value)
     return cfg

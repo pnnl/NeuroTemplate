@@ -137,11 +137,11 @@ against that error. Fix the model, not the controller.
    residual (`reference_control` plus a `residual_delta` box) is an option for a
    small, trusted correction. It is not the way to make a policy behave: a box narrow
    enough to keep a wrong model safe is too narrow to reach what pays.
-4. **Time before you train.** Each control run prints, before its first epoch, about
-   how long one epoch takes on this machine and what the configured epochs will cost.
-   On a fixed budget, size `epochs`, `train_pred_steps` and the previews from that
-   line, not after the run has eaten the time: a long preview and a day-long rollout
-   are what pay, and they are also what costs.
+4. **Time before you train.** After its first epoch a run prints the seconds per
+   epoch and what the configured epochs will cost. On a fixed budget, size `epochs`,
+   `train_pred_steps` and the previews from that line: a long preview and a day-long
+   rollout are what pay, and they are also what costs. The run ends by saying whether
+   patience stopped it or the epoch cap did with the dev loss still falling.
 5. **Train on several draws of the price.** List the plant file once per reference
    file and give each a different tariff: the same one shifted a few hours each way,
    or with its contrast changed. A policy trained on one tariff learns its hours; one

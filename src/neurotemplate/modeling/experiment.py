@@ -21,6 +21,7 @@ from pandas import DataFrame
 from neurotemplate._typing import beartype
 
 from neurotemplate.common.data_utils import NormStats, get_loader
+from neurotemplate.common.progress import Progress
 from neurotemplate.common.tracking import RunLog, RunLogger, save_checkpoint
 from neurotemplate.modeling.heads import HeadStack
 from neurotemplate.modeling.dynamics import get_dynamics
@@ -103,9 +104,6 @@ def build_trainer(
     No custom Problem subclass needed — physics losses are proper
     Neuromancer Loss objects inside PenaltyLoss.
     """
-    if cfg.verbose:
-        print("Building dynamics system...")
-
     # SystemPreview with 'yn' feedback loop for autoregressive rollout
     system = get_dynamics(
         cfg, nm_mapping, head_stack=head_stack, block_spec=block_spec,
@@ -120,9 +118,6 @@ def build_trainer(
     raw_model = system.nodes[0].callable
     head_stack = raw_model.head_stack
 
-    if cfg.verbose:
-        print("Building loss (tracking + physics)...")
-
     # Single PenaltyLoss with all objectives:
     #   - Tracking: ref_loss
     #   - Physics:  grad_penalty (Loss object, train-only)
@@ -134,20 +129,10 @@ def build_trainer(
         head_stack=head_stack,
     )
 
-    if cfg.verbose:
-        print("Building Problem...")
-
     # Standard Neuromancer Problem — no subclass needed
     problem = Problem([system], loss).to(cfg.device)
 
-    if cfg.verbose:
-        # problem.show()
-        print("Building optimizer...")
-
     optimizer = torch.optim.Adam(_parameter_groups(problem, cfg), lr=cfg.lr)
-
-    if cfg.verbose:
-        print("Building data loaders...")
 
     train_loader = get_loader(
         dfs=train_dfs, cfg=cfg, nm_mapping=nm_mapping,
@@ -160,9 +145,6 @@ def build_trainer(
         steps=cfg.history_steps + cfg.dev_pred_steps,
     )
 
-    if cfg.verbose:
-        print("Building Trainer...")
-
     trainer = Trainer(
         problem=problem,
         train_data=train_loader,
@@ -173,9 +155,11 @@ def build_trainer(
         warmup=cfg.warmup,
         epochs=cfg.epochs,
         device=cfg.device,
-        epoch_verbose=cfg.epoch_verbose,
         eval_metric="mean_dev_loss",
         lr_scheduler=True,
+        callback=Progress(cfg.progress, cfg.update_every),
+        # Neuromancer prints its own epoch line only when there is no logger.
+        epoch_verbose=cfg.epochs + 1,
     )
 
     return trainer
@@ -220,7 +204,7 @@ def create_child_logger(
         stage_cfg,
         savedir=child_savedir,
         stdout=global_logger.stdout,
-        verbosity=cfg.epoch_verbose if cfg.verbose else 0,
+        verbosity=0,
         logout=global_logger.logout,
         nested=True,
         save_weights=False,
@@ -263,7 +247,7 @@ def train_with_curriculum(
 
     pred_steps = cfg.train_pred_steps
     for i in range(1 + cfg.curriculum_steps):
-        if cfg.verbose:
+        if cfg.curriculum_steps and cfg.progress != "silent":
             print(f"Training with {pred_steps} prediction steps "
                   f"(curriculum step {i}/{cfg.curriculum_steps})")
 
