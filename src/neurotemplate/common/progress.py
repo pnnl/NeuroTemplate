@@ -64,10 +64,9 @@ class Progress(Callback):
         best = self.best_epoch
         if trainer.badcount > trainer.patience:
             why = f"stopped by patience at epoch {self.epochs_run}"
-        elif best == self.epochs_run:
-            why = (f"reached the {trainer.epochs}-epoch cap with the dev loss still "
-                   "falling; more epochs would likely help")
         else:
-            why = f"reached the {trainer.epochs}-epoch cap"
+            # Patience never ran out, so the dev loss was still improving.
+            why = (f"reached the {trainer.epochs}-epoch cap before patience "
+                   f"({trainer.patience}) ran out; more epochs may help")
         print(f"Training {why}. Best dev loss {self.best_dev:.4g} at epoch {best}; "
               f"{_duration(perf_counter() - self.start)}.", flush=True)
