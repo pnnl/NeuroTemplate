@@ -128,7 +128,8 @@ against that error. Fix the model, not the controller.
 3. **Bounds.** The policy writes each command inside `actuation_bounds` (by default
    the data's range). `command_bounds` narrows a command to a range that follows a
    reference at each step: a cooling setpoint inside the comfort band, a heating
-   setpoint under its floor, which also keeps the two from crossing. Keep a margin
+   setpoint under its floor, which also keeps the two from crossing (a side may also
+   name the other command: `[["Heating Setpoint", 1.0], 30.0]`). Keep a margin
    inside an edge the equipment overshoots (`[column, offset]`): a latching thermostat
    starts only past its setpoint, so a policy pinned at the ceiling rides just over
    it. Where one
@@ -228,5 +229,5 @@ command_bounds:                 # inside the band, a margin under its ceiling, h
 policy: mlp
 ```
 
-Size `epochs` from the cost line the run prints before training.
+Size `epochs` from the seconds-per-epoch line the run prints after its first epoch.
 

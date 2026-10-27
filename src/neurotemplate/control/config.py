@@ -106,13 +106,13 @@ class ControlConfig:
     residual_delta: dict[str, list[float]] = field(default_factory=dict)
 
     # A per-step range for a U column, `{column: [low, high]}`: each side a
-    # number in the column's units, the name of a reference or disturbance
-    # column the policy reads, or `[column, offset]`, that column plus a fixed
-    # offset in the U column's units (a margin inside a band edge). The policy commands inside its actuation box as usual,
-    # and that box is mapped onto [low, high] at each step, so a cooling
-    # setpoint can be held inside the comfort band and a heating setpoint
-    # under its floor, which also keeps the two from crossing. A column cannot
-    # be both here and in residual_delta.
+    # number in the column's units, the name of a column (a reference or
+    # disturbance the policy reads, or another command), or `[column, offset]`,
+    # that column plus a signed offset in the U column's units. The policy
+    # commands inside its actuation box as usual, and that box is mapped onto
+    # [low, high] at each step. A side naming another command orders the two:
+    # `{Cool: [[Heat, 1.0], 30.0]}` holds cooling at least 1 above heating at
+    # every step. A column cannot be both here and in residual_delta.
     command_bounds: dict[str, list] = field(default_factory=dict)
 
     # ── Training ─────────────────────────────────────────────────
@@ -234,7 +234,7 @@ class ControlConfig:
             if not (isinstance(pair, list) and len(pair) == 2 and all(map(side_ok, pair))):
                 raise ValueError(
                     f"command_bounds[{column!r}] must be a pair [low, high], each a "
-                    "number in the column's units, a column the policy reads, or "
+                    "number in the column's units, a column name, or "
                     f"[column, offset] in the column's units, got {pair!r}.")
             if column in self.residual_delta:
                 raise ValueError(

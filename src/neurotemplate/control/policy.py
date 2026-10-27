@@ -31,6 +31,7 @@ selects a dynamics family on the sys-id side:
 
 from __future__ import annotations
 
+from graphlib import CycleError, TopologicalSorter
 from typing import Optional
 
 import torch
@@ -244,28 +245,32 @@ class _ReferenceBounds(nn.Module):
     For each column `command_bounds` names, the base policy's command `u`, in
     `[umin, umax]`, becomes `low + (u - umin) / (umax - umin) · (high - low)`,
     with `low` and `high` either fixed or read at the current step from a
-    column the policy reads: a reference (R) or a disturbance (D), each window's
-    present row. `high` is held at least `low`. A linear map rather than a
-    clamp, so the whole range keeps a gradient.
+    column: a reference (R) or a disturbance (D) at its window's present row,
+    or another command (U) as this step emits it. `high` is held at least
+    `low`. A linear map rather than a clamp, so the whole range keeps a
+    gradient.
+
+    Columns are mapped in `order`, each after any bounded command it reads, so
+    a side naming a bounded command reads that command's final value.
     """
 
     def __init__(self, base: nn.Module, u_columns: list[str], bounds: dict[str, list],
-                 umin: torch.Tensor, umax: torch.Tensor, norm_stats: NormStats,
-                 sources: dict[str, tuple[int, int, int, int]]):
+                 order: list[str], umin: torch.Tensor, umax: torch.Tensor,
+                 norm_stats: NormStats, sources: dict[str, tuple]):
         super().__init__()
         self.base = base
-        self.bounds = {c: list(pair) for c, pair in bounds.items()}
-        self.columns = [u_columns.index(c) for c in bounds]
+        self.columns = [u_columns.index(c) for c in order]
         self.register_buffer("umin", umin)
         self.register_buffer("umax", umax)
-        # Each side as (source or None, scale, offset): a source is (positional
-        # input, present row, window width, column) for a named column, whose
-        # normalized value maps to the U column's normalized space by
-        # `value · scale + offset`; a number is the constant `offset`.
+        # Each side as (source or None, scale, offset): a source is `("U", column)`
+        # for a command, or (positional input, present row, window width, column)
+        # for a reference or disturbance. The named column's normalized value
+        # maps to the bounded column's normalized space by `value · scale +
+        # offset`; a number is the constant `offset`.
         sides = []
-        for column, pair in bounds.items():
+        for column in order:
             u = norm_stats[column]
-            for side in pair:
+            for side in bounds[column]:
                 name, margin = _bound_side(side)
                 if name is not None:
                     v = norm_stats[name]
@@ -275,10 +280,12 @@ class _ReferenceBounds(nn.Module):
                     sides.append((None, 0.0, (margin - u["shift"]) / u["stretch"]))
         self.sides = sides
 
-    def _side(self, k: int, args: tuple, like: torch.Tensor) -> torch.Tensor:
+    def _side(self, k: int, args: tuple, columns: list, like: torch.Tensor) -> torch.Tensor:
         source, scale, offset = self.sides[k]
         if source is None:
             return torch.full_like(like, offset)
+        if source[0] == "U":
+            return columns[source[1]] * scale + offset
         key, row, width, column = source
         return _current(args[key], row, width)[:, column] * scale + offset
 
@@ -286,8 +293,8 @@ class _ReferenceBounds(nn.Module):
         u = self.base(*args)
         columns = list(u.unbind(-1))
         for n, j in enumerate(self.columns):
-            low = self._side(2 * n, args, u[:, j])
-            high = torch.maximum(self._side(2 * n + 1, args, u[:, j]), low)
+            low = self._side(2 * n, args, columns, u[:, j])
+            high = torch.maximum(self._side(2 * n + 1, args, columns, u[:, j]), low)
             share = (u[:, j] - self.umin[j]) / (self.umax[j] - self.umin[j])
             columns[j] = low + share * (high - low)
         return torch.stack(columns, dim=-1)
@@ -600,28 +607,44 @@ def _reference_bounds(net, cfg, nm_mapping, norm_stats, keys, input_map, r_colum
                       umin, umax) -> _ReferenceBounds:
     """`_ReferenceBounds` from `cfg.command_bounds`, every name checked first.
 
-    A named side is read from the R window if it is a reference column, else
-    from the D window: each at its present row (the key's deepest `past`)."""
+    A named side is a reference column (read from the R window), a disturbance
+    (the D window), each at its present row (the key's deepest `past`), or
+    another command. Commands are ordered so each follows the bounded commands
+    its sides name; a cycle is refused."""
+    u_columns = list(nm_mapping["U"])
     readable = {"R": r_columns, "D": list(nm_mapping["D"])}
     sources, problems = {}, []
+    after = {}
     for column, pair in cfg.command_bounds.items():
-        if column not in nm_mapping["U"]:
-            problems.append(f"{column!r} is not a U column ({nm_mapping['U']})")
+        if column not in u_columns:
+            problems.append(f"{column!r} is not a U column ({u_columns})")
+        after[column] = set()
         for raw in pair:
             side, _ = _bound_side(raw)
             if side is None:
                 continue
+            if side in u_columns:
+                sources[side] = ("U", u_columns.index(side))
+                if side in cfg.command_bounds:
+                    after[column].add(side)
+                continue
             key = next((k for k in ("R", "D") if side in readable[k] and k in keys), None)
             if key is None:
                 problems.append(f"{column!r} is bounded by {side!r}, which is not a "
-                                f"reference or disturbance column the policy reads "
-                                f"(R {r_columns}, D {nm_mapping['D']})")
+                                f"command, or a reference or disturbance column the policy "
+                                f"reads (U {u_columns}, R {r_columns}, D {nm_mapping['D']})")
                 continue
             sources[side] = (keys.index(key), input_map[key]["past"], len(readable[key]),
                              readable[key].index(side))
     if problems:
         raise ValueError("command_bounds: " + "; ".join(problems) + ".")
-    return _ReferenceBounds(net, list(nm_mapping["U"]), cfg.command_bounds, umin, umax,
+    try:
+        order = list(TopologicalSorter(after).static_order())
+    except CycleError as e:
+        raise ValueError(f"command_bounds: the bounds read each other in a cycle "
+                         f"({' -> '.join(e.args[1])}); one of them has to be fixed "
+                         "or read from data.") from None
+    return _ReferenceBounds(net, u_columns, cfg.command_bounds, order, umin, umax,
                             norm_stats, sources)
 
 

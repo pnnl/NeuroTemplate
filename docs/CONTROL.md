@@ -141,7 +141,8 @@ transformation of your own reference file works the same way.
 By default each control commands anywhere inside `actuation_bounds`, the
 data's range. `command_bounds` narrows a control to a range that moves with
 a forecast at each step, `{column: [low, high]}`, each side a number in the
-column's units or a reference or disturbance column the policy reads:
+column's units, a reference or disturbance column the policy reads, or
+another command:
 
 ```yaml
 command_bounds:                     # syntax, not values
@@ -149,14 +150,25 @@ command_bounds:                     # syntax, not values
   "Heating Setpoint": [15.0, "Comfort Low"]
 ```
 
-A side `[column, offset]` is that column plus a fixed offset in the command's
-units. Equipment that starts only once the state is past its setpoint (a
+A side `[column, offset]` is that column plus a signed offset in the command's
+units: `["Comfort High", -0.5]` is half a degree under the ceiling,
+`["Comfort Low", -1.0]` a degree under the floor. Equipment that starts only once the state is past its setpoint (a
 latching thermostat) overshoots a setpoint held at the band edge, so keep the
 command a margin inside it.
 
 The policy's whole output range is mapped onto `[low, high]`, so every
 command in it is reachable and none outside it is. Bounding cooling inside
-the band and heating under its floor also keeps the two from crossing.
+the band and heating under its floor keeps the two from crossing; where no
+band separates them, a side naming the other command orders them directly:
+
+```yaml
+command_bounds:
+  "Heating Setpoint": [15.0, 22.0]
+  "Cooling Setpoint": [["Heating Setpoint", 1.0], 30.0]   # at least 1 above heating
+```
+
+Bounds that read other commands are mapped after them, in whatever order
+they are declared; bounds that read each other in a cycle are refused.
 
 ## Residual control: a correction to a trusted rule
 

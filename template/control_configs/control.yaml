@@ -157,11 +157,13 @@ gains: {comfort_lower: 1.0, comfort_upper: 1.0, du: 1.0}
 #   Cooling Setpoint [°C]: [below, above]
 
 # Per-step bounds: the policy's range for a column, mapped onto [low, high] at
-# each step, each side a number in the column's units or a reference or
-# disturbance column the policy reads. Inside the band for cooling and under its floor for
-# heating keeps them from crossing. Not with residual_delta on the same column.
-# A side [column, offset] keeps a margin inside an edge: equipment that starts
-# only past its setpoint overshoots a setpoint held at the band's ceiling.
+# each step, each side a number in the column's units, a reference or
+# disturbance column the policy reads, or another command. Inside the band for
+# cooling and under its floor for heating keeps them from crossing; a side
+# naming the other command orders them directly ([["Heating Setpoint [°C]",
+# 1.0], 30.0]). Not with residual_delta on the same column. A side
+# [column, offset] adds a signed offset: a margin inside an edge, since
+# equipment that starts only past its setpoint overshoots one held at the edge.
 # command_bounds:
 #   Cooling Setpoint [°C]: ["Comfort Low [°C]", ["Comfort High [°C]", -0.5]]
 #   Heating Setpoint [°C]: [15.0, "Comfort Low [°C]"]

@@ -4,7 +4,7 @@ import torch
 
 from neurotemplate.control.closed_loop import build_closed_loop
 from neurotemplate.control.losses import resolve_objective
-from neurotemplate.control.policy import build_policy
+from neurotemplate.control.policy import _reference_bounds, build_policy
 from neurotemplate.control.scenarios import build_window_dict, horizons
 from control_fixtures import SETPT, full_setup
 
@@ -47,7 +47,7 @@ def test_a_bounded_setpoint_stays_inside_the_band_at_every_step():
 
 
 def test_bounds_name_columns_the_policy_can_read():
-    with pytest.raises(ValueError, match="not a reference or disturbance column"):
+    with pytest.raises(ValueError, match="not a command, or a reference or disturbance"):
         _rollout(command_bounds={SETPT: ["Nowhere [°C]", HIGH]})
 
 
@@ -83,3 +83,34 @@ def test_a_bound_may_sit_a_margin_inside_a_band_edge():
     high = _physical(s, out["R"][:, hmax - 1:, r_columns.index(HIGH)], HIGH)
     steps = min(u.shape[1], high.shape[1])
     assert (u[:, :steps] <= high[:, :steps] - 0.5 + 1e-4).all()
+
+
+def _ordered(bounds, u):
+    """`_reference_bounds` over two commands in °C, unnormalized, on a stub
+    policy that emits `u`; returns the bounded commands."""
+    from types import SimpleNamespace
+    heat, cool = "Heat [°C]", "Cool [°C]"
+    stats = {c: {"shift": 0.0, "stretch": 1.0} for c in (heat, cool)}
+    cfg = SimpleNamespace(command_bounds=bounds)
+    nm = {"U": [heat, cool], "D": []}
+    base = lambda *args: u                      # noqa: E731
+    net = _reference_bounds(base, cfg, nm, stats, ["yn"], {}, [],
+                            torch.tensor([0.0, 0.0]), torch.tensor([1.0, 1.0]))
+    return net(torch.zeros(1)), heat, cool
+
+
+def test_a_command_bounded_by_another_stays_ordered_whatever_the_declaration_order():
+    """Cooling at least 1 °C above heating at every step, with the two declared
+    either way round: the bounds are mapped in the order they read each other."""
+    u = torch.rand(256, 2)
+    for bounds in ({"Heat [°C]": [15.0, 22.0], "Cool [°C]": [["Heat [°C]", 1.0], 30.0]},
+                   {"Cool [°C]": [["Heat [°C]", 1.0], 30.0], "Heat [°C]": [15.0, 22.0]}):
+        out, _, _ = _ordered(bounds, u)
+        assert (out[:, 1] >= out[:, 0] + 1.0 - 1e-5).all()
+        assert (out[:, 0] >= 15.0 - 1e-5).all() and (out[:, 0] <= 22.0 + 1e-5).all()
+
+
+def test_bounds_that_read_each_other_in_a_cycle_are_refused():
+    with pytest.raises(ValueError, match="cycle"):
+        _ordered({"Heat [°C]": [15.0, "Cool [°C]"], "Cool [°C]": ["Heat [°C]", 30.0]},
+                 torch.rand(4, 2))
