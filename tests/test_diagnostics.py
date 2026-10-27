@@ -131,18 +131,28 @@ def test_actuator_off_mask_true_only_when_every_actuator_is_at_rest():
     assert mask.tolist() == [True, True, False, False]
 
 
-def test_a_latch_shows_up_as_two_columns_and_a_memoryless_switch_as_one():
-    """A thermostat that starts above +0.3 and stops below -0.3 runs, at an
-    error of zero, if and only if it ran the step before; a switch at zero
-    runs on the error alone."""
+def test_a_latch_shows_up_as_two_columns_and_its_thresholds_and_capacity_are_read_back():
+    """A cooling stage that starts 0.3 past its setpoint and stops 0.2 back,
+    removing 3 °C/h against a 1.5 °C/h gain: at an error of zero it runs if
+    and only if it ran the step before, and the estimates find the three
+    numbers. A switch at zero runs on the error alone."""
     import numpy as np
-    from neurotemplate.modeling.diagnostics import latch_table
+    from neurotemplate.modeling.diagnostics import latch_estimates, latch_table
     rng = np.random.default_rng(0)
-    error = np.cumsum(rng.normal(0, 0.08, 20_000)).clip(-2, 2)
-    latched = np.zeros_like(error, dtype=bool)
-    for k in range(1, len(error)):
-        latched[k] = error[k] > 0.3 or (latched[k - 1] and error[k] > -0.3)
-    middle = [r for r in latch_table(latched, error) if r.low == -0.25][0]
+    step_h, n = 1 / 12, 20_000
+    setpoint = 24.0 + np.repeat(rng.uniform(-1, 1, n // 200), 200)
+    zone, running = np.empty(n), np.zeros(n, dtype=bool)
+    zone[0] = 24.0
+    for k in range(n - 1):
+        error = zone[k] - setpoint[k]
+        running[k] = error > 0.3 or (k > 0 and running[k - 1] and error > -0.2)
+        zone[k + 1] = zone[k] + (1.5 - 3.0 * running[k]) * step_h + rng.normal(0, 0.03)
+    error = zone - setpoint
+    middle = [r for r in latch_table(running, error) if r.low == 0.0][0]
     assert middle.p_after_running > 0.9 and middle.p_after_idle < 0.1
+    estimate = latch_estimates([(running, error, zone)], sign=-1, step_h=step_h)
+    assert estimate.on_at == pytest.approx(0.3, abs=0.1)
+    assert estimate.off_at == pytest.approx(0.2, abs=0.1)
+    assert estimate.capacity == pytest.approx(3.0, rel=0.15)
     memoryless = [r for r in latch_table(error > 0, error) if r.low == 0.0][0]
     assert memoryless.p_after_running == memoryless.p_after_idle == 1.0

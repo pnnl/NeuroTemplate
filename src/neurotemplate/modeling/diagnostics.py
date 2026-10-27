@@ -553,6 +553,84 @@ def latch_table(running: np.ndarray, error: np.ndarray,
     return rows
 
 
+#: Bin width, in the state's units of error, for locating a switch point.
+SWITCH_BIN = 0.1
+#: Steps a bin needs before its probability or mean rate counts.
+SWITCH_MIN_N = 20
+
+
+@dataclass(frozen=True)
+class LatchEstimate:
+    """What a record says about a thermostat stage, in the units a demand
+    declaration takes. Any of them None when the record never shows it."""
+    on_at: Optional[float]     # error at which a stopped stage starts
+    off_at: Optional[float]    # error back past the setpoint at which a running stage stops
+    capacity: Optional[float]  # state units per hour: running minus idle, at matched error
+
+
+def _bins(error: np.ndarray) -> list[np.ndarray]:
+    """Masks of `SWITCH_BIN`-wide bins of error, lowest first."""
+    start = math.floor(error.min() / SWITCH_BIN) * SWITCH_BIN
+    edges = np.arange(start, error.max() + SWITCH_BIN, SWITCH_BIN)
+    return [(error > lo) & (error <= lo + SWITCH_BIN) for lo in edges]
+
+
+def _half_crossing(error: np.ndarray, hit: np.ndarray) -> Optional[float]:
+    """The error at which P(hit) first rises through one half, scanning upward,
+    interpolated between bin centres; None if it never does."""
+    points = [(float(error[m].mean()), float(hit[m].mean()))
+              for m in _bins(error) if m.sum() >= SWITCH_MIN_N]
+    for (e0, p0), (e1, p1) in zip(points, points[1:]):
+        if p0 < 0.5 <= p1:
+            return e0 + (0.5 - p0) / (p1 - p0) * (e1 - e0)
+    return None
+
+
+def latch_estimates(records: list[tuple[np.ndarray, np.ndarray, np.ndarray]],
+                    sign: int, step_h: float) -> LatchEstimate:
+    """`on_at`, `off_at` and `capacity` from `(running, error, state)` records,
+    each contiguous.
+
+    A stopped stage starts where P(running | idle the step before) crosses one
+    half; a running one stops where P(running | running before) does, `off_at`
+    being that error's distance past the setpoint. `capacity` is how much
+    faster the state moves in `sign`'s direction with the stage running two
+    steps in a row than idle two in a row, at the same error, averaged over
+    the bins that have both. Staged equipment running below full stage makes
+    it a lower bound. Advice for centring a box, not a fit.
+    """
+    now, before, error, running_rate, idle_rate, rate_error = [], [], [], [], [], []
+    for running, err, state in records:
+        running = np.asarray(running, dtype=bool)
+        err, state = np.asarray(err, dtype=float), np.asarray(state, dtype=float)
+        now.append(running[1:])
+        before.append(running[:-1])
+        error.append(err[1:])
+        # The step's effect shows in the next state; held two steps, so a
+        # start or a stop does not dilute it.
+        rate = (state[2:] - state[1:-1]) / step_h
+        held_on, held_off = running[1:-1] & running[:-2], ~running[1:-1] & ~running[:-2]
+        running_rate.append(np.where(held_on, rate, np.nan))
+        idle_rate.append(np.where(held_off, rate, np.nan))
+        rate_error.append(err[1:-1])
+    now, before, error = map(np.concatenate, (now, before, error))
+    running_rate, idle_rate, rate_error = map(np.concatenate,
+                                              (running_rate, idle_rate, rate_error))
+
+    on_at = _half_crossing(error[~before], now[~before]) if (~before).any() else None
+    stop = _half_crossing(error[before], now[before]) if before.any() else None
+
+    gaps, weights = [], []
+    for m in _bins(rate_error):
+        on, off = running_rate[m], idle_rate[m]
+        on, off = on[~np.isnan(on)], off[~np.isnan(off)]
+        if len(on) >= SWITCH_MIN_N and len(off) >= SWITCH_MIN_N:
+            gaps.append(sign * (on.mean() - off.mean()))
+            weights.append(len(on))
+    capacity = float(np.average(gaps, weights=weights)) if gaps else None
+    return LatchEstimate(on_at, None if stop is None else -stop, capacity)
+
+
 def pool_latch_tables(tables: list[list[LatchRow]]) -> list[LatchRow]:
     """Bin-wise counts and probabilities pooled across several records."""
     pooled = []

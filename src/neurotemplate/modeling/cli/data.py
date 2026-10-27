@@ -43,11 +43,11 @@ from neurotemplate.modeling.dynamics import family_by_channel
 from neurotemplate.modeling.pipeline import resolve_block_spec, resolve_nm_mapping
 from neurotemplate.modeling.diagnostics import (
     K_MAX_DEFAULT,
-    LATCH_EDGES,
     MIN_RUN_HOURS_DEFAULT,
     OFF_TOLERANCE_FRAC,
     actuator_off_mask,
     estimate_decay,
+    latch_estimates,
     latch_table,
     pool_latch_tables,
     recommend_head,
@@ -247,7 +247,7 @@ def latch_main() -> None:
         default_config_path=MODEL_CONFIG_DIR / "modeling.yaml",
         command_flags=flags,
     )
-    train_raws, _dev_raws, _test_raws, _freq_s = get_data_splits(cfg)
+    train_raws, _dev_raws, _test_raws, freq_s = get_data_splits(cfg)
     missing = [c for c in (args.running, args.setpoint, args.state)
                if c not in train_raws[0].columns]
     if missing:
@@ -255,13 +255,15 @@ def latch_main() -> None:
 
     # The error is positive while the equipment is called for, as the demand
     # feature is; each file on its own, since "the step before" needs contiguity.
-    tables = []
+    tables, records = [], []
     for raw in train_raws:
         meter = raw[args.running].to_numpy(dtype=float)
         floor = meter.min() + OFF_TOLERANCE_FRAC * (meter.max() - meter.min())
         error = args.sign * (raw[args.setpoint] - raw[args.state]).to_numpy(dtype=float)
         tables.append(latch_table(meter > floor, error))
+        records.append((meter > floor, error, raw[args.state].to_numpy(dtype=float)))
     rows = pool_latch_tables(tables)
+    estimate = latch_estimates(records, args.sign, step_h=freq_s / 3600.0)
 
     print(f"How often {args.running!r} runs, by {args.state!r} minus "
           f"{args.setpoint!r} (sign {args.sign:+d}: positive while it is called for)")
@@ -273,4 +275,16 @@ def latch_main() -> None:
               f"   {cell(r.p_after_idle, r.n_after_idle)}")
     print("  The same column twice means the equipment answers the error alone. A high "
           "'after running' beside a low 'after idle' in the bins around zero means it "
-          "latches: declare `hysteresis: true` on the setpoint's demand entry.")
+          "latches: declare `hysteresis` on the setpoint's demand entry.")
+
+    def number(value, unit=""):
+        return "not seen in this record" if value is None else f"{value:.2f}{unit}"
+    print("Implied by this record (centre a box on each, wide enough for what it cannot see):")
+    print(f"  on_at     {number(estimate.on_at)}  error at which a stopped stage starts")
+    print(f"  off_at    {number(estimate.off_at)}  back past the setpoint, at which a "
+          "running stage stops")
+    print(f"  capacity  {number(estimate.capacity, ' per hour')}  how much faster the state "
+          "moves running than idle at the same error; a lower bound when the equipment "
+          "stages")
+    print("  Memory at a fixed measured error: a deadband, a minimum run time, or a "
+          "thermostat reading another temperature than this one all produce it.")
