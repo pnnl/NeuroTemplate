@@ -158,12 +158,7 @@ physics instead of having to learn it:
 
 Inside `2r2c`, a `demand` column becomes a saturating branch, bounded in
 value and in slope, so the stability guarantee survives the one state read
-it admits. When the same demand delivers more under some conditions than
-others (a coil removes more heat when the air it rejects heat to is cooler),
-name those columns in the entry's `modulated_by`: the branch's effect is then
-scaled by a learned factor between 0 and 2 of them, starting at 1, and the
-slope bound holds at any factor. The reportcard's branch lines give the
-factor's weights. When the equipment behind a setpoint latches (a thermostat
+it admits. When the equipment behind a setpoint latches (a thermostat
 that starts a stage above the setpoint and, once running, keeps it running
 until the zone is some way below), set `"hysteresis": true` on the entry: the
 branch then carries its stage between steps and learns the two thresholds,

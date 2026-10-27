@@ -72,9 +72,7 @@ Every key below is in docs/MODELING.md ("Blocks", "Declaring what a column is").
      `BoundedHead(project_physical_to_norm(0.0, stats), float("inf"))` in
      `data_head_config`. A regression head that dips negative tells the cost term
      that running the equipment earns money.
-4. **When the actuator's effect depends on conditions** (equipment that delivers
-   more on a cool night than on a hot afternoon), name those columns in the demand
-   entry's `modulated_by`. **When the equipment latches** (it starts above the
+4. **When the equipment latches** (it starts above the
    setpoint and, once running, runs until the zone is some way below), set
    `hysteresis: true`. `nt data latch` checks: it prints how often the equipment runs
    at the same error, after a step running and after a step idle.
@@ -183,8 +181,7 @@ def block_mapping(nm_mapping, cfg):
                             "tau_slow_h": [24.0, 150.0]},
                  "inputs": {
                      "Cooling Setpoint": {"kind": "demand", "sign": -1, "state": "Zone Temp",
-                                          "hysteresis": True,            # nt data latch
-                                          "modulated_by": ["Outdoor Temp"]},
+                                          "hysteresis": True},           # nt data latch
                      "Heating Setpoint": {"kind": "demand", "sign": +1, "state": "Zone Temp"},
                      "Solar": {"kind": "linear", "sign": +1}}},
         "meter": {"Y": ["Compressor Power", "Fan Power"], "reads": ["Zone Temp"],

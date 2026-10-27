@@ -880,8 +880,8 @@ def _build_pre_stack(
     `SSMGrad.forward` serve every family.
     """
     # The transform carries only what defines the feature: a hysteresis
-    # column's error is left signed. `branch` and `modulated_by` say what a
-    # 2r2c block does with it, and stay there.
+    # column's error is left signed. `branch` says what a 2r2c block does
+    # with it, and stays there.
     demands = {
         column: {**{k: entry[k] for k in ("kind", "state", "sign")},
                  "clamped": not entry.get("hysteresis", False)}

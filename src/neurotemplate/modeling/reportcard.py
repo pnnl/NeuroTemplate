@@ -298,11 +298,6 @@ def _forcing_lines(forcing: Optional[dict], indent: str) -> list[str]:
         if "on_at_C" in term:
             line += (f"; latched: on {term['on_at_C']:.2f} °C past the setpoint, "
                      f"off {term['off_at_C']:.2f} °C back")
-        if "modulated_by" in term:
-            weights = ", ".join(f"{c} {w:+.3g}"
-                                for c, w in term["modulated_by"]["weights"].items())
-            line += (f"; factor = 2·sigmoid({term['modulated_by']['bias']:+.3g} + "
-                     f"{weights}, normalised)")
         lines.append(line)
     if forcing.get("mlp"):
         hsizes = forcing.get("mlp_hsizes") or []
