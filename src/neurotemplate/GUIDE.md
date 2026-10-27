@@ -77,8 +77,9 @@ Every key below is in docs/MODELING.md ("Blocks", "Declaring what a column is").
    setpoint and, once running, runs until the zone is some way below), declare
    `hysteresis: {on_at: box, off_at: box}` in °C of error. `nt data latch` checks
    both: it prints how often the equipment runs at the same error, after a step
-   running and after a step idle, then the thresholds and the capacity those imply.
-   Centre each box on its estimate, wide enough to hold what the estimate cannot see.
+   running and after a step idle, then the error at its starts and stops and the jump
+   in the zone's rate across them. Size each box from those, wide enough to hold what
+   they cannot see: the jump is a lower bound for equipment that stages.
 5. **Priors.** Time constants come from `nt data decay`; a `2r2c` block's
    `tau_fast_h` box cannot start below two data steps (0.17 h on 5-minute data), the
    floor its stability guarantee needs. Output heads come from

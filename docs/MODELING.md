@@ -178,12 +178,13 @@ edge.
 `nt data latch` estimates all three from the record. It prints how often the
 equipment runs at the same zone-minus-setpoint after a step running and
 after a step idle: equal columns mean a memoryless thermostat, columns that
-split around zero mean a latch. Under the table it prints where each column
-crosses one half, the error at which the stage starts and stops, and the
-zone's rate running against idle at the same error, a capacity. These are
-measurements of memory at a fixed measured error, which a deadband, a
-minimum run time or a thermostat that reads another temperature than the
-logged zone all produce, so use them to centre a box, not to pin a value.
+split around zero mean a latch. Under the table it reads the record's starts
+and stops: the error at each, and the jump in the zone's rate across each,
+which is the stage's capacity (conditions on either side of a switch are
+nearly the same). Each comes as a median and a middle half. These measure
+memory at a fixed measured error, which a deadband, a minimum run time,
+cycling or a thermostat that reads another temperature than the logged zone
+all produce, so use them to size a box, not to pin a value.
 Nothing is inferred from column names. A declaration changes the
 physics but not the shapes, so a wrong one shows only in the reportcard's
 branch lines.

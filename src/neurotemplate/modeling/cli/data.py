@@ -277,14 +277,15 @@ def latch_main() -> None:
           "'after running' beside a low 'after idle' in the bins around zero means it "
           "latches: declare `hysteresis` on the setpoint's demand entry.")
 
-    def number(value, unit=""):
-        return "not seen in this record" if value is None else f"{value:.2f}{unit}"
-    print("Implied by this record (centre a box on each, wide enough for what it cannot see):")
-    print(f"  on_at     {number(estimate.on_at)}  error at which a stopped stage starts")
-    print(f"  off_at    {number(estimate.off_at)}  back past the setpoint, at which a "
-          "running stage stops")
-    print(f"  capacity  {number(estimate.capacity, ' per hour')}  how much faster the state "
-          "moves running than idle at the same error; a lower bound when the equipment "
-          "stages")
-    print("  Memory at a fixed measured error: a deadband, a minimum run time, or a "
-          "thermostat reading another temperature than this one all produce it.")
+    def spread(q, unit=""):
+        if q is None:
+            return "no event in this record"
+        return f"{q[1]:.2f}{unit} (middle half {q[0]:.2f} to {q[2]:.2f})"
+    print("At each start and stop (a box covering the middle half is a fair start):")
+    print(f"  error at a start  {spread(estimate.start_error)}  -> on_at")
+    print(f"  error at a stop   {spread(estimate.stop_error)}  -> off_at is its negative, "
+          "where it lies past the setpoint")
+    print(f"  rate jump         {spread(estimate.capacity, ' per hour')}  -> capacity; "
+          "a lower bound when the equipment switches one stage of several")
+    print("  Memory at a fixed measured error: a deadband, a minimum run time, cycling, or "
+          "a thermostat reading another temperature than this one all produce it.")

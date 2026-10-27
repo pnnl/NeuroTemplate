@@ -151,8 +151,8 @@ def test_a_latch_shows_up_as_two_columns_and_its_thresholds_and_capacity_are_rea
     middle = [r for r in latch_table(running, error) if r.low == 0.0][0]
     assert middle.p_after_running > 0.9 and middle.p_after_idle < 0.1
     estimate = latch_estimates([(running, error, zone)], sign=-1, step_h=step_h)
-    assert estimate.on_at == pytest.approx(0.3, abs=0.1)
-    assert estimate.off_at == pytest.approx(0.2, abs=0.1)
-    assert estimate.capacity == pytest.approx(3.0, rel=0.15)
+    assert estimate.start_error[1] == pytest.approx(0.3, abs=0.1)
+    assert estimate.stop_error[1] == pytest.approx(-0.2, abs=0.1)
+    assert estimate.capacity[1] == pytest.approx(3.0, rel=0.15)
     memoryless = [r for r in latch_table(error > 0, error) if r.low == 0.0][0]
     assert memoryless.p_after_running == memoryless.p_after_idle == 1.0
