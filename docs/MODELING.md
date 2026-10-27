@@ -181,10 +181,13 @@ after a step idle: equal columns mean a memoryless thermostat, columns that
 split around zero mean a latch. Under the table it reads the record's starts
 and stops: the error at each, and the jump in the zone's rate across each,
 which is the stage's capacity (conditions on either side of a switch are
-nearly the same). Each comes as a median and a middle half. These measure
-memory at a fixed measured error, which a deadband, a minimum run time,
-cycling or a thermostat that reads another temperature than the logged zone
-all produce, so use them to size a box, not to pin a value.
+nearly the same). Each comes as a median and a middle half. The capacity
+sizes its box directly. The switch points do not: they say where the
+measured zone was when the equipment switched, while the branch's
+thresholds act on the model's own predicted zone and absorb whatever lag the
+model lacks, so they fit wider. Box them from 0 to several times the
+measured points, and read the fit against them. A box held to the measured
+points pins them where the model cannot use them.
 Nothing is inferred from column names. A declaration changes the
 physics but not the shapes, so a wrong one shows only in the reportcard's
 branch lines.

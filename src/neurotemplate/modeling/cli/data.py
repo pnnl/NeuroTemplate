@@ -281,11 +281,14 @@ def latch_main() -> None:
         if q is None:
             return "no event in this record"
         return f"{q[1]:.2f}{unit} (middle half {q[0]:.2f} to {q[2]:.2f})"
-    print("At each start and stop (a box covering the middle half is a fair start):")
-    print(f"  error at a start  {spread(estimate.start_error)}  -> on_at")
-    print(f"  error at a stop   {spread(estimate.stop_error)}  -> off_at is its negative, "
-          "where it lies past the setpoint")
-    print(f"  rate jump         {spread(estimate.capacity, ' per hour')}  -> capacity; "
-          "a lower bound when the equipment switches one stage of several")
+    print("At each start and stop:")
+    print(f"  error at a start  {spread(estimate.start_error)}")
+    print(f"  error at a stop   {spread(estimate.stop_error)}")
+    print(f"  rate jump         {spread(estimate.capacity, ' per hour')}  -> capacity: a box "
+          "around it; a lower bound when the equipment switches one stage of several")
+    print("  The switch points are where the measured state was when the equipment "
+          "switched. A model's on_at and off_at act on its own predicted state and also "
+          "absorb the lag it lacks, so they fit wider: box them from 0 to several times "
+          "these, and read where the fit lands against them.")
     print("  Memory at a fixed measured error: a deadband, a minimum run time, cycling, or "
           "a thermostat reading another temperature than this one all produce it.")

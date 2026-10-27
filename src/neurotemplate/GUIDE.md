@@ -78,8 +78,10 @@ Every key below is in docs/MODELING.md ("Blocks", "Declaring what a column is").
    `hysteresis: {on_at: box, off_at: box}` in °C of error. `nt data latch` checks
    both: it prints how often the equipment runs at the same error, after a step
    running and after a step idle, then the error at its starts and stops and the jump
-   in the zone's rate across them. Size each box from those, wide enough to hold what
-   they cannot see: the jump is a lower bound for equipment that stages.
+   in the zone's rate across them. The jump sizes the capacity box (a lower bound for
+   equipment that stages). The thresholds act on the model's zone, not the sensor's,
+   and fit wider than the measured switch points: box them from 0 to several times
+   those.
 5. **Priors.** Time constants come from `nt data decay`; a `2r2c` block's
    `tau_fast_h` box cannot start below two data steps (0.17 h on 5-minute data), the
    floor its stability guarantee needs. Output heads come from
@@ -186,7 +188,7 @@ def block_mapping(nm_mapping, cfg):
                  "inputs": {
                      "Cooling Setpoint": {"kind": "demand", "sign": -1, "state": "Zone Temp",
                                           "capacity": [1.0, 6.0],        # °C/h; nt data latch
-                                          "hysteresis": {"on_at": [0.0, 1.5],
+                                          "hysteresis": {"on_at": [0.0, 2.5],
                                                          "off_at": [0.0, 1.0]}},
                      "Heating Setpoint": {"kind": "demand", "sign": +1, "state": "Zone Temp",
                                           "capacity": [1.0, 6.0]},
