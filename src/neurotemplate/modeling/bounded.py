@@ -71,11 +71,8 @@ class BoundedParameter(nn.Module):
         """Position in the box, per label: 0 at `low`, 1 at `high`."""
         return torch.sigmoid(self.theta)
 
-    def value(self, shift: torch.Tensor | None = None) -> torch.Tensor:
-        """The value, or with `shift` the value at `θ + shift`: still inside
-        the box, for a parameter that varies with some input."""
-        fraction = self.fraction() if shift is None else torch.sigmoid(self.theta + shift)
-        inside = self.lower + (self.upper - self.lower) * fraction
+    def value(self) -> torch.Tensor:
+        inside = self.lower + (self.upper - self.lower) * self.fraction()
         return torch.exp(inside) if self.log else inside
 
     def describe(self) -> dict:

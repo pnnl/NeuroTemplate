@@ -73,8 +73,7 @@ Every key below is in docs/MODELING.md ("Blocks", "Declaring what a column is").
      `data_head_config`. A regression head that dips negative tells the cost term
      that running the equipment earns money.
 4. **Capacity and latching.** A `2r2c` demand declares its `capacity`, °C per hour at
-   full stage, as a scalar or a box, or `{box: [min, max], inputs: [columns]}` when it
-   varies with conditions (outdoor temperature: less cooling on a hot afternoon). When the equipment latches (it starts above the
+   full stage, as a scalar or a box. When the equipment latches (it starts above the
    setpoint and, once running, runs until the zone is some way below), declare
    `hysteresis: {on_at: box, off_at: box}` in °C of error. `nt data latch` checks
    both: it prints how often the equipment runs at the same error, after a step
