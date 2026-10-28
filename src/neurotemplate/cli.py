@@ -61,10 +61,9 @@ def main(argv: Optional[list[str]] = None) -> None:
     # instead of dumping training progress in blocks minutes apart.
     sys.stdout.reconfigure(encoding="utf-8", line_buffering=True)
     sys.stderr.reconfigure(encoding="utf-8")
-    # Dependencies' import-time noise (an invalid escape in a docstring, a
-    # deprecated alias) is not the user's to act on, and every line of it
-    # lands in an agent's context. The library's own warnings still show.
-    warnings.filterwarnings("ignore", category=SyntaxWarning)
+    # Dependencies' import-time noise (a deprecated alias) is not the user's
+    # to act on, and every line of it lands in an agent's context. The
+    # library's own warnings, and the user's hooks', still show.
     for package in ("tensorly", "neuromancer", "neuralop", "torch_harmonics"):
         warnings.filterwarnings("ignore", category=DeprecationWarning, module=package)
         warnings.filterwarnings("ignore", category=FutureWarning, module=package)
