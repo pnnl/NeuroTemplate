@@ -253,9 +253,7 @@ def block_mapping(
                it inherits that. Declare every setpoint that drives the
                block. In `2r2c` it drives a bounded, saturating heat input
                whose `capacity`, °C per hour at full stage, is a declared
-               scalar or [lo, hi] (`nt data latch` estimates it), or
-               {"box": [lo, hi], "inputs": [U or D columns]} for a capacity
-               that moves inside its box with conditions; `"branch":
+               scalar or [lo, hi] (`nt data latch` estimates it); `"branch":
                "mlp"` routes it into the learned residual instead, losing the
                stability bound. Equipment that latches (starts past its
                setpoint and runs until the state is some way back) also sets

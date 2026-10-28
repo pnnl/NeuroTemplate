@@ -56,10 +56,7 @@ with a `demand` entry has exactly one Y channel. Inside a `2r2c` block the
 feature feeds a bounded `saturating` branch by default; `"branch": "mlp"`
 routes it into the learned residual instead, which gives up the stability
 bound and is reported as such. A saturating branch declares its `capacity`,
-°C per hour at full stage, as a scalar or a box (`rc.demand_boxes`), or as
-`{"box": box, "inputs": [columns]}` for a capacity that moves inside its box
-with other U or D columns (never a demand column): a coil that delivers more
-on a cool night than on a hot afternoon.
+°C per hour at full stage, as a scalar or a box (`rc.demand_boxes`).
 
 A saturating `demand` entry may set `"hysteresis": {"on_at": box, "off_at":
 box}`, in °C of error: the branch is then a latched thermostat stage that
@@ -282,15 +279,6 @@ def _resolve_inputs(spec: dict, block: str, y_names: list[str],
             if key in entry and not saturating:
                 problems.append(f"`inputs[{column!r}]` sets `{key}`, which belongs to a "
                                 "saturating `demand` branch and nothing else.")
-        capacity = entry.get("capacity")
-        for name in capacity.get("inputs", []) if isinstance(capacity, dict) else []:
-            if name not in u_names and name not in d_names:
-                problems.append(f"`inputs[{column!r}].capacity` reads {name!r}, which is "
-                                f"not one of this block's U {u_names} or D {d_names} columns.")
-            elif inputs.get(name, {}).get("kind") == "demand":
-                problems.append(f"`inputs[{column!r}].capacity` reads {name!r}, a demand "
-                                "column: its feature reads the state, which would break "
-                                "the branch's slope bound.")
 
     if problems:
         raise ValueError(
