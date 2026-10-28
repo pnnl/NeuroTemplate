@@ -12,7 +12,7 @@ import pytest
 import torch
 from torch import nn
 
-from neuromancer.system import Node, SystemPreview
+from neurotemplate.nm.system import Node, SystemPreview
 
 from neurotemplate.modeling.prestack import PreStack
 from neurotemplate.modeling.scenarios import (

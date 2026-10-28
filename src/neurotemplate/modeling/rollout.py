@@ -6,7 +6,7 @@ of keys no node writes taken straight from their data tensor.
 from __future__ import annotations
 
 import torch
-from neuromancer.system import RolloutBuffers, SystemPreview
+from neurotemplate.nm.system import RolloutBuffers, SystemPreview
 
 
 class WindowedSystem(SystemPreview):

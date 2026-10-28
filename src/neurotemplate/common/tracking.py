@@ -14,7 +14,7 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Iterator, Optional, Protocol, Union, runtime_checkable
 
-from neuromancer.loggers import MLFlowLogger
+from neurotemplate.nm.loggers import MLFlowLogger
 
 
 @runtime_checkable

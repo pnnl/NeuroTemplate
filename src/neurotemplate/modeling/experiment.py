@@ -29,9 +29,9 @@ from neurotemplate.modeling.loss import build_loss
 from neurotemplate.modeling.rc import physical_parameters
 from neurotemplate.modeling.config import ModelingConfig
 
-from neuromancer.problem import Problem
-from neuromancer.trainer import Trainer
-from neuromancer.system import System
+from neurotemplate.nm.problem import Problem
+from neurotemplate.nm.trainer import Trainer
+from neurotemplate.nm.system import System
 
 
 # ── Seed / Device helpers ────────────────────────────────────────

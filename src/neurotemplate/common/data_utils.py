@@ -5,7 +5,7 @@ from typing import Optional, TypedDict
 
 import pandas as pd
 import torch
-from neuromancer.dataset import DictDataset
+from neurotemplate.nm.dataset import DictDataset
 
 from neurotemplate.common.config import paths_as_list
 

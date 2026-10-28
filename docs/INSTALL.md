@@ -5,8 +5,7 @@ holds your data, hook files and configs. New library features arrive by
 bumping the version the application pins.
 
 It needs Python 3.10 or newer. These instructions use
-[uv](https://docs.astral.sh/uv/); plain pip works, but it cannot apply the
-constraints below.
+[uv](https://docs.astral.sh/uv/); plain pip works too.
 
 ## As a dependency
 
@@ -17,27 +16,9 @@ In the application's `pyproject.toml`:
 dependencies = [
     "NeuroTemplate @ git+ssh://git@<host>/<owner>/neurotemplate.git@<tag>",
 ]
-
-[tool.uv]
-constraint-dependencies = [
-    "neuraloperator<2",
-    "torch-harmonics<0.8",
-]
 ```
 
 Then `uv sync`. That puts one command, `nt`, on the environment's `PATH`.
-
-**Copy the constraints block.** Neuromancer imports from neuraloperator a
-class that neuraloperator 2.0 removed, and it does not pin either package.
-uv reads `[tool.uv]` only from the project being synced, never from a
-dependency, so the library cannot set these for you. Without them
-`uv sync` succeeds and every `nt` command fails at import, with
-`cannot import name 'SFNO' from 'neuralop.models'`.
-
-**Neuromancer is pinned to one git commit.** If the application lists its
-own Neuromancer source, such as a local checkout, point it at the same
-commit or drop it. Otherwise `uv sync` refuses with conflicting URLs for
-`neuromancer`.
 
 ### Optional extras
 

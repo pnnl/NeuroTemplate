@@ -20,10 +20,9 @@ from __future__ import annotations
 
 import torch
 
-from neuromancer.system import SystemPreview
-from neuromancer.problem import Problem
-from neuromancer.constraint import Loss
-from neuromancer.loss import PenaltyLoss
+from neurotemplate.nm.system import SystemPreview
+from neurotemplate.nm.problem import Problem
+from neurotemplate.nm.loss import Loss, PenaltyLoss
 
 from neurotemplate.common.data_utils import NormStats
 from neurotemplate.control.losses import (

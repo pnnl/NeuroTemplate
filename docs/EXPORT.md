@@ -1,8 +1,8 @@
 # Exporting
 
 `nt export model` ships a trained surrogate and `nt export policy` a trained
-policy, as a standalone package that runs without NeuroTemplate,
-Neuromancer or the training code. The export serializes the trained network
+policy, as a standalone package that runs without NeuroTemplate or the
+training code. The export serializes the trained network
 rather than reimplementing it. Normalization, the window layout and any
 hidden state are inside the exported graphs, so a package takes physical
 units in and gives physical units out.

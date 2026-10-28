@@ -16,8 +16,7 @@ from typing import Optional
 
 import torch
 
-from neuromancer.constraint import variable, Loss
-from neuromancer.loss import PenaltyLoss
+from neurotemplate.nm.loss import Loss, PenaltyLoss
 
 from neurotemplate.modeling.config import ModelingConfig
 from neurotemplate.modeling.gradient_sampling import SampledGradientPenalty
@@ -48,9 +47,9 @@ def build_loss(
         PenaltyLoss combining all active loss terms
     """
 
-    # ── Tracking losses (Neuromancer Variable expressions) ──────────
+    # ── Tracking loss ───────────────────────────────────────────────
     #
-    # These operate on the System's output dict:
+    # It operates on the System's output dict:
     #   'Y'  = ground truth states from the data loader [batch, time, ny]
     #   'yn' = model predictions accumulated by System [batch, time+1, ny]
     #
@@ -61,23 +60,25 @@ def build_loss(
     # the same slice pipeline.evaluate_and_plot uses, which keeps the training
     # loss and the reported test metric measuring the same span.
 
-    y = variable("Y")[:, cfg.history_steps:, :]
-    yhat = variable("yn")[:, cfg.history_steps:-1, :]
-
     # Reference tracking
     #
-    # Without heads (or with all-regression heads), this is the original
-    # blanket MSE — preserved as a Variable expression so it still shows
-    # up labeled "ref_loss" in the Trainer output dict.
-    #
+    # Without heads (or with all-regression heads), this is the blanket MSE.
     # With non-trivial heads, the per-channel loss is computed via the
     # head_stack callable so each channel uses its own activation/loss
-    # pairing (e.g. BCE for binary). The result is wrapped in a Loss so
-    # it still appears as a labeled objective alongside the others.
+    # pairing (e.g. BCE for binary). Either way it is a Loss labeled
+    # "ref_loss" in the Trainer output dict.
     if head_stack is None:
-        mse = torch.mean((yhat - y) ** 2)
-        ref_loss = cfg.ref_gain * mse == 0
-        ref_loss.update_name("ref_loss")
+        def mse(yn, Y):
+            return torch.mean(
+                (yn[:, cfg.history_steps:-1, :] - Y[:, cfg.history_steps:, :]) ** 2
+            )
+
+        ref_loss = Loss(
+            input_keys=["yn", "Y"],
+            loss=mse,
+            weight=cfg.ref_gain,
+            name="ref_loss",
+        )
     else:
         def head_compute(yn, Y):
             return head_stack.loss(

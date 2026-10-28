@@ -169,7 +169,7 @@ from typing import Optional
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from neuromancer.modules import blocks
+from neurotemplate.nm import blocks
 
 from neurotemplate.modeling import windows
 from neurotemplate.modeling.bounded import BoundedParameter, bounded_parameters, parse_box

@@ -94,7 +94,7 @@ calibration, export agreement), plus the diagnostics a reader acts on and
 one end-to-end pass per command sequence. It does not test report
 formatting, error-message wording or plots.
 
-NeuroTemplate sits on top of Neuromancer and reuses its `Node`, `System`,
-`Problem`, `Trainer`, blocks and losses directly. Where a Neuromancer class
-does the job, import it rather than shadowing it. Neuromancer is pinned to
-one git commit in `pyproject.toml`; bump it deliberately.
+NeuroTemplate runs on PyTorch alone. Its `Node`, `System`, `Problem`,
+`Trainer`, blocks and losses are in `neurotemplate/nm`: a trimmed copy of
+Neuromancer's, under Neuromancer's BSD-2 license, kept until the library's
+own rollout and training loop replace it. Don't grow it.

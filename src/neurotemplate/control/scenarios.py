@@ -45,7 +45,7 @@ from __future__ import annotations
 import torch
 from pandas import DataFrame
 
-from neuromancer.dataset import DictDataset
+from neurotemplate.nm.dataset import DictDataset
 
 from neurotemplate.common.config import paths_as_list
 from neurotemplate.common.data_utils import (

@@ -52,10 +52,10 @@ from neurotemplate.modeling.config import ModelingConfig
 
 from neurotemplate._typing import beartype
 
-from neuromancer.system import Node, SystemPreview
+from neurotemplate.nm.system import Node, SystemPreview
 # Aliased: this module's own per-block Block type would otherwise collide
 # with neuromancer's `blocks` module name (MLP/Linear builders).
-from neuromancer.modules import blocks as nm_blocks
+from neurotemplate.nm import blocks as nm_blocks
 
 from neurotemplate.modeling import windows
 from neurotemplate.modeling.heads import HeadStack

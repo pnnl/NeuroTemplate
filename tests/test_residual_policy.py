@@ -10,7 +10,7 @@ the rule, and a rule that anchors different columns from the boxes is refused.
 import pytest
 import torch
 import torch.nn as nn
-from neuromancer.modules import blocks
+from neurotemplate.nm import blocks
 
 from neurotemplate.control.closed_loop import build_closed_loop
 from neurotemplate.control.losses import resolve_objective
