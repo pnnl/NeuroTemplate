@@ -160,7 +160,11 @@ Inside `2r2c`, a `demand` column becomes a saturating branch, bounded in
 value and in slope, so the stability guarantee survives the one state read
 it admits. Its `capacity`, how fast full stage moves the zone in °C per
 hour, is declared like a time constant: a scalar pins it, `[min, max]` fits
-it inside, and there is no default. When the equipment behind a setpoint
+it inside, and there is no default. `{"box": [min, max], "inputs": [columns]}`
+lets it move inside the box with other U or D columns (outdoor temperature, an
+occupancy schedule): a coil that delivers more on a cool night than on a hot
+afternoon. It starts constant, and the reportcard prints it at each input's
+training extremes. When the equipment behind a setpoint
 latches (a thermostat that starts a stage above the setpoint and, once
 running, keeps it running until the zone is some way below), declare
 `"hysteresis": {"on_at": [min, max], "off_at": [min, max]}` in °C of error:

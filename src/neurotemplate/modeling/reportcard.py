@@ -298,6 +298,9 @@ def _forcing_lines(forcing: Optional[dict], indent: str) -> list[str]:
         lines.append(f"{indent}- {'latched' if term['latched'] else 'saturating'}: "
                      f"{column}, w={term['w']:.3g} °C, "
                      f"slope_share={term['slope_share']:.2f}")
+        for name, r in term.get("capacity_range", {}).items():
+            lines.append(f"{indent}  capacity {r['capacity'][0]:.3g} °C/h at {name} "
+                         f"{r['at'][0]:.3g}, {r['capacity'][1]:.3g} at {r['at'][1]:.3g}")
     if forcing.get("mlp"):
         hsizes = forcing.get("mlp_hsizes") or []
         size_s = f", hsizes={hsizes}" if hsizes else ""

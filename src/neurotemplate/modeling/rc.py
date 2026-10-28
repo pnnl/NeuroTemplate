@@ -238,13 +238,16 @@ def time_constant_boxes(params: dict, steps_per_hour: float,
 
 
 def demand_boxes(inputs: dict[str, dict], block: str) -> dict[str, dict]:
-    """Each saturating `demand` entry's boxes, validated:
-    `{column: {"capacity": (lo, hi)[, "on_at": (lo, hi), "off_at": (lo, hi)]}}`.
+    """Each saturating `demand` entry's boxes, validated: `{column:
+    {"capacity": (lo, hi), "capacity_inputs": (...)[, "on_at": (lo, hi),
+    "off_at": (lo, hi)]}}`.
 
     `capacity` (°C per hour at full stage) is required: like the time
-    constants, it is a prior about the building with no library default. A
-    `hysteresis` entry is `{"on_at": box, "off_at": box}` in °C of error.
-    Every problem is named at once.
+    constants, it is a prior about the building with no library default. It
+    is a scalar or a box, or `{"box": box, "inputs": [columns]}` for a
+    capacity that moves inside its box with those columns (`blocks` checks
+    the names). A `hysteresis` entry is `{"on_at": box, "off_at": box}` in °C
+    of error. Every problem is named at once.
     """
     boxes, problems = {}, []
     for column, entry in inputs.items():
@@ -256,8 +259,19 @@ def demand_boxes(inputs: dict[str, dict], block: str) -> dict[str, dict]:
                             "moves at full stage, a scalar or [min, max] (`nt data latch` "
                             "estimates it)")
         else:
+            capacity = entry["capacity"]
+            if isinstance(capacity, dict) and set(capacity) != {"box", "inputs"}:
+                problems.append(f"{column!r} capacity must be a scalar, [min, max], or "
+                                f"{{box: [min, max], inputs: [columns]}}; got {capacity!r}")
+                capacity = None
+            elif isinstance(capacity, dict):
+                box["capacity_inputs"] = tuple(capacity["inputs"])
+                capacity = capacity["box"]
+            else:
+                box["capacity_inputs"] = ()
             try:
-                box["capacity"] = parse_box(f"{column!r} capacity", entry["capacity"])
+                if capacity is not None:
+                    box["capacity"] = parse_box(f"{column!r} capacity", capacity)
             except ValueError as error:
                 problems.append(str(error))
         latch = entry.get("hysteresis")
@@ -365,7 +379,7 @@ class LinearTerm(nn.Module):
 
 
 class SaturatingTerm(nn.Module):
-    """`sign · cap · tanh(x / w)`: a staged coil's response to demand.
+    """`sign · cap(c) · tanh(x / w)`: a staged coil's response to demand.
 
     `cap` is the declared `capacity` (°C per hour at full stage), fitted
     inside its box and used per step; the slope at the origin is `headroom ·
@@ -374,37 +388,49 @@ class SaturatingTerm(nn.Module):
     in each step so the bound follows the rates if they train. `θ_s = 0`
     starts at half the budget.
 
+    With capacity `inputs`, the box position moves with them: `cap(c)` is the
+    box's value at `θ + b·c`, `c` the normalised input columns and `b`
+    starting at zero. `w` moves with `cap`, so the slope bound holds for any
+    `c`; the inputs never read the state, so it stays a bound on the state.
+
     The input is the pre-stack's demand feature, scaled to about [0, 1] by
     `demand_scale`; this branch holds the same scale and undoes it, so `w`
     reads in °C of demand.
     """
 
     def __init__(self, sign: int, control: dict, state: dict, column: str,
-                 boxes: dict, steps_per_hour: float):
+                 boxes: dict, steps_per_hour: float, n_inputs: int = 0):
         super().__init__()
         self.sign = int(sign)
         self.steps_per_hour = float(steps_per_hour)
         self.capacity = BoundedParameter(f"{column}: capacity_C_per_h",
                                          *boxes["capacity"], (column,))
+        self.capacity_weights = nn.Linear(n_inputs, 1, bias=False) if n_inputs else None
+        if self.capacity_weights is not None:
+            nn.init.zeros_(self.capacity_weights.weight)
         self.theta_slope = nn.Parameter(torch.tensor(0.0))
         _buffer(self, "scale", demand_scale(sign, control, state))
         _buffer(self, "zone_stretch", state["stretch"])
 
-    def cap(self) -> torch.Tensor:
-        """°C per step at full stage."""
-        return self.capacity.value() / self.steps_per_hour
+    def cap(self, inputs: Optional[torch.Tensor] = None) -> torch.Tensor:
+        """°C per step at full stage, at the normalised capacity `inputs`
+        (None: where they are 0)."""
+        shift = None if inputs is None else self.capacity_weights(inputs)
+        return self.capacity.value(shift) / self.steps_per_hour
 
     def slope_share(self) -> torch.Tensor:
         """Fraction of the stability headroom the slope at the origin uses."""
         return torch.sigmoid(self.theta_slope)
 
-    def width(self, headroom: torch.Tensor) -> torch.Tensor:
+    def width(self, headroom: torch.Tensor, cap: torch.Tensor) -> torch.Tensor:
         """`w`: °C of demand over which the response ramps from off to full."""
-        return self.cap() / (headroom * self.slope_share())
+        return cap / (headroom * self.slope_share())
 
-    def forward(self, x: torch.Tensor, headroom: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, headroom: torch.Tensor,
+                inputs: Optional[torch.Tensor] = None) -> torch.Tensor:
         demand_c = x * self.scale
-        response = self.sign * self.cap() * torch.tanh(demand_c / self.width(headroom))
+        cap = self.cap(inputs)
+        response = self.sign * cap * torch.tanh(demand_c / self.width(headroom, cap))
         return response / self.zone_stretch
 
 
@@ -427,8 +453,8 @@ class LatchedTerm(SaturatingTerm):
     """
 
     def __init__(self, sign: int, control: dict, state: dict, column: str,
-                 boxes: dict, steps_per_hour: float):
-        super().__init__(sign, control, state, column, boxes, steps_per_hour)
+                 boxes: dict, steps_per_hour: float, n_inputs: int = 0):
+        super().__init__(sign, control, state, column, boxes, steps_per_hour, n_inputs)
         self.on_at = BoundedParameter(f"{column}: on_at_C", *boxes["on_at"], (column,),
                                       log=False)
         self.off_at = BoundedParameter(f"{column}: off_at_C", *boxes["off_at"], (column,),
@@ -438,22 +464,42 @@ class LatchedTerm(SaturatingTerm):
         """`(on_at, off_at)` in °C of error."""
         return self.on_at.value(), self.off_at.value()
 
-    def width(self, headroom: torch.Tensor) -> torch.Tensor:
+    def width(self, headroom: torch.Tensor, cap: torch.Tensor) -> torch.Tensor:
         """`τ`: °C of error over which each switch ramps."""
-        return super().width(headroom) / 2
+        return super().width(headroom, cap) / 2
 
     def forward(self, x: torch.Tensor, headroom: torch.Tensor,
+                inputs: Optional[torch.Tensor] = None,
                 previous: Optional[torch.Tensor] = None) -> tuple[torch.Tensor, torch.Tensor]:
         """`(increment, stage)`: the branch's increment and the stage it leaves."""
         error = x * self.scale
-        tau = self.width(headroom)
+        cap = self.cap(inputs)
+        tau = self.width(headroom, cap)
         on_at, off_at = self.thresholds()
         on = torch.sigmoid((error - on_at) / tau)
         hold = torch.sigmoid((error + off_at) / tau)
         previous = on if previous is None else previous
         stage = on + (1 - on) * previous * hold
-        response = self.sign * self.cap() * stage
+        response = self.sign * cap * stage
         return response / self.zone_stretch, stage
+
+
+def _capacity_range(term: SaturatingTerm, names: list[str],
+                    stats: list[dict]) -> dict[str, dict]:
+    """Per capacity input, the capacity (°C/h) at the input's training min
+    and max, the other inputs held at their midpoints."""
+    lows = torch.tensor([(s["min"] - s["shift"]) / s["stretch"] for s in stats])
+    highs = torch.tensor([(s["max"] - s["shift"]) / s["stretch"] for s in stats])
+    middle = (lows + highs) / 2
+    ranges = {}
+    for i, (name, s) in enumerate(zip(names, stats)):
+        ends = []
+        for end in (lows[i], highs[i]):
+            inputs = middle.clone()
+            inputs[i] = end
+            ends.append(round(float(term.cap(inputs) * term.steps_per_hour), 3))
+        ranges[name] = {"at": [s["min"], s["max"]], "capacity": ends}
+    return ranges
 
 
 def physical_parameters(module: nn.Module) -> list[nn.Parameter]:
@@ -580,8 +626,16 @@ class RCBlock(nn.Module):
         self.saturating = nn.ModuleList(
             (LatchedTerm if "on_at" in branch_boxes[c] else SaturatingTerm)(
                 inputs[c]["sign"], norm_stats[c], norm_stats[self.channel_names[0]],
-                c, branch_boxes[c], steps_per_hour)
+                c, branch_boxes[c], steps_per_hour,
+                n_inputs=len(branch_boxes[c]["capacity_inputs"]))
             for c in self.saturating_names)
+        # Each saturating branch's capacity inputs, as drive positions.
+        self.capacity_input_names = [list(branch_boxes[c]["capacity_inputs"])
+                                     for c in self.saturating_names]
+        self._capacity_pos = [[drive_names.index(m) for m in names]
+                              for names in self.capacity_input_names]
+        self._capacity_stats = [[norm_stats[m] for m in names]
+                                for names in self.capacity_input_names]
         self.n_latched = sum(isinstance(t, LatchedTerm) for t in self.saturating)
         # Demand features routed into `g` by declaration: a ReLU MLP has no
         # slope bound, so the stability guarantee is off for this block.
@@ -700,7 +754,7 @@ class RCBlock(nn.Module):
                 (self._u_last.start, self._u_last.stop),
                 (self._d_last.start, self._d_last.stop),
                 self._ambient_pos, tuple(self._linear_pos),
-                tuple(self._saturating_pos),
+                tuple(self._saturating_pos), tuple(map(tuple, self._capacity_pos)),
                 tuple(t.sign for t in self.linear),
                 tuple((type(t), t.sign) for t in self.saturating),
                 self.gain is None)
@@ -749,13 +803,16 @@ class RCBlock(nn.Module):
         for pos, term in zip(self._linear_pos, self.linear):
             total = total + term(self._column(drive, pos))
         stages = []
-        for pos, term in zip(self._saturating_pos, self.saturating):
+        for pos, capacity_pos, term in zip(self._saturating_pos, self._capacity_pos,
+                                           self.saturating):
+            capacity_inputs = drive[..., capacity_pos] if capacity_pos else None
             if isinstance(term, LatchedTerm):
                 previous = None if stage is None else stage[..., len(stages):len(stages) + 1]
-                heat, new_stage = term(self._column(drive, pos), headroom, previous)
+                heat, new_stage = term(self._column(drive, pos), headroom,
+                                       capacity_inputs, previous)
                 stages.append(new_stage)
             else:
-                heat = term(self._column(drive, pos), headroom)
+                heat = term(self._column(drive, pos), headroom, capacity_inputs)
             total = total + heat
         return total, (torch.cat(stages, dim=-1) if stages else None)
 
@@ -787,10 +844,13 @@ class RCBlock(nn.Module):
                     for name, term in zip(self.linear_names, self.linear)
                 },
                 "saturating": {
-                    name: {"w": round(float(term.width(headroom)), 4),
+                    name: {"w": round(float(term.width(headroom, term.cap())), 4),
                            "slope_share": round(float(term.slope_share()), 3),
-                           "latched": isinstance(term, LatchedTerm)}
-                    for name, term in zip(self.saturating_names, self.saturating)
+                           "latched": isinstance(term, LatchedTerm),
+                           "capacity_range": _capacity_range(term, names, stats)}
+                    for name, names, stats, term in zip(
+                        self.saturating_names, self.capacity_input_names,
+                        self._capacity_stats, self.saturating)
                 },
                 "mlp": list(self.mlp_names),
                 # hsizes of the learned heat-input map `g` — the one hidden

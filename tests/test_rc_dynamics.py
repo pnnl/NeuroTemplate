@@ -652,3 +652,45 @@ def test_hysteresis_on_anything_but_a_saturating_demand_is_refused():
                     "hysteresis": {"on_at": 0.2, "off_at": 0.2}}}}}
     with pytest.raises(ValueError, match="belongs to a saturating"):
         build_blocks(DECLARED_MAPPING, spec)
+
+
+# ── a capacity that moves with other columns ─────────────────────
+
+def make_capacity_block(capacity_inputs: list[str]) -> RCBlock:
+    sp = {**DECLARED["north"]["inputs"]["north sp"],
+          "capacity": {"box": [0.5, 2.0], "inputs": capacity_inputs}}
+    return make_block(
+        1, 2, 2, channel_names=("north T",), u_names=("north sp", "ahu fan"),
+        d_names=("oat", "ghi"), inputs={**DECLARED["north"]["inputs"], "north sp": sp},
+        ambient="oat", norm_stats=STATS,
+    )
+
+
+def test_a_capacity_with_an_input_moves_inside_its_box_and_keeps_the_slope_bound():
+    """The input carries the capacity from one edge of its box to the other;
+    the ramp width moves with it, so the slope stays under the headroom."""
+    block = make_capacity_block(["oat"])
+    term = block.saturating[0]
+    with torch.no_grad():
+        term.capacity_weights.weight.fill_(-20.0)   # less cooling on a hot afternoon
+        term.theta_slope.fill_(20.0)                # the whole budget
+        a_o, a_m, _ = block.rates()
+    headroom = 1 - a_m - a_o
+    for oat, capacity in ((5.0, 2.0), (35.0, 0.5)):
+        inputs = torch.tensor([[normalised("oat", oat)]])
+        assert float(term.cap(inputs).detach()) * SPH == pytest.approx(capacity, rel=1e-3)
+        x = torch.zeros(1, 1, requires_grad=True)
+        term(x, headroom, inputs).sum().backward()
+        slope_in_state = x.grad.abs() * STATS["north T"]["stretch"] / term.scale
+        assert slope_in_state.item() <= headroom.item() * (1 + 1e-5)
+    reported = block.describe()["forcing"]["saturating"]["north sp"]["capacity_range"]
+    assert reported["oat"]["at"] == [5.0, 35.0]
+    assert reported["oat"]["capacity"] == pytest.approx([2.0, 0.5], rel=1e-3)
+
+
+def test_a_capacity_reading_a_demand_column_is_refused():
+    sp = {**DECLARED["north"]["inputs"]["north sp"],
+          "capacity": {"box": [0.5, 2.0], "inputs": ["north sp"]}}
+    spec = {"north": {**DECLARED["north"], "inputs": {"north sp": sp}}}
+    with pytest.raises(ValueError, match="a demand column"):
+        build_blocks(DECLARED_MAPPING, spec)
