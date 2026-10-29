@@ -358,3 +358,39 @@ def test_c_runner_reproduces_the_reference(tmp_path, monkeypatch):
     result = subprocess.run(["./validate"], cwd=package, capture_output=True, text=True)
     assert result.returncode == 0, result.stdout + result.stderr
     assert "[PASS] model" not in result.stdout and "[PASS] policy" in result.stdout
+
+
+def test_an_mpc_run_exports_a_planner_beside_its_surrogate(tmp_path):
+    """`policy: mpc` ships no policy graph: the package plans through its own
+    model/, in torch, and reproduces the trained planner's commands."""
+    from control_fixtures import (
+        HIGH, LOW, TARIFF, full_setup, make_nm_mapping, make_tracking_plant,
+    )
+    from neurotemplate.control.closed_loop import build_closed_loop
+    from neurotemplate.control.controller import build_controller
+    from neurotemplate.export.policy import export_policy
+
+    future = {c: 4 for c in (TARIFF, LOW, HIGH, *make_nm_mapping()["D"])}
+    s = full_setup(**{**_priced(0), "future": future}, policy="mpc", mpc_horizon=4,
+                   mpc_iters=5)
+    cfg, sysid_cfg, nm, ns = s["cfg"], s["sysid_cfg"], s["nm"], s["norm_stats"]
+    dyn_sys, plant = make_tracking_plant(sysid_cfg, nm)
+    with pytest.raises(FileNotFoundError, match="torch format first"):
+        export_policy(policy_node=build_controller(cfg, sysid_cfg, nm, ns, plant),
+                      cl_system=None, cfg=cfg, sysid_cfg=sysid_cfg, nm_mapping=nm,
+                      norm_stats=ns, test_dfs=[s["frame"]], run_id="0" * 32,
+                      out_dir=tmp_path / "pkg", graph_format="torch")
+    export_model(dyn_sys=dyn_sys, cfg=sysid_cfg, nm_mapping=nm, norm_stats=ns,
+                 frame=s["plant"], timestep_seconds=300.0, run_id="1" * 32,
+                 out_dir=tmp_path / "pkg", graph_format="torch")
+    mpc = build_controller(cfg, sysid_cfg, nm, ns, plant)
+    result = export_policy(
+        policy_node=mpc, cl_system=build_closed_loop(plant, mpc, cfg, sysid_cfg),
+        cfg=cfg, sysid_cfg=sysid_cfg, nm_mapping=nm, norm_stats=ns,
+        test_dfs=[s["frame"]], run_id="0" * 32, out_dir=tmp_path / "pkg",
+        graph_format="torch")
+
+    assert all(check.ok for check in check_reference(result.out_dir))
+    spec = json.loads((result.out_dir / "policy" / "policy.json").read_text())
+    assert spec["mpc"]["horizon"] == 4 and spec["mpc"]["power"]
+    assert not (result.out_dir / "policy" / "policy.pt2").exists()

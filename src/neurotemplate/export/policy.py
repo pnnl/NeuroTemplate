@@ -27,6 +27,8 @@ those windows are the reference; ONNX Runtime must match them.
 
 from __future__ import annotations
 
+import json
+import shutil
 import tempfile
 import uuid
 from dataclasses import dataclass, replace
@@ -40,7 +42,10 @@ import torch.nn as nn
 
 from neurotemplate.control.losses import resolve_objective
 from neurotemplate.control.pipeline import evaluate_closed_loop
-from neurotemplate.control.policy import describe_policy
+from neurotemplate.control.controller import describe_controller
+from neurotemplate.control.mpc import MPC, _inner_keys
+from neurotemplate.control.policy import _bound_side, _ReferenceBounds, with_command_bounds
+from neurotemplate.hooks import load_control_hooks
 from neurotemplate.export import ccode
 from neurotemplate.export.package import (
     FLOAT_FORMAT, check_graph_format, install, provenance, write_graph, write_json,
@@ -48,6 +53,12 @@ from neurotemplate.export.package import (
 from neurotemplate.export.runtime import Policy, window_columns
 from neurotemplate.export.spec import FORMAT, opset
 from neurotemplate.export.verify import AGREEMENT_TOL, REPRODUCE_TOL
+
+#: The share of windows on which an exported MPC must plan what the trained
+#: one plans. A surrogate with a latch or a clamp is piecewise, so a one-ulp
+#: difference can send a few windows' Adam steps down another branch; an
+#: export that is wrong disagrees on most of them.
+MPC_AGREEMENT_SHARE = 0.95
 
 #: Every input a policy Node may read, in the order `build_policy` gives
 #: them; "U" only when it reads past commands, "R" only when its objective
@@ -190,6 +201,7 @@ class PolicyExport:
     error: dict[str, float]     # worst |ORT - torch| per command, physical units
     windows_verified: int
     windows_shipped: int
+    share: float                # of the windows, every command within tolerance
 
 
 def export_policy(*, policy_node, cl_system, cfg, sysid_cfg,
@@ -205,6 +217,9 @@ def export_policy(*, policy_node, cl_system, cfg, sysid_cfg,
     fixture is `fixture_windows` of the verified windows, evenly spaced.
     """
     check_graph_format(graph_format, exporter, onnx2c)
+    mpc = policy_node.callable if isinstance(policy_node.callable, MPC) else None
+    if mpc is not None:
+        _check_mpc_package(graph_format, Path(out_dir))
     # Export and verification run on the CPU. The evaluation rollout builds
     # its data on `sysid_cfg.device`, so the configs move with the modules —
     # as copies, leaving the caller's configs as they were.
@@ -212,13 +227,17 @@ def export_policy(*, policy_node, cl_system, cfg, sysid_cfg,
     cpu = torch.device("cpu")
     cfg, sysid_cfg = replace(cfg, device=cpu), replace(sysid_cfg, device=cpu)
     inputs = policy_inputs(policy_node, cfg, nm_mapping, norm_stats)
-    graph = policy_graph(policy_node.callable, inputs).eval()
+    graph = None if mpc is not None else policy_graph(policy_node.callable, inputs).eval()
 
     flat = closed_loop_windows(cl_system, policy_node, cfg, sysid_cfg, test_dfs,
                                nm_mapping, norm_stats)
     physical = physical_windows(flat, inputs)
     with torch.no_grad():
-        reference = graph(*physical.values()).double().numpy()
+        if mpc is None:
+            reference = graph(*physical.values()).double().numpy()
+        else:   # every window planned from scratch, as act_batch plans them
+            mpc.set_rollout_state(None)
+            reference = mpc(*flat.values()).double().numpy()
     count = len(reference)
 
     u_stretch = {c: norm_stats[c]["stretch"] for c in nm_mapping["U"]}
@@ -226,14 +245,22 @@ def export_policy(*, policy_node, cl_system, cfg, sysid_cfg,
     with tempfile.TemporaryDirectory() as tmp:
         policy_dir = Path(tmp) / "policy"
         policy_dir.mkdir()
-        # Trace on two real windows: batch >= 2, see trace.export_graph.
-        write_graph(graph, tuple(x[:2] for x in physical.values()),
-                    [GRAPH_NAMES[s.key] for s in inputs], ["u"],
-                    policy_dir / "policy", graph_format, exporter, export_id, run_id,
-                    onnx2c)
         spec = _spec(export_id, run_id, cfg, inputs, nm_mapping, description,
-                     describe_policy(policy_node, cfg, sysid_cfg, nm_mapping),
+                     describe_controller(policy_node, cfg, sysid_cfg, nm_mapping),
                      graph_format)
+        if mpc is None:
+            # Trace on two real windows: batch >= 2, see trace.export_graph.
+            write_graph(graph, tuple(x[:2] for x in physical.values()),
+                        [GRAPH_NAMES[s.key] for s in inputs], ["u"],
+                        policy_dir / "policy", graph_format, exporter, export_id, run_id,
+                        onnx2c)
+        else:
+            # The planner runs through the package's model; the staged copy
+            # lets the self-check below run it.
+            shutil.copytree(Path(out_dir) / "model", Path(tmp) / "model")
+            spec["mpc"] = _mpc_block(mpc, cfg, nm_mapping)
+            if spec["mpc"]["power"]:
+                _write_power_graph(cfg, nm_mapping, mpc, inputs, policy_dir, export_id, run_id)
         write_json(policy_dir / "policy.json", spec)
         u_tolerance = {c: REPRODUCE_TOL * s for c, s in u_stretch.items()}
         if graph_format == "c":
@@ -246,20 +273,25 @@ def export_policy(*, policy_node, cl_system, cfg, sysid_cfg,
         actions = Policy(policy_dir).act_batch(named)
         error = {c: float(np.abs(actions[:, i] - reference[:, i]).max())
                  for i, c in enumerate(nm_mapping["U"])}
-        worst = max(error[c] / u_stretch[c] for c in error)
-        if worst > AGREEMENT_TOL:
+        stretch = np.array([u_stretch[c] for c in nm_mapping["U"]])
+        within = (np.abs(actions - reference) / stretch <= AGREEMENT_TOL).all(1).mean()
+        if mpc is None and within < 1 or within < MPC_AGREEMENT_SHARE:
             raise RuntimeError(
                 "REFUSING TO WRITE: the exported policy does not reproduce the "
-                f"trained one (worst command error {worst:.2e} of its column's "
-                f"stretch; tolerance {AGREEMENT_TOL:.0e}). Per column: {error}")
+                f"trained one: {within * 100:.1f}% of windows agree to "
+                f"{AGREEMENT_TOL:.0e} of each command's stretch"
+                + ("" if mpc is None else f", {MPC_AGREEMENT_SHARE * 100:.0f}% required")
+                + f". Worst per column: {error}")
 
         shipped = np.unique(np.linspace(0, count - 1, min(fixture_windows, count)).astype(int))
         _write_reference(policy_dir / "reference", spec["inputs"], named, reference,
                          shipped, nm_mapping["U"], {
                              "export_id": export_id, "run_id": run_id,
-                             "tolerance": {"u": u_tolerance},
+                             "tolerance": {"u": u_tolerance, **(
+                                 {} if mpc is None else {"share": MPC_AGREEMENT_SHARE})},
                              "agreement_at_export": {
                                  "windows": count,
+                                 "share_within_tolerance": float(within),
                                  "tolerance_fraction_of_stretch": AGREEMENT_TOL,
                                  "u_max_abs": error,
                              },
@@ -268,7 +300,66 @@ def export_policy(*, policy_node, cl_system, cfg, sysid_cfg,
         install(Path(tmp), Path(out_dir), "policy")
 
     return PolicyExport(out_dir=Path(out_dir), error=error, windows_verified=count,
-                        windows_shipped=len(shipped))
+                        windows_shipped=len(shipped), share=float(within))
+
+
+def _check_mpc_package(graph_format: str, out_dir: Path) -> None:
+    """An MPC policy plans through torch model graphs in the same package."""
+    if graph_format != "torch":
+        raise ValueError("policy: mpc plans with gradients at run time, through the "
+                         "model graphs: export it with --format torch.")
+    spec = out_dir / "model" / "model.json"
+    if not spec.exists() or json.loads(spec.read_text(encoding="utf-8"))["graph_format"] != "torch":
+        raise FileNotFoundError(
+            f"policy: mpc plans through the surrogate, so {out_dir}/model must hold it "
+            "in torch format first (`nt export policy` writes it for an MPC run).")
+
+
+def _mpc_block(mpc: MPC, cfg, nm_mapping: dict[str, list[str]]) -> dict:
+    """What the runtime's planner needs: `policy.json`'s `mpc`."""
+    objective = resolve_objective(cfg, nm_mapping)
+    keys, input_map = _inner_keys(objective.r_columns)
+    bounds = with_command_bounds(torch.nn.Identity(), cfg, nm_mapping, keys, input_map,
+                                 mpc.umin, mpc.umax)
+    order = ([nm_mapping["U"][j] for j in bounds.columns]
+             if isinstance(bounds, _ReferenceBounds) else [])
+
+    def side(raw) -> dict:
+        name, offset = _bound_side(raw)
+        return {"value": offset} if name is None else {"column": name, "offset": offset}
+
+    return {
+        "horizon": mpc.horizon, "iters": mpc.iters, "lr": mpc.lr, "hmax": mpc.hmax,
+        "umin": mpc.umin.tolist(), "umax": mpc.umax.tolist(),
+        "command_bounds": [{"column": c, "low": side(cfg.command_bounds[c][0]),
+                            "high": side(cfg.command_bounds[c][1])} for c in order],
+        "terms": [{"name": t.name, "column": t.column, "target": t.target, "map": t.map,
+                   "norm": t.norm, "weight": t.weight, "gain": t.gain}
+                  for t in objective.terms],
+        "power": objective.reads_power,
+    }
+
+
+class _PowerGraph(torch.nn.Module):
+    """`power_metric` over planned trajectories, for the MPC runtime."""
+
+    def __init__(self, hook, nm_mapping: dict[str, list[str]]):
+        super().__init__()
+        self.hook, self.nm_mapping = hook, nm_mapping
+
+    def forward(self, y: torch.Tensor, u: torch.Tensor, d: torch.Tensor) -> torch.Tensor:
+        return self.hook(y, u, d, self.nm_mapping)
+
+
+def _write_power_graph(cfg, nm_mapping, mpc: MPC, inputs: list[PolicyInput],
+                       policy_dir: Path, export_id: str, run_id: str) -> None:
+    """Trace the power hook on two typical trajectories one horizon long."""
+    typical = {spec.key: torch.tensor(spec.shift) for spec in inputs}
+    args = tuple(x.expand(2, mpc.horizon, -1).clone()
+                 for x in (typical["yn"], 0.5 * (mpc.umin + mpc.umax), typical["D"]))
+    write_graph(_PowerGraph(load_control_hooks(cfg).power_metric, nm_mapping), args,
+                ["y", "u", "d"], ["power"], policy_dir / "power", "torch", "dynamo",
+                export_id, run_id, "onnx2c")
 
 
 def _spec(export_id: str, run_id: str, cfg, inputs: list[PolicyInput],

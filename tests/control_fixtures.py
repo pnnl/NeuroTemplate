@@ -14,10 +14,10 @@ import torch
 
 from neurotemplate.modeling.config import ModelingConfig as Config
 from neurotemplate.common.data_utils import compute_norm_stats
-from neurotemplate.modeling.dynamics import get_dynamics
+from neurotemplate.modeling.dynamics import _rollout_system, get_dynamics
 from neurotemplate.control.config import ControlConfig
 from neurotemplate.control.losses import extend_norm_stats, resolve_objective
-from model_fixtures import model_cfg, uniform_history, unit_stats
+from model_fixtures import model_cfg, uniform_history
 
 # Single-zone Modelica RTU strip-mall dataset. Y is one zone temp plus the
 # RTU thermal/flow state plus the two metered RTU power channels; U is a
@@ -169,13 +169,32 @@ def make_control_cfg(future: dict[str, int] | None = None, u_past: int = 0,
     return cfg
 
 
-def make_frozen_dynamics(sysid_cfg: Config, nm_mapping: dict):
-    """Real SystemPreview from src, frozen — stand-in for a loaded model."""
-    dyn_sys = get_dynamics(sysid_cfg, nm_mapping, unit_stats(nm_mapping))
+def make_frozen_dynamics(sysid_cfg: Config, nm_mapping: dict, norm_stats: dict):
+    """Real SystemPreview from src, frozen — stand-in for a loaded model,
+    normalising with the plant's `norm_stats` as a trained one would."""
+    dyn_sys = get_dynamics(sysid_cfg, nm_mapping, norm_stats)
     for p in dyn_sys.parameters():
         p.requires_grad_(False)
     dyn_sys.eval()
     return dyn_sys, dyn_sys.nodes[0]
+
+
+class TrackingZone(torch.nn.Module):
+    """A plant of the user's own (`modeling.contract`): the zone closes half
+    its gap to the cooling setpoint every step, every other output holds.
+    Stable and responsive, so a planner has something to plan."""
+
+    def forward(self, y, u, d):
+        nxt = y[:, -1].clone()
+        nxt[:, 0] = nxt[:, 0] + 0.5 * (u[:, -1, 0] - nxt[:, 0])
+        return nxt
+
+
+def make_tracking_plant(sysid_cfg: Config, nm_mapping: dict):
+    """`TrackingZone` as a frozen surrogate: (dyn_sys, dyn_node)."""
+    plant = TrackingZone()
+    dyn_sys = _rollout_system(plant, plant, sysid_cfg, nm_mapping)
+    return dyn_sys.eval(), dyn_sys.nodes[0]
 
 
 def write_splits(cfg, tmp_path, plant: pd.DataFrame,
@@ -208,7 +227,7 @@ def full_setup(reference: pd.DataFrame | None = None, **control_overrides):
     norm_stats = extend_norm_stats(resolve_objective(cfg, nm), cfg,
                                    make_norm_stats(plant))
     raw = plant.join(make_reference_df(plant) if reference is None else reference)
-    dyn_sys, dyn_node = make_frozen_dynamics(sysid_cfg, nm)
+    dyn_sys, dyn_node = make_frozen_dynamics(sysid_cfg, nm, make_norm_stats(plant))
     return dict(
         nm=nm, plant=plant, raw=raw, norm_stats=norm_stats, frame=raw,
         sysid_cfg=sysid_cfg, cfg=cfg, dyn_sys=dyn_sys, dyn_node=dyn_node,

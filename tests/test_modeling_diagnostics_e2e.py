@@ -35,7 +35,7 @@ def _evaluate(tmp_path, synth: bool = True):
     cfg.test_window, cfg.test_stride = 24, 24
     cfg.synth_n_scenarios, cfg.synth_hours = 4, 0.5
     cfg.plot, cfg.progress = False, "silent"
-    dyn_sys, _ = make_frozen_dynamics(cfg, nm)
+    dyn_sys, _ = make_frozen_dynamics(cfg, nm, norm_stats)
 
     spec = hooks.synth_cfg(nm, norm_stats) if synth else None
     return evaluate_and_plot(
@@ -72,7 +72,7 @@ def test_the_checks_do_not_disturb_the_surrogate(tmp_path):
     cfg.test_window, cfg.test_stride = 24, 24
     cfg.synth_n_scenarios, cfg.synth_hours = 4, 0.5
     cfg.plot, cfg.progress = False, "silent"
-    dyn_sys, _ = make_frozen_dynamics(cfg, nm)
+    dyn_sys, _ = make_frozen_dynamics(cfg, nm, norm_stats)
     before = [p.clone() for p in dyn_sys.parameters()]
 
     evaluate_and_plot(

@@ -16,6 +16,10 @@ values in and out of them.
     model/model.json        columns, units, history length, state width
     policy/policy.*         (y, d[, r]) -> u
     policy/policy.json      each input's columns and window length
+    policy/power.pt2        MPC only: (y, u, d) trajectories -> power
+
+A policy exported from an MPC run has no policy graph: `policy.json` says how
+it plans (`mpc`), and it plans through the model graphs beside it, in torch.
 
 Every window is `[batch, steps, n]` in physical units, oldest row first. For
 the dynamics model, row -1 of `u`/`d` is the input that drives this step; the
@@ -104,7 +108,8 @@ def _onnx_graph(path: Path, spec: dict):
     return lambda feed: sess.run(None, feed)
 
 
-def _torch_graph(path: Path, spec: dict):
+def _torch_module(path: Path, spec: dict):
+    """A `.pt2` program as a torch module, checked against `spec`."""
     import torch
 
     stamp = {STAMP: ""}
@@ -115,6 +120,13 @@ def _torch_graph(path: Path, spec: dict):
         module = torch.export.load(str(path), extra_files=stamp).module()
     _check_stamp(path, json.loads(stamp[STAMP] or "{}"),
                  {"export_id": spec["export_id"]})
+    return module
+
+
+def _torch_graph(path: Path, spec: dict):
+    import torch
+
+    module = _torch_module(path, spec)
 
     def run(feed):
         with torch.no_grad():
@@ -320,7 +332,11 @@ class Policy:
         self.spec = _load_spec(policy_dir / "policy.json")
         self.inputs: dict[str, dict] = self.spec["inputs"]
         self.u_columns: list[str] = self.spec["u_columns"]
-        self._graph = _graph(policy_dir, "policy", self.spec)
+        if "mpc" in self.spec:
+            self._planner = _Planner(policy_dir, self.spec)
+        else:
+            self._graph = _graph(policy_dir, "policy", self.spec)
+        self._previous = None   # MPC's last plan, between `act` calls
 
     def act(self, y, u_history=None, d=None, r=None) -> dict[str, float]:
         """The command for one step: `{u column: value}`.
@@ -330,27 +346,182 @@ class Policy:
         whose objective names reference columns.
         """
         windows = {"y": y, "u_history": u_history, "d": d, "r": r}
-        u = self.act_batch({name: None if windows[name] is None
-                            else np.asarray(windows[name])[None]
-                            for name in self.inputs})[0]
-        return {c: float(v) for c, v in zip(self.u_columns, u)}
+        feed = self._feed({name: None if windows[name] is None
+                           else np.asarray(windows[name])[None] for name in self.inputs})
+        if "mpc" in self.spec:
+            u, self._previous = self._planner.plan(feed, self._previous)
+        else:
+            u = self._graph(feed)[0]
+        return {c: float(v) for c, v in zip(self.u_columns, u[0])}
 
     def act_batch(self, windows: Mapping[str, np.ndarray]) -> np.ndarray:
         """Commands for a batch of windows, `{input: [batch, steps, n]}` ->
-        `[batch, n_u]`. For scoring many scenarios at once."""
+        `[batch, n_u]`. For scoring many scenarios at once. An MPC policy
+        plans each from scratch here; `act` starts from its last plan."""
+        feed = self._feed(windows)
+        if "mpc" in self.spec:
+            return self._planner.plan(feed, None)[0]
+        return self._graph(feed)[0]
+
+    def reset(self) -> None:
+        """Forget MPC's last plan, as at the start of a new episode."""
+        self._previous = None
+
+    def _feed(self, windows: Mapping[str, np.ndarray]) -> dict[str, np.ndarray]:
         missing = [name for name in self.inputs if windows.get(name) is None]
         if missing:
             raise KeyError(f"policy input(s) {missing} not supplied.")
-        feed = {name: np.asarray(windows[name], dtype=np.float32) for name in self.inputs}
-        return self._graph(feed)[0]
+        return {name: np.asarray(windows[name], dtype=np.float32) for name in self.inputs}
 
     def describe(self) -> str:
         s = self.spec
         shapes = ", ".join(f"{name} {spec['steps']}x{len(spec['columns'])}"
                            for name, spec in self.inputs.items())
+        plans = ("" if "mpc" not in s else
+                 f"\n  plans {s['mpc']['horizon']} steps ahead through model/, "
+                 f"{s['mpc']['iters']} Adam steps per command")
         return (f"{s['description'] or 'NeuroTemplate policy'}  "
                 f"(run {s['trained_from']['run_id'][:8]}, {s['trained_from']['policy']})\n"
-                f"  commands {len(self.u_columns)} controls from windows {shapes}")
+                f"  commands {len(self.u_columns)} controls from windows {shapes}" + plans)
+
+
+class _Planner:
+    """MPC, as `policy: mpc` runs it in training (`control.mpc`).
+
+    For each window: a free command per step over the next `horizon` steps,
+    `umin + sigmoid(z) * (umax - umin)` mapped onto `command_bounds`, rolled
+    through the model graphs beside the policy, scored by the run's objective
+    table, and improved by `iters` Adam steps at `lr`, starting from the last
+    plan shifted by one step (or, without one, from the last command applied).
+    The first step's command is the action.
+    """
+
+    def __init__(self, policy_dir: Path, spec: dict):
+        import torch
+
+        self.torch = torch
+        m = spec["mpc"]
+        self.horizon, self.iters, self.lr, self.hmax = m["horizon"], m["iters"], m["lr"], m["hmax"]
+        self.umin, self.umax = torch.tensor(m["umin"]), torch.tensor(m["umax"])
+        self.bounds, self.terms = m["command_bounds"], m["terms"]
+        model_dir = policy_dir.parent / "model"
+        model = _load_spec(model_dir / "model.json")
+        if model["graph_format"] != "torch":
+            raise ValueError("an MPC policy plans with gradients, through torch "
+                             "model graphs; model/ is not torch.")
+        self.history, self.stateful = model["history_steps"], model["state"]["width"] > 0
+        self.warm_start = _torch_module(model_dir / "warm_start.pt2", model)
+        self.step = _torch_module(model_dir / "step.pt2", model)
+        self.power = _torch_module(policy_dir / "power.pt2", spec) if m["power"] else None
+        columns = {"y": spec["inputs"]["y"]["columns"], "u": spec["u_columns"],
+                   "d": spec["inputs"]["d"]["columns"],
+                   "r": spec["inputs"]["r"]["columns"] if "r" in spec["inputs"] else []}
+        self.where = {c: (role, i) for role, cs in columns.items() for i, c in enumerate(cs)}
+
+    def plan(self, feed: dict[str, np.ndarray], previous):
+        """(first commands [batch, nu], the plan to start the next step from)"""
+        torch = self.torch
+        y, d = torch.from_numpy(feed["y"]), torch.from_numpy(feed["d"])
+        applied = torch.from_numpy(feed["u_history"])
+        r = torch.from_numpy(feed["r"]) if "r" in feed else None
+        if previous is None:
+            start = applied[:, -1:].expand(-1, self.horizon, -1).clamp(self.umin, self.umax)
+            share = ((start - self.umin) / (self.umax - self.umin).clamp_min(1e-9)).clamp(1e-3, 1 - 1e-3)
+            z = torch.log(share / (1 - share))
+        else:
+            z = torch.cat([previous[:, 1:], previous[:, -1:]], dim=1)
+        z = z.clone().requires_grad_(True)
+        optimizer = torch.optim.Adam([z], lr=self.lr)
+        for _ in range(self.iters):
+            # Summed over windows: each is its own problem (control.mpc).
+            loss = self._objective(z, y, applied, d, r) * len(z)
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+        with torch.no_grad():
+            u = self._commands(z, r)
+        return u[:, 0].numpy(), z.detach()
+
+    def _commands(self, z, r):
+        """The plan's commands, [batch, horizon, nu], inside every bound."""
+        u = self.umin + self.torch.sigmoid(z) * (self.umax - self.umin)
+        columns = list(u.unbind(-1))
+        for entry in self.bounds:          # in the order the sides read each other
+            j = self.where[entry["column"]][1]
+            low = self._side(entry["low"], columns, r)
+            high = self.torch.maximum(self._side(entry["high"], columns, r), low)
+            share = (columns[j] - self.umin[j]) / (self.umax[j] - self.umin[j])
+            columns[j] = low + share * (high - low)
+        return self.torch.stack(columns, dim=-1)
+
+    def _side(self, side: dict, columns: list, r):
+        if "value" in side:
+            return self.torch.full_like(columns[0], side["value"])
+        role, i = self.where[side["column"]]
+        # A command's bound reads the reference at the command's own step.
+        x = columns[i] if role == "u" else r[:, self.hmax - 1:self.hmax - 1 + self.horizon, i]
+        return x + side["offset"]
+
+    def _rollout(self, u, y, applied, d):
+        """The model's outputs after each planned command, [batch, horizon, ny]."""
+        torch, h = self.torch, self.history
+        ys = list(y.unbind(1))
+        us = torch.cat([applied, u], dim=1)
+        state, outputs = None, []
+        for k in range(self.horizon):
+            now = self.hmax - 1 + k
+            feed = {"y": torch.stack(ys[now - h + 1:now + 1], dim=1),
+                    "u": us[:, now - h + 1:now + 1], "d": d[:, now - h + 1:now + 1]}
+            if state is not None:
+                feed["state"] = state
+            out = (self.warm_start if k == 0 else self.step)(**feed)
+            y_next, state = out if self.stateful else (out, None)
+            ys.append(y_next)
+            outputs.append(y_next)
+        return torch.stack(outputs, dim=1)
+
+    def _objective(self, z, y, applied, d, r):
+        u = self._commands(z, r)
+        ahead = slice(self.hmax, self.hmax + self.horizon)
+        series = {"y": self._rollout(u, y, applied, d), "u": u, "d": d[:, ahead],
+                  "r": None if r is None else r[:, ahead]}
+
+        def named(name):
+            if name == "power":
+                return self.power(y=series["y"], u=u, d=series["d"])
+            role, i = self.where[name]
+            return series[role][..., i]
+
+        total = 0.0
+        for term in self.terms:
+            h = named(term["column"])
+            if term["target"] is not None:
+                h = h - named(term["target"])
+            if term["map"] == "relu":
+                h = self.torch.relu(h)
+            elif term["map"] == "nrelu":
+                h = self.torch.relu(-h)
+            elif term["map"] == "first_difference":
+                h = h[:, 1:] - h[:, :-1]
+            weight = None if term["weight"] is None else named(term["weight"])
+            if weight is not None and term["map"] == "first_difference":
+                weight = weight[:, 1:]
+            total = total + term["gain"] * _power_mean(self.torch, h, term["norm"], weight)
+        return total
+
+
+def _power_mean(torch, h, q: float, weight):
+    """Per window `(mean_t w·|h|^q)^(1/q)`, then the batch mean: the
+    training objective's reduction (`control.losses.power_mean`)."""
+    a = h.abs() if q == 1 else h.abs() ** q
+    if weight is not None:
+        a = a * weight
+    per_window = a.mean(dim=1)
+    if q != 1:
+        positive = per_window > 0
+        safe = torch.where(positive, per_window, torch.ones_like(per_window))
+        per_window = torch.where(positive, safe ** (1.0 / q), torch.zeros_like(per_window))
+    return per_window.mean()
 
 
 # ── reproducing the shipped reference ────────────────────────────
@@ -392,9 +563,16 @@ class ReferenceCheck:
     tolerance: dict[str, float]
     state_error: float = 0.0
     state_tolerance: float = 0.0
+    # MPC only: the share of windows whose every command is within tolerance,
+    # and the share required. Planning through a surrogate with a latch or a
+    # clamp can take another path from a one-ulp difference, on a few windows.
+    share: Optional[float] = None
+    required_share: Optional[float] = None
 
     @property
     def ok(self) -> bool:
+        if self.share is not None:
+            return self.share >= self.required_share
         return (all(self.error[c] <= self.tolerance[c] for c in self.error)
                 and self.state_error <= self.state_tolerance)
 
@@ -407,10 +585,14 @@ class ReferenceCheck:
                          f"{self.state_error:.2e} (tolerance {self.state_tolerance:.0e})")
         bad = [c for c in self.error if self.error[c] > self.tolerance[c]]
         if bad:
-            lines.append(f"  {self.name}: out of tolerance: {bad}")
+            where = "on some windows" if self.share is not None else ""
+            lines.append(f"  {self.name}: out of tolerance {where}: {bad}".replace("  :", ":"))
         if self.state_error > self.state_tolerance:
             lines.append("  the hidden state disagrees: warm-up or step is wrong, "
                          "not just the output layer")
+        if self.share is not None:
+            lines.append(f"  {self.name}: {self.share * 100:.1f}% of windows within "
+                         f"tolerance (required {self.required_share * 100:.0f}%)")
         return "\n".join(lines)
 
 
@@ -459,6 +641,12 @@ def _check_policy(policy_dir: Path) -> ReferenceCheck:
     actions = policy.act_batch(read_windows(policy_dir / "reference" / "inputs.csv",
                                             policy.inputs))
     _, expected = read_csv(policy_dir / "reference" / "expected_actions.csv")
-    error = {c: float(np.abs(actions[:, i] - expected[c]).max())
-             for i, c in enumerate(policy.u_columns)}
-    return ReferenceCheck("policy", error, reference["tolerance"]["u"])
+    differences = np.stack([np.abs(actions[:, i] - expected[c])
+                            for i, c in enumerate(policy.u_columns)], axis=1)
+    error = {c: float(differences[:, i].max()) for i, c in enumerate(policy.u_columns)}
+    tolerance = reference["tolerance"]
+    if "share" not in tolerance:
+        return ReferenceCheck("policy", error, tolerance["u"])
+    within = (differences <= np.array([tolerance["u"][c] for c in policy.u_columns])).all(1)
+    return ReferenceCheck("policy", error, tolerance["u"], share=float(within.mean()),
+                          required_share=tolerance["share"])

@@ -12,7 +12,7 @@ from neurotemplate.control.policy import build_policy
 from neurotemplate.control.closed_loop import build_closed_loop, build_control_loss, build_problem
 from control_fixtures import (
     ZONE, SETPT, DIST, Y_COLS,
-    full_setup, make_frozen_dynamics, make_sysid_cfg,
+    full_setup, make_frozen_dynamics, make_norm_stats, make_sysid_cfg,
 )
 from neurotemplate.modeling.dynamics import get_dynamics, stateful_blocks
 
@@ -76,7 +76,7 @@ def _gru_setup():
     """full_setup, but with a stateful surrogate instead of an MLP."""
     s = full_setup()
     sysid_cfg = make_sysid_cfg(model="gru")
-    _, dyn_node = make_frozen_dynamics(sysid_cfg, s["nm"])
+    _, dyn_node = make_frozen_dynamics(sysid_cfg, s["nm"], make_norm_stats(s["plant"]))
     return s, sysid_cfg, dyn_node
 
 

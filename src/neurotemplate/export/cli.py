@@ -12,7 +12,8 @@ refuses to write unless they agree — unless the trained model's own rollout
 blows up there, when it asks whether to export unverified (no terminal: no). `policy` exports a trained DPC policy: it
 runs the trained closed loop over the control run's own test split and
 refuses to write unless the exported policy issues the same commands on
-every window it saw. Both may target the same `--out`; see
+every window it saw. An MPC run (`policy: mpc`) exports with `--format
+torch`, and carries its surrogate as model/: the package plans through it. Both may target the same `--out`; see
 `neurotemplate.export.package` for the layout.
 """
 
@@ -111,6 +112,19 @@ def policy_main() -> None:
     policy_node, cl_system, cfg, sysid_cfg, nm_mapping, norm_stats = (
         load_trained_policy(args.run_id, run_dir=args.run_dir, device="cpu"))
     _, _, test_dfs = load_control_splits(cfg, nm_mapping)
+    if cfg.policy == "mpc":
+        # MPC plans through the surrogate, so the package carries it as
+        # model/, verified on the control run's own test split.
+        dyn_sys, sysid_cfg, _, _ = load_trained_dynamics(
+            cfg.sysid_run_id, run_dir=cfg.run_dir, device="cpu")
+        frame = test_dfs[0]
+        model = export_model(
+            dyn_sys=dyn_sys, cfg=sysid_cfg, nm_mapping=nm_mapping, norm_stats=norm_stats,
+            frame=frame, timestep_seconds=(frame.index[1] - frame.index[0]).total_seconds(),
+            run_id=cfg.sysid_run_id, out_dir=Path(args.out), graph_format="torch",
+            exporter=args.exporter)
+        print(f"exported its surrogate, run {cfg.sysid_run_id}, as torch programs: "
+              f"verified {model.steps_verified} open-loop steps")
 
     result = export_policy(
         policy_node=policy_node, cl_system=cl_system, cfg=cfg, sysid_cfg=sysid_cfg,
@@ -124,7 +138,8 @@ def policy_main() -> None:
     worst = max(result.error, key=result.error.get)
     print(f"exported policy run {args.run_id} ({cfg.policy}) as {_how(args)}")
     print(f"  verified {result.windows_verified} closed-loop windows against the "
-          f"trained policy: worst command {worst} {result.error[worst]:.2e}")
+          f"trained policy: {result.share * 100:.1f}% agree, worst command {worst} "
+          f"{result.error[worst]:.2e}")
     print(f"  shipped {result.windows_shipped} windows as the reference fixture")
     print(f"wrote {result.out_dir}")
 

@@ -189,6 +189,20 @@ test. A column is either anchored or in `command_bounds`, not both.
 Nothing is rounded to an actuator's resolution; that is the building
 management system's job. Smoothness comes from a `first_difference` row.
 
+## MPC: planning through the surrogate at every step
+
+`policy: mpc` trains nothing. At every step it plans the next `mpc_horizon`
+commands through its own copy of the surrogate, inside the actuation bounds
+and `command_bounds`, against the same objective, with `mpc_iters` Adam
+steps from its previous plan, and commands the first. Its forecast is what
+`policy_window` gives a policy, so every D and reference column's `future`
+must reach the horizon. It has no `residual_delta`.
+
+A trained policy is one forward pass per step and MPC is a solve, so the
+choice is compute against what the Controller gap says a policy leaves on
+the table. Both are scored the same way, and both export (MPC with
+`--format torch`, see [EXPORT.md](EXPORT.md)).
+
 ## What every run reports
 
 In `control_reportcard.md` and in MLflow. These are instruments, read

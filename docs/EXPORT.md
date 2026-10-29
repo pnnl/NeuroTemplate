@@ -115,6 +115,13 @@ which carried the exporting machine's file paths.
 - **A policy** is run through the trained closed loop on the control run's
   test split. The exported policy must issue the same command for every
   window the trained one saw.
+- **An MPC run** (`policy: mpc`) exports with `--format torch` and carries
+  its surrogate as `model/`: it has no policy graph, and the package's
+  `Policy` plans through the model at every call, as training did. A
+  surrogate with a latch or a clamp is piecewise, so a one-ulp difference
+  can send a window's Adam steps down another branch: the export requires
+  95% of windows to plan the trained command, and `validate` the same of
+  the fixture. An export that is wrong disagrees on most of them.
 
 The shipped `reference/` fixtures come from the trained torch model, not
 from the exported graphs. So `validate`, on the recipient's machine, checks

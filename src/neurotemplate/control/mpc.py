@@ -107,7 +107,10 @@ class MPC(nn.Module):
             optimizer = torch.optim.Adam([plan.z], lr=self.lr)
             for _ in range(self.iters):
                 plan.step = 0
-                total = self.loss(loop(dict(data)))["loss"]
+                # Summed over the batch, not averaged: each window is its own
+                # problem, and its solve must not depend on its batch-mates
+                # (Adam's epsilon sees the gradient's scale).
+                total = self.loss(loop(dict(data)))["loss"] * len(plan.z)
                 optimizer.zero_grad()
                 total.backward()
                 optimizer.step()

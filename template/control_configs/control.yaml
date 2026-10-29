@@ -129,12 +129,18 @@ losses:
 gains: {comfort_lower: 1.0, comfort_upper: 1.0, du: 1.0}
 
 # ── POLICY ───────────────────────────────────────────────────────
-# linear | mlp. `linear` is one saturated affine law, u = sat(Kx + b): few
-# parameters, gains you can read, and little it can learn from the
+# linear | mlp | mpc. `linear` is one saturated affine law, u = sat(Kx + b):
+# few parameters, gains you can read, and little it can learn from the
 # surrogate that the plant does not share. Reach for `mlp` when the linear
 # law visibly cannot express the behaviour and the incentive for it is
-# visibly in the objective; extra size tends to buy jitter.
+# visibly in the objective; extra size tends to buy jitter. `mpc` trains
+# nothing: every step it plans the next mpc_horizon steps through the
+# surrogate and commands the first. It costs a solve per step, where a
+# policy costs one forward pass; the Controller gap says what a policy leaves.
 # policy: linear
+# mpc_horizon: 72      # steps; every D and reference `future` must reach it
+# mpc_iters: 20        # Adam steps per control step, from the last plan
+# mpc_lr: 0.05
 # gelu | relu | tanh | silu (mlp only).
 # policy_nonlin: gelu
 # How the output is squashed into the actuation box: sigmoid_scale (smooth)

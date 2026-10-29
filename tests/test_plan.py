@@ -11,10 +11,11 @@ from neurotemplate.control.pipeline import evaluation_windows
 from neurotemplate.control.plan import plan_on_surrogate
 from neurotemplate.control.policy import build_policy
 from neurotemplate.control.scenarios import eval_pred_steps, horizons, scored_steps
-from control_fixtures import HIGH, LOW, SETPT, full_setup, make_nm_mapping
+from control_fixtures import HIGH, LOW, SETPT, full_setup, make_nm_mapping, make_tracking_plant
 
 
 def test_the_plan_improves_on_the_policy_inside_its_bounds():
+    torch.manual_seed(0)   # the fixture surrogate's weights
     s = full_setup(command_bounds={SETPT: [LOW, [HIGH, -0.5]]}, plan_iters=30,
                    test_window=30, test_stride=30)
     cfg, sysid_cfg, nm, ns = s["cfg"], s["sysid_cfg"], s["nm"], s["norm_stats"]
@@ -38,11 +39,12 @@ def test_mpc_beats_an_untrained_policy_inside_its_bounds_and_starts_each_rollout
     future = {c: 4 for c in (LOW, HIGH, *make_nm_mapping()["D"])}
     s = full_setup(command_bounds={SETPT: [LOW, [HIGH, -0.5]]}, future=future)
     cfg, sysid_cfg, nm, ns = s["cfg"], s["sysid_cfg"], s["nm"], s["norm_stats"]
+    _, plant = make_tracking_plant(sysid_cfg, nm)   # a zone that follows its setpoint
     data, _ = evaluation_windows(cfg, sysid_cfg, [s["frame"]], nm)
     loss = build_control_loss(cfg, sysid_cfg, nm)
 
     def objective(policy):
-        cl = build_closed_loop(s["dyn_node"], policy, cfg, sysid_cfg)
+        cl = build_closed_loop(plant, policy, cfg, sysid_cfg)
         cl.nsteps = eval_pred_steps(cfg, horizons(cfg, sysid_cfg)[2])
         with torch.no_grad():
             out = cl(dict(data))
@@ -51,7 +53,7 @@ def test_mpc_beats_an_untrained_policy_inside_its_bounds_and_starts_each_rollout
     torch.manual_seed(0)
     untrained, _, _ = objective(build_policy(cfg, sysid_cfg, nm, ns))
     cfg.policy, cfg.mpc_horizon, cfg.mpc_iters = "mpc", 4, 15
-    mpc = build_controller(cfg, sysid_cfg, nm, ns, s["dyn_node"])
+    mpc = build_controller(cfg, sysid_cfg, nm, ns, plant)
     planned, out, cl = objective(mpc)
     assert planned < untrained
 

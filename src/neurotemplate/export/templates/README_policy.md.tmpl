@@ -7,7 +7,10 @@ policy = Policy("policy")
 u = policy.act(y, u_history, d, r)    # {u column: command}; u_history and r only if it reads them
 ```
 
-One stateless graph, one call per control step. Each argument is a
+A trained policy is one stateless graph, one call per control step. A
+policy exported from an MPC run (`policy.json` has `mpc`) has no graph: it
+plans through `model/` at every call, in torch, starting from its last plan
+(`reset()` forgets it); `act_batch` plans each window from scratch. Each argument is a
 `[steps, n]` window in physical units, oldest row first; `current row` is
 where the present step sits, and rows after it are the known future
 (forecast disturbances; the reference schedule). `u_history` holds the commands

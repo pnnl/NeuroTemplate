@@ -47,8 +47,10 @@ if Path("policy").is_dir():
     windows = read_windows("policy/reference/inputs.csv", policy.inputs)
     first = {name: window[0] for name, window in windows.items()}
     print("  first reference window ->", policy.act(**first))
+    # An MPC policy plans at every command, so it is timed over fewer.
+    commands = 20 if "mpc" in policy.spec else STEPS
     start = time.perf_counter()
-    for _ in range(STEPS):
+    for _ in range(commands):
         policy.act(**first)
-    print(f"  {STEPS} commands, "
-          f"{(time.perf_counter() - start) / STEPS * 1e6:.1f} us per command")
+    print(f"  {commands} commands, "
+          f"{(time.perf_counter() - start) / commands * 1e6:.1f} us per command")
