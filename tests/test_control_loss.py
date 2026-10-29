@@ -17,19 +17,15 @@ from control_fixtures import HIGH, LOW, SETPT, ZONE, full_setup
 def _data(s, zone, low=24.0, high=25.0, u=None):
     """A rolled-out dict with the zone held at `zone` °C (a scalar, or one
     value per scored step) against the band [low, high]."""
-    cfg, nm, ns = s["cfg"], s["nm"], s["norm_stats"]
+    cfg, nm = s["cfg"], s["nm"]
     _, _, hmax = horizons(cfg, s["sysid_cfg"])
     P, b = cfg.train_pred_steps, 2
     W = hmax + P
 
-    def norm(col, value):
-        return (value - ns[col]["shift"]) / ns[col]["stretch"]
-
     yn = torch.zeros(b, W, len(nm["Y"]))
-    zone = torch.as_tensor(zone, dtype=torch.float32)
-    yn[:, hmax:, nm["Y"].index(ZONE)] = norm(ZONE, zone)
+    yn[:, hmax:, nm["Y"].index(ZONE)] = torch.as_tensor(zone, dtype=torch.float32)
     R = torch.empty(b, W, 2)
-    R[..., 0], R[..., 1] = norm(HIGH, high), norm(LOW, low)   # sorted: High, Low
+    R[..., 0], R[..., 1] = high, low                          # sorted: High, Low
     U = torch.zeros(b, W - 1, len(nm["U"])) if u is None else u
     return {"yn": yn, "U": U, "D": torch.zeros(b, W, len(nm["D"])), "R": R}
 
@@ -45,8 +41,7 @@ def test_the_bound_is_the_rms_violation_in_physical_units():
     P = s["cfg"].train_pred_steps
     zone = torch.full((P,), 24.5)
     zone[2] = 26.0                                  # 1 °C above the 25 °C ceiling
-    out = build_control_loss(s["cfg"], s["sysid_cfg"], s["nm"],
-                             s["norm_stats"])(_data(s, zone))
+    out = build_control_loss(s["cfg"], s["sysid_cfg"], s["nm"])(_data(s, zone))
     assert float(out["comfort_upper_loss"]) == pytest.approx(3.0 / P ** 0.5, rel=1e-4)
     assert float(out["comfort_lower_loss"]) == 0.0
 
@@ -54,7 +49,7 @@ def test_the_bound_is_the_rms_violation_in_physical_units():
 def test_relu_bounds_from_below_and_nrelu_from_above():
     """The direction lives in the map, not in a name."""
     s = full_setup(gains=_gains(comfort_lower=1.0, comfort_upper=1.0))
-    loss = build_control_loss(s["cfg"], s["sysid_cfg"], s["nm"], s["norm_stats"])
+    loss = build_control_loss(s["cfg"], s["sysid_cfg"], s["nm"])
     cold, hot = loss(_data(s, 23.0)), loss(_data(s, 26.0))
     assert float(cold["comfort_lower_loss"]) == pytest.approx(1.0, rel=1e-4)
     assert float(cold["comfort_upper_loss"]) == 0.0
@@ -62,21 +57,17 @@ def test_relu_bounds_from_below_and_nrelu_from_above():
     assert float(hot["comfort_lower_loss"]) == 0.0
 
 
-@pytest.mark.parametrize("units", ["physical", "normalized"])
-def test_a_first_difference_is_scored_in_the_declared_units(units):
-    """A gain per °C of setpoint movement, or per z-scored unit."""
+def test_a_first_difference_is_scored_per_unit_of_movement():
+    """A gain per °C of setpoint movement."""
     s = full_setup(gains=_gains(du=1.0))
-    s["cfg"].losses["du"]["units"] = units
-    cfg, nm, ns = s["cfg"], s["nm"], s["norm_stats"]
+    cfg, nm = s["cfg"], s["nm"]
     _, _, hmax = horizons(cfg, s["sysid_cfg"])
     u = torch.randn(2, hmax - 1 + cfg.train_pred_steps, 1)
-    got = float(build_control_loss(cfg, s["sysid_cfg"], nm, ns)(
+    got = float(build_control_loss(cfg, s["sysid_cfg"], nm)(
         _data(s, 24.5, u=u))["du_loss"])
 
     commands = u[:, hmax - 1:, 0]
     expected = (commands[:, 1:] - commands[:, :-1]).abs().mean()
-    if units == "physical":
-        expected = expected * ns[SETPT]["stretch"]
     assert got == pytest.approx(float(expected), rel=1e-5)
 
 

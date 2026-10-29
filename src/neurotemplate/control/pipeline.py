@@ -17,7 +17,7 @@ from matplotlib import rc_context
 
 from neuromancer.trainer import Trainer
 
-from neurotemplate.common.data_utils import NormStats, axis_label, to_physical
+from neurotemplate.common.data_utils import NormStats, axis_label
 from neurotemplate.common.progress import Progress
 from neurotemplate.common.metrics import (
     ChannelMetrics,
@@ -127,7 +127,6 @@ def band_trajectories(
     out: dict,
     hmax: int,
     nm_mapping: dict[str, list[str]],
-    norm_stats: NormStats,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """(y, lower, upper) for the regulated channels over the scored horizon.
 
@@ -136,7 +135,7 @@ def band_trajectories(
     excursion arithmetic needs no special case.
     """
     def column(name):
-        return scored_series(objective, name, out, hmax, nm_mapping, norm_stats)
+        return scored_series(objective, name, out, hmax, nm_mapping)
 
     y = torch.stack([column(b.target) for b in objective.bands], dim=-1)
 
@@ -160,7 +159,7 @@ def evaluate_closed_loop(
 ) -> tuple[ControlResults, dict]:
     """Roll the trained closed loop on the test split; pooled physical metrics.
 
-    `test_dfs` is a list of one or more normalized test dataframes. Windows
+    `test_dfs` is a list of one or more test dataframes. Windows
     from different files are pooled along the batch axis (no rollout spans
     two files). Metrics are computed once across the pooled rollouts.
     """
@@ -188,8 +187,7 @@ def evaluate_closed_loop(
     # Plumb source_idx through `out` so plot_closed_loop can route per-batch.
     out["source_idx"] = source_idx
 
-    y_ctrl, lower, upper = band_trajectories(objective, out, hmax, nm_mapping,
-                                             norm_stats)
+    y_ctrl, lower, upper = band_trajectories(objective, out, hmax, nm_mapping)
     step_hours = hours_per_step(out["t"][:, scored_steps("t", hmax), :])
     comfort = comfort_metrics(y_ctrl, lower, upper, regulated, step_hours)
     # Two pooled headline numbers across all regulated channels. The rate is
@@ -208,15 +206,14 @@ def evaluate_closed_loop(
                                    [regulated[j] for j in two_sided])
 
     u_cols = nm_mapping["U"]
-    U = to_physical(out["U"][:, scored_steps("U", hmax), :], u_cols, norm_stats)
+    U = out["U"][:, scored_steps("U", hmax), :]
     mean_abs_du = (U[:, 1:, :] - U[:, :-1, :]).abs().mean().item()
 
     # Per-control behaviour, in the same physical units as the commands. The
     # bounds come from the hook the policy is actually squashed into, so
     # "at bound" means the limit the policy was given, not the data's spread.
-    umin_n, umax_n = hooks.actuation_bounds(nm_mapping, norm_stats)
-    u_lo = to_physical(umin_n.to(device), u_cols, norm_stats)
-    u_hi = to_physical(umax_n.to(device), u_cols, norm_stats)
+    u_lo, u_hi = (b.to(device=device, dtype=torch.float32)
+                  for b in hooks.actuation_bounds(nm_mapping, norm_stats))
     actuation = actuation_metrics(U, u_cols, u_lo, u_hi)
     response = response_audit(
         y_ctrl, lower, upper, U, regulated, u_cols, u_lo, u_hi,
@@ -228,14 +225,13 @@ def evaluate_closed_loop(
             out["yn"][:, scored_steps("yn", hmax), :],
             out["U"][:, scored_steps("U", hmax), :],
             out["D"][:, scored_steps("D", hmax), :],
-            nm_mapping, norm_stats,
+            nm_mapping,
         )
         # Each weight a power term carries (a tariff, a carbon series) rides
         # through the rollout untouched, so it is co-indexed with the power it
         # prices.
         weights = {
-            term.weight: scored_series(objective, term.weight, out, hmax,
-                                       nm_mapping, norm_stats)
+            term.weight: scored_series(objective, term.weight, out, hmax, nm_mapping)
             for term in objective.terms
             if term.column == POWER and term.weight is not None
         }
@@ -246,12 +242,11 @@ def evaluate_closed_loop(
     # have issued at each step, so U - u_ref is the deviation that was deployed.
     residual = []
     if cfg.residual_delta:
-        u_ref = reference_over_horizon(cfg, out, hmax, nm_mapping, norm_stats)
+        u_ref = reference_over_horizon(cfg, out, hmax, nm_mapping)
         for column, ref in u_ref.items():
             j = u_cols.index(column)
-            stats = norm_stats[column]
             residual.append(residual_metrics(
-                column, U[:, :, j], ref * stats["stretch"] + stats["shift"],
+                column, U[:, :, j], ref,
                 tuple(float(side) for side in cfg.residual_delta[column]),
             ))
 
@@ -372,22 +367,20 @@ def plot_closed_loop(
     u_cols = nm_mapping["U"]
 
     y, lower, upper = (x.cpu() for x in band_trajectories(
-        objective, out, hmax, nm_mapping, norm_stats))
+        objective, out, hmax, nm_mapping))
     # U[k] is the command that drove y[k] (see scored_steps).
-    U = to_physical(out["U"][:, scored_steps("U", hmax), :], u_cols, norm_stats).cpu()
+    U = out["U"][:, scored_steps("U", hmax), :].cpu()
 
-    # Context traces overlaid on the regulated axis (denormalized), and the
-    # optional power row. Both come from the use case — the library has no
-    # opinion about which columns are interesting.
+    # Context traces overlaid on the regulated axis, and the optional power
+    # row. Both come from the use case — the library has no opinion about
+    # which columns are interesting.
     d_cols, y_cols = nm_mapping["D"], nm_mapping["Y"]
     context = {
-        name: to_physical(out["D"][:, scored_steps("D", hmax), d_cols.index(name)],
-                          [name], norm_stats).cpu()
+        name: out["D"][:, scored_steps("D", hmax), d_cols.index(name)].cpu()
         for name in hooks.plot_context_channels(nm_mapping)
     }
     power = {
-        name: to_physical(out["yn"][:, scored_steps("yn", hmax), y_cols.index(name)], [name],
-                          norm_stats).clamp_min(0.0).cpu()
+        name: out["yn"][:, scored_steps("yn", hmax), y_cols.index(name)].clamp_min(0.0).cpu()
         for name in hooks.power_channels(nm_mapping)
     }
 
@@ -396,7 +389,7 @@ def plot_closed_loop(
     # reads at a glance, and how a precool that never happened becomes obvious.
     edges = {name for b in objective.bands for name in (b.lower, b.upper)}
     traces = {
-        name: scored_series(objective, name, out, hmax, nm_mapping, norm_stats).cpu()
+        name: scored_series(objective, name, out, hmax, nm_mapping).cpu()
         for name in objective.r_columns if name not in edges
     }
 

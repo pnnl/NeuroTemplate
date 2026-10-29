@@ -8,11 +8,9 @@ import torch
 from neurotemplate.modeling.config import ModelingConfig as Config
 from neurotemplate.common.config import dict_to_dataclass
 from neurotemplate.common.data_utils import (
-    normalize_df,
     compute_norm_stats,
     get_sw_dict,
     get_sw_dict_multi,
-    unnormalize_df,
 )
 
 
@@ -46,14 +44,6 @@ def cfg():
     }, Config)
     c.device = torch.device("cpu")
     return c
-
-
-def test_norm_z_score_round_trip(synthetic_df):
-    stats = compute_norm_stats(synthetic_df, norm_type="z_score")
-    normed = normalize_df(synthetic_df, stats)
-    back = unnormalize_df(normed, stats)
-    for col in synthetic_df.columns:
-        assert np.allclose(back[col].to_numpy(), synthetic_df[col].to_numpy())
 
 
 def test_column_overrides_apply_per_column_norm(synthetic_df):

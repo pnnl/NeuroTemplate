@@ -47,22 +47,22 @@ def _run_diagnostics(reference=None, **overrides):
     cfg, sysid_cfg, nm, ns = s["cfg"], s["sysid_cfg"], s["nm"], s["norm_stats"]
     _, _, hmax = horizons(cfg, sysid_cfg)
     objective = resolve_objective(cfg, nm)
-    test_dfs = [s["norm_df"]]
+    test_dfs = [s["frame"]]
 
 
     policy = build_policy(cfg, sysid_cfg, nm, ns)
     cl = build_closed_loop(s["dyn_node"], policy, cfg, sysid_cfg)
-    loss = build_control_loss(cfg, sysid_cfg, nm, ns)
+    loss = build_control_loss(cfg, sysid_cfg, nm)
     problem = build_problem(cl, loss)
 
     train_loader, _ = build_loaders(cfg, sysid_cfg, nm, test_dfs, test_dfs)
     out = run_objective_pass(problem, next(iter(train_loader)))
     balance = objective_balance(loss, out)
-    term = power_term(cfg, nm, ns)
+    term = power_term(cfg, nm)
     power_diag = (power_diagnostics(term, out, hmax)
                   if term is not None and objective.reads_power else None)
 
-    arch = describe_policy(policy, cfg, sysid_cfg, nm, ns)
+    arch = describe_policy(policy, cfg, sysid_cfg, nm)
     notes = objective_notes(objective, cfg)
     results, _ = evaluate_closed_loop(cfg, sysid_cfg, cl, test_dfs, nm, ns)
     md = render_control_reportcard(

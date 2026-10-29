@@ -410,7 +410,7 @@ def _plot_predictions(
             "Y": test_out["yn"][batch, :-1, :].detach().cpu().numpy(),
             "t": test_out["t"][batch].detach().cpu().numpy(),
         }
-        df_pred = to_df(data=pred_dict, norm_stats=norm_stats, nm_mapping=nm_mapping)
+        df_pred = to_df(data=pred_dict, nm_mapping=nm_mapping)
         plot_predictions(
             cfg=cfg,
             df_true=test_dfs[src[batch]], df_pred=df_pred,

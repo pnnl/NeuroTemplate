@@ -33,10 +33,10 @@ pytestmark = pytest.mark.filterwarnings("ignore:.*timestamps from training")
 
 def _train(s, dfs=None):
     cfg, sysid_cfg, nm, ns = s["cfg"], s["sysid_cfg"], s["nm"], s["norm_stats"]
-    dfs = dfs or [s["norm_df"]]
+    dfs = dfs or [s["frame"]]
     policy = build_policy(cfg, sysid_cfg, nm, ns)
     cl = build_closed_loop(s["dyn_node"], policy, cfg, sysid_cfg)
-    problem = build_problem(cl, build_control_loss(cfg, sysid_cfg, nm, ns))
+    problem = build_problem(cl, build_control_loss(cfg, sysid_cfg, nm))
     train_loader, dev_loader = build_loaders(cfg, sysid_cfg, nm, dfs, dfs)
     trained, best_dev, _ = train_policy(cfg, problem, train_loader, dev_loader)
     return problem, trained, best_dev
@@ -50,7 +50,7 @@ def test_a_grid_response_objective_trains():
 
     assert torch.isfinite(torch.tensor(best_dev))
     results, out = evaluate_closed_loop(
-        s["cfg"], s["sysid_cfg"], trained, [s["norm_df"]], s["nm"],
+        s["cfg"], s["sysid_cfg"], trained, [s["frame"]], s["nm"],
         s["norm_stats"],
     )
     assert TARIFF in results.energy.weighted_energy
@@ -63,7 +63,7 @@ def test_a_residual_over_a_reference_file_trains_and_reloads(tmp_path):
     s = full_setup(epochs=3, residual_delta={SETPT: [1.0, 1.0]})
     cfg, sysid_cfg, nm, ns = s["cfg"], s["sysid_cfg"], s["nm"], s["norm_stats"]
     write_splits(cfg, tmp_path, s["plant"], [make_reference_df(s["plant"])])
-    train_dfs, _, test_dfs = load_control_splits(cfg, nm, ns)
+    train_dfs, _, test_dfs = load_control_splits(cfg, nm)
     _, _, hmax = horizons(cfg, sysid_cfg)
     problem, trained, best_dev = _train(s, train_dfs)
 
@@ -71,9 +71,8 @@ def test_a_residual_over_a_reference_file_trains_and_reloads(tmp_path):
     results, out = evaluate_closed_loop(cfg, sysid_cfg, trained, test_dfs, nm, ns)
     # The commanded setpoint never leaves the box after training — the
     # guarantee the residual exists to give.
-    u_ref = reference_over_horizon(cfg, out, hmax, nm, ns)[SETPT]
-    delta = ((out["U"][:, scored_steps("U", hmax), 0] - u_ref)
-             * ns[SETPT]["stretch"]).abs()
+    u_ref = reference_over_horizon(cfg, out, hmax, nm)[SETPT]
+    delta = (out["U"][:, scored_steps("U", hmax), 0] - u_ref).abs()
     assert float(delta.max()) <= 1.0 + 1e-4
     (residual,) = results.residual
     assert residual.max_abs_delta <= 1.0 + 1e-4
@@ -90,7 +89,7 @@ def test_a_residual_over_a_reference_file_trains_and_reloads(tmp_path):
     assert ns_again == ns
     policy = build_policy(again, sysid_cfg, nm, ns_again)
     cl = build_closed_loop(s["dyn_node"], policy, again, sysid_cfg)
-    rebuilt = build_problem(cl, build_control_loss(again, sysid_cfg, nm, ns_again))
+    rebuilt = build_problem(cl, build_control_loss(again, sysid_cfg, nm))
     rebuilt.load_state_dict(problem.state_dict())
     _, out_again = evaluate_closed_loop(again, sysid_cfg, cl, test_dfs, nm, ns_again)
     assert torch.equal(out_again["U"], out["U"])

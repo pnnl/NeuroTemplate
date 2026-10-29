@@ -14,8 +14,11 @@ A lean control-specific windower. Per window:
     U    : seed = first Hmax-1 real U steps [n, Hmax-1, nu]  (policy appends)
     D    : full real disturbances           [n, W,   nd]
     t    : full sec_elapsed (for plots)     [n, W,   1]
-    R    : the reference columns            [n, W,   n_ref]  (normalized; only
-           when the objective names one, see control.losses)
+    R    : the reference columns            [n, W,   n_ref]  (only when the
+           objective names one, see control.losses)
+
+Every key is in physical units: the policy normalises its own inputs, and the
+surrogate is behind the model contract (`modeling.contract`).
 
 D, t and R run F rows past the rollout so the policy's preview at the last
 steps reads real rows, not SystemPreview's `nearest` copy of the final one.
@@ -48,9 +51,7 @@ from pandas import DataFrame
 from neuromancer.dataset import DictDataset
 
 from neurotemplate.common.config import paths_as_list
-from neurotemplate.common.data_utils import (
-    NormStats, get_data_splits, load_split, normalize_df, sliding_windows,
-)
+from neurotemplate.common.data_utils import get_data_splits, load_split, sliding_windows
 from neurotemplate.control.losses import (
     ROLE_KEYS, Objective, check_weights, resolve_objective,
 )
@@ -97,21 +98,12 @@ def scored_steps(key: str, hmax: int) -> slice:
 
 @beartype
 def scored_series(objective: Objective, name: str, data: dict, hmax: int,
-                  nm_mapping: dict[str, list[str]], norm_stats: NormStats,
-                  physical: bool = True) -> torch.Tensor:
-    """One named Y, U, D or reference column over the scored horizon, [b, P].
-
-    Physical units unless `physical` is False. `norm_stats` must carry the
-    reference columns (`losses.extend_norm_stats`).
-    """
+                  nm_mapping: dict[str, list[str]]) -> torch.Tensor:
+    """One named Y, U, D or reference column over the scored horizon, [b, P]."""
     role = objective.roles[name]
     key = ROLE_KEYS[role]
     j = objective.columns_of(role, nm_mapping).index(name)
-    x = data[key][:, scored_steps(key, hmax), j]
-    if not physical:
-        return x
-    stats = norm_stats[name]
-    return x * stats["stretch"] + stats["shift"]
+    return data[key][:, scored_steps(key, hmax), j]
 
 
 def _span(df: DataFrame) -> str:
@@ -167,12 +159,10 @@ def _attach_references(plants: list[DataFrame], split: str, cfg,
 def load_control_splits(
     cfg,
     nm_mapping: dict[str, list[str]],
-    norm_stats: NormStats,
 ) -> tuple[list[DataFrame], list[DataFrame], list[DataFrame]]:
-    """(train, dev, test) plant frames with their reference columns, normalized.
+    """(train, dev, test) plant frames with their reference columns joined on.
 
-    One list per split, one frame per plant file. `norm_stats` must carry the
-    reference columns (`losses.extend_norm_stats`).
+    One list per split, one frame per plant file, physical units.
     """
     objective = resolve_objective(cfg, nm_mapping)
     train, dev, test, _ = get_data_splits(cfg)
@@ -181,7 +171,7 @@ def load_control_splits(
         if objective.r_columns:
             plants = _attach_references(plants, split, cfg, objective.r_columns)
         check_weights(objective, plants, split)
-        splits.append([normalize_df(df, norm_stats) for df in plants])
+        splits.append(plants)
     return splits[0], splits[1], splits[2]
 
 
@@ -199,8 +189,8 @@ def build_window_dict(
     P: int,
     stride: int,
 ) -> dict:
-    """Lean closed-loop window dict for one normalized frame (see the module
-    docstring for the keys)."""
+    """Lean closed-loop window dict for one frame (see the module docstring
+    for the keys)."""
     _, _, hmax = horizons(cfg, sysid_cfg)
     W = hmax + P + forecast_tail(cfg)
     device = sysid_cfg.device

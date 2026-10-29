@@ -10,12 +10,16 @@ U column a `past`; R is the objective's reference columns (control.losses),
 present only when it names one. Each column is read over its own `past` and
 `future` (see `build_policy`).
 
-Output is squashed into the actuator limits (normalized U space) by
-blocks.MLP_bounds; a U column `residual_delta` names is instead a bounded
-deviation from `reference_control` (`_ResidualPolicy`). Nothing is rounded to
-an actuator's resolution: that is the building's job, and the controller
-commands through it. Windowing uses the same input_map convention as
-modeling/dynamics.get_dynamics so the policy composes with the frozen dynamics Node.
+Every window arrives in physical units and every command leaves in them.
+The learned map alone computes in normalised units (`_NormalizedNet`): its
+inputs normalised by their columns' stats, its output squashed into the
+actuator limits by blocks.MLP_bounds. A U column `residual_delta` names is
+instead a bounded deviation from `reference_control` (`_ResidualPolicy`), and
+`command_bounds` maps a command onto a per-step range (`_ReferenceBounds`);
+both work in physical units. Nothing is rounded to an actuator's resolution:
+that is the building's job, and the controller commands through it.
+Windowing uses the same input_map convention as modeling/dynamics.get_dynamics
+so the policy composes with the frozen dynamics Node.
 
 `policy_catalog` selects the network family the same way `model_catalog`
 selects a dynamics family on the sys-id side:
@@ -58,32 +62,44 @@ POLICY_NONLIN = {
     "silu": nn.SiLU,
 }
 
-class _WindowGather(nn.Module):
-    """Narrow each input window to the (column, timestep) pairs declared.
+class _NormalizedNet(nn.Module):
+    """The learned map, in normalised units.
 
-    SystemPreview's input_map gives one window per key, so a key's window is
-    sized to the deepest `past` and the deepest `future` any of its columns
-    declared. A column that asked for less would otherwise see steps it never
-    requested. This applies the narrowing gather — one per positional input,
-    keyed by its index — in front of whatever net build_policy constructed.
-
-    A fixed permutation computed once at construction, applied with
+    Each physical input window `[batch, rows * n]` is normalised by its
+    columns' stats, then narrowed to the (column, timestep) pairs declared:
+    SystemPreview's input_map gives one window per key, sized to the deepest
+    `past` and `future` any of its columns declared, and a column that asked
+    for less would otherwise see steps it never requested. The narrowing is a
+    fixed permutation computed once at construction, applied with
     `index_select` against registered buffers — same discipline as
     `BlockStack` (modeling/dynamics.py): no data-dependent control flow.
+
+    The output is the net's own: normalised U, inside the net's bounds.
     """
 
-    def __init__(self, base: nn.Module, gathers: dict[int, torch.Tensor]):
+    def __init__(self, base: nn.Module, stats: list[tuple[torch.Tensor, torch.Tensor]],
+                 gathers: dict[int, torch.Tensor]):
         super().__init__()
         self.base = base
+        for i, (shift, stretch) in enumerate(stats):
+            self.register_buffer(f"_shift_{i}", shift, persistent=False)
+            self.register_buffer(f"_stretch_{i}", stretch, persistent=False)
+        self.n_inputs = len(stats)
         self.indices = sorted(gathers)
         for i in self.indices:
             self.register_buffer(f"_gather_{i}", gathers[i], persistent=False)
 
     def forward(self, *args: torch.Tensor) -> torch.Tensor:
-        args = list(args)
-        for i in self.indices:
-            args[i] = args[i].index_select(-1, getattr(self, f"_gather_{i}"))
-        return self.base(*args)
+        normalized = []
+        for i, x in enumerate(args):
+            shift = getattr(self, f"_shift_{i}")
+            if shift.numel():   # a key with no columns has nothing to normalise
+                window = x.reshape(x.shape[0], -1, shift.shape[0])
+                x = ((window - shift) / getattr(self, f"_stretch_{i}")).reshape(x.shape[0], -1)
+            if i in self.indices:
+                x = x.index_select(-1, getattr(self, f"_gather_{i}"))
+            normalized.append(x)
+        return self.base(*normalized)
 
 
 def _current(x: torch.Tensor, block: int, width: int) -> torch.Tensor:
@@ -98,7 +114,8 @@ class _ReferenceRule(nn.Module):
     to `(batch, window*dim)`, oldest-first, see `SystemPreview.get_mapped_data`
     — and that flattening convention is library business which must not leak
     into a use case's rule. This slices the current step back out and hands the
-    hook plain `[b, n]` tensors, and each reference column by name.
+    hook plain `[b, n]` tensors, and each reference column by name, all in
+    physical units; the rule answers in them.
 
     The rule returns `{U column: [b]}`, one command per anchored column, and
     must return exactly the columns `residual_delta` names: a column it adds
@@ -111,13 +128,11 @@ class _ReferenceRule(nn.Module):
     state-carrying path for it.
     """
 
-    def __init__(self, rule, nm_mapping: dict[str, list[str]],
-                 norm_stats: NormStats, keys: list[str], now: dict[str, int],
-                 r_columns: list[str], anchored: list[str]):
+    def __init__(self, rule, nm_mapping: dict[str, list[str]], keys: list[str],
+                 now: dict[str, int], r_columns: list[str], anchored: list[str]):
         super().__init__()
         self.rule = rule
         self.nm_mapping = nm_mapping
-        self.norm_stats = norm_stats
         self.r_columns = r_columns
         self.anchored = anchored
         # The policy's positional inputs, and which row of each flattened
@@ -134,13 +149,7 @@ class _ReferenceRule(nn.Module):
                for key in ("yn", "D", "R") if key in windows}
         r_now = {name: now["R"][:, j] for j, name in enumerate(self.r_columns)
                  } if "R" in now else {}
-        commands = self.rule(
-            now["yn"],
-            r_now,
-            now["D"],
-            self.nm_mapping,
-            self.norm_stats,
-        )
+        commands = self.rule(now["yn"], r_now, now["D"], self.nm_mapping)
         if set(commands) != set(self.anchored):
             raise ValueError(
                 f"reference_control returned {sorted(commands)}, but "
@@ -167,15 +176,29 @@ def _clamp_straight_through(x: torch.Tensor, lo: torch.Tensor,
     return x + (torch.clamp(x, lo, hi) - x).detach()
 
 
+class _Commands(nn.Module):
+    """The net's normalised output as physical commands: `z · stretch + shift`."""
+
+    def __init__(self, base: nn.Module, u_shift: torch.Tensor, u_stretch: torch.Tensor):
+        super().__init__()
+        self.base = base
+        self.register_buffer("u_shift", u_shift, persistent=False)
+        self.register_buffer("u_stretch", u_stretch, persistent=False)
+
+    def forward(self, *args: torch.Tensor) -> torch.Tensor:
+        return self.base(*args) * self.u_stretch + self.u_shift
+
+
 class _ResidualPolicy(nn.Module):
     """Command a bounded deviation from a reference rule, per U column.
 
-    For each column `residual_delta` names (an *anchored* column):
+    For each column `residual_delta` names (an *anchored* column), with the
+    net's output `z` in normalised units and everything else physical:
 
-        δ = clamp(net, -below, +above)    net bounded to ±max(below, above)
+        δ = clamp(z · stretch, -below, +above)    z bounded to ±max(below, above)
         u = clamp(rule + δ, umin, umax)
 
-    and every other column is the net's own output over its actuation bounds.
+    and every other column is the net's own command over its actuation bounds.
 
     The point is not that a network finds it easier to learn zero than
     identity — the `linear` family already expresses `u = sat(Kx + b)`, so
@@ -204,7 +227,8 @@ class _ResidualPolicy(nn.Module):
     def __init__(self, base: nn.Module, reference: nn.Module,
                  u_columns: list[str],
                  umin: torch.Tensor, umax: torch.Tensor,
-                 below: torch.Tensor, above: torch.Tensor, anchored: torch.Tensor):
+                 below: torch.Tensor, above: torch.Tensor, anchored: torch.Tensor,
+                 u_shift: torch.Tensor, u_stretch: torch.Tensor):
         super().__init__()
         self.base = base
         self.reference = reference
@@ -216,17 +240,20 @@ class _ResidualPolicy(nn.Module):
         # Which columns the rule anchors, [nu] bool: `_ReferenceRule`
         # refuses a rule that returns any other set.
         self.register_buffer("anchored", anchored, persistent=False)
+        self.register_buffer("u_shift", u_shift, persistent=False)
+        self.register_buffer("u_stretch", u_stretch, persistent=False)
 
     def forward(self, *args: torch.Tensor) -> torch.Tensor:
-        raw = self.base(*args)
+        z = self.base(*args)
+        free = z * self.u_stretch + self.u_shift
         rule = self.reference(*args)
-        # Every column at once: a free column carries its raw output as a
-        # stand-in rule, and the `where` hands it the raw output untouched.
-        rule_now = torch.stack([rule[c] if c in rule else raw[:, j]
+        # Every column at once: a free column carries its own command as a
+        # stand-in rule, and the `where` hands it that command untouched.
+        rule_now = torch.stack([rule[c] if c in rule else free[:, j]
                                 for j, c in enumerate(self.u_columns)], dim=-1)
-        delta = _clamp_straight_through(raw, -self.below, self.above)
+        delta = _clamp_straight_through(z * self.u_stretch, -self.below, self.above)
         commanded = torch.clamp(rule_now + delta, self.umin, self.umax)
-        return torch.where(self.anchored, commanded, raw)
+        return torch.where(self.anchored, commanded, free)
 
 
 def _bound_side(side) -> tuple[Optional[str], float]:
@@ -256,38 +283,28 @@ class _ReferenceBounds(nn.Module):
 
     def __init__(self, base: nn.Module, u_columns: list[str], bounds: dict[str, list],
                  order: list[str], umin: torch.Tensor, umax: torch.Tensor,
-                 norm_stats: NormStats, sources: dict[str, tuple]):
+                 sources: dict[str, tuple]):
         super().__init__()
         self.base = base
         self.columns = [u_columns.index(c) for c in order]
         self.register_buffer("umin", umin)
         self.register_buffer("umax", umax)
-        # Each side as (source or None, scale, offset): a source is `("U", column)`
+        # Each side as (source or None, offset): a source is `("U", column)`
         # for a command, or (positional input, present row, window width, column)
-        # for a reference. The named column's normalized value
-        # maps to the bounded column's normalized space by `value · scale +
-        # offset`; a number is the constant `offset`.
-        sides = []
-        for column in order:
-            u = norm_stats[column]
-            for side in bounds[column]:
-                name, margin = _bound_side(side)
-                if name is not None:
-                    v = norm_stats[name]
-                    sides.append((sources[name], v["stretch"] / u["stretch"],
-                                  (v["shift"] + margin - u["shift"]) / u["stretch"]))
-                else:
-                    sides.append((None, 0.0, (margin - u["shift"]) / u["stretch"]))
-        self.sides = sides
+        # for a reference; the side is its value plus `offset`. A number is the
+        # constant `offset`.
+        self.sides = [(None if name is None else sources[name], margin)
+                      for column in order
+                      for name, margin in map(_bound_side, bounds[column])]
 
     def _side(self, k: int, args: tuple, columns: list, like: torch.Tensor) -> torch.Tensor:
-        source, scale, offset = self.sides[k]
+        source, offset = self.sides[k]
         if source is None:
             return torch.full_like(like, offset)
         if source[0] == "U":
-            return columns[source[1]] * scale + offset
+            return columns[source[1]] + offset
         key, row, width, column = source
-        return _current(args[key], row, width)[:, column] * scale + offset
+        return _current(args[key], row, width)[:, column] + offset
 
     def forward(self, *args: torch.Tensor) -> torch.Tensor:
         u = self.base(*args)
@@ -444,8 +461,7 @@ policy_catalog = {
 POLICY_BOUND_METHODS = list(blocks.MLP_bounds.bound_methods)
 
 
-def _reference_rule(cfg, hooks, nm_mapping, norm_stats, keys: list[str],
-                    now: dict[str, int],
+def _reference_rule(cfg, hooks, nm_mapping, keys: list[str], now: dict[str, int],
                     r_columns: list[str]) -> Optional[_ReferenceRule]:
     """The residual's anchor rule, or None when `residual_delta` is empty.
 
@@ -469,7 +485,7 @@ def _reference_rule(cfg, hooks, nm_mapping, norm_stats, keys: list[str],
             "is no rule for the residual to deviate from. Implement the hook, "
             "or leave residual_delta empty for a plain policy."
         )
-    return _ReferenceRule(rule, nm_mapping, norm_stats, keys, now, r_columns,
+    return _ReferenceRule(rule, nm_mapping, keys, now, r_columns,
                           anchored=list(cfg.residual_delta))
 
 
@@ -479,10 +495,9 @@ def reference_over_horizon(
     out: dict,
     hmax: int,
     nm_mapping: dict[str, list[str]],
-    norm_stats: NormStats,
 ) -> dict[str, torch.Tensor]:
     """The reference rule replayed on a recorded rollout: {anchored U column:
-    [b, P]}, normalized.
+    [b, P]}, physical units.
 
     The rule is memoryless, so every (window, step) can be evaluated at once by
     folding time into the batch axis — a history of one step, so every window
@@ -499,8 +514,8 @@ def reference_over_horizon(
     """
     r_columns = resolve_objective(cfg, nm_mapping).r_columns
     keys = ["yn", "D"] + (["R"] if r_columns else [])
-    rule = _reference_rule(cfg, load_control_hooks(cfg), nm_mapping, norm_stats,
-                           keys, now={key: 0 for key in keys}, r_columns=r_columns)
+    rule = _reference_rule(cfg, load_control_hooks(cfg), nm_mapping, keys,
+                           now={key: 0 for key in keys}, r_columns=r_columns)
     # The other keys run one step past U, so bound the slice by U's length.
     steps = slice(scored_steps("U", hmax).start, out["U"].shape[1])
     P = steps.stop - steps.start
@@ -543,55 +558,57 @@ def build_policy(
     key_gathers = {key: _key_gather(key, table[key]) for key in keys}
     insize = sum(len(indices) for indices in key_gathers.values())
 
-    umin, umax = hooks.actuation_bounds(nm_mapping, norm_stats)
-    umin, umax = umin.to(device), umax.to(device)
+    # Physical actuation bounds, and the same in the net's normalised units.
+    u_cols = nm_mapping["U"]
+    u_shift, u_stretch = _column_stats(norm_stats, u_cols, device)
+    umin, umax = (b.to(device=device, dtype=torch.float32)
+                  for b in hooks.actuation_bounds(nm_mapping, norm_stats))
+    umin_n, umax_n = (umin - u_shift) / u_stretch, (umax - u_shift) / u_stretch
 
     reference = _reference_rule(
-        cfg, hooks, nm_mapping, norm_stats, keys,
+        cfg, hooks, nm_mapping, keys,
         now={key: input_map[key]["past"] for key in keys}, r_columns=r_columns)
     if reference is None:
-        net_min, net_max = umin, umax
+        net_min, net_max = umin_n, umax_n
     else:
-        # Each anchored column's box around the rule, normalized; zero for a
+        # Each anchored column's box around the rule, physical; zero for a
         # free column. The net takes the symmetric ±max of an anchored
-        # column's box and its actuation bounds for a free one;
+        # column's box, normalised, and its actuation bounds for a free one;
         # _ResidualPolicy clamps the anchored ones to their box.
-        u_cols = nm_mapping["U"]
         anchored = torch.tensor([c in cfg.residual_delta for c in u_cols],
                                 device=device)
-        physical = torch.tensor(
-            [cfg.residual_delta.get(c, [0.0, 0.0]) for c in u_cols],
-            dtype=torch.float32, device=device)
-        stretch = torch.tensor([norm_stats[c]["stretch"] for c in u_cols],
-                               dtype=torch.float32, device=device)
-        below, above = physical[:, 0] / stretch, physical[:, 1] / stretch
-        half = torch.maximum(below, above)
-        net_min = torch.where(anchored, -half, umin)
-        net_max = torch.where(anchored, half, umax)
+        box = torch.tensor([cfg.residual_delta.get(c, [0.0, 0.0]) for c in u_cols],
+                           dtype=torch.float32, device=device)
+        below, above = box[:, 0], box[:, 1]
+        half = torch.maximum(below, above) / u_stretch
+        net_min = torch.where(anchored, -half, umin_n)
+        net_max = torch.where(anchored, half, umax_n)
 
     net = policy_catalog[cfg.policy](cfg, insize, nu, net_min, net_max).to(device)
     if reference is not None:
         _zero_final_layer(net, anchored)
 
-    # The per-column windows are a gather in front of whatever net was just
-    # built, applied before the residual wrapping below so the reference
-    # (which slices its own current step from the raw windows, see
-    # _ReferenceRule) and the trainable net see the same windows either way.
-    # A key whose columns all read its whole window gathers nothing.
+    # Each window normalised and gathered to its columns' own steps, in front
+    # of whatever net was just built. The reference rule and the bounds read
+    # the raw physical windows (see _ReferenceRule). A key whose columns all
+    # read its whole window gathers nothing.
+    columns = {"yn": nm_mapping["Y"], "U": u_cols, "D": nm_mapping["D"], "R": r_columns}
     gathers = {}
     for i, key in enumerate(keys):
         window = input_map[key]
         width = len(table[key]) * (window["past"] + 1 + window["future"])
         if key_gathers[key] != list(range(width)):
             gathers[i] = torch.tensor(key_gathers[key], dtype=torch.long, device=device)
-    if gathers:
-        net = _WindowGather(net, gathers)
+    net = _NormalizedNet(net, [_column_stats(norm_stats, columns[key], device)
+                               for key in keys], gathers)
 
-    if reference is not None:
+    if reference is None:
+        net = _Commands(net, u_shift, u_stretch)
+    else:
         net = _ResidualPolicy(net, reference, list(u_cols), umin, umax,
-                              below, above, anchored).to(device)
+                              below, above, anchored, u_shift, u_stretch).to(device)
     if cfg.command_bounds:
-        net = _reference_bounds(net, cfg, nm_mapping, norm_stats, keys, input_map,
+        net = _reference_bounds(net, cfg, nm_mapping, keys, input_map,
                                 r_columns, umin, umax).to(device)
 
     return Node(
@@ -603,7 +620,15 @@ def build_policy(
     )
 
 
-def _reference_bounds(net, cfg, nm_mapping, norm_stats, keys, input_map, r_columns,
+def _column_stats(norm_stats: NormStats, columns: list[str],
+                  device) -> tuple[torch.Tensor, torch.Tensor]:
+    """(shift, stretch) of `columns`, each [n], float32."""
+    return tuple(torch.tensor([float(norm_stats[c][field]) for c in columns],
+                              dtype=torch.float32, device=device)
+                 for field in ("shift", "stretch"))
+
+
+def _reference_bounds(net, cfg, nm_mapping, keys, input_map, r_columns,
                       umin, umax) -> _ReferenceBounds:
     """`_ReferenceBounds` from `cfg.command_bounds`, every name checked first.
 
@@ -642,7 +667,7 @@ def _reference_bounds(net, cfg, nm_mapping, norm_stats, keys, input_map, r_colum
                          f"({' -> '.join(e.args[1])}); one of them has to be fixed "
                          "or read from data.") from None
     return _ReferenceBounds(net, u_columns, cfg.command_bounds, order, umin, umax,
-                            norm_stats, sources)
+                            sources)
 
 
 # ── Policy description (for reportcard) ──────────────────────────
@@ -654,7 +679,6 @@ def describe_policy(
     cfg,
     sysid_cfg,
     nm_mapping: dict[str, list[str]],
-    norm_stats: NormStats,
 ) -> dict:
     """
     Describe the constructed policy for the reportcard.
@@ -667,30 +691,28 @@ def describe_policy(
     the sum — past + 1 + future per Y, D and reference column, past per U
     column — by eye: a wrong window is otherwise an invisible failure.
     """
-    # Unwrap: Node -> [_ReferenceBounds] -> [_ResidualPolicy] -> [_WindowGather] -> MLP_bounds
+    # Unwrap: Node -> [_ReferenceBounds] -> _ResidualPolicy | _Commands
+    #   -> _NormalizedNet -> MLP_bounds
     raw = policy_node.callable
     bounded = isinstance(raw, _ReferenceBounds)
     if bounded:
         raw = raw.base
     residual = isinstance(raw, _ResidualPolicy)
-    net = raw.base if residual else raw
-    if isinstance(net, _WindowGather):
-        net = net.base
+    net = raw.base.base
 
     r_columns = resolve_objective(cfg, nm_mapping).r_columns
     columns = nm_mapping["Y"] + nm_mapping["U"] + nm_mapping["D"] + r_columns
 
-    # Actuator limits are set in normalized U space by the actuation_bounds
-    # hook; report them in physical units, which is what a reader can sanity
+    # Actuator limits in physical units, which is what a reader can sanity
     # check against the building. For a residual policy the network's own box
     # is ±Δ on an anchored column, so the limits the commands actually live in
     # are the clamp's.
     u_cols = nm_mapping["U"]
-    stretch = torch.tensor([norm_stats[c]["stretch"] for c in u_cols], device="cpu")
-    shift = torch.tensor([norm_stats[c]["shift"] for c in u_cols], device="cpu")
-    lo, hi = (raw.umin, raw.umax) if residual else (net.min, net.max)
-    umin_phys = (lo.detach().cpu() * stretch + shift).tolist()
-    umax_phys = (hi.detach().cpu() * stretch + shift).tolist()
+    if residual:
+        umin_phys, umax_phys = raw.umin.tolist(), raw.umax.tolist()
+    else:
+        umin_phys, umax_phys = ((bound * raw.u_stretch + raw.u_shift).tolist()
+                                for bound in (net.min, net.max))
 
     return {
         "family": cfg.policy,

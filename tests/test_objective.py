@@ -30,9 +30,9 @@ def _problem(**gains):
     cfg, sysid_cfg, nm, ns = s["cfg"], s["sysid_cfg"], s["nm"], s["norm_stats"]
     policy = build_policy(cfg, sysid_cfg, nm, ns)
     cl = build_closed_loop(s["dyn_node"], policy, cfg, sysid_cfg)
-    loss = build_control_loss(cfg, sysid_cfg, nm, ns)
+    loss = build_control_loss(cfg, sysid_cfg, nm)
     problem = build_problem(cl, loss)
-    train, _ = build_loaders(cfg, sysid_cfg, nm, [s["norm_df"]], [s["norm_df"]])
+    train, _ = build_loaders(cfg, sysid_cfg, nm, [s["frame"]], [s["frame"]])
     return problem, loss, next(iter(train)), s
 
 

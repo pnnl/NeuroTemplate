@@ -137,14 +137,13 @@ def _policy_section(arch: dict) -> str:
 
 
 def _objective_table(objective: Objective) -> str:
-    rows = ["| Term | Operand | Map | Norm | Weight | Units | Gain |",
-            "|---|---|---|---:|---|---|---:|"]
+    rows = ["| Term | Operand | Map | Norm | Weight | Gain |",
+            "|---|---|---|---:|---|---:|"]
     for t in objective.terms:
         operand = f"`{t.column}`" + ("" if t.target is None else f" − `{t.target}`")
         rows.append(
             f"| {t.name} | {operand} | {t.map or '—'} | {t.norm:g} | "
-            f"{'—' if t.weight is None else f'`{t.weight}`'} | {t.units} | "
-            f"{t.gain:g} |"
+            f"{'—' if t.weight is None else f'`{t.weight}`'} | {t.gain:g} |"
         )
     return "\n".join(rows)
 
@@ -162,8 +161,7 @@ def _scenario_section(cfg, sysid_cfg, nm_mapping: dict,
         f"- **Control U ({len(nm_mapping['U'])}):** "
         + ", ".join(f"`{c}`" for c in nm_mapping["U"]),
         "- **Objective:** each term is `gain · power-mean(map(operand))` per "
-        "window, averaged over the batch; `physical` units denormalise the "
-        "operand before the map.\n",
+        "window, averaged over the batch, the operand in physical units.\n",
         _objective_table(objective),
     ]
     return _section("Scenario", "\n".join(rows))

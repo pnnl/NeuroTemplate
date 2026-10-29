@@ -21,7 +21,7 @@ import numpy as np
 import pandas as pd
 import torch
 
-from neurotemplate.common.data_utils import compute_norm_stats, normalize_df
+from neurotemplate.common.data_utils import compute_norm_stats
 from neurotemplate.modeling.config import ModelingConfig as Config
 from neurotemplate.modeling.pipeline import TrainedModel, train_and_evaluate
 from fake_logger import FakeLogger
@@ -47,7 +47,7 @@ def _make_cfg(savedir, **over) -> Config:
 def _run(cfg: Config) -> TrainedModel:
     df = _synthetic_df()
     norm_stats = compute_norm_stats(df, norm_type=cfg.norm_type)
-    dfs = [normalize_df(df, norm_stats)]
+    dfs = [df]
     return train_and_evaluate(
         cfg=cfg,
         train_dfs=dfs, dev_dfs=dfs, test_dfs=dfs,

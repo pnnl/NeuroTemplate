@@ -6,9 +6,7 @@ These are the user-owned hooks that connect the generic control machinery to
 computed, and the rule a residual policy is anchored to. The band itself
 is data — reference columns the objective names (see control_fixtures).
 
-Everything returned in "normalized space" uses the same per-column
-shift/stretch as the loaded sys-id run (norm_stats), so it is directly
-comparable to the surrogate's normalized state/inputs.
+Every hook works in physical units.
 
 Target dataset: single-zone Modelica RTU strip-mall (summer month).
   Y = [Zone Air Temperature, RTU Supply Air Temperature, RTU Supply Air Flow,
@@ -37,7 +35,7 @@ HIGH = "Comfort High [°C]"
 
 
 # ---------------------------------------------------------------------
-# Required: actuator limits for the policy output (normalized U space)
+# Required: actuator limits for the policy output
 # ---------------------------------------------------------------------
 @beartype
 def actuation_bounds(
@@ -45,23 +43,14 @@ def actuation_bounds(
     norm_stats: NormStats,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
-    Per-U-channel (umin, umax) in NORMALIZED space for blocks.MLP_bounds.
-
-    Uses each control column's observed physical min/max from the training
-    data (norm_stats), mapped through that column's shift/stretch.
+    Per-U-channel (umin, umax): each control column's observed min/max in
+    the training data.
     """
     u_cols = nm_mapping["U"]
     if not u_cols:
         raise ValueError("No control (U) columns in nm_mapping.")
-
-    umin = torch.tensor([
-        (norm_stats[c]["min"] - norm_stats[c]["shift"]) / norm_stats[c]["stretch"]
-        for c in u_cols
-    ])
-    umax = torch.tensor([
-        (norm_stats[c]["max"] - norm_stats[c]["shift"]) / norm_stats[c]["stretch"]
-        for c in u_cols
-    ])
+    umin = torch.tensor([norm_stats[c]["min"] for c in u_cols])
+    umax = torch.tensor([norm_stats[c]["max"] for c in u_cols])
     return umin, umax
 
 
@@ -87,7 +76,6 @@ def reference_control(
     r_now: dict[str, torch.Tensor],
     d_now: torch.Tensor,
     nm_mapping: dict[str, list[str]],
-    norm_stats: NormStats,
 ) -> dict[str, torch.Tensor]:
     """Park the setpoint at the middle of the comfort band.
 
@@ -97,18 +85,10 @@ def reference_control(
     exactly-optimal comfort controller, which makes it a sharp check on
     whether a learned policy is earning its complexity.
 
-    Memoryless, current step only, normalized in and normalized U out — the
-    same space the learned policy emits — one entry per anchored U column.
+    Memoryless, current step only, one entry per anchored U column.
     """
-    def physical(name):
-        return r_now[name] * norm_stats[name]["stretch"] + norm_stats[name]["shift"]
-
-    mid = 0.5 * (physical(LOW) + physical(HIGH))            # [b], °C
     (setpoint,) = nm_mapping["U"]
-    stats = norm_stats[setpoint]
-    umin, umax = actuation_bounds(nm_mapping, norm_stats)
-    u = (mid - stats["shift"]) / stats["stretch"]           # [b]
-    return {setpoint: torch.clamp(u, float(umin[0]), float(umax[0]))}
+    return {setpoint: 0.5 * (r_now[LOW] + r_now[HIGH])}     # [b], °C
 
 
 @beartype
@@ -136,25 +116,18 @@ def plot_context_channels(nm_mapping: dict[str, list[str]]) -> list[str]:
     ]
 
 
-def _unnorm(col_idx: int, col_name: str, yn: torch.Tensor,
-            norm_stats: dict) -> torch.Tensor:
-    s = norm_stats[col_name]
-    return yn[:, :, col_idx] * s["stretch"] + s["shift"]
-
-
 @beartype
 def power_metric(
     yn: torch.Tensor,
     U: torch.Tensor,
     D: torch.Tensor,
     nm_mapping: dict[str, list[str]],
-    norm_stats: NormStats,
 ) -> torch.Tensor:
     """
     Total HVAC electrical power per timestep.
 
     Args:
-        yn: predicted state trajectory [batch, time, ny] (normalized)
+        yn: predicted state trajectory [batch, time, ny]
         U:  control trajectory         [batch, time, nu] (unused here;
             the policy influences power through the dynamics)
         D:  disturbance trajectory     [batch, time, nd] (unused here;
@@ -171,7 +144,5 @@ def power_metric(
             f"Power' channels in Y. Got Y = {y}"
         )
 
-    total = sum(
-        _unnorm(y.index(name), name, yn, norm_stats) for name in metered
-    )
+    total = sum(yn[:, :, y.index(name)] for name in metered)
     return total.clamp_min(0.0)

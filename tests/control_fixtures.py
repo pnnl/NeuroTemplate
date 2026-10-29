@@ -13,7 +13,7 @@ import pandas as pd
 import torch
 
 from neurotemplate.modeling.config import ModelingConfig as Config
-from neurotemplate.common.data_utils import compute_norm_stats, normalize_df
+from neurotemplate.common.data_utils import compute_norm_stats
 from neurotemplate.modeling.dynamics import get_dynamics
 from neurotemplate.control.config import ControlConfig
 from neurotemplate.control.losses import extend_norm_stats, resolve_objective
@@ -196,9 +196,9 @@ def write_splits(cfg, tmp_path, plant: pd.DataFrame,
 def full_setup(reference: pd.DataFrame | None = None, **control_overrides):
     """One-call bundle used by most tests.
 
-    `norm_stats` carries the reference columns and `norm_df` is the plant
-    frame with its reference columns joined, normalized — what
-    `load_control_splits` hands the loaders.
+    `norm_stats` carries the reference columns and `frame` is the plant
+    frame with its reference columns joined — what `load_control_splits`
+    hands the loaders.
     """
     nm = make_nm_mapping()
     plant = make_raw_df()
@@ -209,7 +209,6 @@ def full_setup(reference: pd.DataFrame | None = None, **control_overrides):
     raw = plant.join(make_reference_df(plant) if reference is None else reference)
     dyn_sys, dyn_node = make_frozen_dynamics(sysid_cfg, nm)
     return dict(
-        nm=nm, plant=plant, raw=raw, norm_stats=norm_stats,
-        norm_df=normalize_df(raw, norm_stats),
+        nm=nm, plant=plant, raw=raw, norm_stats=norm_stats, frame=raw,
         sysid_cfg=sysid_cfg, cfg=cfg, dyn_sys=dyn_sys, dyn_node=dyn_node,
     )

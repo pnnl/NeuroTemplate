@@ -27,8 +27,8 @@ The hooks in `control_user_defined.py`, scaffolded in
 | `power_metric` | the power signal that energy, cost and peak terms reduce; by default the sum of `power_channels` | to replace the default with a proxy |
 | `reference_control` | a rule to anchor a residual policy to | with `residual_delta` |
 
-The surrogate is a config field, `sysid_run_id`. Column roles and
-normalization come from it. Everything else, including the objective and what the policy reads, is in
+The surrogate is a config field, `sysid_run_id`. Column roles come from
+it. Every hook takes and returns physical units. Everything else, including the objective and what the policy reads, is in
 `control_configs/control.yaml`, which explains each setting and how to size
 it.
 
@@ -253,7 +253,7 @@ from neurotemplate.control.scenarios import load_control_splits
 
 _, cl_system, cfg, sysid_cfg, nm_mapping, norm_stats = load_trained_policy(run_id)
 cfg.test_reference_path = ["data/test_reference_shifted.csv"]
-_, _, test_dfs = load_control_splits(cfg, nm_mapping, norm_stats)
+_, _, test_dfs = load_control_splits(cfg, nm_mapping)
 results, _ = evaluate_closed_loop(cfg, sysid_cfg, cl_system, test_dfs,
                                   nm_mapping, norm_stats)
 results.energy.weighted_energy["Tariff"]   # one entry per weight a power term names

@@ -5,12 +5,10 @@ These answer: what the actuator limits are, and optionally what power costs
 and what rule a residual policy is anchored to. The objective — which
 outputs are held inside which band, what power is priced at — is not a hook:
 it is the `losses` table in control.yaml, over columns of the surrogate and
-of your reference files (see `make_references.py`). The Y/U/D roles and the
-normalization come from the frozen sys-id run.
+of your reference files (see `make_references.py`). The Y/U/D roles come
+from the frozen sys-id run.
 
-Everything returned "in normalized space" uses the surrogate's own
-per-column shift/stretch (norm_stats), which also carries an entry for every
-reference column the objective names.
+Every hook works in physical units, the data's own.
 
 The file must be named `control_user_defined.py` and live in the directory
 you run `nt` from, or be pointed at by `user_hooks_path` in your YAML. Fill
@@ -39,7 +37,7 @@ def actuation_bounds(
     norm_stats: NormStats,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
-    Per-U-channel (umin, umax) in NORMALIZED space; the policy output is
+    Per-U-channel (umin, umax) in physical units; the policy output is
     squashed into this box.
 
     The default below is each U column's observed range in the training
@@ -60,13 +58,8 @@ def actuation_bounds(
     u_cols = nm_mapping["U"]
     if not u_cols:
         raise ValueError("No control (U) columns in nm_mapping.")
-
-    def norm(col: str, key: str) -> float:
-        s = norm_stats[col]
-        return (s[key] - s["shift"]) / s["stretch"]
-
-    umin = torch.tensor([norm(c, "min") for c in u_cols])
-    umax = torch.tensor([norm(c, "max") for c in u_cols])
+    umin = torch.tensor([norm_stats[c]["min"] for c in u_cols])
+    umax = torch.tensor([norm_stats[c]["max"] for c in u_cols])
     return umin, umax
 
 
@@ -115,14 +108,13 @@ def power_metric(
     U: torch.Tensor,
     D: torch.Tensor,
     nm_mapping: dict[str, list[str]],
-    norm_stats: NormStats,
 ) -> torch.Tensor:
     """
     Instantaneous power per timestep, shape [batch, time]: what a loss term
     naming `power` reduces (a mean for energy, a tariff-weighted mean for
     cost, a power mean for a peak), and what the reportcard integrates.
 
-    Inputs are the normalized trajectories: yn [batch, time, ny],
+    Inputs are the trajectories in physical units: yn [batch, time, ny],
     U [batch, time, nu], D [batch, time, nd]. At each step, U is the command
     that drove the plant into that step's yn. The library converts no units:
     return Watts and the integral is in Wh.
@@ -146,15 +138,7 @@ def power_metric(
         raise NotImplementedError(
             "power_metric sums the meters power_channels names, and it names none. "
             "List the metered Y columns there, or write a proxy in power_metric.")
-    return sum(_denorm(yn, c, nm_mapping, norm_stats) for c in channels)
-
-
-def _denorm(x: torch.Tensor, col: str, nm_mapping: dict[str, list[str]],
-            norm_stats: NormStats, role: str = "Y"
-            ) -> torch.Tensor:
-    """Physical units for one channel of a [batch, time, n] trajectory."""
-    s = norm_stats[col]
-    return x[:, :, nm_mapping[role].index(col)] * s["stretch"] + s["shift"]
+    return sum(yn[:, :, nm_mapping["Y"].index(c)] for c in channels)
 
 
 # ---------------------------------------------------------------------
@@ -168,10 +152,8 @@ def _denorm(x: torch.Tensor, col: str, nm_mapping: dict[str, list[str]],
 # name is a free policy output over its actuation bounds. Return exactly
 # the columns `residual_delta` names (the library refuses anything else).
 #
-# Current step only, memoryless, normalized in and normalized out — the same
-# space the learned policy emits. `r_now` maps each reference column the
-# objective names to its current value, [b], normalized; `norm_stats` has an
-# entry for each, so `x * stretch + shift` gives physical units. Return
+# Current step only, memoryless, physical units in and out. `r_now` maps each
+# reference column the objective names to its current value, [b]. Return
 # continuous values: nothing is rounded to an actuator's resolution.
 #
 # What makes a good anchor:
@@ -207,21 +189,14 @@ def _denorm(x: torch.Tensor, col: str, nm_mapping: dict[str, list[str]],
 #
 # @beartype
 # def reference_control(
-#     y_now: torch.Tensor,               # [b, ny] current state, normalized
-#     r_now: dict[str, torch.Tensor],    # {reference column: [b]}, normalized
-#     d_now: torch.Tensor,               # [b, nd] current disturbances, normalized
+#     y_now: torch.Tensor,               # [b, ny] current state
+#     r_now: dict[str, torch.Tensor],    # {reference column: [b]}
+#     d_now: torch.Tensor,               # [b, nd] current disturbances
 #     nm_mapping: dict[str, list[str]],
-#     norm_stats: NormStats,
-# ) -> dict[str, torch.Tensor]:          # {anchored U column: [b]}, normalized
+# ) -> dict[str, torch.Tensor]:          # {anchored U column: [b]}
 #     """Heating at the band floor, cooling at its ceiling."""
-#     def physical(col):
-#         return r_now[col] * norm_stats[col]["stretch"] + norm_stats[col]["shift"]
-#
-#     def normalized(col, value):
-#         return (value - norm_stats[col]["shift"]) / norm_stats[col]["stretch"]
-#
-#     cool, heat = bracket_band(physical(BAND_LOW), physical(BAND_HIGH))
-#     return {HEAT: normalized(HEAT, heat), COOL: normalized(COOL, cool)}
+#     cool, heat = bracket_band(r_now[BAND_LOW], r_now[BAND_HIGH])
+#     return {HEAT: heat, COOL: cool}
 
 
 @beartype

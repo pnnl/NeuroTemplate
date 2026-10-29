@@ -59,22 +59,20 @@ GRAPH_NAMES = {"yn": "y", "U": "u_history", "D": "d", "R": "r"}
 
 @dataclass(frozen=True)
 class PolicyInput:
-    """One policy input: its window, and how to put it in physical units."""
+    """One policy input: its window, and its columns' typical value."""
     key: str                # the Node's input key
     columns: list[str]
     steps: int              # window length the graph takes
     current_row: int        # where the present step sits; later rows are preview.
                             # For u_history, `steps`: it ends the step before.
-    shift: list[float]
-    stretch: list[float]
+    shift: list[float]      # each column's typical value, for the C example
 
 
 def policy_inputs(policy_node, cfg, nm_mapping: dict[str, list[str]],
                   norm_stats: dict[str, dict]) -> list[PolicyInput]:
     """Every input the policy reads, in the order its Node passes them.
 
-    `norm_stats` carries the reference columns (`losses.extend_norm_stats`),
-    so every input denormalises the same way.
+    `norm_stats` carries the reference columns (`losses.extend_norm_stats`).
     """
     columns = {"yn": nm_mapping["Y"], "U": nm_mapping["U"], "D": nm_mapping["D"],
                "R": resolve_objective(cfg, nm_mapping).r_columns}
@@ -84,8 +82,7 @@ def policy_inputs(policy_node, cfg, nm_mapping: dict[str, list[str]],
         cols = columns[key]
         inputs.append(PolicyInput(
             key, cols, _graph_rows(key, window), window["past"],
-            [float(norm_stats[c]["shift"]) for c in cols],
-            [float(norm_stats[c]["stretch"]) for c in cols]))
+            [float(norm_stats[c]["shift"]) for c in cols]))
     return inputs
 
 
@@ -98,11 +95,11 @@ def _graph_rows(key: str, window: dict) -> int:
 
 
 class PolicyGraph(nn.Module):
-    """A trained policy with physical units on both sides.
+    """A trained policy, physical units on both sides as the policy already is.
 
-    Each input arrives as `[batch, steps, n]` and is normalised and flattened
-    time-major — the layout `SystemPreview.get_mapped_data` hands the Node —
-    before the policy sees it; its command leaves in physical units.
+    Each input arrives as `[batch, steps, n]` and is flattened time-major —
+    the layout `SystemPreview.get_mapped_data` hands the Node — before the
+    policy sees it.
     `u_history` gets its newest row repeated as the current one, as SystemPreview pads
     it in the closed loop; the policy drops that row, so the recipient
     never supplies it.
@@ -111,8 +108,7 @@ class PolicyGraph(nn.Module):
     `_PolicyGraphWithU` takes `u_history` too. `policy_graph` picks.
     """
 
-    def __init__(self, policy: nn.Module, inputs: list[PolicyInput],
-                 nm_mapping: dict[str, list[str]], norm_stats: dict[str, dict]):
+    def __init__(self, policy: nn.Module, inputs: list[PolicyInput]):
         super().__init__()
         self.policy = policy
         self.keys = [spec.key for spec in inputs]
@@ -124,12 +120,6 @@ class PolicyGraph(nn.Module):
                 not {"yn", "D"} <= set(self.keys):
             raise ValueError(f"unexpected policy inputs {self.keys}; expected "
                              f"{POLICY_KEYS}, U and R optional.")
-        for spec in inputs:
-            self.register_buffer(f"{spec.key}_shift", torch.tensor(spec.shift))
-            self.register_buffer(f"{spec.key}_stretch", torch.tensor(spec.stretch))
-        u = nm_mapping["U"]
-        self.register_buffer("u_shift", torch.tensor([norm_stats[c]["shift"] for c in u]))
-        self.register_buffer("u_stretch", torch.tensor([norm_stats[c]["stretch"] for c in u]))
 
     def forward(self, y: torch.Tensor, d: torch.Tensor,
                 r: torch.Tensor | None = None) -> torch.Tensor:
@@ -138,12 +128,11 @@ class PolicyGraph(nn.Module):
     def _command(self, windows: dict[str, torch.Tensor | None]) -> torch.Tensor:
         flat = []
         for key in self.keys:
-            x = ((windows[key] - getattr(self, f"{key}_shift"))
-                 / getattr(self, f"{key}_stretch"))
+            x = windows[key]
             if key == "U":
                 x = torch.cat([x, x[:, -1:]], dim=1)
             flat.append(x.reshape(x.shape[0], -1))
-        return self.policy(*flat) * self.u_stretch + self.u_shift
+        return self.policy(*flat)
 
 
 class _PolicyGraphWithU(PolicyGraph):
@@ -155,35 +144,31 @@ class _PolicyGraphWithU(PolicyGraph):
         return self._command({"yn": y, "U": u_history, "D": d, "R": r})
 
 
-def policy_graph(policy: nn.Module, inputs: list[PolicyInput],
-                 nm_mapping: dict[str, list[str]],
-                 norm_stats: dict[str, dict]) -> PolicyGraph:
+def policy_graph(policy: nn.Module, inputs: list[PolicyInput]) -> PolicyGraph:
     """The graph for `policy`: torch.export and the ONNX exporter bind the
     inputs positionally to `forward`, so its signature lists exactly the
     windows the policy reads."""
     reads_u = any(spec.key == "U" for spec in inputs)
     graph = _PolicyGraphWithU if reads_u else PolicyGraph
-    return graph(policy, inputs, nm_mapping, norm_stats)
+    return graph(policy, inputs)
 
 
 def physical_windows(flat: dict[str, torch.Tensor],
                      inputs: list[PolicyInput]) -> dict[str, torch.Tensor]:
     """Node windows (`closed_loop_windows`) as the graph takes them:
-    `{key: [windows, steps, n]}` in physical units, U without its current
-    row."""
+    `{key: [windows, steps, n]}`, U without its current row."""
     out = {}
     for spec in inputs:
         n = len(spec.columns)
         rows = flat[spec.key].shape[-1] // n
-        window = flat[spec.key].reshape(-1, rows, n)[:, :spec.steps]
-        out[spec.key] = window * torch.tensor(spec.stretch) + torch.tensor(spec.shift)
+        out[spec.key] = flat[spec.key].reshape(-1, rows, n)[:, :spec.steps]
     return out
 
 
 def closed_loop_windows(cl_system, policy_node, cfg, sysid_cfg, test_dfs: list,
                         nm_mapping, norm_stats) -> dict[str, torch.Tensor]:
     """Every window the policy is handed in the trained closed loop's
-    evaluation rollout: `{key: [windows, steps * n]}`, normalised, flat.
+    evaluation rollout: `{key: [windows, steps * n]}`, flat.
 
     Read off the finished rollout, so a U window's current row is the
     command chosen at that step rather than the padded copy the policy was
@@ -216,7 +201,7 @@ def export_policy(*, policy_node, cl_system, cfg, sysid_cfg,
     """Export, verify on every closed-loop window of the test split, install.
 
     `graph_format`, `exporter` and `onnx2c` are as for `dynamics.export_model`.
-    `test_dfs` are the control run's normalised test frames. The shipped
+    `test_dfs` are the control run's test frames. The shipped
     fixture is `fixture_windows` of the verified windows, evenly spaced.
     """
     check_graph_format(graph_format, exporter, onnx2c)
@@ -227,7 +212,7 @@ def export_policy(*, policy_node, cl_system, cfg, sysid_cfg,
     cpu = torch.device("cpu")
     cfg, sysid_cfg = replace(cfg, device=cpu), replace(sysid_cfg, device=cpu)
     inputs = policy_inputs(policy_node, cfg, nm_mapping, norm_stats)
-    graph = policy_graph(policy_node.callable, inputs, nm_mapping, norm_stats).eval()
+    graph = policy_graph(policy_node.callable, inputs).eval()
 
     flat = closed_loop_windows(cl_system, policy_node, cfg, sysid_cfg, test_dfs,
                                nm_mapping, norm_stats)
@@ -247,7 +232,7 @@ def export_policy(*, policy_node, cl_system, cfg, sysid_cfg,
                     policy_dir / "policy", graph_format, exporter, export_id, run_id,
                     onnx2c)
         spec = _spec(export_id, run_id, cfg, inputs, nm_mapping, description,
-                     describe_policy(policy_node, cfg, sysid_cfg, nm_mapping, norm_stats),
+                     describe_policy(policy_node, cfg, sysid_cfg, nm_mapping),
                      graph_format)
         write_json(policy_dir / "policy.json", spec)
         u_tolerance = {c: REPRODUCE_TOL * s for c, s in u_stretch.items()}

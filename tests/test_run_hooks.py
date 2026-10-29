@@ -47,14 +47,14 @@ def test_editing_the_hooks_file_after_training_changes_nothing(tmp_path, monkeyp
     cfg, sysid_cfg, nm, ns = s["cfg"], s["sysid_cfg"], s["nm"], s["norm_stats"]
     policy = build_policy(cfg, sysid_cfg, nm, ns)
     closed_loop = build_closed_loop(s["dyn_node"], policy, cfg, sysid_cfg)
-    problem = build_problem(closed_loop, build_control_loss(cfg, sysid_cfg, nm, ns))
-    loaders = build_loaders(cfg, sysid_cfg, nm, [s["norm_df"]], [s["norm_df"]])
+    problem = build_problem(closed_loop, build_control_loss(cfg, sysid_cfg, nm))
+    loaders = build_loaders(cfg, sysid_cfg, nm, [s["frame"]], [s["frame"]])
     with tracked_run(cfg, stdout=[], logout=[]) as logger:
         run_id = logger.run.info.run_id
         snapshot_hooks(load_control_hooks(cfg), CONTROL_SNAPSHOT, logger)
         train_policy(cfg, problem, *loaders, logger=logger)
 
-    windows = build_window_dict(s["norm_df"], cfg, sysid_cfg, nm,
+    windows = build_window_dict(s["frame"], cfg, sysid_cfg, nm,
                                 P=cfg.train_pred_steps, stride=cfg.history_steps)
     with torch.no_grad():
         trained = closed_loop(dict(windows))["U"]

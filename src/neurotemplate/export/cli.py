@@ -110,7 +110,7 @@ def policy_main() -> None:
     args = get_policy_args(sys.argv[1:])
     policy_node, cl_system, cfg, sysid_cfg, nm_mapping, norm_stats = (
         load_trained_policy(args.run_id, run_dir=args.run_dir, device="cpu"))
-    _, _, test_dfs = load_control_splits(cfg, nm_mapping, norm_stats)
+    _, _, test_dfs = load_control_splits(cfg, nm_mapping)
 
     result = export_policy(
         policy_node=policy_node, cl_system=cl_system, cfg=cfg, sysid_cfg=sysid_cfg,

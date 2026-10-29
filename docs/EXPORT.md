@@ -3,9 +3,10 @@
 `nt export model` ships a trained surrogate and `nt export policy` a trained
 policy, as a standalone package that runs without NeuroTemplate,
 Neuromancer or the training code. The export serializes the trained network
-rather than reimplementing it. Normalization, the window layout and any
-hidden state are inside the exported graphs, so a package takes physical
-units in and gives physical units out.
+rather than reimplementing it. A trained model and policy already take
+physical units in and give physical units out; whatever they do inside
+(normalisation, the window layout, hidden state) is inside the exported
+graphs.
 
 ```bash
 nt export model  --run_id <model_run>  --data data/test.csv --out delivery --format onnx

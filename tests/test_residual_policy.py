@@ -33,7 +33,7 @@ def _box(below, above):
 
 def _windows(s):
     cfg = s["cfg"]
-    return build_window_dict(s["norm_df"], cfg, s["sysid_cfg"], s["nm"],
+    return build_window_dict(s["frame"], cfg, s["sysid_cfg"], s["nm"],
                               P=cfg.train_pred_steps, stride=cfg.history_steps)
 
 
@@ -55,7 +55,7 @@ def test_a_fresh_residual_policy_emits_the_reference_exactly(method):
     cfg, sysid_cfg, nm, ns = s["cfg"], s["sysid_cfg"], s["nm"], s["norm_stats"]
     _, _, hmax = horizons(cfg, sysid_cfg)
     _, out = _rollout(s)
-    u_ref = reference_over_horizon(cfg, out, hmax, nm, ns)[SETPT]
+    u_ref = reference_over_horizon(cfg, out, hmax, nm)[SETPT]
     assert torch.allclose(out["U"][:, scored_steps("U", hmax), 0], u_ref, atol=1e-6)
 
 
@@ -79,9 +79,9 @@ def _perturbed_deviation(s, scale):
         for p in policy.parameters():
             p.add_(torch.randn_like(p) * scale)
     out = build_closed_loop(s["dyn_node"], policy, cfg, sysid_cfg)(_windows(s))
-    u_ref = reference_over_horizon(cfg, out, hmax, nm, ns)[SETPT]
+    u_ref = reference_over_horizon(cfg, out, hmax, nm)[SETPT]
     deviation = out["U"][:, scored_steps("U", hmax), 0] - u_ref
-    return (deviation * ns[SETPT]["stretch"]).detach()
+    return deviation.detach()
 
 
 def test_a_one_sided_box_starts_at_the_rule_and_deploys_only_its_open_side():
@@ -115,7 +115,8 @@ def test_a_heating_and_cooling_pair_recover_from_their_closed_sides():
         net, lambda x: rule, ["heat", "cool"],
         umin=torch.tensor([0.0, 0.0]), umax=torch.tensor([50.0, 50.0]),
         below=torch.tensor([0.0, 0.5]), above=torch.tensor([0.5, 0.0]),
-        anchored=torch.tensor([True, True]))
+        anchored=torch.tensor([True, True]),
+        u_shift=torch.zeros(2), u_stretch=torch.ones(2))   # the net's units are °C
     x = torch.randn(32, 4)
     optimizer = torch.optim.Adam(net.parameters(), lr=0.05)
 
@@ -152,7 +153,7 @@ def test_the_in_rollout_current_step_matches_the_bare_rule():
     policy = build_policy(cfg, sysid_cfg, nm, ns)
     rule_in_policy = policy.callable.reference
     keys = ["yn", "D", "R"]
-    bare = _reference_rule(cfg, load_control_hooks(cfg), nm, ns, keys,
+    bare = _reference_rule(cfg, load_control_hooks(cfg), nm, keys,
                            now={key: 0 for key in keys},
                            r_columns=resolve_objective(cfg, nm).r_columns)
 

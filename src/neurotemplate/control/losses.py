@@ -19,9 +19,8 @@ optional), then the `map`, then the `norm` — the power mean
   - `norm` is the power mean, not the raw q-norm: it does not grow with the
     horizon, and it is homogeneous of degree 1 in the operand, so every term's
     gain scales the same way when units change.
-  - `units: physical` (the default) denormalises `column` and `target`
-    separately before the map, so a gain is per physical unit. `normalized`
-    keeps the window dict's own scale. `power` is Watts either way.
+  - Everything is in physical units, so a gain is per physical unit of the
+    operand; `power` is Watts.
   - A `weight` is data — a reference or disturbance column, in its physical
     units. A tariff is not a kind of reference; it is the `weight` of a power
     term.
@@ -32,15 +31,13 @@ otherwise a column of the reference files. The reference columns are the
 control-side `R` key: windowed beside Y/U/D, read by the policy, never by the
 surrogate.
 
-How an `R` column is normalised is declared rather than inferred. A column
-bound to a Y target (the `column` of an entry whose `target` is in Y) uses that
-target's shift and stretch, so the policy compares like with like. One band
-column may bound several targets — one comfort band over every zone — and
-then takes the stats of the first of them in Y order: a `units: physical`
-term denormalises column and target separately, so the loss is the same
-whichever it takes, and only the policy's input scale depends on the choice.
-Every other `R` column — a tariff, a cap on `power` — is divided by its entry
-in `reference_scale`, with no shift, so a zero stays a zero.
+How the policy normalises an `R` column it reads is declared rather than
+inferred. A column bound to a Y target (the `column` of an entry whose `target`
+is in Y) uses that target's shift and stretch, so the policy compares like with
+like. One band column may bound several targets — one comfort band over every
+zone — and then takes the stats of the first of them in Y order. Every other
+`R` column — a tariff, a cap on `power` — is divided by its entry in
+`reference_scale`, with no shift, so a zero stays a zero.
 
 The regulated set is derived: the Y targets of the `relu`/`nrelu` entries.
 """
@@ -59,8 +56,7 @@ from neurotemplate._typing import beartype
 #: The `power_metric` hook's output, by contract in Watts.
 POWER = "power"
 MAPS = ("relu", "nrelu", "first_difference")
-UNITS = ("physical", "normalized")
-ENTRY_KEYS = {"column", "target", "map", "norm", "weight", "units"}
+ENTRY_KEYS = {"column", "target", "map", "norm", "weight"}
 #: A term's output key is `<name>_loss`; PenaltyLoss already writes these two.
 RESERVED_NAMES = {"objective", "penalty"}
 #: The window-dict key each role is read from.
@@ -76,7 +72,6 @@ class LossTerm:
     map: Optional[str]
     norm: float
     weight: Optional[str]
-    units: str
     gain: float
 
     @property
@@ -163,16 +158,13 @@ def parse_losses(losses: dict, gains: dict) -> list[LossTerm]:
         _require(map_ not in ("relu", "nrelu") or entry.get("target") is not None,
                  f"{where}: a `{map_}` bound needs a `target` — the operand is "
                  "`column − target`.")
-        units = entry.get("units", "physical")
-        _require(units in UNITS, f"{where}: units must be one of {list(UNITS)}; "
-                 f"got {units!r}.")
         gain = gains[name]
         _require(isinstance(gain, (int, float)) and not isinstance(gain, bool)
                  and gain >= 0, f"gains[{name!r}] must be a number >= 0; got {gain!r}.")
         terms.append(LossTerm(
             name=name, column=entry["column"], target=entry.get("target"),
             map=map_, norm=float(norm), weight=entry.get("weight"),
-            units=units, gain=float(gain),
+            gain=float(gain),
         ))
     return terms
 
@@ -242,32 +234,15 @@ def resolve_objective(cfg, nm_mapping: dict[str, list[str]]) -> Objective:
                      f"{where}: weight {term.weight!r} must be data — a reference "
                      "or disturbance column — not something the rollout predicts "
                      "or commands.")
-        if term.units == "normalized" and term.target is not None:
-            _require(roles[term.column] == "R" and roles[term.target] == "Y",
-                     f"{where}: `units: normalized` compares `column` and "
-                     "`target` in the window dict's own scale, which is one "
-                     "scale only for a reference column bound to a Y target. "
-                     "Use `units: physical`.")
         if roles[term.column] == "R" and term.target is not None \
                 and roles[term.target] == "Y":
             targets = targets_of.setdefault(term.column, [])
             if term.target not in targets:
                 targets.append(term.target)
 
-    # A column shared by several targets takes the first one's stats; a
-    # normalised compare against any other would be on the wrong scale.
-    bound_to: dict[str, str] = {}
-    for column, targets in targets_of.items():
-        first = min(targets, key=nm_mapping["Y"].index)
-        bound_to[column] = first
-        normalized = [t.name for t in terms
-                      if t.column == column and t.units == "normalized"]
-        _require(len(targets) == 1 or not normalized,
-                 f"Reference column {column!r} bounds {targets} and is "
-                 f"normalised with {first!r}'s stats, so `units: normalized` "
-                 f"in {normalized} compares it with the others on the wrong "
-                 "scale. Use `units: physical`, or give each target its own "
-                 "column.")
+    # A column shared by several targets takes the first one's stats.
+    bound_to = {column: min(targets, key=nm_mapping["Y"].index)
+                for column, targets in targets_of.items()}
 
     scales = cfg.reference_scale
     for name in r_columns:

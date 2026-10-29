@@ -22,7 +22,6 @@ from control_fixtures import (
     make_frozen_dynamics, make_nm_mapping, make_norm_stats, make_raw_df,
     make_sysid_cfg,
 )
-from neurotemplate.common.data_utils import normalize_df
 import modeling_user_defined as hooks
 from fake_logger import FakeLogger
 from model_fixtures import unit_stats
@@ -40,7 +39,7 @@ def _evaluate(tmp_path, synth: bool = True):
 
     spec = hooks.synth_cfg(nm, norm_stats) if synth else None
     return evaluate_and_plot(
-        cfg=cfg, dyn_sys=dyn_sys, test_dfs=[normalize_df(raw, norm_stats)],
+        cfg=cfg, dyn_sys=dyn_sys, test_dfs=[raw],
         nm_mapping=nm, norm_stats=norm_stats, synth_cfg=spec,
         freq_s=300.0, plot_run_dir=Path(tmp_path),
     ), cfg, nm, norm_stats
@@ -77,7 +76,7 @@ def test_the_checks_do_not_disturb_the_surrogate(tmp_path):
     before = [p.clone() for p in dyn_sys.parameters()]
 
     evaluate_and_plot(
-        cfg=cfg, dyn_sys=dyn_sys, test_dfs=[normalize_df(raw, norm_stats)],
+        cfg=cfg, dyn_sys=dyn_sys, test_dfs=[raw],
         nm_mapping=nm, norm_stats=norm_stats,
         synth_cfg=hooks.synth_cfg(nm, norm_stats),
         freq_s=300.0, plot_run_dir=Path(tmp_path),
@@ -114,7 +113,7 @@ def test_a_staged_channel_is_scored_as_a_classifier_and_against_persistence(tmp_
     dyn_sys.eval()
 
     results = evaluate_and_plot(
-        cfg=cfg, dyn_sys=dyn_sys, test_dfs=[normalize_df(raw, norm_stats)],
+        cfg=cfg, dyn_sys=dyn_sys, test_dfs=[raw],
         nm_mapping=nm, norm_stats=norm_stats, synth_cfg=None,
         freq_s=300.0, plot_run_dir=Path(tmp_path),
     )

@@ -20,7 +20,7 @@ from neurotemplate.modeling.dynamics import get_dynamics, stateful_blocks
 def _windows(s, cfg=None, sysid_cfg=None):
     cfg = cfg or s["cfg"]
     return build_window_dict(
-        s["norm_df"], cfg, sysid_cfg or s["sysid_cfg"], s["nm"],
+        s["frame"], cfg, sysid_cfg or s["sysid_cfg"], s["nm"],
         P=cfg.train_pred_steps, stride=cfg.history_steps,
     )
 
@@ -50,10 +50,10 @@ def test_gradients_only_reach_policy():
 
     policy = build_policy(cfg, sysid_cfg, nm, s["norm_stats"])
     cl = build_closed_loop(s["dyn_node"], policy, cfg, sysid_cfg)
-    loss = build_control_loss(cfg, sysid_cfg, nm, s["norm_stats"])
+    loss = build_control_loss(cfg, sysid_cfg, nm)
     problem = build_problem(cl, loss)
 
-    train, _ = build_loaders(cfg, sysid_cfg, nm, [s["norm_df"]], [s["norm_df"]])
+    train, _ = build_loaders(cfg, sysid_cfg, nm, [s["frame"]], [s["frame"]])
     batch = next(iter(train))
     out = problem(batch)
     total = out[f'{batch["name"]}_loss']
@@ -149,7 +149,7 @@ def test_a_policy_parked_on_the_inactive_side_still_gets_gradient():
     _, _, hmax = horizons(cfg, sysid_cfg)
 
     policy = build_policy(cfg, sysid_cfg, nm, norm_stats)
-    last = policy.callable.linear[-1]
+    last = policy.callable.base.base.linear[-1]   # _Commands -> _NormalizedNet -> net
     with torch.no_grad():
         last.weight.zero_()
         # Near the top of the bounded net's range without saturating its own

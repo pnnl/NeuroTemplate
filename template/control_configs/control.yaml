@@ -1,6 +1,7 @@
 # DPC policy training config. `nt control train` reads this file by default.
 # Fields are shown at their built-in defaults, commented out — uncomment what
-# you change. Y/U/D roles and normalization come from the frozen surrogate.
+# you change. Y/U/D roles come from the frozen surrogate. Everything here is
+# in physical units.
 # Step counts are in timesteps of your data. Column names and numbers in the
 # examples are syntax from some other plant: use your columns, and size
 # values as each comment says.
@@ -83,8 +84,8 @@ policy_window:
 # mean per window: 1 = mean, 2 = RMS, larger approaches the max), with an
 # optional per-step `weight` column; then its gain. `column`, `target` and
 # `weight` name a Y, U or D column of the surrogate, a reference column, or
-# `power` (control_user_defined.power_metric). `units: physical` (default)
-# makes a gain per physical unit; `normalized` keeps the surrogate's scale.
+# `power` (control_user_defined.power_metric). A gain is per physical unit of
+# its operand.
 #
 # Smoothing: one first_difference row per U column, each with its own gain.
 # Every move the policy makes costs the plant something the surrogate may

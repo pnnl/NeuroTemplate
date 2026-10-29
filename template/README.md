@@ -133,8 +133,8 @@ Each is off until you ask for it — see [CONTROL.md](../docs/CONTROL.md).
   rollout stability, and (under `2r2c`) the time constants and declared
   branches in physical units. The `Finished run:` lines and
   `test_metrics.json` give per-channel test errors in physical units;
-  `test_rmse` in `run_summary.json` is one number pooled in normalized
-  space. Test error is measured on your data's excitation, not where a
+  `test_rmse` in `run_summary.json` is one number pooled over the
+  channels, each normalised by its training stats. Test error is measured on your data's excitation, not where a
   controller will drive the plant; the stability and physics sections are
   the better guide to a surrogate for control.
 - **Control:** look at the closed-loop plots before any number. Does the

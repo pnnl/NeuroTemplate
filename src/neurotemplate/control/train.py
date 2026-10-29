@@ -106,9 +106,9 @@ def train_control(cfg: ControlConfig,
     _, _, hmax = horizons(cfg, sysid_cfg)
     eval_pred_steps(cfg, hmax)   # fail now, not after the policy has trained
     # One list per split (length >= 1), each plant file joined with its
-    # reference file and normalized; the loaders window each file in
-    # isolation — no rollout spans two files.
-    train_dfs, dev_dfs, test_dfs = load_control_splits(cfg, nm_mapping, norm_stats)
+    # reference file; the loaders window each file in isolation — no rollout
+    # spans two files.
+    train_dfs, dev_dfs, test_dfs = load_control_splits(cfg, nm_mapping)
     train_loader, dev_loader = build_loaders(
         cfg, sysid_cfg, nm_mapping, train_dfs, dev_dfs,
     )
@@ -119,9 +119,9 @@ def train_control(cfg: ControlConfig,
     hooks = load_control_hooks(cfg)
 
     policy_node = build_policy(cfg, sysid_cfg, nm_mapping, norm_stats)
-    arch = describe_policy(policy_node, cfg, sysid_cfg, nm_mapping, norm_stats)
+    arch = describe_policy(policy_node, cfg, sysid_cfg, nm_mapping)
     cl_system = build_closed_loop(dyn_node, policy_node, cfg, sysid_cfg)
-    loss = build_control_loss(cfg, sysid_cfg, nm_mapping, norm_stats)
+    loss = build_control_loss(cfg, sysid_cfg, nm_mapping)
     problem = build_problem(cl_system, loss).to(cfg.device)
 
     # One forward pass before training: which term is actually being
@@ -130,7 +130,7 @@ def train_control(cfg: ControlConfig,
     balance_batch = next(iter(train_loader))
     balance_out = run_objective_pass(problem, balance_batch)
     balance = objective_balance(loss, balance_out)
-    power = power_term(cfg, nm_mapping, norm_stats)
+    power = power_term(cfg, nm_mapping)
     power_diag = (power_diagnostics(power, balance_out, hmax)
                   if power is not None and objective.reads_power else None)
     notes = objective_notes(objective, cfg)

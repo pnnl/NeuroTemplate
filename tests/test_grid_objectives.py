@@ -38,13 +38,13 @@ def _rolled_out(s):
     cfg, sysid_cfg, nm, ns = s["cfg"], s["sysid_cfg"], s["nm"], s["norm_stats"]
     policy = build_policy(cfg, sysid_cfg, nm, ns)
     cl = build_closed_loop(s["dyn_node"], policy, cfg, sysid_cfg)
-    data = build_window_dict(s["norm_df"], cfg, sysid_cfg, nm,
+    data = build_window_dict(s["frame"], cfg, sysid_cfg, nm,
                              P=cfg.train_pred_steps, stride=cfg.history_steps)
     return cl(data)
 
 
 def _cost(s, out):
-    loss = build_control_loss(s["cfg"], s["sysid_cfg"], s["nm"], s["norm_stats"])
+    loss = build_control_loss(s["cfg"], s["sysid_cfg"], s["nm"])
     return float(loss(out)["cost_loss"].detach())
 
 
@@ -56,7 +56,7 @@ def _power_of(s, out):
         out["yn"][:, scored_steps("yn", hmax), :],
         out["U"][:, scored_steps("U", hmax), :],
         out["D"][:, scored_steps("D", hmax), :],
-        s["nm"], s["norm_stats"],
+        s["nm"],
     )
 
 
@@ -73,7 +73,7 @@ def test_cost_is_the_tariff_weighted_mean_power():
     _, _, hmax = horizons(s["cfg"], s["sysid_cfg"])
     out = _rolled_out(s)
 
-    tariff = out["R"][:, hmax:, _tariff_index(s)] * TARIFF_SCALE   # $/kWh
+    tariff = out["R"][:, hmax:, _tariff_index(s)]                  # $/kWh
     expected = (_power_of(s, out) * tariff).mean()
     assert _cost(s, out) == pytest.approx(float(expected.detach()), rel=1e-5)
 
@@ -103,8 +103,8 @@ def test_every_power_term_reaches_the_policy_parameters(name):
 
     policy = build_policy(cfg, sysid_cfg, nm, ns)
     problem = build_problem(build_closed_loop(s["dyn_node"], policy, cfg, sysid_cfg),
-                            build_control_loss(cfg, sysid_cfg, nm, ns))
-    data = build_window_dict(s["norm_df"], cfg, sysid_cfg, nm,
+                            build_control_loss(cfg, sysid_cfg, nm))
+    data = build_window_dict(s["frame"], cfg, sysid_cfg, nm,
                              P=cfg.train_pred_steps, stride=cfg.history_steps)
     out = problem({**data, "name": "train"})
     params = [p for p in policy.parameters() if p.requires_grad]

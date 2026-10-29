@@ -3,7 +3,7 @@ import torch
 
 from neurotemplate.control.scenarios import build_window_dict, horizons, scored_steps
 from neurotemplate.control.policy import (
-    _WindowGather,
+    _NormalizedNet,
     _key_gather,
     build_policy,
 )
@@ -17,7 +17,7 @@ N_REF = 2
 
 def _windows(s):
     cfg = s["cfg"]
-    return build_window_dict(s["norm_df"], cfg, s["sysid_cfg"], s["nm"],
+    return build_window_dict(s["frame"], cfg, s["sysid_cfg"], s["nm"],
                              P=cfg.train_pred_steps, stride=cfg.history_steps)
 
 
@@ -36,7 +36,8 @@ def test_key_gather_keeps_each_columns_declared_steps():
 def test_a_uniform_window_builds_no_gather():
     s = full_setup()
     policy = build_policy(s["cfg"], s["sysid_cfg"], s["nm"], s["norm_stats"])
-    assert not any(isinstance(m, _WindowGather) for m in policy.callable.modules())
+    net = next(m for m in policy.callable.modules() if isinstance(m, _NormalizedNet))
+    assert net.indices == []
 
 
 def test_the_table_must_say_what_each_role_may_read():
@@ -106,15 +107,19 @@ def test_the_policy_reads_the_commands_applied_and_never_the_padded_copy():
     policy = build_policy(cfg, sysid_cfg, nm, ns)
     assert policy.input_keys == ["yn", "U", "D", "R"]
     seen = []
-    gather = next(m for m in policy.callable.modules() if isinstance(m, _WindowGather))
-    gather.base.register_forward_pre_hook(
+    net = next(m for m in policy.callable.modules() if isinstance(m, _NormalizedNet))
+    net.base.register_forward_pre_hook(
         lambda _module, args: seen.append(args[1].detach().clone()))
     out = build_closed_loop(s["dyn_node"], policy, cfg, sysid_cfg)(_windows(s))
 
+    # The net sees the commands normalised, so compare them normalised.
+    (setpoint,) = nm["U"]
+    shift, stretch = ns[setpoint]["shift"], ns[setpoint]["stretch"]
     assert seen
     for k, window in enumerate(seen):
         i = hmax - 1 + k
-        assert torch.equal(window, out["U"][:, i - 5:i, :].reshape(len(window), -1))
+        applied = (out["U"][:, i - 5:i, :] - shift) / stretch
+        assert torch.allclose(window, applied.reshape(len(window), -1))
 
 
 # ── Policy family registry ───────────────────────────────────────

@@ -289,7 +289,7 @@ def test_trained_policy_exports_as_the_trained_policy(tmp_path, overrides, graph
     closed_loop = build_closed_loop(s["dyn_node"], policy, cfg, sysid_cfg)
     result = export_policy(
         policy_node=policy, cl_system=closed_loop, cfg=cfg, sysid_cfg=sysid_cfg,
-        nm_mapping=nm, norm_stats=ns, test_dfs=[s["norm_df"]], run_id="0" * 32,
+        nm_mapping=nm, norm_stats=ns, test_dfs=[s["frame"]], run_id="0" * 32,
         out_dir=tmp_path / "pkg", graph_format=graph_format,
         exporter="legacy" if graph_format == "onnx" else "dynamo",
     )
@@ -307,13 +307,11 @@ def test_trained_policy_exports_as_the_trained_policy(tmp_path, overrides, graph
     # The graph's physical windows are the closed loop's own windows: the
     # wrapper around the trained net must issue the net's own commands.
     inputs = policy_inputs(policy, cfg, nm, ns)
-    flat = closed_loop_windows(closed_loop, policy, cfg, sysid_cfg, [s["norm_df"]], nm, ns)
+    flat = closed_loop_windows(closed_loop, policy, cfg, sysid_cfg, [s["frame"]], nm, ns)
     physical = physical_windows(flat, inputs).values()
-    stretch = torch.tensor([ns[c]["stretch"] for c in nm["U"]])
-    shift = torch.tensor([ns[c]["shift"] for c in nm["U"]])
     with torch.no_grad():
-        wrapped = policy_graph(policy.callable, inputs, nm, ns)(*physical)
-        direct = policy.callable(*flat.values()) * stretch + shift
+        wrapped = policy_graph(policy.callable, inputs)(*physical)
+        direct = policy.callable(*flat.values())
     assert torch.allclose(wrapped, direct, atol=1e-4)
 
 
@@ -338,7 +336,7 @@ def test_c_runner_reproduces_the_reference(tmp_path, monkeypatch):
     export_policy(
         policy_node=policy, cl_system=build_closed_loop(s["dyn_node"], policy, cfg, sysid_cfg),
         cfg=cfg, sysid_cfg=sysid_cfg, nm_mapping=nm, norm_stats=ns,
-        test_dfs=[s["norm_df"]], run_id="0" * 32, out_dir=package, graph_format="c",
+        test_dfs=[s["frame"]], run_id="0" * 32, out_dir=package, graph_format="c",
     )
 
     make(package)

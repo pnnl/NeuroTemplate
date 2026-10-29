@@ -454,20 +454,16 @@ def get_loader(
     return loader
 
 
-# Convert windowed tensors back to a DataFrame (optionally unnormalize).
+# Convert windowed tensors back to a DataFrame.
 @beartype
 def to_df(
     data: dict,
-    norm_stats: NormStats,
     nm_mapping: dict[str, list[str]],
-    unnorm: Optional[bool] = False,
 ):
     """
     Args:
         data: Windowed tensor dict (Y/U/D/t) to flatten into columns.
-        norm_stats: Shift/stretch stats used to undo normalization if requested.
         nm_mapping: Column mapping that defines output column ordering.
-        unnorm: If True, applies unnormalize_df() before returning the DataFrame.
     """
 
     df_dict = {}
@@ -484,12 +480,7 @@ def to_df(
             else:
                 raise ValueError(f"Unexpected data shape: {data[key].shape}")
 
-    df = pd.DataFrame.from_dict(df_dict)
-
-    if unnorm:
-        return unnormalize_df(df, norm_stats)
-    else:
-        return df
+    return pd.DataFrame.from_dict(df_dict)
 
 
 # Concatenate a list of per-file DataFrames into one, skipping pd.concat's
@@ -719,53 +710,3 @@ def warn_degenerate_columns(
             "Exclude the column from the mapping or widen the excitation."
         )
     return frozen
-
-
-# Apply precomputed normalization stats to a dataframe.
-@beartype
-def normalize_df(
-    df: pd.DataFrame,
-    norm_stats: NormStats,
-):
-    """
-    Args:
-        df: DataFrame to normalize in-place (copied before modification).
-        norm_stats: Per-column stats dict applied to columns present in df.
-    """
-    df_norm = df.copy()
-    for col, stats in norm_stats.items():
-        if col in df_norm.columns:
-            df_norm[col] = (df_norm[col] - stats["shift"]) / stats["stretch"]
-    return df_norm
-
-
-@beartype
-def to_physical(
-    x: torch.Tensor,
-    cols: list[str],
-    norm_stats: NormStats,
-) -> torch.Tensor:
-    """Undo normalization on a tensor whose last axis is `cols`, any leading shape."""
-    shift = torch.tensor([norm_stats[c]["shift"] for c in cols],
-                         dtype=x.dtype, device=x.device)
-    stretch = torch.tensor([norm_stats[c]["stretch"] for c in cols],
-                           dtype=x.dtype, device=x.device)
-    return x * stretch + shift
-
-
-# Undo normalization using stored shift/stretch stats.
-@beartype
-def unnormalize_df(
-    df_norm: pd.DataFrame,
-    norm_stats: NormStats,
-):
-    """
-    Args:
-        df_norm: Normalized DataFrame to convert back to original scale.
-        norm_stats: Per-column stats dict used to invert normalization.
-    """
-    df = df_norm.copy()
-    for col, stats in norm_stats.items():
-        if col in df.columns:
-            df[col] = df_norm[col] * stats["stretch"] + stats["shift"]
-    return df

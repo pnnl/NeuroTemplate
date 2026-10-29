@@ -2,7 +2,8 @@ import pytest
 import torch
 
 from neurotemplate.control.closed_loop import build_closed_loop
-from neurotemplate.control.policy import build_policy
+from neurotemplate.control.losses import resolve_objective
+from neurotemplate.control.policy import _NormalizedNet, build_policy
 from neurotemplate.control.scenarios import (
     build_window_dict,
     horizons,
@@ -19,7 +20,7 @@ pytestmark = pytest.mark.filterwarnings("ignore:.*timestamps from training")
 def _windows(s, df=None):
     cfg = s["cfg"]
     return build_window_dict(
-        s["norm_df"] if df is None else df, cfg, s["sysid_cfg"], s["nm"],
+        s["frame"] if df is None else df, cfg, s["sysid_cfg"], s["nm"],
         P=cfg.train_pred_steps, stride=cfg.history_steps,
     )
 
@@ -60,16 +61,23 @@ def test_the_reference_survives_the_rollout_untouched():
 # ── Reference files ──────────────────────────────────────────────
 
 
-def test_a_loaded_reference_is_normalised_with_its_targets_stats(tmp_path):
+def test_a_loaded_reference_is_read_as_written_and_the_policy_scales_it_by_its_target(tmp_path):
     s = full_setup()
     cfg, nm, ns, plant = s["cfg"], s["nm"], s["norm_stats"], s["plant"]
     reference = make_reference_df(plant)
     write_splits(cfg, tmp_path, plant, [reference])
-    (train,), _, _ = load_control_splits(cfg, nm, ns)
-    zone = ns[nm["Y"][0]]
-    expected = (reference[LOW] - zone["shift"]) / zone["stretch"]
+    (train,), _, _ = load_control_splits(cfg, nm)
     assert torch.allclose(torch.tensor(train[LOW].to_numpy()),
-                          torch.tensor(expected.to_numpy()), atol=1e-6)
+                          torch.tensor(reference[LOW].to_numpy()))
+
+    # The band's floor reaches the policy's net normalised like the zone it bounds.
+    policy = build_policy(cfg, s["sysid_cfg"], nm, ns)
+    net = next(m for m in policy.callable.modules() if isinstance(m, _NormalizedNet))
+    i = policy.input_keys.index("R")
+    j = resolve_objective(cfg, nm).r_columns.index(LOW)
+    zone = ns[nm["Y"][0]]
+    assert getattr(net, f"_shift_{i}")[j].item() == pytest.approx(zone["shift"])
+    assert getattr(net, f"_stretch_{i}")[j].item() == pytest.approx(zone["stretch"])
     assert HIGH in train.columns
 
 
@@ -83,4 +91,4 @@ def test_a_reference_off_its_plant_files_timestamps_is_refused(tmp_path):
     with pytest.raises(ValueError, match=(
             rf"reference covers {shifted.index[0]} to {shifted.index[-1]}.*"
             rf"plant file {plant.index[0]} to {plant.index[-1]}")):
-        load_control_splits(s["cfg"], s["nm"], s["norm_stats"])
+        load_control_splits(s["cfg"], s["nm"])

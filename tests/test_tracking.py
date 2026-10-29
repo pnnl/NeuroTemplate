@@ -35,8 +35,8 @@ def test_a_finished_run_carries_its_state_dict_and_no_pickled_model(
     cfg, sysid_cfg, nm, ns = s["cfg"], s["sysid_cfg"], s["nm"], s["norm_stats"]
     policy = build_policy(cfg, sysid_cfg, nm, ns)
     problem = build_problem(build_closed_loop(s["dyn_node"], policy, cfg, sysid_cfg),
-                            build_control_loss(cfg, sysid_cfg, nm, ns))
-    loaders = build_loaders(cfg, sysid_cfg, nm, [s["norm_df"]], [s["norm_df"]])
+                            build_control_loss(cfg, sysid_cfg, nm))
+    loaders = build_loaders(cfg, sysid_cfg, nm, [s["frame"]], [s["frame"]])
     with tracked_run(cfg, stdout=[], logout=[]) as logger:
         run_id = logger.run.info.run_id
         train_policy(cfg, problem, *loaders, logger=logger)

@@ -110,14 +110,6 @@ _SUPPLY_GAINS = {**BAND_GAINS, "supply_lower": 1.0, "supply_upper": 1.0}
      "needs a `reference_scale` entry"),
     # A weight is data: one the rollout predicts would carry gradient.
     ({"losses": _band(comfort_lower={"weight": ZONE})}, "must be data"),
-    # `units: normalized` compares a setpoint and a zone in two scales.
-    ({"losses": _band(comfort_lower={"column": SETPT, "units": "normalized"})},
-     "one scale only"),
-    # A shared band takes one target's stats; a normalised compare against
-    # the other target would be on the wrong scale.
-    ({"losses": {**BAND_LOSSES, **_SUPPLY_BAND,
-                 "supply_lower": {**_SUPPLY_BAND["supply_lower"], "units": "normalized"}},
-      "gains": _SUPPLY_GAINS}, "wrong scale"),
 ])
 def test_resolve_names_the_problem(fields, message):
     cfg = make_control_cfg(policy_window={}, **fields)   # not what is under test

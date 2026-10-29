@@ -25,7 +25,6 @@ from neuromancer.problem import Problem
 from neuromancer.constraint import Loss
 from neuromancer.loss import PenaltyLoss
 
-from neurotemplate.common.data_utils import NormStats
 from neurotemplate.control.losses import (
     POWER, LossTerm, apply_map, power_mean, resolve_objective,
 )
@@ -73,20 +72,19 @@ def build_closed_loop(dyn_node, policy_node, cfg, sysid_cfg) -> SystemPreview:
 
 
 @beartype
-def power_term(cfg, nm_mapping: dict[str, list[str]],
-               norm_stats: NormStats):
+def power_term(cfg, nm_mapping: dict[str, list[str]]):
     """The per-step power signal as a plain callable, or None when unimplemented.
 
     Signature is `(yn, U, D) -> [batch, time]` over the *scored horizon*
-    slices. Shared with `control.objective` so the shape check sweeps exactly
-    the quantity the loss minimizes, not a re-derivation of it.
+    slices, physical units. Shared with `control.objective` so the shape check
+    sweeps exactly the quantity the loss minimizes, not a re-derivation of it.
     """
     hooks = load_control_hooks(cfg)
     if not getattr(hooks, "POWER_METRIC_IMPLEMENTED", False):
         return None
 
     def term(yn, u, d):
-        return hooks.power_metric(yn, u, d, nm_mapping, norm_stats)
+        return hooks.power_metric(yn, u, d, nm_mapping)
 
     return term
 
@@ -96,15 +94,13 @@ def build_control_loss(
     cfg,
     sysid_cfg,
     nm_mapping: dict[str, list[str]],
-    norm_stats: NormStats,
 ) -> PenaltyLoss:
     """One scalar term per entry of `cfg.losses`, scaled by its gain.
 
     Each term reads the scored horizon of the rollout — the P steps after the
     warm-up, with U read one index earlier (see `scenarios.scored_steps`) —
     and is reduced by `losses.power_mean`, so a gain tuned at P=48 means the
-    same thing at P=288. `norm_stats` must carry the reference columns'
-    entries (`losses.extend_norm_stats`).
+    same thing at P=288. Every series is in physical units.
 
     Every term that names `power` evaluates the same `power_metric` hook on
     the same slices, so a cost cannot price a different power signal than the
@@ -119,7 +115,7 @@ def build_control_loss(
     _, _, hmax = horizons(cfg, sysid_cfg)
     keys = ["yn", "U", "D"] + (["R"] if objective.r_columns else [])
 
-    power = power_term(cfg, nm_mapping, norm_stats)
+    power = power_term(cfg, nm_mapping)
     if objective.reads_power and power is None:
         names = [t.name for t in objective.terms
                  if POWER in (t.column, t.target)]
@@ -129,24 +125,23 @@ def build_control_loss(
             "POWER_METRIC_IMPLEMENTED = True)."
         )
 
-    def series(name: str, units: str, data: dict) -> torch.Tensor:
+    def series(name: str, data: dict) -> torch.Tensor:
         """`name` over the scored horizon, [batch, P]."""
         if name == POWER:
             return power(*(data[k][:, scored_steps(k, hmax), :]
                            for k in ("yn", "U", "D")))
-        return scored_series(objective, name, data, hmax, nm_mapping,
-                             norm_stats, physical=units == "physical")
+        return scored_series(objective, name, data, hmax, nm_mapping)
 
     def term_loss(term: LossTerm):
         def loss(*tensors):
             data = dict(zip(keys, tensors))
-            h = series(term.column, term.units, data)
+            h = series(term.column, data)
             if term.target is not None:
-                h = h - series(term.target, term.units, data)
+                h = h - series(term.target, data)
             h = apply_map(h, term.map)
             weight = None
             if term.weight is not None:
-                weight = series(term.weight, "physical", data)
+                weight = series(term.weight, data)
                 if term.map == "first_difference":
                     weight = weight[:, 1:]
             return power_mean(h, term.norm, weight)

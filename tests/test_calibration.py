@@ -24,7 +24,7 @@ from neurotemplate.modeling.calibration import (
     collect_rollout_z,
     share_match_thresholds,
 )
-from neurotemplate.common.data_utils import get_sw_dict_multi, normalize_df
+from neurotemplate.common.data_utils import get_sw_dict_multi
 from neurotemplate.modeling.dynamics import get_dynamics
 from model_fixtures import unit_stats
 from neurotemplate.modeling.heads import HeadStack, OrdinalHead, RegressionHead
@@ -97,7 +97,7 @@ def test_collected_z_lines_up_with_the_scored_truth():
     cfg = make_sysid_cfg()
     cfg.dev_pred_steps = 8
     dyn_sys, _ = _staged_system(cfg, nm, norm_stats)
-    data = get_sw_dict_multi([normalize_df(raw, norm_stats)], cfg, nm,
+    data = get_sw_dict_multi([raw], cfg, nm,
                              steps=cfg.history_steps + cfg.dev_pred_steps)
     data.pop("source_idx")
     z, y_true = collect_rollout_z(dyn_sys, data, cfg.history_steps)
@@ -128,10 +128,8 @@ def _staged_run(tmp_path, **over):
     cfg = trainable_cfg(tmp_path, nm, **over)
 
     norm_stats = compute_norm_stats(df, norm_type=cfg.norm_type)
-    dfs = [normalize_df(df, norm_stats)]
-    stats = norm_stats["stage"]
-    levels = torch.tensor([(v - stats["shift"]) / stats["stretch"] for v in (0.0, 1.0)])
-    stack = HeadStack([OrdinalHead(n_levels=2, level_values=levels)], ["stage"])
+    dfs = [df]
+    stack = HeadStack([OrdinalHead(n_levels=2, level_values=[0.0, 1.0])], ["stage"])
     balance_level_weights(stack, dfs)
     logger = FakeLogger()
     result = train_and_evaluate(
