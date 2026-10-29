@@ -43,7 +43,7 @@ leaves a markdown reportcard.
 cp -r /path/to/neurotemplate/template/. my_app/ && cd my_app/
 # fill in modeling_user_defined.py and model_configs/modeling.yaml
 nt model train                                   # ... Finished run: <model_run>
-nt control train --set sysid_run_id=<model_run>  # ... Finished DPC run: <policy_run>
+nt control train --set sysid_run_id=<model_run>  # ... Finished control run: <policy_run>
 nt export model  --run_id <model_run> --data data/test.csv --out delivery
 nt export policy --run_id <policy_run> --out delivery
 ```

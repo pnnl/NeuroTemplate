@@ -1,14 +1,17 @@
-"""The best open-loop plan: no worse than the policy it starts from, and
-inside the bounds a policy is held to."""
+"""Planning through the surrogate: the best open-loop plan, no worse than the
+policy it starts from, and MPC, which re-plans at every step. Both inside the
+bounds a policy is held to."""
 
 import torch
 
-from neurotemplate.control.closed_loop import build_closed_loop
+from neurotemplate.control.closed_loop import build_closed_loop, build_control_loss
+from neurotemplate.control.controller import build_controller
+from neurotemplate.control.losses import resolve_objective
+from neurotemplate.control.pipeline import evaluation_windows
 from neurotemplate.control.plan import plan_on_surrogate
 from neurotemplate.control.policy import build_policy
-from neurotemplate.control.scenarios import horizons, scored_steps
-from neurotemplate.control.losses import resolve_objective
-from control_fixtures import HIGH, LOW, SETPT, full_setup
+from neurotemplate.control.scenarios import eval_pred_steps, horizons, scored_steps
+from control_fixtures import HIGH, LOW, SETPT, full_setup, make_nm_mapping
 
 
 def test_the_plan_improves_on_the_policy_inside_its_bounds():
@@ -29,3 +32,37 @@ def test_the_plan_improves_on_the_policy_inside_its_bounds():
     u = plan.out["U"][:, scored_steps("U", hmax), 0]
     low, high = (plan.out["R"][:, hmax - 1:hmax - 1 + u.shape[1], r.index(c)] for c in (LOW, HIGH))
     assert (u >= low - 1e-4).all() and (u <= high - 0.5 + 1e-4).all()
+
+
+def test_mpc_beats_an_untrained_policy_inside_its_bounds_and_starts_each_rollout_cold():
+    future = {c: 4 for c in (LOW, HIGH, *make_nm_mapping()["D"])}
+    s = full_setup(command_bounds={SETPT: [LOW, [HIGH, -0.5]]}, future=future)
+    cfg, sysid_cfg, nm, ns = s["cfg"], s["sysid_cfg"], s["nm"], s["norm_stats"]
+    data, _ = evaluation_windows(cfg, sysid_cfg, [s["frame"]], nm)
+    loss = build_control_loss(cfg, sysid_cfg, nm)
+
+    def objective(policy):
+        cl = build_closed_loop(s["dyn_node"], policy, cfg, sysid_cfg)
+        cl.nsteps = eval_pred_steps(cfg, horizons(cfg, sysid_cfg)[2])
+        with torch.no_grad():
+            out = cl(dict(data))
+        return float(loss(out)["loss"]), out, cl
+
+    torch.manual_seed(0)
+    untrained, _, _ = objective(build_policy(cfg, sysid_cfg, nm, ns))
+    cfg.policy, cfg.mpc_horizon, cfg.mpc_iters = "mpc", 4, 15
+    mpc = build_controller(cfg, sysid_cfg, nm, ns, s["dyn_node"])
+    planned, out, cl = objective(mpc)
+    assert planned < untrained
+
+    _, _, hmax = horizons(cfg, sysid_cfg)
+    r = resolve_objective(cfg, nm).r_columns
+    u = out["U"][:, scored_steps("U", hmax), 0]
+    low, high = (out["R"][:, hmax - 1:hmax - 1 + u.shape[1], r.index(c)] for c in (LOW, HIGH))
+    assert (u >= low - 1e-4).all() and (u <= high - 0.5 + 1e-4).all()
+
+    # The last plan is rollout state: a second rollout on the same windows
+    # starts cold and commands the same.
+    with torch.no_grad():
+        again = cl(dict(data))
+    assert torch.allclose(again["U"], out["U"])

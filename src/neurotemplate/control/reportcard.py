@@ -90,7 +90,28 @@ def _box(below: float, above: float) -> str:
     return f"[{lo}, {hi}]"
 
 
+def _mpc_section(arch: dict) -> str:
+    rows = [
+        "- **Family:** `mpc`: at every step, the plan over the next steps "
+        "through a copy of the surrogate, inside the bounds, against the "
+        "objective; the first step is commanded",
+        f"- **Horizon:** {arch['horizon']} steps, {arch['iters']} Adam steps of "
+        f"{arch['lr']:g} per control step, from the last plan shifted",
+        "- **Inputs:** " + ", ".join(f"`{key}`" for key in arch["inputs"]),
+    ]
+    if arch.get("command_bounds"):
+        rows.append("- **Per-step bounds:**")
+        rows += [f"  - `{col}`: [{low}, {high}]"
+                 for col, (low, high) in arch["command_bounds"].items()]
+    rows.append("- **Actuation bounds (physical units):**")
+    rows += [f"  - `{col}`: [{lo:.4g}, {hi:.4g}]"
+             for col, lo, hi in zip(arch["u_cols"], arch["umin_phys"], arch["umax_phys"])]
+    return _section("Controller: MPC", "\n".join(rows))
+
+
 def _policy_section(arch: dict) -> str:
+    if arch["family"] == "mpc":
+        return _mpc_section(arch)
     hsizes = arch["hsizes"] if arch["hsizes"] else "*(none — single affine map)*"
     bounds = "\n".join(
         f"  - `{col}`: [{lo:.4g}, {hi:.4g}]"
@@ -272,7 +293,7 @@ def _gap_section(plan, results) -> str:
             + ["Violation", "Mean exceedance"]
             + [f"∫`{w}`·power" for w in cost])
     rows = []
-    for label, values, scored, weighted in (("Policy", by_name[0], results, cost),
+    for label, values, scored, weighted in (("Controller", by_name[0], results, cost),
                                             ("Best plan", by_name[1], plan.results, plan_cost)):
         total = sum(values.values())
         rows.append([label, f"{total:.4g}"] + [f"{values[n]:.4g}" for n in names]
@@ -284,7 +305,7 @@ def _gap_section(plan, results) -> str:
         f"bounds and objective, over these test windows, with every step ahead "
         f"known ({plan.iterations} Adam steps, {plan.time_s:.0f} s): a bar for "
         f"any controller on this surrogate, not a controller. Its objective is "
-        f"**{plan.gap * 100:.0f}%** below the policy's. That gap is the "
+        f"**{plan.gap * 100:.0f}%** below the controller's. That gap is the "
         "controller's; what the plan does not do either, the surrogate does not "
         "make pay.\n",
         "| " + " | ".join(head) + " |",

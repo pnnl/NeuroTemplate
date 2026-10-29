@@ -17,7 +17,7 @@ from neurotemplate.control.closed_loop import (
 )
 from neurotemplate.control.config import ControlConfig
 from neurotemplate.control.losses import extend_norm_stats, resolve_objective
-from neurotemplate.control.policy import build_policy
+from neurotemplate.control.controller import build_controller
 from neurotemplate.hooks import CONTROL_SNAPSHOT, run_hooks_path
 from neurotemplate.modeling.load import (
     config_from_run_params, load_trained_dynamics, resolve_artifacts_dir,
@@ -91,7 +91,7 @@ def load_trained_policy(run_id: str, run_dir=None, sysid_run_dir=None, device=No
     norm_stats = extend_norm_stats(resolve_objective(cfg, nm_mapping), cfg,
                                    sysid_stats)
 
-    policy_node = build_policy(cfg, sysid_cfg, nm_mapping, norm_stats)
+    policy_node = build_controller(cfg, sysid_cfg, nm_mapping, norm_stats, dyn_node)
     cl_system = build_closed_loop(dyn_node, policy_node, cfg, sysid_cfg)
     problem = build_problem(
         cl_system, build_control_loss(cfg, sysid_cfg, nm_mapping),

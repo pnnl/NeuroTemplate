@@ -34,7 +34,7 @@ def main() -> None:
     print(f"Comfort violation rate: "
           f"{run.results.comfort_violation_rate * 100:.2f}%")
     print(f"Mean |ΔU| (all U columns, physical units): {run.results.mean_abs_du:.4g}")
-    print(f"Finished DPC run: {run.run_id}")
+    print(f"Finished control run: {run.run_id}")
     print(f"Reportcard: {artifact_file(run.run_id, 'control_reportcard.md')}")
 
 

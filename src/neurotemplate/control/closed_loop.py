@@ -19,6 +19,7 @@ from __future__ import annotations
 
 
 import torch
+import torch.nn as nn
 
 from neuromancer.system import SystemPreview
 from neuromancer.problem import Problem
@@ -65,9 +66,9 @@ def build_closed_loop(dyn_node, policy_node, cfg, sysid_cfg) -> SystemPreview:
         nstep_key="D",
         nsteps=cfg.train_pred_steps,
         start_iter=hmax - 1,
-        # Stateful surrogates only: clear the hidden state so it cannot leak
-        # between batches. None for stateless ones.
-        init_func=make_reset_init(dyn_node.callable),
+        # Stateful surrogates and controllers (MPC's last plan) only: clear
+        # the state so it cannot leak between batches. None for stateless ones.
+        init_func=make_reset_init(nn.ModuleList([dyn_node.callable, policy_node.callable])),
     )
 
 

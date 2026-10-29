@@ -316,6 +316,19 @@ class _ReferenceBounds(nn.Module):
             columns[j] = low + share * (high - low)
         return torch.stack(columns, dim=-1)
 
+    def base_of(self, u: torch.Tensor, *args: torch.Tensor) -> torch.Tensor:
+        """The base command `forward` maps onto `u` at one step, from that
+        step's windows: its inverse. A side naming a command reads that
+        command's final value, as in `forward`."""
+        columns = list(u.unbind(-1))
+        base = list(columns)
+        for n, j in enumerate(self.columns):
+            low = self._side(2 * n, args, columns, u[:, j])
+            high = torch.maximum(self._side(2 * n + 1, args, columns, u[:, j]), low)
+            share = ((u[:, j] - low) / (high - low).clamp_min(1e-9)).clamp(0.0, 1.0)
+            base[j] = self.umin[j] + share * (self.umax[j] - self.umin[j])
+        return torch.stack(base, dim=-1)
+
 
 def _zero_final_layer(net: nn.Module, rows: torch.Tensor) -> None:
     """Start each anchored column's residual at δ ≡ 0, exactly.

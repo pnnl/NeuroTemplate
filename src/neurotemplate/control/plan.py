@@ -37,7 +37,7 @@ from neurotemplate.control.objective import ObjectiveBalance, objective_balance
 from neurotemplate.control.pipeline import (
     ControlResults, evaluation_windows, score_rollout,
 )
-from neurotemplate.control.policy import _ReferenceBounds, with_command_bounds
+from neurotemplate.control.policy import with_command_bounds
 from neurotemplate.control.scenarios import eval_pred_steps, horizons
 from neurotemplate.hooks import load_control_hooks
 
@@ -80,19 +80,18 @@ class PlanResult:
         return (self.policy.total - self.plan.total) / self.policy.total
 
 
-def _commands_before_bounds(cl_system, policy_node: Node, data: dict) -> torch.Tensor:
-    """The policy's commands at every step of its rollout on `data`, before
-    `command_bounds` maps them, [b, steps, nu]: the plan starts there."""
-    policy = policy_node.callable
-    source = policy.base if isinstance(policy, _ReferenceBounds) else policy
+def _rollout_with_commands(cl_system, policy_node: Node, data: dict) -> tuple[dict, list]:
+    """The controller's rollout on `data`, and at every step the windows it
+    was handed and the command it issued."""
     seen = []
-    handle = source.register_forward_hook(lambda _m, _args, out: seen.append(out.detach()))
+    handle = policy_node.callable.register_forward_hook(
+        lambda _m, args, out: seen.append(([a.detach() for a in args], out.detach())))
     try:
         with torch.no_grad():
-            cl_system(dict(data))
+            out = cl_system(dict(data))
     finally:
         handle.remove()
-    return torch.stack(seen, dim=1)
+    return out, seen
 
 
 @beartype
@@ -106,16 +105,24 @@ def plan_on_surrogate(cfg, sysid_cfg, cl_system, policy_node: Node, test_dfs: li
     steps = eval_pred_steps(cfg, horizons(cfg, sysid_cfg)[2])
     cl_system.nsteps = steps
     loss = build_control_loss(cfg, sysid_cfg, nm_mapping)
+    policy_out, issued = _rollout_with_commands(cl_system, policy_node, data)
     with torch.no_grad():
-        policy_balance = objective_balance(loss, loss(cl_system(dict(data))))
+        policy_balance = objective_balance(loss, loss(policy_out))
 
     device = sysid_cfg.device
     umin, umax = (b.to(device=device, dtype=torch.float32)
                   for b in load_control_hooks(cfg).actuation_bounds(nm_mapping, norm_stats))
-    plan = _FreePlan(umin, umax, _commands_before_bounds(cl_system, policy_node, data))
-    node = Node(with_command_bounds(plan, cfg, nm_mapping, list(policy_node.input_keys),
-                                    policy_node.input_map, umin, umax),
-                policy_node.input_keys, ["U"], name="plan",
+    # The plan starts at the controller's own commands: behind command_bounds,
+    # at the base commands the bounds map onto them.
+    plan = _FreePlan(umin, umax, umin.expand(len(data["yn"]), steps, -1))
+    bounded = with_command_bounds(plan, cfg, nm_mapping, list(policy_node.input_keys),
+                                  policy_node.input_map, umin, umax)
+    start = torch.stack([bounded.base_of(u, *args) if bounded is not plan else u
+                         for args, u in issued], dim=1)
+    with torch.no_grad():
+        share = ((start - umin) / (umax - umin).clamp_min(1e-9)).clamp(1e-3, 1 - 1e-3)
+        plan.z.copy_(torch.log(share / (1 - share)))
+    node = Node(bounded, policy_node.input_keys, ["U"], name="plan",
                 input_map=policy_node.input_map)
     loop = build_closed_loop(cl_system.nodes[1], node, cfg, sysid_cfg)
     loop.nsteps = steps

@@ -28,7 +28,7 @@ from neurotemplate._typing import beartype
 import mlflow
 
 from neurotemplate.common.run_summary import write_run_summary
-from neurotemplate.common.tracking import tracked_run
+from neurotemplate.common.tracking import save_checkpoint, tracked_run
 from neurotemplate.modeling.dynamics import describe_dynamics
 from neurotemplate.modeling.experiment import resolve_device, set_seeds, set_threads
 
@@ -39,7 +39,7 @@ from neurotemplate.control.losses import extend_norm_stats, resolve_objective
 from neurotemplate.control.scenarios import (
     build_loaders, eval_pred_steps, horizons, load_control_splits,
 )
-from neurotemplate.control.policy import build_policy, describe_policy
+from neurotemplate.control.controller import build_controller, describe_controller
 from neurotemplate.control.closed_loop import (
     build_closed_loop, build_control_loss, build_problem, power_term,
 )
@@ -119,8 +119,8 @@ def train_control(cfg: ControlConfig,
     # there before spending an hour training against a band nothing can hold.
     hooks = load_control_hooks(cfg)
 
-    policy_node = build_policy(cfg, sysid_cfg, nm_mapping, norm_stats)
-    arch = describe_policy(policy_node, cfg, sysid_cfg, nm_mapping)
+    policy_node = build_controller(cfg, sysid_cfg, nm_mapping, norm_stats, dyn_node)
+    arch = describe_controller(policy_node, cfg, sysid_cfg, nm_mapping)
     cl_system = build_closed_loop(dyn_node, policy_node, cfg, sysid_cfg)
     loss = build_control_loss(cfg, sysid_cfg, nm_mapping)
     problem = build_problem(cl_system, loss).to(cfg.device)
@@ -149,9 +149,13 @@ def train_control(cfg: ControlConfig,
         logout=["train_loss", "dev_loss", "time"] + term_keys,
     ) as logger:
         snapshot_hooks(hooks, CONTROL_SNAPSHOT, logger)
-        cl_system, best_dev, train_time_s = train_policy(
-            cfg, problem, train_loader, dev_loader, logger=logger,
-        )
+        if cfg.policy == "mpc":     # nothing to train: the surrogate is the controller
+            save_checkpoint(logger, problem.state_dict())
+            best_dev, train_time_s = float("nan"), 0.0
+        else:
+            cl_system, best_dev, train_time_s = train_policy(
+                cfg, problem, train_loader, dev_loader, logger=logger,
+            )
         # The same batch through the trained policy: the shares a weight can
         # be tuned against (a residual's Δu term is exactly zero before).
         trained_balance = objective_balance(
@@ -169,7 +173,7 @@ def train_control(cfg: ControlConfig,
                                      nm_mapping, norm_stats)
             if cfg.progress != "silent":
                 print(f"Best plan on the surrogate: objective {plan.gap * 100:.0f}% below "
-                      "the policy's (control reportcard, Controller gap).")
+                      "the controller's (control reportcard, Controller gap).")
 
         if cfg.plot:
             # `t` is elapsed seconds from each file's first row, so the plots

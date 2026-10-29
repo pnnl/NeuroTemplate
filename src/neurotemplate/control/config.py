@@ -86,7 +86,8 @@ class ControlConfig:
     # Network family (see control.policy.policy_catalog). "linear" ignores
     # policy_layers / log2_policy_hidden / policy_nonlin and produces a single
     # saturated affine feedback law: the default, because it has little it
-    # can learn from the surrogate that the plant does not share.
+    # can learn from the surrogate that the plant does not share. "mpc" trains
+    # nothing: it plans through the surrogate at every step (control.mpc).
     policy: str = "linear"
     policy_nonlin: str = "gelu"
     # How the network output is squashed into [umin, umax]: "sigmoid_scale"
@@ -94,6 +95,11 @@ class ControlConfig:
     policy_bound_method: str = "sigmoid_scale"
     log2_policy_hidden: int = 3
     policy_layers: int = 1
+    # `policy: mpc`: steps planned ahead (every D and reference column's
+    # `future` must reach them), Adam steps per control step, and their rate.
+    mpc_horizon: int = 72
+    mpc_iters: int = 20
+    mpc_lr: float = 0.05
     # The residual, per U column: {column: [below, above]} in that column's
     # physical units. A column named here commands
     # clamp(reference_control(...)[column] + δ, umin, umax) with
@@ -164,7 +170,10 @@ class ControlConfig:
             raise ValueError("sysid_run_id must be set (MLflow run id of the "
                              "trained dynamics surrogate)")
 
-        check_one_of(self, "policy", list(policy_catalog))
+        check_one_of(self, "policy", [*policy_catalog, "mpc"])
+        if self.policy == "mpc" and self.residual_delta:
+            raise ValueError("policy: mpc plans every command itself, so it has no "
+                             "residual to box: leave residual_delta empty.")
         check_one_of(self, "progress", list(PROGRESS_LEVELS))
         check_one_of(self, "policy_nonlin", list(POLICY_NONLIN))
         check_one_of(self, "policy_bound_method", POLICY_BOUND_METHODS)
@@ -210,6 +219,7 @@ class ControlConfig:
             "log2_policy_hidden", "policy_layers",
             "epochs", "update_every", "lr",
             "test_window", "test_stride", "plan_lr",
+            "mpc_horizon", "mpc_iters", "mpc_lr",
         ]:
             check_positive(self, name)
         if self.threads is not None:
