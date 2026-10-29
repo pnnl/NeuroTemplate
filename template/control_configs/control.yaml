@@ -182,6 +182,11 @@ gains: {comfort_lower: 1.0, comfort_upper: 1.0, du: 1.0}
 # day of 5-minute data.
 # test_window: 287
 # test_stride: 288
+# The best open-loop plan over the same windows, the policy's bar on the
+# reportcard ("Controller gap"): Adam steps from the policy's own commands,
+# and their rate. More steps tighten the bar; 0 skips it.
+# plan_iters: 200
+# plan_lr: 0.05
 
 # ── RUNTIME ──────────────────────────────────────────────────────
 # One seed is one draw, and nothing reports the spread between seeds here:

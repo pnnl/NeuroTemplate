@@ -130,6 +130,11 @@ class ControlConfig:
     # rollout on plots is test_window - hmax). Matches sys-id semantics.
     test_window: int = 287
     test_stride: int = 288
+    # The best open-loop plan on the surrogate over the same windows, the
+    # bar the policy is read against (`control.plan`): Adam steps and their
+    # rate. 0 skips it.
+    plan_iters: int = 200
+    plan_lr: float = 0.05
 
     # ── Runtime ──────────────────────────────────────────────────
     seed: int = -1
@@ -204,13 +209,13 @@ class ControlConfig:
             "batch_size", "train_pred_steps",
             "log2_policy_hidden", "policy_layers",
             "epochs", "update_every", "lr",
-            "test_window", "test_stride",
+            "test_window", "test_stride", "plan_lr",
         ]:
             check_positive(self, name)
         if self.threads is not None:
             check_positive(self, "threads")
 
-        for name in ["warmup", "patience"]:
+        for name in ["warmup", "patience", "plan_iters"]:
             check_non_negative(self, name)
 
         # Column names are resolved against the surrogate's U at policy build.

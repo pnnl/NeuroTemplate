@@ -220,6 +220,15 @@ against the rule or a previous run.
   `δ` sat at each edge of its box. A box edge that binds most of the time
   means the rule is wrong for this plant, or the optimizer is riding a
   surrogate error into the wall.
+- **Controller gap**: the policy beside the best open-loop plan on the same
+  test windows, term by term. The plan is a free command per step through the
+  same surrogate, bounds and objective, optimised with every step ahead known,
+  so nothing commanding through those bounds does better on this surrogate.
+  The gap between them is the controller's: its inputs, structure or
+  training. What the plan does not do either (a pre-cool, riding the band
+  edge) the surrogate or the objective does not reward, and no controller
+  will find it. It cannot see where the surrogate is wrong about the plant.
+  `plan_iters` sets its effort, 0 skips it.
 
 [template/README.md](../template/README.md) describes the run-by-run ladder
 (the rule, the band terms only, the full objective, its price-blind twin),

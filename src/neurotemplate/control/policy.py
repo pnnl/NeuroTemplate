@@ -607,9 +607,7 @@ def build_policy(
     else:
         net = _ResidualPolicy(net, reference, list(u_cols), umin, umax,
                               below, above, anchored, u_shift, u_stretch).to(device)
-    if cfg.command_bounds:
-        net = _reference_bounds(net, cfg, nm_mapping, keys, input_map,
-                                r_columns, umin, umax).to(device)
+    net = with_command_bounds(net, cfg, nm_mapping, keys, input_map, umin, umax).to(device)
 
     return Node(
         net,
@@ -626,6 +624,18 @@ def _column_stats(norm_stats: NormStats, columns: list[str],
     return tuple(torch.tensor([float(norm_stats[c][field]) for c in columns],
                               dtype=torch.float32, device=device)
                  for field in ("shift", "stretch"))
+
+
+def with_command_bounds(net: nn.Module, cfg, nm_mapping: dict[str, list[str]],
+                        keys: list[str], input_map: dict, umin: torch.Tensor,
+                        umax: torch.Tensor) -> nn.Module:
+    """`net`, commanding over `[umin, umax]`, behind `cfg.command_bounds` as a
+    policy is (`_ReferenceBounds`); `net` itself when nothing is bounded.
+    Any controller reading the policy's windows can go behind it."""
+    if not cfg.command_bounds:
+        return net
+    return _reference_bounds(net, cfg, nm_mapping, keys, input_map,
+                             resolve_objective(cfg, nm_mapping).r_columns, umin, umax)
 
 
 def _reference_bounds(net, cfg, nm_mapping, keys, input_map, r_columns,

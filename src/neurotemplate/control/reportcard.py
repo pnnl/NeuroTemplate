@@ -260,6 +260,39 @@ def _performance_section(results) -> str:
     return _section("Closed-loop performance", "\n".join(body))
 
 
+def _gap_section(plan, results) -> str:
+    """The policy beside the best open-loop plan on the same windows
+    (`control.plan`), term by term."""
+    names = [term.name for term in plan.policy.terms]
+    by_name = [{term.name: term.value for term in balance.terms}
+               for balance in (plan.policy, plan.plan)]
+    cost = {} if results.energy is None else results.energy.weighted_energy
+    plan_cost = {} if plan.results.energy is None else plan.results.energy.weighted_energy
+    head = (["", "Objective"] + [n.removesuffix("_loss") for n in names]
+            + ["Violation", "Mean exceedance"]
+            + [f"∫`{w}`·power" for w in cost])
+    rows = []
+    for label, values, scored, weighted in (("Policy", by_name[0], results, cost),
+                                            ("Best plan", by_name[1], plan.results, plan_cost)):
+        total = sum(values.values())
+        rows.append([label, f"{total:.4g}"] + [f"{values[n]:.4g}" for n in names]
+                    + [f"{scored.comfort_violation_rate * 100:.2f}%",
+                       f"{scored.comfort_mean_exceedance:.4g}"]
+                    + [f"{weighted[w]:.4g}" for w in cost])
+    body = [
+        f"The best plan is a free command per step through the same surrogate, "
+        f"bounds and objective, over these test windows, with every step ahead "
+        f"known ({plan.iterations} Adam steps, {plan.time_s:.0f} s): a bar for "
+        f"any controller on this surrogate, not a controller. Its objective is "
+        f"**{plan.gap * 100:.0f}%** below the policy's. That gap is the "
+        "controller's; what the plan does not do either, the surrogate does not "
+        "make pay.\n",
+        "| " + " | ".join(head) + " |",
+        "|" + "|".join(["---"] + ["---:"] * (len(head) - 1)) + "|",
+    ] + ["| " + " | ".join(row) + " |" for row in rows]
+    return _section("Controller gap", "\n".join(body))
+
+
 def _actuation_section(results) -> str:
     """Per-control effort and time-at-bound, as measured.
 
@@ -390,6 +423,7 @@ def render_control_reportcard(
     trained_balance: Optional[ObjectiveBalance] = None,
     power: Optional[PowerDiagnostics] = None,
     objective_notes: Optional[list[str]] = None,
+    plan=None,
     run_name: Optional[str] = None,
     timestamp: Optional[str] = None,
     best_dev_loss: Optional[float] = None,
@@ -413,6 +447,8 @@ def render_control_reportcard(
                      power signal reads zero, and how much of that is a dead
                      gradient.
         objective_notes: Optional objective.objective_notes(...) prose.
+        plan:        Optional plan.PlanResult, the best open-loop plan on the
+                     same windows; None renders no gap section.
 
     Returns:
         Markdown string. The caller writes it to disk and logs it.
@@ -436,8 +472,10 @@ def render_control_reportcard(
     ]
     if balance is not None:
         parts.append(_objective_section(balance, power, objective_notes, trained_balance))
+    parts.append(_performance_section(results))
+    if plan is not None:
+        parts.append(_gap_section(plan, results))
     parts += [
-        _performance_section(results),
         _actuation_section(results),
         _response_section(results, nm_mapping["U"]),
         _tracking_section(results),

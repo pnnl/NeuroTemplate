@@ -163,29 +163,54 @@ def evaluate_closed_loop(
     from different files are pooled along the batch axis (no rollout spans
     two files). Metrics are computed once across the pooled rollouts.
     """
-    hooks = load_control_hooks(cfg)
-    _, _, hmax = horizons(cfg, sysid_cfg)
-    objective = resolve_objective(cfg, nm_mapping)
-    regulated = objective.regulated
-    device = sysid_cfg.device
-
-    # The test split's reference columns are fixed data, so every run is
-    # scored against the same references.
-    pred_steps = eval_pred_steps(cfg, hmax)
-    data = build_window_dict_multi(
-        test_dfs, cfg, sysid_cfg, nm_mapping, P=pred_steps, stride=cfg.test_stride,
-    )
-    # source_idx is bookkeeping for plotting only; the closed-loop System
-    # doesn't expect it among its inputs.
-    source_idx = data.pop("source_idx")
-
-    cl_system.nsteps = pred_steps
+    data, source_idx = evaluation_windows(cfg, sysid_cfg, test_dfs, nm_mapping)
+    cl_system.nsteps = eval_pred_steps(cfg, horizons(cfg, sysid_cfg)[2])
     t0 = tic()
     with torch.no_grad():
         out = cl_system(data)
     eval_time_s = tic() - t0
     # Plumb source_idx through `out` so plot_closed_loop can route per-batch.
     out["source_idx"] = source_idx
+    return score_rollout(cfg, sysid_cfg, out, nm_mapping, norm_stats, eval_time_s), out
+
+
+@beartype
+def evaluation_windows(cfg, sysid_cfg, test_dfs: list,
+                       nm_mapping: dict[str, list[str]]) -> tuple[dict, torch.Tensor]:
+    """The test split's closed-loop windows, and which file each came from.
+
+    The test split's reference columns are fixed data, so every run — and
+    every controller scored on it — is scored against the same references.
+    A closed loop rolls them out over `eval_pred_steps`.
+    """
+    _, _, hmax = horizons(cfg, sysid_cfg)
+    data = build_window_dict_multi(
+        test_dfs, cfg, sysid_cfg, nm_mapping, P=eval_pred_steps(cfg, hmax),
+        stride=cfg.test_stride,
+    )
+    # source_idx is bookkeeping for plotting only; the closed-loop System
+    # doesn't expect it among its inputs.
+    return data, data.pop("source_idx")
+
+
+@beartype
+def score_rollout(
+    cfg,
+    sysid_cfg,
+    out: dict,
+    nm_mapping: dict[str, list[str]],
+    norm_stats: NormStats,
+    eval_time_s: float,
+    residual: bool = True,
+) -> ControlResults:
+    """Pooled physical metrics of one finished evaluation rollout. `residual`
+    scores the deployed deviation from the reference rule, when the run has
+    one; a controller that is no residual is not scored against a box."""
+    hooks = load_control_hooks(cfg)
+    _, _, hmax = horizons(cfg, sysid_cfg)
+    objective = resolve_objective(cfg, nm_mapping)
+    regulated = objective.regulated
+    device = sysid_cfg.device
 
     y_ctrl, lower, upper = band_trajectories(objective, out, hmax, nm_mapping)
     step_hours = hours_per_step(out["t"][:, scored_steps("t", hmax), :])
@@ -240,12 +265,12 @@ def evaluate_closed_loop(
     # How much of each box a residual policy actually used. Replaying the
     # (memoryless) rule on the recorded trajectory gives the command it would
     # have issued at each step, so U - u_ref is the deviation that was deployed.
-    residual = []
-    if cfg.residual_delta:
+    deviations = []
+    if residual and cfg.residual_delta:
         u_ref = reference_over_horizon(cfg, out, hmax, nm_mapping)
         for column, ref in u_ref.items():
             j = u_cols.index(column)
-            residual.append(residual_metrics(
+            deviations.append(residual_metrics(
                 column, U[:, :, j], ref,
                 tuple(float(side) for side in cfg.residual_delta[column]),
             ))
@@ -260,8 +285,8 @@ def evaluate_closed_loop(
         tracking=tracking,
         energy=energy,
         eval_time_s=eval_time_s,
-        residual=residual,
-    ), out
+        residual=deviations,
+    )
 
 
 # ── MLflow metric logging ────────────────────────────────────────
