@@ -16,7 +16,7 @@ from typing import Optional
 
 import torch
 
-from neuromancer.constraint import variable, Loss
+from neuromancer.constraint import Loss
 from neuromancer.loss import PenaltyLoss
 
 from neurotemplate.modeling.config import ModelingConfig
@@ -32,6 +32,8 @@ def build_loss(
     raw_model: torch.nn.Module,
     system: torch.nn.Module,
     grad_masks: dict[str, torch.Tensor],
+    nm_mapping: dict[str, list[str]],
+    norm_stats: dict[str, dict],
     head_stack: Optional[HeadStack] = None,
 ) -> PenaltyLoss:
     """
@@ -39,57 +41,47 @@ def build_loss(
 
     Args:
         cfg:          ModelingConfig with loss gains and physics parameters
-        raw_model:    SSMGrad instance (the raw dynamics module inside the System)
+        raw_model:    the normalised SSMGrad inside the System
         system:       Neuromancer SystemPreview wrapping the dynamics model
         grad_masks:   {key: Tensor[1,1,ny,nx]} with sign constraints, or empty dict
-        head_stack:   per-channel output heads, or None for blanket MSE
+        nm_mapping, norm_stats: the run's; the tracking loss is scored with
+                      each Y channel normalised by its stats, so channels in
+                      different units weigh alike
+        head_stack:   per-channel output heads in those normalised units, or
+                      None for blanket MSE
 
     Returns:
         PenaltyLoss combining all active loss terms
     """
 
-    # ── Tracking losses (Neuromancer Variable expressions) ──────────
+    # ── Tracking loss ───────────────────────────────────────────────
     #
-    # These operate on the System's output dict:
-    #   'Y'  = ground truth states from the data loader [batch, time, ny]
+    #   'Y'  = ground truth from the data loader [batch, time, ny]
     #   'yn' = model predictions accumulated by System [batch, time+1, ny]
     #
-    # yn has one extra timestep (the initial condition), so we slice :-1
-    # to align predictions with ground truth. The leading history_steps positions
-    # of yn are the seeded history — copies of Y that contribute exactly zero
-    # error and would only dilute the mean — so both sides drop them. This is
-    # the same slice pipeline.evaluate_and_plot uses, which keeps the training
-    # loss and the reported test metric measuring the same span.
-
-    y = variable("Y")[:, cfg.history_steps:, :]
-    yhat = variable("yn")[:, cfg.history_steps:-1, :]
-
-    # Reference tracking
+    # Both in physical units. yn has one extra timestep (the initial
+    # condition), so it is sliced :-1 to align with the truth. The leading
+    # history_steps positions are the seeded history — copies of Y that
+    # contribute exactly zero error and would only dilute the mean — so both
+    # sides drop them. This is the same span pipeline.evaluate_and_plot scores.
     #
-    # Without heads (or with all-regression heads), this is the original
-    # blanket MSE — preserved as a Variable expression so it still shows
-    # up labeled "ref_loss" in the Trainer output dict.
-    #
-    # With non-trivial heads, the per-channel loss is computed via the
-    # head_stack callable so each channel uses its own activation/loss
-    # pairing (e.g. BCE for binary). The result is wrapped in a Loss so
-    # it still appears as a labeled objective alongside the others.
-    if head_stack is None:
-        mse = torch.mean((yhat - y) ** 2)
-        ref_loss = cfg.ref_gain * mse == 0
-        ref_loss.update_name("ref_loss")
-    else:
-        def head_compute(yn, Y):
-            return head_stack.loss(
-                yn[:, cfg.history_steps:-1, :], Y[:, cfg.history_steps:, :]
-            )
+    # Each channel is scored normalised, with its own head's loss (MSE for a
+    # regression head, BCE for binary, ...), or blanket MSE without heads.
+    shift = torch.tensor([norm_stats[c]["shift"] for c in nm_mapping["Y"]],
+                         dtype=torch.float32, device=cfg.device)
+    stretch = torch.tensor([norm_stats[c]["stretch"] for c in nm_mapping["Y"]],
+                           dtype=torch.float32, device=cfg.device)
+    h = cfg.history_steps
 
-        ref_loss = Loss(
-            input_keys=["yn", "Y"],
-            loss=head_compute,
-            weight=cfg.ref_gain,
-            name="ref_loss",
-        )
+    def tracking(yn, Y):
+        y_hat = (yn[:, h:-1, :] - shift) / stretch
+        y = (Y[:, h:, :] - shift) / stretch
+        if head_stack is None:
+            return torch.mean((y_hat - y) ** 2)
+        return head_stack.loss(y_hat, y)
+
+    ref_loss = Loss(input_keys=["yn", "Y"], loss=tracking, weight=cfg.ref_gain,
+                    name="ref_loss")
 
     objectives = [ref_loss]
 

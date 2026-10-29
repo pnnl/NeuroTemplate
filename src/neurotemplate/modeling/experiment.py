@@ -24,6 +24,7 @@ from neurotemplate.common.data_utils import NormStats, get_loader
 from neurotemplate.common.progress import Progress
 from neurotemplate.common.tracking import RunLog, RunLogger, save_checkpoint
 from neurotemplate.modeling.heads import HeadStack
+from neurotemplate.modeling.contract import normalized_core
 from neurotemplate.modeling.dynamics import get_dynamics
 from neurotemplate.modeling.loss import build_loss
 from neurotemplate.modeling.rc import physical_parameters
@@ -106,16 +107,14 @@ def build_trainer(
     """
     # SystemPreview with 'yn' feedback loop for autoregressive rollout
     system = get_dynamics(
-        cfg, nm_mapping, head_stack=head_stack, block_spec=block_spec,
-        norm_stats=norm_stats,
+        cfg, nm_mapping, norm_stats, head_stack=head_stack, block_spec=block_spec,
     ).to(cfg.device)
 
-    # The raw SSMGrad model lives inside the System's Node.
-    # Physics losses need direct access to it for Jacobians and
-    # training-mode checks. The loss must read the head stack the model
-    # owns (get_dynamics attaches its own copy), not the caller's — one
-    # stack, so nothing calibrated on it can go stale in the loss.
-    raw_model = system.nodes[0].callable
+    # The normalised family inside the contract. The gradient penalty
+    # differentiates it directly, and the loss reads the head stack it owns
+    # (get_dynamics rescales its own copy), not the caller's — one stack, so
+    # nothing calibrated on it can go stale in the loss.
+    raw_model = normalized_core(system)
     head_stack = raw_model.head_stack
 
     # Single PenaltyLoss with all objectives:
@@ -126,6 +125,8 @@ def build_trainer(
         raw_model=raw_model,
         system=system,
         grad_masks=grad_masks,
+        nm_mapping=nm_mapping,
+        norm_stats=norm_stats,
         head_stack=head_stack,
     )
 

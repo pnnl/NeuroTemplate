@@ -18,7 +18,7 @@ import torch
 
 from neurotemplate.modeling.config import ModelingConfig
 from neurotemplate.common.config import ConfigError, dict_to_dataclass, _parse_value
-from neurotemplate.common.data_utils import load_split, normalize_df
+from neurotemplate.common.data_utils import load_split
 from neurotemplate.common.tracking import CHECKPOINT
 from neurotemplate.modeling.experiment import resolve_device, set_seeds
 from neurotemplate.modeling.heads import HeadStack
@@ -102,8 +102,7 @@ def _load_dyn_sys(cfg, nm_mapping, head_stack, block_spec, norm_stats,
     not match the trained one fails here, naming the keys.
     """
     dyn_sys = get_dynamics(
-        cfg, nm_mapping, head_stack=head_stack, block_spec=block_spec,
-        norm_stats=norm_stats,
+        cfg, nm_mapping, norm_stats, head_stack=head_stack, block_spec=block_spec,
     ).to(cfg.device)
     problem_state = torch.load(weights_path, map_location=cfg.device)
     if not all(k.startswith(_PROBLEM_NODE_PREFIX) for k in problem_state):
@@ -171,18 +170,16 @@ def evaluate_trained(cfg, dyn_sys, data_paths: list[str], norm_stats: dict,
                      plot_dir: Optional[Path]):
     """Evaluate a loaded model on `data_paths`: one split, one or more CSVs.
 
-    The data is normalized with the run's own `norm_stats`, never stats
-    fitted to it: the model only reads inputs in the scaling it trained under.
+    The model normalises with the run's own `norm_stats`, never stats fitted
+    to this data: it only reads inputs in the scaling it trained under.
 
     Returns (test_results, raw_dfs). `raw_dfs` is always a list (length >= 1)
-    of unnormalized dataframes — callers needing a row count sum lengths
-    across the list.
+    of dataframes — callers needing a row count sum lengths across the list.
     """
     raw_dfs, freq_s = load_split(data_paths, "--data")
-    norm_dfs = [normalize_df(df, norm_stats) for df in raw_dfs]
     test_results = evaluate_and_plot(
         cfg=cfg, dyn_sys=dyn_sys,
-        test_dfs=norm_dfs,
+        test_dfs=raw_dfs,
         nm_mapping=nm_mapping, norm_stats=norm_stats,
         synth_cfg=synth_cfg, freq_s=freq_s,
         plot_run_dir=plot_dir,

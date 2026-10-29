@@ -55,6 +55,7 @@ from neurotemplate._typing import beartype
 from neurotemplate.common.data_utils import get_sw_dict_multi, pool_dfs
 from neurotemplate.common.metrics import level_metrics
 from neurotemplate.modeling.config import ModelingConfig
+from neurotemplate.modeling.contract import contract_model, normalized_core
 from neurotemplate.modeling.heads import HeadStack, OrdinalHead, inverse_sqrt_frequency_weights
 
 
@@ -102,8 +103,8 @@ class Calibration:
 @beartype
 def balance_level_weights(head_stack: HeadStack, train_dfs: list[DataFrame]) -> None:
     """Set every levelled head's `level_weights` to the inverse square-root
-    frequency of its levels in the (normalized) training data. Heads
-    without levels are left alone."""
+    frequency of its levels in the training data. The stack and the data are
+    in the same (physical) units. Heads without levels are left alone."""
     pool = pool_dfs(train_dfs)
     for name, head in zip(head_stack.channel_names, head_stack.heads):
         levels = head.levels()
@@ -116,9 +117,10 @@ def balance_level_weights(head_stack: HeadStack, train_dfs: list[DataFrame]) -> 
 def collect_rollout_z(dyn_sys, data: dict, history_steps: int) -> tuple[torch.Tensor, torch.Tensor]:
     """Roll `dyn_sys` out on `data` and return the pre-activation z it produced
     at every scored step, [batch, steps, raw_width], with the matching truth
-    [batch, steps, ny]. Read through a forward hook on the head stack, so the
-    System's output contract is untouched."""
-    head_stack = dyn_sys.nodes[0].callable.head_stack
+    [batch, steps, ny] in the same (normalised) units as the heads. Read
+    through a forward hook on the head stack, so the System's output contract
+    is untouched."""
+    head_stack = normalized_core(dyn_sys).head_stack
     seen: list[torch.Tensor] = []
     handle = head_stack.register_forward_hook(lambda _m, inp, _out: seen.append(inp[0].detach()))
     try:
@@ -129,7 +131,7 @@ def collect_rollout_z(dyn_sys, data: dict, history_steps: int) -> tuple[torch.Te
     # The rollout runs one step past the last truth (yn has T+1 entries);
     # drop that final z so z[:, t] lines up with Y[:, history_steps + t].
     z = torch.stack(seen, dim=1)[:, :-1]
-    return z, out["Y"][:, history_steps:]
+    return z, contract_model(dyn_sys).normalize("Y", out["Y"][:, history_steps:])
 
 
 def _rollout_z(dyn_sys, cfg, dev_dfs, nm_mapping):
@@ -181,8 +183,9 @@ def calibrate_decision_thresholds(
     System's own head stack. Returns {channel: Calibration} for every
     ordinal channel that could be calibrated; a channel with a level dev
     never visits, or with `use_ste=False` (its snap never runs), is
-    skipped with a warning. Empty without ordinal heads."""
-    head_stack = dyn_sys.nodes[0].callable.head_stack
+    skipped with a warning. Empty without ordinal heads. Thresholds are in
+    the model's normalised units, where its heads compute."""
+    head_stack = normalized_core(dyn_sys).head_stack
     if head_stack is None or not any(isinstance(h, OrdinalHead) for h in head_stack.heads):
         return {}
 

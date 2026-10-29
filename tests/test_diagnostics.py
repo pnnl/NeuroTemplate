@@ -64,7 +64,7 @@ def test_staged_signal_recommends_the_right_number_of_levels():
     rec = recommend_head(_staged(), "Total DX Power [W]")
     assert rec.kind == "ordinal"
     assert "n_levels=3" in rec.snippet
-    assert "project_physical_to_norm" in rec.snippet
+    assert "level_values=[" in rec.snippet
 
 
 # ── estimate_decay: recover a known tau, and say so when there is none ──

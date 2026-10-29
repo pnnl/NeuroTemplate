@@ -43,6 +43,7 @@ from neurotemplate.export.package import (
 )
 from neurotemplate.export.spec import build_spec
 from neurotemplate.export.state import StateSlot, probe_state_slots
+from neurotemplate.modeling.contract import contract_model
 from neurotemplate.export.verify import (
     AGREEMENT_TOL, Agreement, Rollout, blew_up, compare, package_rollout, reach,
     require_agreement, tolerances, torch_rollout,
@@ -98,7 +99,7 @@ def export_model(*, dyn_sys, cfg, nm_mapping: dict[str, list[str]],
                          f"ship a fixture of {shipped}.")
 
     dyn_sys = dyn_sys.cpu().eval()
-    reference = torch_rollout(dyn_sys, nm_mapping, norm_stats, frame)
+    reference = torch_rollout(dyn_sys, nm_mapping, frame)
     reached = reach(reference, nm_mapping["Y"], norm_stats)
     verified = not blew_up(reached)
     if not verified and not ask(
@@ -174,25 +175,24 @@ def _write_graphs(model_dir: Path, dyn_sys, cfg, nm_mapping, norm_stats,
                   run_id: str) -> list[StateSlot]:
     """Trace both graphs into `model_dir`; return the lifted state layout."""
     model_dir.mkdir(parents=True)
-    model = dyn_sys.nodes[0].callable
-    widths = [len(nm_mapping[key]) for key in ("Y", "U", "D")]
+    model = contract_model(dyn_sys)
     batch, steps = 2, cfg.history_steps   # batch 2: see trace.export_graph
 
-    slots = probe_state_slots(model, *(torch.randn(batch, steps * n) for n in widths))
-    width = sum(slot.width for slot in slots)
-
     def physical(key: str) -> torch.Tensor:
+        """A window of plausible values: each column's mean ± its spread."""
         cols = nm_mapping[key]
         shift = torch.tensor([norm_stats[c]["shift"] for c in cols])
         stretch = torch.tensor([norm_stats[c]["stretch"] for c in cols])
         return shift + stretch * torch.randn(batch, steps, len(cols))
 
     window = (physical("Y"), physical("U"), physical("D"))
+    slots = probe_state_slots(model, *window)
+    width = sum(slot.width for slot in slots)
     names = ["y", "u", "d"]
     outputs = ["y_next", "state_next"] if width else ["y_next"]
     graphs = {
-        "warm_start": (WarmStart(model, nm_mapping, norm_stats, slots), window, names),
-        "step": (Step(model, nm_mapping, norm_stats, slots),
+        "warm_start": (WarmStart(model, slots), window, names),
+        "step": (Step(model, slots),
                  window + ((torch.randn(batch, width),) if width else ()),
                  names + (["state"] if width else [])),
     }

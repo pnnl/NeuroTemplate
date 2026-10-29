@@ -10,6 +10,7 @@ from __future__ import annotations
 
 
 import torch
+import torch.nn as nn
 
 from neurotemplate.common.tracking import CHECKPOINT
 from neurotemplate.control.closed_loop import (
@@ -25,6 +26,29 @@ from neurotemplate.modeling.load import (
 from neurotemplate.modeling.experiment import resolve_device
 
 from neurotemplate._typing import beartype
+
+
+class _NormalizedPlant(nn.Module):
+    """The frozen surrogate, for a closed loop that rolls out in normalised
+    units: converts at the plant's edge, so the contract model behind it
+    (`model`) sees physical units."""
+
+    def __init__(self, model: nn.Module, nm_mapping: dict[str, list[str]],
+                 norm_stats: dict, history_steps: int):
+        super().__init__()
+        self.model = model
+        self.history_steps = history_steps
+        self.widths = [len(nm_mapping[key]) for key in ("Y", "U", "D")]
+        for key in ("Y", "U", "D"):
+            for field in ("shift", "stretch"):
+                self.register_buffer(f"{key}_{field}", torch.tensor(
+                    [float(norm_stats[c][field]) for c in nm_mapping[key]]), persistent=False)
+
+    def forward(self, y: torch.Tensor, u: torch.Tensor, d: torch.Tensor) -> torch.Tensor:
+        physical = [x.reshape(x.shape[0], self.history_steps, width)
+                    * getattr(self, f"{key}_stretch") + getattr(self, f"{key}_shift")
+                    for key, x, width in zip(("Y", "U", "D"), (y, u, d), self.widths)]
+        return (self.model(*physical) - self.Y_shift) / self.Y_stretch
 
 
 @beartype
@@ -56,6 +80,8 @@ def load_frozen_dynamics(
             "nodes; closed-loop assembly assumes one dynamics Node."
         )
     dyn_node = dyn_sys.nodes[0]
+    dyn_node.callable = _NormalizedPlant(dyn_node.callable.model, nm_mapping, norm_stats,
+                                         sysid_cfg.history_steps)
 
     return dyn_sys, dyn_node, sysid_cfg, nm_mapping, norm_stats
 

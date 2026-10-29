@@ -37,8 +37,6 @@ from neurotemplate.modeling.heads import (
     HeadStack,
     OrdinalHead,
     RegressionHead,
-    bounds_from_norm,
-    project_physical_to_norm,
 )
 
 INF = float("inf")
@@ -153,15 +151,27 @@ def test_decision_thresholds_move_the_snap_but_not_the_activation():
     assert torch.equal(low.thresholds, mid.thresholds)
 
 
-# ── Projection helpers ───────────────────────────────────────────
+# ── Units: a stack declared physical, held normalised ────────────
 
-def test_bounds_project_from_physical_units_into_normalized_ones():
-    stats = {"shift": 5.0, "stretch": 2.0, "min": 1.0, "max": 9.0}
-    assert bounds_from_norm(stats) == (-2.0, 2.0)
-    assert math.isclose(project_physical_to_norm(7.0, stats), 1.0)
+def test_a_physical_stack_rescales_into_a_models_units_and_back():
+    stats = {"power": {"shift": 5.0, "stretch": 2.0}, "stage": {"shift": 5.0, "stretch": 2.0},
+             "flag": {"shift": 0.0, "stretch": 1.0}}
+    physical = HeadStack([BoundedHead(1.0, INF),
+                          OrdinalHead(n_levels=3, level_values=[1.0, 5.0, 9.0],
+                                      decision_thresholds=[4.0, 8.0]),
+                          BinaryHead()], ["power", "stage", "flag"])
+    normalized = physical.normalized(stats)
+    bounded, ordinal, _ = normalized.heads
     # An infinite bound means "no bound" and must not become a huge number.
-    assert project_physical_to_norm(INF, stats) == INF
-    assert project_physical_to_norm(-INF, stats) == -INF
+    assert (bounded.lo, bounded.hi) == (-2.0, INF)
+    assert ordinal.level_values.tolist() == [-2.0, 0.0, 2.0]
+    assert ordinal.thresholds.tolist() == [-1.0, 1.0]
+    assert ordinal.decision_thresholds.tolist() == [-0.5, 1.5]
+    assert normalized.physical(stats).to_config() == physical.to_config()
+
+    # A binary channel's 0/1 target only survives unnormalised.
+    with pytest.raises(ValueError, match="binary head"):
+        physical.normalized({**stats, "flag": {"shift": 0.5, "stretch": 1.0}})
 
 
 # ── Pre-stack: derived inputs ────────────────────────────────────

@@ -13,7 +13,8 @@ from neurotemplate.common.data_utils import get_grad_masks
 from neurotemplate.modeling.experiment import set_seeds
 from neurotemplate.modeling.gradient_sampling import SampledGradientPenalty
 from neurotemplate.modeling.load import evaluate_trained, load_trained_dynamics
-from neurotemplate.modeling.pipeline import render_reportcard, write_reportcard
+from neurotemplate.modeling.contract import normalized_core
+from neurotemplate.modeling.pipeline import render_reportcard, trained_heads, write_reportcard
 from neurotemplate.hooks import load_modeling_hooks
 
 from neurotemplate._typing import beartype
@@ -21,9 +22,8 @@ from neurotemplate._typing import beartype
 
 def _eval_grad_penalty(dyn_sys, cfg, grad_masks):
     """Compute the raw (gain=1) gradient sign penalty."""
-    raw_model = dyn_sys.nodes[0].callable
     penalty = SampledGradientPenalty(
-        model=raw_model,
+        model=normalized_core(dyn_sys),
         grad_mapping=grad_masks,
         n_samples=cfg.grad_n_samples,
         device=cfg.device,
@@ -137,7 +137,7 @@ def main() -> None:
     md = render_reportcard(
         cfg=cfg, dyn_sys=dyn_sys, test_results=test_results,
         norm_stats=norm_stats, nm_mapping=nm_mapping,
-        head_stack=dyn_sys.nodes[0].callable.head_stack,
+        head_stack=trained_heads(dyn_sys, norm_stats),
         run_name=args.run_id,
         split_sizes={"test": {
             "rows": sum(len(d) for d in raw_dfs), "files": len(raw_dfs),

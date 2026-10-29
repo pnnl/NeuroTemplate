@@ -17,7 +17,7 @@ from neurotemplate.common.data_utils import compute_norm_stats, normalize_df
 from neurotemplate.modeling.dynamics import get_dynamics
 from neurotemplate.control.config import ControlConfig
 from neurotemplate.control.losses import extend_norm_stats, resolve_objective
-from model_fixtures import model_cfg, uniform_history
+from model_fixtures import model_cfg, uniform_history, unit_stats
 
 # Single-zone Modelica RTU strip-mall dataset. Y is one zone temp plus the
 # RTU thermal/flow state plus the two metered RTU power channels; U is a
@@ -170,7 +170,7 @@ def make_control_cfg(future: dict[str, int] | None = None, u_past: int = 0,
 
 def make_frozen_dynamics(sysid_cfg: Config, nm_mapping: dict):
     """Real SystemPreview from src, frozen — stand-in for a loaded model."""
-    dyn_sys = get_dynamics(sysid_cfg, nm_mapping)
+    dyn_sys = get_dynamics(sysid_cfg, nm_mapping, unit_stats(nm_mapping))
     for p in dyn_sys.parameters():
         p.requires_grad_(False)
     dyn_sys.eval()

@@ -413,9 +413,7 @@ def _bounded_coverage_section(
     was set up to fail — the model literally cannot reach those samples
     because the head clamps/squashes them away.
 
-    `test_df` must already be in the same space the head consumes (the
-    normalized test split). Bounds and test values are compared directly;
-    no extra projection.
+    `test_df` and the bounds are both in physical units.
 
     Returns None if any input is missing (section is just skipped).
     """
@@ -451,15 +449,13 @@ def _bounded_coverage_section(
         return None
 
     header = (
-        "| Channel | Test min (norm) | Test max (norm) | Bounds (norm) | "
+        "| Channel | Test min | Test max | Bounds | "
         "# below lo | # above hi | % outside |"
     )
     sep = "|" + "|".join(["---"] * 7) + "|"
     body_lines = [
-        "Bounds and test values are both in normalized space (head bounds "
-        "are interpreted in the space the head consumes). A non-zero "
-        "outside count means the channel was set up to fail — the model "
-        "literally cannot reach those samples.\n",
+        "A non-zero outside count means the channel was set up to fail — "
+        "the model literally cannot reach those samples.\n",
         header,
         sep,
     ]
@@ -494,7 +490,6 @@ def _levels_section(
     levels: list[LevelMetrics],
     persistence_levels: list[LevelMetrics],
     head_stack: Optional[HeadStack],
-    norm_stats: Optional[dict],
 ) -> Optional[str]:
     """Classification view of the binary / ordinal channels.
 
@@ -513,15 +508,14 @@ def _levels_section(
         "a level at all; NRMSE above cannot.\n",
         level_metrics_to_markdown(levels, persistence_levels or None),
     ]
-    if head_stack is not None and norm_stats is not None:
+    if head_stack is not None:
         rules = []
         for name, head in zip(head_stack.channel_names, head_stack.heads):
             # With use_ste=False the smooth activation is fed back and the
             # snap never runs, so there is no decision rule to report.
             if isinstance(head, OrdinalHead) and head.use_ste:
-                s = norm_stats[name]
-                phys = (head.decision_thresholds * s["stretch"] + s["shift"]).tolist()
-                rules.append(f"`{name}`: " + ", ".join(f"{t:.4g}" for t in phys))
+                rules.append(f"`{name}`: " + ", ".join(
+                    f"{t:.4g}" for t in head.decision_thresholds.tolist()))
         if rules:
             body.append(
                 "\nDecision thresholds (physical units, where the ordinal snap "
@@ -763,7 +757,7 @@ def render_reportcard(
                        renders no extra section, which is what keeps
                        ensemble_seeds=1 byte-identical to a run built before
                        this feature existed.
-        head_stack:    Optional HeadStack; when provided, non-regression Y
+        head_stack:    Optional HeadStack, physical units; when provided, non-regression Y
                        columns are annotated with their head kind in the data
                        section (e.g. "bounded [0, +∞]").
         run_name:      MLflow run name (falls back to cfg.run).
@@ -788,7 +782,7 @@ def render_reportcard(
         _data_section(nm_mapping, split_sizes, head_stack, norm_stats),
         _metrics_section(test_metrics, persistence),
     ]
-    levels_md = _levels_section(levels or [], persistence_levels or [], head_stack, norm_stats)
+    levels_md = _levels_section(levels or [], persistence_levels or [], head_stack)
     if levels_md is not None:
         parts.append(levels_md)
     calibration_md = _calibration_section(calibration, norm_stats)

@@ -16,7 +16,8 @@ import torch
 from neurotemplate.modeling.config import ModelingConfig as Config
 from neurotemplate.modeling.dynamics import get_dynamics
 from neurotemplate.modeling.gru import GRUBlock
-from model_fixtures import model_cfg, uniform_history
+from model_fixtures import model_cfg, uniform_history, unit_stats
+from neurotemplate.modeling.contract import normalized_core
 
 NY, NU, ND = 2, 1, 1
 P = 5  # rollout steps past the history
@@ -64,7 +65,7 @@ def make_batch(history_steps: int, batch: int = 3) -> dict:
 def build_system(model: str, history_steps: int, nm_mapping):
     """Deterministic weights so cross-run comparisons are meaningful."""
     torch.manual_seed(1234)
-    return get_dynamics(make_cfg(model, history_steps), nm_mapping)
+    return get_dynamics(make_cfg(model, history_steps), nm_mapping, unit_stats(nm_mapping))
 
 
 def flat_window(data: dict, lo: int, hi: int) -> tuple:
@@ -135,7 +136,7 @@ def test_rollout_enters_warmed_from_its_own_window(nm_mapping):
     system = build_system("gru", history_steps, nm_mapping)
     out = system(dict(data))
 
-    model = system.nodes[0].callable
+    model = normalized_core(system)
     model.fy.set_rollout_state(None)
     with torch.no_grad():
         expected = model(*flat_window(data, 0, history_steps))

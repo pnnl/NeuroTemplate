@@ -35,3 +35,11 @@ def trainable_cfg(savedir, nm_mapping: dict[str, list[str]], **over) -> Modeling
         "norm_type": "min_max", "plot": False, "seed": 7,
         "savedir": str(savedir), **over,
     })
+
+
+def unit_stats(nm_mapping: dict[str, list[str]]) -> dict[str, dict]:
+    """Identity norm stats: every column reaches a built-in family in its own
+    units, so a test's numbers mean the same on both sides of the contract."""
+    return {c: {"norm_type": "none", "shift": 0.0, "stretch": 1.0, "min": -1.0,
+                "max": 1.0, "mean": 0.0, "stddev": 1.0, "median": 0.0, "unit": None}
+            for key in ("Y", "U", "D") for c in nm_mapping[key]}

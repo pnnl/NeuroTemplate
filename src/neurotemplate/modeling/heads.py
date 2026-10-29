@@ -159,7 +159,19 @@ Serialization
 Heads are reconstructed at load time from a JSON-safe config produced
 by `HeadStack.to_config()` and consumed by `HeadStack.from_config()`.
 The config records each head's `kind` plus its constructor arguments
-in head-space — load_state_dict afterwards restores trained parameters.
+— load_state_dict afterwards restores trained parameters.
+
+Units
+=====
+
+A head is declared in the channel's physical units: a meter's bound at
+0 W, a staged channel's levels at its measured stage powers. A model that
+works in normalised units (every built-in family) holds the same stack
+rescaled into its own units, `HeadStack.normalized(norm_stats)`; its
+calibrated thresholds come back out through `HeadStack.physical`. The two
+are one affine map applied to every value a head carries, so a head means
+the same thing in both. `beta` is not a value: it is the head's sharpness
+in the units of the model that holds it.
 
 The input-side counterpart, `PreStack`, lives in `prestack.py`.
 """
@@ -297,7 +309,7 @@ class BinaryHead(Head):
     width = 1
     residual_compatible = False
 
-    def __init__(self, level_weights: Optional[torch.Tensor] = None):
+    def __init__(self, level_weights: Optional[torch.Tensor | list[float]] = None):
         super().__init__()
         self.register_buffer("_levels", torch.tensor([0.0, 1.0]), persistent=False)
         self.register_buffer(
@@ -341,9 +353,7 @@ class BoundedHead(Head):
     *gentler* gradient behavior than fully-bounded ones — only the
     closed side ever saturates.
 
-    `lo` / `hi` are interpreted in head-space (whatever space the data
-    is consumed in). Callers building heads from physical bounds should
-    project them with `project_physical_to_norm` first.
+    `lo` / `hi` are in the channel's units (see "Units").
 
     `decode` clamps the smooth band to [lo, hi] so the STE combine emits
     exact-bound values forward while gradient flows through the smooth
@@ -455,9 +465,8 @@ class OrdinalHead(Head):
     round-trip through `config()`, and the pipeline sets them after
     training from the data rather than the optimiser.
 
-    `level_values`, `init_thresholds` and `decision_thresholds` live in
-    head-space. Callers constructing the head from physical units should
-    project them through `project_physical_to_norm` first.
+    `level_values`, `init_thresholds` and `decision_thresholds` are in
+    the channel's units (see "Units").
     """
 
     kind = "ordinal"
@@ -467,12 +476,12 @@ class OrdinalHead(Head):
     def __init__(
         self,
         n_levels: int,
-        init_thresholds: Optional[torch.Tensor] = None,
-        level_values: Optional[torch.Tensor] = None,
+        init_thresholds: Optional[torch.Tensor | list[float]] = None,
+        level_values: Optional[torch.Tensor | list[float]] = None,
         beta: float = 15.0,
         use_ste: bool = True,
-        decision_thresholds: Optional[torch.Tensor] = None,
-        level_weights: Optional[torch.Tensor] = None,
+        decision_thresholds: Optional[torch.Tensor | list[float]] = None,
+        level_weights: Optional[torch.Tensor | list[float]] = None,
     ):
         super().__init__()
         if n_levels < 2:
@@ -483,12 +492,12 @@ class OrdinalHead(Head):
         self.beta = float(beta)
         self.use_ste = bool(use_ste)
 
-        # level_values: K output values the head can emit, in head-space.
+        # level_values: K output values the head can emit.
         # Default is the integer-index sequence [0, 1, ..., K-1].
         if level_values is None:
             level_values = torch.arange(n_levels, dtype=torch.float32)
         else:
-            level_values = level_values.to(torch.float32)
+            level_values = torch.as_tensor(level_values, dtype=torch.float32)
             if level_values.shape != (n_levels,):
                 raise ValueError(
                     f"level_values must have shape ({n_levels},), "
@@ -561,6 +570,7 @@ class OrdinalHead(Head):
             "n_levels": self.n_levels,
             "beta": self.beta,
             "level_values": self.level_values.tolist(),
+            "init_thresholds": self.thresholds.tolist(),
             "use_ste": self.use_ste,
             "decision_thresholds": self.decision_thresholds.tolist(),
             "level_weights": self.level_weights.tolist(),
@@ -574,7 +584,7 @@ def _checked_thresholds(
     or `default` when not given."""
     if given is None:
         return default.clone()
-    thresholds = given.to(torch.float32)
+    thresholds = torch.as_tensor(given, dtype=torch.float32)
     if thresholds.shape != default.shape:
         raise ValueError(
             f"{name} must have shape {tuple(default.shape)}, "
@@ -591,7 +601,7 @@ def _checked_level_weights(given: Optional[torch.Tensor], n_levels: int) -> torc
     """`given` as a positive float32 (n_levels,) tensor, or ones when not given."""
     if given is None:
         return torch.ones(n_levels)
-    weights = given.to(torch.float32)
+    weights = torch.as_tensor(given, dtype=torch.float32)
     if weights.shape != (n_levels,):
         raise ValueError(
             f"level_weights must have shape ({n_levels},), got {tuple(weights.shape)}"
@@ -610,26 +620,6 @@ def inverse_sqrt_frequency_weights(y: torch.Tensor, levels: torch.Tensor) -> tor
     counts = torch.bincount(idx, minlength=len(levels)).clamp(min=1).to(torch.float32)
     weights = counts.rsqrt()
     return weights * len(levels) / weights.sum()
-
-
-# ── Helpers exposed to users building heads from physical units ──
-
-
-def project_physical_to_norm(x: float, stats: dict[str, float]) -> float:
-    """Map a single physical value to head-space via the column's affine norm.
-
-    ±inf passes through unchanged so half-bounded heads stay half-bounded
-    regardless of normalization.
-    """
-    if math.isinf(x):
-        return x
-    return (x - stats["shift"]) / stats["stretch"]
-
-
-def bounds_from_norm(stats: dict[str, float]) -> tuple[float, float]:
-    """Channel min/max projected into head-space using the column's norm stats."""
-    shift, stretch = stats["shift"], stats["stretch"]
-    return ((stats["min"] - shift) / stretch, (stats["max"] - shift) / stretch)
 
 
 # ── Head stack ──────────────────────────────────────────────────
@@ -786,7 +776,7 @@ class HeadStack(nn.Module):
 
         The trained parameters live in state_dict; this captures the
         topology so load_model can rebuild a stack with the right shape
-        before state_dict is restored.
+        before state_dict is restored. Values are in this stack's own units.
         """
         out: dict[str, dict] = {}
         for name, head in zip(self.channel_names, self.heads):
@@ -821,8 +811,46 @@ class HeadStack(nn.Module):
                 kwargs["lo"] = _json_to_float(kwargs["lo"])
             if "hi" in kwargs:
                 kwargs["hi"] = _json_to_float(kwargs["hi"])
-            for key in ("level_values", "decision_thresholds", "level_weights"):
+            for key in ("level_values", "init_thresholds", "decision_thresholds",
+                        "level_weights"):
                 if key in kwargs:
                     kwargs[key] = torch.tensor(kwargs[key], dtype=torch.float32)
             heads.append(_KIND_TO_CLASS[kind](**kwargs))
         return cls(heads, channel_names)
+
+    # ── Units ──────────────────────────────────────────────────
+
+    def normalized(self, norm_stats: dict[str, dict]) -> "HeadStack":
+        """The same heads for a model that emits each channel normalised by
+        `norm_stats`: every value a head carries mapped through
+        `(x - shift) / stretch`. See the module docstring's "Units"."""
+        return self._rescaled(
+            lambda name, x: (x - norm_stats[name]["shift"]) / norm_stats[name]["stretch"])
+
+    def physical(self, norm_stats: dict[str, dict]) -> "HeadStack":
+        """Inverse of `normalized`: `x * stretch + shift`."""
+        return self._rescaled(
+            lambda name, x: x * norm_stats[name]["stretch"] + norm_stats[name]["shift"])
+
+    def _rescaled(self, to) -> "HeadStack":
+        """A new stack with `to(channel, x)` applied to every value its heads
+        carry. A binary head's levels are 0 and 1 in any units, so its channel
+        must map them to themselves."""
+        config = self.to_config()
+        for name, entry in config.items():
+            if entry["kind"] == "binary" and (to(name, 0.0), to(name, 1.0)) != (0.0, 1.0):
+                raise ValueError(
+                    f"{name!r} has a binary head, whose 0/1 target must reach the "
+                    "model unnormalised: give it None in column_norm_config.")
+            for key in _VALUE_FIELDS:
+                if key not in entry:
+                    continue
+                value = entry[key]
+                entry[key] = ([to(name, x) for x in value] if isinstance(value, list)
+                              else _float_to_json(to(name, _json_to_float(value))))
+        return HeadStack.from_config(config, self.channel_names)
+
+
+#: The config fields that are values in a channel's units, as opposed to
+#: counts, weights and sharpness.
+_VALUE_FIELDS = ("lo", "hi", "level_values", "init_thresholds", "decision_thresholds")

@@ -14,7 +14,7 @@ from control_fixtures import (
     ZONE, SETPT, DIST, Y_COLS,
     full_setup, make_frozen_dynamics, make_sysid_cfg,
 )
-from neurotemplate.modeling.dynamics import get_dynamics
+from neurotemplate.modeling.dynamics import get_dynamics, stateful_blocks
 
 
 def _windows(s, cfg=None, sysid_cfg=None):
@@ -106,7 +106,8 @@ def test_gru_surrogate_rolls_out_and_warms_up():
     # policy's first command rather than recorded data. Control never has to know those indices — SystemPreview's
     # input_map derives the window from the model's declared history_steps.
     model = dyn_node.callable
-    model.fy.set_rollout_state(None)
+    for block in stateful_blocks(model):
+        block.set_rollout_state(None)
     with torch.no_grad():
         expected = model(*[
             out[key][:, hmax - h_sys:hmax, :].reshape(out[key].shape[0], -1)
@@ -130,7 +131,7 @@ def _demand_setup():
                                     "capacity": [0.5, 3.0]}}},
         "rtu": {"Y": [c for c in Y_COLS if c != ZONE], "model": "mlp"},
     }
-    dyn_sys = get_dynamics(sysid_cfg, nm, block_spec=spec, norm_stats=norm_stats)
+    dyn_sys = get_dynamics(sysid_cfg, nm, norm_stats, block_spec=spec)
     for p in dyn_sys.parameters():
         p.requires_grad_(False)
     dyn_sys.eval()

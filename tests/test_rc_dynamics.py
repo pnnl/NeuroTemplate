@@ -42,7 +42,8 @@ from neurotemplate.modeling.rc import (
     MIN_TAU_STEPS, LatchedTerm, RCBlock, SaturatingTerm, demand_boxes, mode_taus,
     time_constant_boxes,
 )
-from model_fixtures import model_cfg, uniform_history
+from model_fixtures import model_cfg, uniform_history, unit_stats
+from neurotemplate.modeling.contract import normalized_core
 
 SPH = 12.0            # 5-minute data
 HISTORY_STEPS = 6
@@ -231,8 +232,8 @@ def test_a_week_of_adversarial_input_does_not_diverge():
     run away — which is what a DPC policy searching for exploits needs."""
     torch.manual_seed(0)
     boxed = {name: {**spec, "params": BOXED} for name, spec in SPLIT.items()}
-    system = get_dynamics(make_cfg(), MAPPING, block_spec=boxed)
-    for block in system.nodes[0].callable.fy.blocks:
+    system = get_dynamics(make_cfg(), MAPPING, unit_stats(MAPPING), block_spec=boxed)
+    for block in normalized_core(system).fy.blocks:
         set_thetas(block, -20.0)                  # fastest allowed rates
         with torch.no_grad():
             for p in block.gain.parameters():
@@ -250,7 +251,7 @@ def test_a_week_of_adversarial_input_does_not_diverge():
 def test_a_head_start_outlives_the_history_window():
     """A difference in initial temperature has to survive far longer than
     `history_steps`, or the family has bought nothing over a windowed MLP."""
-    system = get_dynamics(make_cfg(), MAPPING, block_spec=SPLIT)
+    system = get_dynamics(make_cfg(), MAPPING, unit_stats(MAPPING), block_spec=SPLIT)
     steps = int(SPH) * 24
     warm = rollout(system, 2.0, steps)[0, :, 0]
     cold = rollout(system, 0.0, steps)[0, :, 0]
@@ -283,8 +284,8 @@ def test_the_gradient_penalty_still_works_on_a_mixed_family_block():
     side by side — the gather/scatter permutations that make this vmap-safe
     don't care how many families are mixed in."""
     cfg = make_cfg(model="mlp", history=MIXED_HISTORY)  # default family for blocks that don't override
-    system = get_dynamics(cfg, MIXED_MAPPING, block_spec=MIXED_SPLIT)
-    raw = system.nodes[0].callable
+    system = get_dynamics(cfg, MIXED_MAPPING, unit_stats(MIXED_MAPPING), block_spec=MIXED_SPLIT)
+    raw = normalized_core(system)
     # widths: ny=2, nu=1, nd=1
     x = torch.randn(4, HISTORY_STEPS * 4)
     jac = torch.vmap(torch.func.jacrev(raw.compute_output, argnums=(0, 1, 2)))(
@@ -315,8 +316,8 @@ def test_a_pinned_time_constant_cannot_move_and_a_boxed_one_stays_in_its_box():
 
 def test_one_blocks_input_cannot_move_another_blocks_state():
     torch.manual_seed(0)
-    system = get_dynamics(make_cfg(), MAPPING, block_spec=SPLIT)
-    fy = system.nodes[0].callable.fy
+    system = get_dynamics(make_cfg(), MAPPING, unit_stats(MAPPING), block_spec=SPLIT)
+    fy = normalized_core(system).fy
     with torch.no_grad():
         for block in fy.blocks:
             for p in block.gain.parameters():
@@ -336,8 +337,8 @@ def test_outputs_come_back_in_the_mappings_channel_order():
     """Blocks may be declared in any order and hold their states in any
     order; the loss and the feedback loop both assume nm_mapping's."""
     reordered = {"south": SPLIT["south"], "north": SPLIT["north"]}
-    system = get_dynamics(make_cfg(), MAPPING, block_spec=reordered)
-    fy = system.nodes[0].callable.fy
+    system = get_dynamics(make_cfg(), MAPPING, unit_stats(MAPPING), block_spec=reordered)
+    fy = normalized_core(system).fy
     assert fy._to_y_order.tolist() == [1, 0]
     assert fy(torch.randn(2, HISTORY_STEPS * 7)).shape == (2, 2)
 
@@ -348,8 +349,8 @@ def test_a_group_of_zones_runs_exactly_as_its_blocks_would_alone():
     the zone computes on its own, or every multi-zone building trains on
     numbers no single zone would produce."""
     torch.manual_seed(0)
-    system = get_dynamics(make_cfg(), MAPPING, block_spec=SPLIT)
-    fy = system.nodes[0].callable.fy
+    system = get_dynamics(make_cfg(), MAPPING, unit_stats(MAPPING), block_spec=SPLIT)
+    fy = normalized_core(system).fy
     assert [len(g.blocks) for g in fy._groups] == [2]
     with torch.no_grad():
         for p in fy.parameters():
@@ -378,8 +379,8 @@ def test_a_group_of_zones_runs_exactly_as_its_blocks_would_alone():
 
 
 def test_reset_reaches_every_block():
-    system = get_dynamics(make_cfg(), MAPPING, block_spec=SPLIT)
-    fy = system.nodes[0].callable.fy
+    system = get_dynamics(make_cfg(), MAPPING, unit_stats(MAPPING), block_spec=SPLIT)
+    fy = normalized_core(system).fy
     fy(torch.randn(2, HISTORY_STEPS * 7))
     assert all(b._mass is not None for b in fy.blocks)
     clear_state(stateful_blocks(fy))
@@ -391,8 +392,8 @@ def test_reads_changes_the_reading_blocks_output_and_not_the_read_blocks():
     power's prediction but never the other way around."""
     cfg = make_cfg(model="mlp", history=MIXED_HISTORY)
     torch.manual_seed(0)
-    system = get_dynamics(cfg, MIXED_MAPPING, block_spec=MIXED_SPLIT)
-    fy = system.nodes[0].callable.fy
+    system = get_dynamics(cfg, MIXED_MAPPING, unit_stats(MIXED_MAPPING), block_spec=MIXED_SPLIT)
+    fy = normalized_core(system).fy
     with torch.no_grad():
         for p in fy.blocks[0].gain.parameters():
             p.normal_(0, 1.0)
@@ -431,9 +432,8 @@ def test_demand_is_zero_on_the_inactive_side_and_positive_on_the_active():
     """Through the normalisation round trip: the two columns have different
     shifts, so a setpoint 1 °C above the zone is *below* it in normalised
     units. Only a physical-unit comparison gates in the right place."""
-    system = get_dynamics(make_cfg(history=DECLARED_HISTORY), DECLARED_MAPPING, block_spec=DECLARED,
-                          norm_stats=STATS)
-    pre = system.nodes[0].callable.pre_stack
+    system = get_dynamics(make_cfg(history=DECLARED_HISTORY), DECLARED_MAPPING, STATS, block_spec=DECLARED)
+    pre = normalized_core(system).pre_stack
     zone = torch.full((1, HISTORY_STEPS), normalised("north T", 24.0))
     coasting = torch.full((1, HISTORY_STEPS), normalised("north sp", 25.0))
     cooling = torch.full((1, HISTORY_STEPS), normalised("north sp", 22.0))
@@ -496,18 +496,16 @@ def test_a_declared_block_persists_its_stats_and_reloads_by_config():
     """The branches' norm stats and the pre-stack's are buffers, so the
     checkpoint's numbers reach a rebuilt system through load_state_dict."""
     torch.manual_seed(0)
-    system = get_dynamics(make_cfg(history=DECLARED_HISTORY), DECLARED_MAPPING, block_spec=DECLARED,
-                          norm_stats=STATS)
+    system = get_dynamics(make_cfg(history=DECLARED_HISTORY), DECLARED_MAPPING, STATS, block_spec=DECLARED)
     state = system.state_dict()
     assert any("pre_stack" in k for k in state)
     assert any("saturating.0.capacity.theta" in k for k in state)
-    rebuilt = get_dynamics(make_cfg(history=DECLARED_HISTORY), DECLARED_MAPPING, block_spec=DECLARED,
-                           norm_stats=STATS)
+    rebuilt = get_dynamics(make_cfg(history=DECLARED_HISTORY), DECLARED_MAPPING, STATS, block_spec=DECLARED)
     rebuilt.load_state_dict(state)
     x = torch.randn(2, HISTORY_STEPS * 5)
     y, u, d = x[:, :HISTORY_STEPS], x[:, HISTORY_STEPS:HISTORY_STEPS * 3], x[:, HISTORY_STEPS * 3:]
     clear_state(stateful_blocks(system)); clear_state(stateful_blocks(rebuilt))
-    assert torch.equal(system.nodes[0].callable(y, u, d), rebuilt.nodes[0].callable(y, u, d))
+    assert torch.equal(normalized_core(system)(y, u, d), normalized_core(rebuilt)(y, u, d))
 
 
 def test_a_week_of_adversarial_setpoints_does_not_diverge_with_demand_on():
@@ -515,9 +513,8 @@ def test_a_week_of_adversarial_setpoints_does_not_diverge_with_demand_on():
     rollout stays inside the same bound as the undeclared block's — at the
     fastest rates and with the coil driven to its cap."""
     torch.manual_seed(0)
-    system = get_dynamics(make_cfg(history=DECLARED_HISTORY), DECLARED_MAPPING, block_spec=DECLARED,
-                          norm_stats=STATS)
-    block = system.nodes[0].callable.fy.blocks[0]
+    system = get_dynamics(make_cfg(history=DECLARED_HISTORY), DECLARED_MAPPING, STATS, block_spec=DECLARED)
+    block = normalized_core(system).fy.blocks[0]
     set_thetas(block, -20.0)                          # the fastest rates
     with torch.no_grad():
         block.saturating[0].capacity.theta.fill_(20.0)
@@ -537,7 +534,7 @@ def test_a_2r2c_without_the_residual_is_refused():
     """It predicts an increment; without the residual that would be read as
     an absolute temperature."""
     with pytest.raises(ValueError, match="requires residual"):
-        get_dynamics(make_cfg(residual=False), MAPPING, block_spec=SPLIT)
+        get_dynamics(make_cfg(residual=False), MAPPING, unit_stats(MAPPING), block_spec=SPLIT)
 
 
 def test_a_head_that_will_not_add_the_state_back_is_refused():
@@ -545,7 +542,7 @@ def test_a_head_that_will_not_add_the_state_back_is_refused():
     would read that increment as an absolute temperature."""
     stack = HeadStack([RegressionHead(), BinaryHead()], MAPPING["Y"])
     with pytest.raises(ValueError, match="residual-compatible"):
-        get_dynamics(make_cfg(), MAPPING, head_stack=stack, block_spec=SPLIT)
+        get_dynamics(make_cfg(), MAPPING, unit_stats(MAPPING), head_stack=stack, block_spec=SPLIT)
 
 
 def test_2r2c_with_reads_is_refused():
@@ -558,7 +555,7 @@ def test_2r2c_with_reads_is_refused():
         "power": {"Y": ["power"], "model": "mlp"},
     }
     with pytest.raises(ValueError, match="cannot declare `reads`"):
-        get_dynamics(make_cfg(model="mlp", history=MIXED_HISTORY), MIXED_MAPPING,
+        get_dynamics(make_cfg(model="mlp", history=MIXED_HISTORY), MIXED_MAPPING, unit_stats(MIXED_MAPPING),
                      block_spec=spec)
 
 
@@ -569,8 +566,8 @@ def test_a_demand_setpoint_lagged_past_its_zone_is_refused():
                       "inputs": {"north sp": DECLARED["north"]["inputs"]["north sp"]}}}
     history = {**uniform_history(DECLARED_MAPPING, 2), "north sp": 3}
     with pytest.raises(ValueError, match=r"history\['north sp'\] is 3, deeper"):
-        get_dynamics(make_cfg(model="mlp", history=history), DECLARED_MAPPING,
-                     block_spec=spec, norm_stats=STATS)
+        get_dynamics(make_cfg(model="mlp", history=history), DECLARED_MAPPING, STATS,
+                     block_spec=spec)
 
 
 # ── hysteresis: a latched thermostat stage ────────────────────────
@@ -630,15 +627,15 @@ def test_a_latched_slope_never_exceeds_the_headroom(previous, error_c):
 
 def test_a_latched_block_carries_its_stage_in_the_rollout_state():
     spec = {"north": {**DECLARED["north"], "inputs": LATCHED_INPUTS}}
-    system = get_dynamics(make_cfg(history=DECLARED_HISTORY), DECLARED_MAPPING,
-                          block_spec=spec, norm_stats=STATS)
-    block = system.nodes[0].callable.fy.blocks[0]
-    pre = system.nodes[0].callable.pre_stack
+    system = get_dynamics(make_cfg(history=DECLARED_HISTORY), DECLARED_MAPPING, STATS,
+                          block_spec=spec)
+    block = normalized_core(system).fy.blocks[0]
+    pre = normalized_core(system).pre_stack
     assert pre.transforms[0].clamped is False
     x = torch.randn(3, HISTORY_STEPS * 5)
     y, u, d = x[:, :HISTORY_STEPS], x[:, HISTORY_STEPS:HISTORY_STEPS * 3], x[:, HISTORY_STEPS * 3:]
     clear_state(stateful_blocks(system))
-    system.nodes[0].callable(y, u, d)
+    normalized_core(system)(y, u, d)
     state = block.rollout_state()
     assert state.shape == (3, 2)
     assert ((state[:, 1] >= 0) & (state[:, 1] <= 1)).all()

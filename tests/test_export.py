@@ -49,6 +49,7 @@ from neurotemplate.export.state import probe_state_slots
 from neurotemplate.export.trace import export_graph
 from neurotemplate.export.verify import Rollout
 from neurotemplate.modeling.config import ModelingConfig as Config
+from neurotemplate.modeling.contract import contract_model
 from neurotemplate.modeling.dynamics import get_dynamics
 from neurotemplate.modeling.heads import (
     BinaryHead, BoundedHead, HeadStack, OrdinalHead, RegressionHead,
@@ -123,10 +124,13 @@ def split(mapping) -> tuple[pd.DataFrame, dict]:
 def export(tmp_path, cfg, mapping, block_spec=None, heads=None, exporter="legacy",
            **options):
     frame, stats = split(mapping)
+    for column, head in zip(mapping["Y"], heads or []):
+        if isinstance(head, BinaryHead):   # a 0/1 target is never normalised
+            stats[column].update(shift=0.0, stretch=1.0)
     torch.manual_seed(0)
     head_stack = HeadStack(heads, mapping["Y"]) if heads else None
-    dyn_sys = get_dynamics(cfg, mapping, head_stack=head_stack,
-                           block_spec=block_spec, norm_stats=stats)
+    dyn_sys = get_dynamics(cfg, mapping, stats, head_stack=head_stack,
+                           block_spec=block_spec)
     return export_model(
         dyn_sys=dyn_sys, cfg=cfg, nm_mapping=mapping, norm_stats=stats,
         frame=frame, timestep_seconds=300.0, run_id="0" * 32,
@@ -192,11 +196,11 @@ def test_step_graph_follows_the_state_it_is_handed(tmp_path):
     cfg = make_cfg(model="gru", history=UNIFORM)
     frame, stats = split(MAPPING)
     torch.manual_seed(0)
-    model = get_dynamics(cfg, MAPPING, norm_stats=stats).nodes[0].callable.eval()
+    model = contract_model(get_dynamics(cfg, MAPPING, stats)).eval()
     windows = [torch.randn(2, HISTORY_STEPS, len(MAPPING[k])) for k in ("Y", "U", "D")]
-    slots = probe_state_slots(model, *(w.reshape(2, -1) for w in windows))
+    slots = probe_state_slots(model, *windows)
     width = sum(slot.width for slot in slots)
-    graph = Step(model, MAPPING, stats, slots)
+    graph = Step(model, slots)
     path = tmp_path / "step.onnx"
     export_graph(graph, (*windows, torch.randn(2, width)), ["y", "u", "d", "state"],
                  ["y_next", "state_next"], path, exporter="legacy")

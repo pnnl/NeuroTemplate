@@ -25,6 +25,7 @@ from control_fixtures import (
 from neurotemplate.common.data_utils import normalize_df
 import modeling_user_defined as hooks
 from fake_logger import FakeLogger
+from model_fixtures import unit_stats
 
 
 def _evaluate(tmp_path, synth: bool = True):
@@ -109,7 +110,7 @@ def test_a_staged_channel_is_scored_as_a_classifier_and_against_persistence(tmp_
     levels = torch.tensor([(v - stats["shift"]) / stats["stretch"] for v in (0.0, 1.0, 2.0)])
     heads = [OrdinalHead(n_levels=3, level_values=levels) if col == STAGE
              else RegressionHead() for col in nm["Y"]]
-    dyn_sys = get_dynamics(cfg, nm, head_stack=HeadStack(heads, nm["Y"]))
+    dyn_sys = get_dynamics(cfg, nm, unit_stats(nm), head_stack=HeadStack(heads, nm["Y"]))
     dyn_sys.eval()
 
     results = evaluate_and_plot(

@@ -8,7 +8,8 @@ import torch
 
 from neurotemplate.modeling.dynamics import get_dynamics
 from neurotemplate.modeling.windows import window_gather
-from model_fixtures import model_cfg
+from model_fixtures import model_cfg, unit_stats
+from neurotemplate.modeling.contract import normalized_core
 
 NM = {"Y": ["y0", "y1"], "U": ["u0"], "D": ["d0", "d1"], "t": ["sec_elapsed"]}
 
@@ -21,7 +22,7 @@ def test_two_keys_are_gathered_key_major_from_their_own_offsets():
 
 def test_a_ragged_table_feeds_each_column_at_its_lag_and_a_uniform_one_gathers_nothing():
     history = {"y0": 2, "y1": 0, "u0": 1, "d0": 0, "d1": 2}
-    model = get_dynamics(model_cfg(model="lssm", history=history), NM).nodes[0].callable
+    model = normalized_core(get_dynamics(model_cfg(model="lssm", history=history), NM, unit_stats(NM)))
     # Window 3 deep. Y rows: [y0 y1] x 3; y0 keeps all three, y1 the newest.
     y = torch.arange(6.0).unsqueeze(0)
     assert model._narrow("Y", y).tolist() == [[0.0, 2.0, 4.0, 5.0]]
@@ -30,5 +31,5 @@ def test_a_ragged_table_feeds_each_column_at_its_lag_and_a_uniform_one_gathers_n
     assert model.fd.linear.in_features == 4
 
     uniform = {c: 2 for c in history}
-    model = get_dynamics(model_cfg(model="lssm", history=uniform), NM).nodes[0].callable
+    model = normalized_core(get_dynamics(model_cfg(model="lssm", history=uniform), NM, unit_stats(NM)))
     assert model._gathered == []

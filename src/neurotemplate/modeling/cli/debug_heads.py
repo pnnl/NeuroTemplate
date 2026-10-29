@@ -26,6 +26,7 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import torch
 
+from neurotemplate.modeling.contract import normalized_core
 from neurotemplate.modeling.load import load_trained_dynamics
 from neurotemplate.modeling.plotting import PLOT_STYLE
 
@@ -198,7 +199,9 @@ def main():
     dyn_sys, _cfg, _nm_mapping, _norm_stats = load_trained_dynamics(
         run_id=args.run_id, run_dir=args.run_dir, weights=args.weights,
     )
-    head_stack = dyn_sys.nodes[0].callable.head_stack
+    # In the model's own (normalised) units: the activation curves are drawn
+    # against the raw output z the family emits.
+    head_stack = normalized_core(dyn_sys).head_stack
     if head_stack is None:
         print("Model has no head_stack — nothing to plot.")
         return

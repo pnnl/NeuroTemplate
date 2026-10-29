@@ -36,8 +36,6 @@ from neurotemplate.modeling.heads import (  # noqa: F401  — cited in comments
     HeadStack,
     OrdinalHead,
     RegressionHead,
-    bounds_from_norm,
-    project_physical_to_norm,
 )
 from neurotemplate.modeling.scenarios import (  # noqa: F401  — cited in synth_cfg
     SynthSpec,
@@ -111,12 +109,13 @@ def data_head_config(
     when the channel really is discrete or bounded:
 
       RegressionHead()                  continuous, MSE loss
-      BinaryHead()                      0/1 target, sigmoid + BCE
+      BinaryHead()                      0/1 target, sigmoid + BCE; give the
+                                        column None in column_norm_config
       BoundedHead(lo, hi)               clamped to [lo, hi]; pass
                                         float("inf") / float("-inf") on an
                                         open side for half-bounded
       OrdinalHead(n_levels=K)           K ordered levels, values 0..K-1
-      OrdinalHead(n_levels=K, level_values=t)
+      OrdinalHead(n_levels=K, level_values=[v0, ...])
                                         K ordered levels at given values
 
     Levelled heads are rebalanced and threshold-calibrated for you
@@ -126,25 +125,17 @@ def data_head_config(
     well while never predicting the equipment on. Pin either by hand with
     `level_weights=` / `decision_thresholds=` and the flag off.
 
-    Bounds and level values live in head-space, i.e. AFTER normalization.
-    Write them in physical units and project:
+    Bounds and level values are in the column's physical units:
 
-        stats = norm_stats[col]
-        BoundedHead(*bounds_from_norm(stats))              # observed min/max
-        BoundedHead(project_physical_to_norm(0.0, stats),
-                    float("inf"))                          # physically >= 0
-        OrdinalHead(n_levels=3, level_values=torch.tensor(
-            [project_physical_to_norm(v, stats) for v in (0.0, 500.0, 1700.0)],
-            dtype=torch.float32))
+        BoundedHead(0.0, float("inf"))                     # physically >= 0
+        OrdinalHead(n_levels=3, level_values=[0.0, 500.0, 1700.0])
     """
     heads = []
     for col in nm_mapping["Y"]:
-        # stats = norm_stats[col]
         # if "on/off" in col.lower():
         #     heads.append(BinaryHead())
         # elif "power" in col.lower():
-        #     heads.append(BoundedHead(project_physical_to_norm(0.0, stats),
-        #                              float("inf")))
+        #     heads.append(BoundedHead(0.0, float("inf")))
         # else:
         heads.append(RegressionHead())
     return HeadStack(heads, nm_mapping["Y"])

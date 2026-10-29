@@ -1,5 +1,9 @@
 """
-Dynamics models wrapped for Neuromancer.
+The built-in dynamics families, behind the model contract, wrapped for
+Neuromancer.
+
+Every family is an SSMGrad computing in normalised units, put behind the
+physical contract by `contract.Normalized` (see `contract`).
 
 SSMGrad is a pure predictor: (y, u, d) -> y_next. It does NOT compute
 Jacobians in its forward pass — gradient sign constraints are handled
@@ -42,7 +46,6 @@ Because cfg.history_steps is also the sliding-window stride
 training set.
 """
 
-import copy
 import warnings
 
 import torch
@@ -58,6 +61,7 @@ from neuromancer.system import Node, SystemPreview
 from neuromancer.modules import blocks as nm_blocks
 
 from neurotemplate.modeling import windows
+from neurotemplate.modeling.contract import Normalized, Windowed, normalized_core
 from neurotemplate.modeling.heads import HeadStack
 from neurotemplate.modeling.prestack import PreStack
 from neurotemplate.modeling.bounded import bounded_parameters
@@ -756,8 +760,7 @@ def describe_dynamics(dyn_sys: SystemPreview, cfg: ModelingConfig) -> dict:
 
     Used by reportcard.render_reportcard.
     """
-    # Unwrap: SystemPreview -> Node -> SSMGrad
-    raw = dyn_sys.nodes[0].callable
+    raw = normalized_core(dyn_sys)
 
     blocks_info: dict[str, Optional[dict]] = {
         "fy": _describe_block(getattr(raw, "fy", None), cfg),
@@ -926,9 +929,9 @@ def _warn_ignored_declarations(blocks: list[Block], families: list[str]) -> None
 def get_dynamics(
     cfg: ModelingConfig,
     nm_mapping: dict[str, list[str]],
+    norm_stats: dict[str, dict],
     head_stack: Optional[HeadStack] = None,
     block_spec: Optional[dict[str, dict]] = None,
-    norm_stats: Optional[dict[str, dict]] = None,
 ) -> SystemPreview:
     """
     Wrap a dynamics model in a Neuromancer SystemPreview for autoregressive rollout.
@@ -945,8 +948,9 @@ def get_dynamics(
     `block_spec` is the optional `block_mapping` hook's result, splitting Y,
     U and D across independent blocks — see `blocks`. None means one block
     holding every channel, which is the right answer for a single-block
-    building. `norm_stats` is needed only when the spec declares a column
-    (`inputs` / `ambient`): those branches work in physical units.
+    building. `norm_stats` is the run's: the family computes in the units
+    it normalises to, and `head_stack`, declared in physical units, is
+    rescaled into them.
     """
     if cfg.model not in VALID_MODEL_NAMES:
         raise ValueError(
@@ -993,10 +997,9 @@ def get_dynamics(
                 f"model.ny={model.ny}; factories (currently) assume width-1 heads."
             )
         _check_2r2c_heads(blocks, families, head_stack)
-        # The System owns its own copy: post-training calibration writes the
-        # decision thresholds into the stack it trained with, and a caller
-        # reusing one stack across seeds or trials must not inherit them.
-        model.head_stack = copy.deepcopy(head_stack)
+        # A new stack, in the family's units; post-training calibration
+        # writes its decision thresholds into this one, never the caller's.
+        model.head_stack = head_stack.normalized(norm_stats)
 
     # Temporal windowing: one rectangular window per key, history_steps deep;
     # the model narrows it to each column's lag.
@@ -1010,7 +1013,8 @@ def get_dynamics(
     }
 
     node = Node(
-        model,
+        Windowed(Normalized(model, nm_mapping, norm_stats), _widths(nm_mapping),
+                 model.history_steps),
         ['yn', 'U', 'D'],   # input: reads predicted state + exogenous
         ['yn'],              # output: next predicted state (feedback loop)
         name=cfg.model.upper() + " Node",

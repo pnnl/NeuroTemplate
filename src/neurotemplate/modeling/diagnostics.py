@@ -224,18 +224,12 @@ def _scope_note(column: str) -> str:
 
 def _ordinal_snippet(column: str, values: list[float]) -> str:
     values_repr = ", ".join(f"{v:g}" for v in values)
-    return (
-        f'OrdinalHead(n_levels={len(values)}, level_values=torch.tensor(\n'
-        f'    [project_physical_to_norm(v, norm_stats["{column}"])\n'
-        f'     for v in ({values_repr})], dtype=torch.float32))'
-    )
+    return f"OrdinalHead(n_levels={len(values)}, level_values=[{values_repr}])"
 
 
 def _bounded_snippet(column: str, lo: float, hi: float) -> str:
-    lo_expr = ("float('-inf')" if math.isinf(lo)
-               else f'project_physical_to_norm({lo:g}, norm_stats["{column}"])')
-    hi_expr = ("float('inf')" if math.isinf(hi)
-               else f'project_physical_to_norm({hi:g}, norm_stats["{column}"])')
+    lo_expr = "float('-inf')" if math.isinf(lo) else f"{lo:g}"
+    hi_expr = "float('inf')" if math.isinf(hi) else f"{hi:g}"
     return f"BoundedHead({lo_expr}, {hi_expr})"
 
 

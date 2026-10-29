@@ -23,7 +23,6 @@ from neurotemplate.modeling.heads import (
     HeadStack,
     OrdinalHead,
     RegressionHead,
-    project_physical_to_norm,
 )
 from neurotemplate.modeling.scenarios import SynthSpec
 
@@ -151,10 +150,9 @@ def data_head_config(
     """
     Return one Head per Y column, packaged as a HeadStack.
 
-    Any numeric bounds / level values are interpreted in PHYSICAL units
-    and projected into head-space via `project_physical_to_norm` /
-    `bounds_from_norm`. Channels without a head-kind reason fall through
-    to RegressionHead (identity activation, MSE loss).
+    Any numeric bounds / level values are in PHYSICAL units. Channels
+    without a head-kind reason fall through to RegressionHead (identity
+    activation, MSE loss).
 
     Available head types:
       - RegressionHead  : continuous target, MSE loss.
@@ -167,33 +165,24 @@ def data_head_config(
                           Pass `use_ste=False` to skip the snap and feed back
                           the smooth activation directly.
       - OrdinalHead     : K-level ordered output. Specify `level_values`
-                          (in physical units, projected here) and let the
+                          (in physical units) and let the
                           head place thresholds at the midpoints. Activation
                           interpolates smoothly between levels; decode snaps
                           to one of the level_values via the STE combine.
     """
-    def _ordinal_with_levels(stats, levels_phys, use_ste=True):
-        levels = torch.tensor(
-            [project_physical_to_norm(v, stats) for v in levels_phys],
-            dtype=torch.float32,
-        )
-        return OrdinalHead(
-            n_levels=len(levels_phys), level_values=levels,
-            beta=20, use_ste=use_ste,
-        )
+    def _ordinal_with_levels(levels, use_ste=True):
+        return OrdinalHead(n_levels=len(levels), level_values=levels,
+                           beta=20, use_ste=use_ste)
 
     heads = []
     for col in nm_mapping["Y"]:
         col_lower = col.lower()
-        stats = norm_stats[col]
         if "supply air flow" in col_lower:
-            heads.append(_ordinal_with_levels(stats, [0.0, 0.82, 1.25]))
+            heads.append(_ordinal_with_levels([0.0, 0.82, 1.25]))
         elif "fan power" in col_lower:
-            heads.append(_ordinal_with_levels(stats, [0.0, 483.0, 1680.7]))
+            heads.append(_ordinal_with_levels([0.0, 483.0, 1680.7]))
         elif "dx power" in col_lower:
-            heads.append(_ordinal_with_levels(
-                stats, [0.0, 4300.0, 8800.0], use_ste=False,
-            ))
+            heads.append(_ordinal_with_levels([0.0, 4300.0, 8800.0], use_ste=False))
         elif "cooling stage" in col_lower:
             heads.append(OrdinalHead(n_levels=3))
         else:

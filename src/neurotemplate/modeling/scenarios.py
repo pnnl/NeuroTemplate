@@ -62,7 +62,7 @@ from typing import Optional
 import torch
 
 from neurotemplate._typing import beartype
-from neurotemplate.common.data_utils import to_physical
+from neurotemplate.modeling.contract import Normalized, contract_model
 
 
 # Pass thresholds, all expressed as a share of a state channel's own recorded
@@ -133,7 +133,7 @@ class SynthSpec:
                   the state where the actuator is live. That has a definite
                   answer where the universal partial does not.
 
-    Everything is in physical units; the library normalizes.
+    Everything is in physical units, as the model reads them.
     """
     states: list[str]
     ambient: str
@@ -273,16 +273,6 @@ class ScenarioResult:
 # ── Input construction ───────────────────────────────────────────
 
 
-def _normalize(value, col: str, norm_stats: dict):
-    stats = norm_stats[col]
-    if stats["stretch"] == 0:
-        raise ValueError(
-            f"Column '{col}' has zero stretch in norm_stats — cannot "
-            "normalize it (constant in the training data?)."
-        )
-    return (value - stats["shift"]) / stats["stretch"]
-
-
 def _resting_value(col: str, spec: SynthSpec, norm_stats: dict) -> float:
     """`off` if the spec gives one, else the column's recorded minimum.
 
@@ -323,7 +313,7 @@ def _state_range(spec: SynthSpec, norm_stats: dict) -> tuple[float, float]:
 
 
 def _equilibrium_inputs(t_phys, nm_mapping, norm_stats, spec, device):
-    """Normalized (y, u, d) rows for a plant sitting at `t_phys` with nothing on.
+    """(y, u, d) rows for a plant sitting at `t_phys` with nothing on.
 
     State channels take `t_phys`; every other column takes its resting value.
     Ambient takes `t_phys` too, so there is no gradient across the envelope —
@@ -338,18 +328,15 @@ def _equilibrium_inputs(t_phys, nm_mapping, norm_stats, spec, device):
         return out
 
     def rest(col):
-        return _normalize(
-            torch.full((n,), _resting_value(col, spec, norm_stats),
-                       device=device),
-            col, norm_stats,
-        )
+        return torch.full((n,), _resting_value(col, spec, norm_stats),
+                       device=device)
 
     y = column(nm_mapping["Y"],
-               lambda c: _normalize(t_phys, c, norm_stats)
+               lambda c: t_phys
                if c in spec.states else rest(c))
     u = column(nm_mapping["U"], rest)
     d = column(nm_mapping["D"],
-               lambda c: _normalize(t_phys, c, norm_stats)
+               lambda c: t_phys
                if c == spec.ambient else rest(c))
     return y, u, d
 
@@ -385,8 +372,10 @@ def _declared_demands(system) -> dict[str, dict]:
 
     Read off the model's own `PreStack` rather than the block spec, so the
     checks and the trained run cannot disagree about what is a thermostat.
+    Only a built-in family declares demands.
     """
-    pre_stack = getattr(system.nodes[0].callable, "pre_stack", None)
+    model = contract_model(system)
+    pre_stack = model.core.pre_stack if isinstance(model, Normalized) else None
     if pre_stack is None:
         return {}
     return {col: entry for col, entry in pre_stack.to_config().items()
@@ -450,8 +439,7 @@ class _Scenario:
         Index 0 is the last seeded step (the equilibrium the rollout starts
         from), so `[:, k] - [:, 0]` is movement caused by the rollout.
         """
-        phys = to_physical(y_pred, self.nm_mapping["Y"], self.norm_stats)
-        return phys[:, self.history_steps - 1:, self.state_idx]
+        return y_pred[:, self.history_steps - 1:, self.state_idx]
 
     def check(self, n: Optional[int] = None) -> list[ScenarioResult]:
         """Just the verdicts. `evaluate` also returns the readout statistics."""
@@ -465,8 +453,7 @@ class _Scenario:
         a known constant in the min or max. It is reported separately as
         `seeded_at` so the spread has a reference point.
         """
-        phys = to_physical(y_pred, self.nm_mapping["Y"], self.norm_stats)
-        free = phys[:, self.history_steps:, :]
+        free = y_pred[:, self.history_steps:, :]
         qs = torch.tensor(READOUT_QUANTILES, device=free.device)
         return [
             ReadoutSummary(
@@ -571,7 +558,7 @@ class EquilibriumScenario(_Scenario):
             data = self._data(n)
             y_pred = self.system(data)["yn"]
         return _trace(self.label, data, y_pred, self.nm_mapping,
-                      self.norm_stats, self.spec, self.history_steps)
+                      self.spec, self.history_steps)
 
 
 class StepResponseScenario(_Scenario):
@@ -621,9 +608,7 @@ class StepResponseScenario(_Scenario):
         u_on = u_off.clone()
         if target is not None:
             j = self.nm_mapping["U"].index(col)
-            u_on[:, j] = _normalize(
-                torch.full((n,), target, device=self.device), col, self.norm_stats,
-            )
+            u_on[:, j] = torch.full((n,), target, device=self.device)
         return _rollout_data(y, (u_off, u_on), (d, d), self.history_steps,
                              self.n_steps, self.ny, self.device)
 
@@ -691,8 +676,7 @@ class StepResponseScenario(_Scenario):
                 data = self._data(self._sample_equilibrium(n, *seeds), col, target)
                 y_pred = self.system(data)["yn"]
             return _trace(f"{self.label}: {col} to {target:.4g}", data, y_pred,
-                          self.nm_mapping, self.norm_stats, self.spec,
-                          self.history_steps)
+                          self.nm_mapping, self.spec, self.history_steps)
         return {}
 
 
@@ -771,10 +755,7 @@ class ReachabilityScenario(_Scenario):
             out = row.clone()
             for col, value in targets.items():
                 j = self.nm_mapping[key].index(col)
-                out[:, j] = _normalize(
-                    torch.full((n,), float(value), device=self.device),
-                    col, self.norm_stats,
-                )
+                out[:, j] = torch.full((n,), float(value), device=self.device)
             return out
 
         return _rollout_data(
@@ -840,8 +821,7 @@ class ReachabilityScenario(_Scenario):
             data = self._data(channel, +1, n)
             y_pred = self.system(data)["yn"]
         return _trace(f"{self.label}: {channel} (up)", data, y_pred,
-                      self.nm_mapping, self.norm_stats, self.spec,
-                      self.history_steps)
+                      self.nm_mapping, self.spec, self.history_steps)
 
 
 class FreeDecayScenario(_Scenario):
@@ -870,7 +850,7 @@ class FreeDecayScenario(_Scenario):
         )
         d_after = d_before.clone()
         j = self.nm_mapping["D"].index(self.spec.ambient)
-        d_after[:, j] = _normalize(t_out, self.spec.ambient, self.norm_stats)
+        d_after[:, j] = t_out
 
         data = _rollout_data(y, (u, u), (d_before, d_after), self.history_steps,
                              self.n_steps, self.ny, self.device)
@@ -926,19 +906,16 @@ class FreeDecayScenario(_Scenario):
             data, _, _ = self._data(n)
             y_pred = self.system(data)["yn"]
         return _trace(self.label, data, y_pred, self.nm_mapping,
-                      self.norm_stats, self.spec, self.history_steps)
+                      self.spec, self.history_steps)
 
 
-def _trace(name, data, y_pred, nm_mapping, norm_stats, spec, history_steps) -> dict:
+def _trace(name, data, y_pred, nm_mapping, spec, history_steps) -> dict:
     """Physical-unit trajectories for the plots, one entry per scenario."""
     j = nm_mapping["D"].index(spec.ambient)
-    a = norm_stats[spec.ambient]
     return {
         "name": name,
-        "predictions": to_physical(
-            y_pred, nm_mapping["Y"], norm_stats).detach().cpu(),
-        "ambient_traj": (
-            data["D"][:, :, j] * a["stretch"] + a["shift"]).detach().cpu(),
+        "predictions": y_pred.detach().cpu(),
+        "ambient_traj": data["D"][:, :, j].detach().cpu(),
         "channel_names": nm_mapping["Y"],
         "state_names": spec.states,
         "seed_steps": history_steps,

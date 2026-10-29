@@ -69,8 +69,7 @@ Every key below is in docs/MODELING.md ("Blocks", "Declaring what a column is").
      the data's correlations ("heating on, so cooling off"), and the policy exploits
      them: it runs the heating to make the modelled cooling power fall.
    - A meter cannot read below zero, so give it a head that cannot either:
-     `BoundedHead(project_physical_to_norm(0.0, stats), float("inf"))` in
-     `data_head_config`. A regression head that dips negative tells the cost term
+     `BoundedHead(0.0, float("inf"))` in `data_head_config`. A regression head that dips negative tells the cost term
      that running the equipment earns money.
 4. **Capacity and latching.** A `2r2c` demand declares its `capacity`, °C per hour at
    full stage, as a scalar or a box. When the equipment latches (it starts above the
@@ -198,7 +197,7 @@ def block_mapping(nm_mapping, cfg):
     }
 
 def data_head_config(nm_mapping, norm_stats):     # meters cannot read below zero
-    heads = [BoundedHead(project_physical_to_norm(0.0, norm_stats[c]), float("inf"))
+    heads = [BoundedHead(0.0, float("inf"))
              if c in ("Compressor Power", "Fan Power") else RegressionHead()
              for c in nm_mapping["Y"]]
     return HeadStack(heads, nm_mapping["Y"])

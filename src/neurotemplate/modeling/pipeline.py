@@ -41,11 +41,8 @@ from neurotemplate.common.data_utils import (
     get_data_splits,
     get_grad_masks,
     get_sw_dict_multi,
-    normalize_df,
     pool_dfs,
     to_df,
-    to_physical,
-    unnormalize_df,
     warn_degenerate_columns,
 )
 from neurotemplate.modeling.calibration import (
@@ -68,6 +65,7 @@ from neurotemplate.common.metrics import (
     stability_to_dict,
 )
 from neurotemplate.common.reportcard import write_reportcard as _write_reportcard
+from neurotemplate.modeling.contract import contract_model, normalized_core
 from neurotemplate.modeling.dynamics import describe_dynamics
 from neurotemplate.modeling.plotting import plot_predictions, plot_synthetic
 from neurotemplate.modeling.reportcard import (
@@ -140,8 +138,8 @@ def build_head_stack(
     hooks, cfg: ModelingConfig, nm_mapping: dict[str, list[str]],
     norm_stats: dict, train_dfs: list[DataFrame],
 ) -> HeadStack:
-    """The hook's head stack, with level weights balanced from the training
-    data when `cfg.balance_levels`."""
+    """The hook's head stack, in physical units, with level weights balanced
+    from the training data when `cfg.balance_levels`."""
     head_stack = hooks.data_head_config(nm_mapping, norm_stats)
     if cfg.balance_levels:
         balance_level_weights(head_stack, train_dfs)
@@ -168,10 +166,12 @@ class PreparedData:
 
 
 def prepare_data(cfg: ModelingConfig, hooks) -> PreparedData:
-    """Load the three splits, map and normalize them, and build the heads.
+    """Load the three splits, map them, fit the norm stats, build the heads.
 
-    Norm stats are fitted on all training files pooled, so each column's
-    range is the union of the training data; windowing stays per file.
+    The splits stay in physical units: a model normalises for itself (see
+    `contract`). Norm stats are fitted on all training files pooled, so each
+    column's range is the union of the training data; windowing stays per
+    file.
     Sets `cfg.steps_per_hour` from the data's own sampling frequency — before
     the hooks see `cfg`, since `2r2c` and `block_mapping` may read it.
     """
@@ -192,18 +192,17 @@ def prepare_data(cfg: ModelingConfig, hooks) -> PreparedData:
         # Before the first epoch, not after the last: the checks run once
         # training is over, and `build_scenarios` re-validates on reload.
         synth_cfg.validate(nm_mapping)
-    train_dfs = [normalize_df(r, norm_stats) for r in train_raws]
     return PreparedData(
-        train_dfs=train_dfs,
-        dev_dfs=[normalize_df(r, norm_stats) for r in dev_raws],
-        test_dfs=[normalize_df(r, norm_stats) for r in test_raws],
+        train_dfs=train_raws,
+        dev_dfs=dev_raws,
+        test_dfs=test_raws,
         freq_s=freq_s,
         nm_mapping=nm_mapping,
         block_spec=block_spec,
         norm_stats=norm_stats,
         grad_masks=get_grad_masks(grad_path=cfg.grad_path, nm_mapping=nm_mapping),
         synth_cfg=synth_cfg,
-        head_stack=build_head_stack(hooks, cfg, nm_mapping, norm_stats, train_dfs),
+        head_stack=build_head_stack(hooks, cfg, nm_mapping, norm_stats, train_raws),
     )
 
 
@@ -224,7 +223,7 @@ def _train(cfg, *, train_dfs, dev_dfs, nm_mapping, grad_masks, norm_stats,
         calibration = calibrate_decision_thresholds(dyn_sys, cfg, dev_dfs, nm_mapping)
         if cfg.progress in ("live", "log") and calibration:
             for name, c in calibration.items():
-                print(f"Calibrated decision thresholds for {name!r} (head-space): "
+                print(f"Calibrated decision thresholds for {name!r}: "
                       + ", ".join(f"{t:.4f}" for t in c.thresholds)
                       + f"  ({len(c.trace)} pass(es), kept #{c.kept + 1})")
     return dyn_sys, best_dev_loss, calibration
@@ -238,7 +237,7 @@ class TestResults:
     """Bundle of test-time outputs. Tensors stay internal to evaluate_and_plot."""
     metrics: list[ChannelMetrics]
     stability: list[RolloutStability]  # rollout shape, to catch ramping models
-    normalized_rmse: float  # RMSE over every channel, in normalized units
+    normalized_rmse: float  # RMSE over every channel, each normalised by its stats
     test_time_s: float
     # Physics assertions on the thermal states. None when the use case opted
     # out of synth_cfg.
@@ -319,28 +318,26 @@ def evaluate_and_plot(
 
     # System output prepends the initial condition; slice past the history_steps
     # history when comparing to ground truth.
-    pred_norm = test_out["yn"][:, cfg.history_steps:-1, :]
-    true_norm = test_out["Y"][:, cfg.history_steps:, :]
-    un_pred = to_physical(pred_norm, nm_mapping["Y"], norm_stats)
-    un_true = to_physical(true_norm, nm_mapping["Y"], norm_stats)
-    metrics = per_channel_metrics(un_pred, un_true, nm_mapping["Y"])
+    pred = test_out["yn"][:, cfg.history_steps:-1, :]
+    true = test_out["Y"][:, cfg.history_steps:, :]
+    metrics = per_channel_metrics(pred, true, nm_mapping["Y"])
     # RMSE alone cannot see a model that has stopped responding to its inputs
     # and is emitting a ramp; compare the rollout's shape to the truth's too.
-    stability = rollout_stability(un_pred, un_true, nm_mapping["Y"])
+    stability = rollout_stability(pred, true, nm_mapping["Y"])
 
     # Persistence sees exactly what the rollout sees at its start — the
     # seeded history — and holds the last of it. Same span, same units.
-    persist_norm = test_out["Y"][:, cfg.history_steps - 1:cfg.history_steps, :].expand_as(true_norm)
-    persistence = per_channel_metrics(
-        to_physical(persist_norm, nm_mapping["Y"], norm_stats), un_true, nm_mapping["Y"],
-    )
-    head_stack = dyn_sys.nodes[0].callable.head_stack
-    levels = _level_metrics(head_stack, pred_norm, true_norm, norm_stats)
-    persistence_levels = _level_metrics(head_stack, persist_norm, true_norm, norm_stats)
+    persist = test_out["Y"][:, cfg.history_steps - 1:cfg.history_steps, :].expand_as(true)
+    persistence = per_channel_metrics(persist, true, nm_mapping["Y"])
+    head_stack = trained_heads(dyn_sys, norm_stats)
+    levels = _level_metrics(head_stack, pred, true)
+    persistence_levels = _level_metrics(head_stack, persist, true)
 
     # One unitless headline number: pooling channels is only meaningful
-    # in normalized space.
-    normalized_rmse = (pred_norm - true_norm).pow(2).mean().sqrt().item()
+    # with each normalised by its stats.
+    model = contract_model(dyn_sys)
+    normalized_rmse = (model.normalize("Y", pred) - model.normalize("Y", true)
+                       ).pow(2).mean().sqrt().item()
 
     # Physics assertions on synthetic states the recorded data never visits.
     # The verdicts are the point; the figures are for when one surprises you.
@@ -369,17 +366,19 @@ def evaluate_and_plot(
     )
 
 
+def trained_heads(dyn_sys, norm_stats: dict) -> Optional[HeadStack]:
+    """The trained model's head stack in physical units, calibrated decision
+    thresholds included, or None without heads."""
+    stack = normalized_core(dyn_sys).head_stack
+    return None if stack is None else stack.physical(norm_stats)
+
+
 def _level_metrics(
     head_stack: Optional[HeadStack],
     y_pred: torch.Tensor,
     y_true: torch.Tensor,
-    norm_stats: dict,
 ) -> list[LevelMetrics]:
-    """Classification metrics for every levelled channel of the stack.
-
-    Indices are taken in head-space — that is where the head's levels live —
-    and only the row labels are projected to physical units.
-    """
+    """Classification metrics for every levelled channel of the (physical) stack."""
     if head_stack is None:
         return []
     out = []
@@ -387,11 +386,9 @@ def _level_metrics(
         head_levels = head.levels()
         if head_levels is None:
             continue
-        stats = norm_stats[name]
-        physical = (head_levels * stats["stretch"] + stats["shift"]).tolist()
         out.append(level_metrics(
             head.level_index(y_pred[..., i]), head.level_index(y_true[..., i]),
-            physical, name,
+            head_levels.tolist(), name,
         ))
     return out
 
@@ -407,20 +404,16 @@ def _plot_predictions(
     start timestamp inside `plot_predictions`, so cross-file pooling
     would misalign the time axis if we used a single concatenated df.
     """
-    df_trues = [unnormalize_df(df, norm_stats) for df in test_dfs]
     src = source_idx.detach().cpu().tolist()
     for batch in range(test_out["yn"].shape[0]):
         pred_dict = {
             "Y": test_out["yn"][batch, :-1, :].detach().cpu().numpy(),
             "t": test_out["t"][batch].detach().cpu().numpy(),
         }
-        df_pred = to_df(
-            data=pred_dict, norm_stats=norm_stats,
-            nm_mapping=nm_mapping, unnorm=True,
-        )
+        df_pred = to_df(data=pred_dict, norm_stats=norm_stats, nm_mapping=nm_mapping)
         plot_predictions(
             cfg=cfg,
-            df_true=df_trues[src[batch]], df_pred=df_pred,
+            df_true=test_dfs[src[batch]], df_pred=df_pred,
             run_dir=str(plot_run_dir),
             logger=logger,
         )
@@ -503,10 +496,9 @@ def render_reportcard(
     Render the markdown reportcard for one run.
 
     `norm_stats` feeds the per-column normalization labels in the Data
-    section. `test_dfs` (already normalized) feeds the bounded-channel
-    coverage check — head bounds live in normalized space, so the
-    normalized split is what we want to compare against. Multi-file
-    splits are concatenated for the coverage check only.
+    section. `test_dfs` feeds the bounded-channel coverage check, against
+    `head_stack`'s bounds; both are in physical units. Multi-file splits are
+    concatenated for the coverage check only.
 
     `ensemble` is the optional cfg.ensemble_seeds > 1 spread (see
     train_and_evaluate); None renders no extra section.
@@ -851,7 +843,7 @@ def train_and_evaluate(
     # used at training time, independent of user_defined.py drift. Read off
     # the System's own stack: that is the one carrying the calibrated
     # decision thresholds, which are not in the saved weights.
-    trained_stack = dyn_sys.nodes[0].callable.head_stack
+    trained_stack = trained_heads(dyn_sys, norm_stats)
     if trained_stack is not None:
         logger.log_dict(trained_stack.to_config(), name="head_config.json")
 
