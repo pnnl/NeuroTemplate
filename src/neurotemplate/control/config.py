@@ -106,8 +106,8 @@ class ControlConfig:
     residual_delta: dict[str, list[float]] = field(default_factory=dict)
 
     # A per-step range for a U column, `{column: [low, high]}`: each side a
-    # number in the column's units, the name of a column (a reference or
-    # disturbance the policy reads, or another command), or `[column, offset]`,
+    # number in the column's units, the name of a column (a reference the
+    # policy reads, or another command), or `[column, offset]`,
     # that column plus a signed offset in the U column's units. The policy
     # commands inside its actuation box as usual, and that box is mapped onto
     # [low, high] at each step. A side naming another command orders the two:

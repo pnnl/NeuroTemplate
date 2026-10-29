@@ -141,8 +141,7 @@ transformation of your own reference file works the same way.
 By default each control commands anywhere inside `actuation_bounds`, the
 data's range. `command_bounds` narrows a control to a range that moves with
 a forecast at each step, `{column: [low, high]}`, each side a number in the
-column's units, a reference or disturbance column the policy reads, or
-another command:
+column's units, a reference column the policy reads, or another command:
 
 ```yaml
 command_bounds:                     # syntax, not values
