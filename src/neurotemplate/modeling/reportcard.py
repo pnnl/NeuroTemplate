@@ -268,6 +268,9 @@ def _bounded_lines(bounded: dict, indent: str) -> list[str]:
         if b["pinned"]:
             lines.append(f"{indent}- {name}: pinned at {b['low']:g}")
             continue
+        if len(b["value"]) > _LISTED_VALUES:
+            lines.append(f"{indent}- {_bounded_summary(name, b)}")
+            continue
         for label, value in b["value"].items():
             fraction = b["fraction"][label]
             note = edge_note(name, fraction)
@@ -277,6 +280,21 @@ def _bounded_lines(bounded: dict, indent: str) -> list[str]:
                 f"{b['high']:g}], {fraction * 100:.0f}% of the way up"
                 + ("" if note is None else f" — ⚠️ {note}"))
     return lines
+
+
+#: A bounded parameter with more values than this prints as one line.
+_LISTED_VALUES = 4
+
+
+def _bounded_summary(name: str, b: dict) -> str:
+    """One line for a many-valued bounded parameter: its spread, and how many
+    values the box stopped at each edge."""
+    values = list(b["value"].values())
+    low = sum(edge_note(name, f) is not None and f < 0.5 for f in b["fraction"].values())
+    high = sum(edge_note(name, f) is not None and f > 0.5 for f in b["fraction"].values())
+    return (f"{name}: {len(values)} values in [{b['low']:g}, {b['high']:g}], "
+            f"{min(values):.3g} to {max(values):.3g}; {low} near the lower edge, "
+            f"{high} near the upper")
 
 
 def _forcing_lines(forcing: Optional[dict], indent: str) -> list[str]:
