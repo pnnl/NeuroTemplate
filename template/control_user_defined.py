@@ -122,9 +122,9 @@ def power_metric(
     The default sums the meters `power_channels` names, as the model predicts
     them. What the policy learns from is this signal's gradient, so the
     meters must respond to the commands: model them in a block that sees the
-    actuation (a declared `demand` the meter block can see; `nt guide model`,
-    step 3). Whether they do is the surrogate's question, answered on its own
-    reportcard.
+    actuation (a declared `demand` the meter block can see; `nt guide
+    thermal-zone`, step 4). Whether they do is the surrogate's question,
+    answered on its own reportcard.
 
     Replace the body when nothing meters the power: a proxy from the physics
     of when the equipment runs, which does not decrease as the demand on it

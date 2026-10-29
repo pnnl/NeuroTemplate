@@ -56,7 +56,7 @@ show the calls.
 
 | Command | Purpose |
 |---|---|
-| `nt guide [step]` | the guided flow, one step at a time |
+| `nt guide [step]` | the guided flow, one step at a time, and the guides beside it |
 | `nt model train` | train a surrogate |
 | `nt model optuna` | hyperparameter search, then retrain the best |
 | `nt model load` | score a trained surrogate on other data |
