@@ -25,6 +25,7 @@ The hooks in `modeling_user_defined.py`, scaffolded in
 | `synth_cfg` | which outputs are thermal states, for the physics checks (`None` skips them) | required |
 | `sub_plot` | how output plots are grouped | required |
 | `block_mapping` | blocks, a family per block, what each input column is, 2R2C priors | optional |
+| `model_families` | models of your own, by name ("Your own model") | optional |
 | `hyper_args` | the search space for `nt model optuna` | that command only |
 
 "Required" means the function must exist, even if it returns the trivial
@@ -191,6 +192,45 @@ points pins them where the model cannot use them.
 Nothing is inferred from column names. A declaration changes the
 physics but not the shapes, so a wrong one shows only in the reportcard's
 branch lines.
+
+### Your own model
+
+Any model that fits one contract gets the rest of the library: training,
+the reportcard and physics checks, reload, control and export.
+
+```
+model(y, u, d) -> y_next
+  y  [batch, history_steps, ny]   the last history_steps outputs, oldest first
+  u  [batch, history_steps, nu]   the matching inputs; row -1 drives this step
+  d  [batch, history_steps, nd]   the matching disturbances
+  -> [batch, ny]                  the next outputs
+```
+
+Every value is in your data's own units. Register a builder by name in
+`modeling_user_defined.py` and set `model` to that name:
+
+```python
+def model_families():
+    return {"my_zone": lambda cfg, nm_mapping, norm_stats: MyZone(...)}
+```
+
+- It is one `torch.nn.Module` over every column: `block_mapping` returns
+  `None` and every head is a `RegressionHead`. A bound or a level belongs
+  inside the model; `neurotemplate.modeling.heads` has the activations.
+- State that outlives the window (a filtered mass, a latch) goes through two
+  methods, `rollout_state()` and `set_rollout_state(state)`, the state one
+  `[batch, width]` tensor. When the state is `None` the model is cold and
+  seeds it from its window; the library resets it between rollouts and
+  lifts it into the exported graphs.
+- To fit it from data it must be differentiable; for a fixed model, train
+  with `lr: 0`. The training loss scores each output scaled by its
+  `norm_stats` stretch. `contract.Normalized` puts a model that computes in
+  normalised units behind the contract, as the built-in families are.
+- The sampled gradient penalty is a built-in family's (`grad_gain: 0`).
+  Export to ONNX or C needs the operators in `export.trace.ALLOWED_OPS`;
+  `--format torch` takes any.
+- The run keeps a copy of the hooks file, so the model's code travels with
+  it. Keep it in that one file.
 
 ## What every run reports
 

@@ -60,9 +60,10 @@ from neuromancer.system import Node, SystemPreview
 # with neuromancer's `blocks` module name (MLP/Linear builders).
 from neuromancer.modules import blocks as nm_blocks
 
+from neurotemplate.hooks import load_modeling_hooks
 from neurotemplate.modeling import windows
-from neurotemplate.modeling.contract import Normalized, Windowed, normalized_core
-from neurotemplate.modeling.heads import HeadStack
+from neurotemplate.modeling.contract import Normalized, Windowed, contract_model, normalized_core
+from neurotemplate.modeling.heads import HeadStack, RegressionHead
 from neurotemplate.modeling.prestack import PreStack
 from neurotemplate.modeling.bounded import bounded_parameters
 from neurotemplate.modeling.gru import GRUBlock
@@ -761,6 +762,9 @@ def describe_dynamics(dyn_sys: SystemPreview, cfg: ModelingConfig) -> dict:
     Used by reportcard.render_reportcard.
     """
     raw = normalized_core(dyn_sys)
+    if raw is None:
+        return _describe_user_model(contract_model(dyn_sys), dyn_sys.nodes[0].callable.widths,
+                                    cfg)
 
     blocks_info: dict[str, Optional[dict]] = {
         "fy": _describe_block(getattr(raw, "fy", None), cfg),
@@ -790,6 +794,26 @@ def describe_dynamics(dyn_sys: SystemPreview, cfg: ModelingConfig) -> dict:
         # Derived inputs, `{u_column: {kind, state, ...}}`; None when no
         # column is rewritten.
         "pre_stack": pre_stack.describe() if pre_stack is not None else None,
+    }
+
+
+def _describe_user_model(model: nn.Module, widths: tuple[int, int, int],
+                         cfg: ModelingConfig) -> dict:
+    """`describe_dynamics` for a model from `model_families()`: what it says
+    about itself (`describe()`, its bounded parameters), and its size."""
+    ny, nu, nd = widths
+    return {
+        "factory": cfg.model,
+        "separable": False,
+        "residual": False,
+        "history": dict(cfg.history),
+        "history_steps": cfg.history_steps,
+        "ny": ny,
+        "nu": nu,
+        "nd": nd,
+        "param_count": _count_params(model),
+        "blocks": {"fy": _describe_block(model, cfg), "fu": None, "fd": None},
+        "pre_stack": None,
     }
 
 
@@ -951,12 +975,13 @@ def get_dynamics(
     building. `norm_stats` is the run's: the family computes in the units
     it normalises to, and `head_stack`, declared in physical units, is
     rescaled into them.
+
+    A `cfg.model` that is not a built-in family is looked up in the hooks
+    file's `model_families()` (see `contract`).
     """
     if cfg.model not in VALID_MODEL_NAMES:
-        raise ValueError(
-            f"Unknown model '{cfg.model}'. "
-            f"Available: {list(VALID_MODEL_NAMES)}"
-        )
+        model = _user_model(cfg, nm_mapping, norm_stats, head_stack, block_spec)
+        return _rollout_system(model, model, cfg, nm_mapping)
 
     blocks = build_blocks(nm_mapping, block_spec)
     families = [_resolve_family(cfg, b) for b in blocks]
@@ -1001,11 +1026,18 @@ def get_dynamics(
         # writes its decision thresholds into this one, never the caller's.
         model.head_stack = head_stack.normalized(norm_stats)
 
+    return _rollout_system(Normalized(model, nm_mapping, norm_stats), model, cfg, nm_mapping)
+
+
+def _rollout_system(contract: nn.Module, stateful: nn.Module, cfg: ModelingConfig,
+                    nm_mapping: dict[str, list[str]]) -> SystemPreview:
+    """The contract model as the autoregressive rollout; `stateful` is where
+    its rollout state lives, reset at every sequence boundary."""
     # Temporal windowing: one rectangular window per key, history_steps deep;
     # the model narrows it to each column's lag.
     input_map = {
         key: {
-            "past": model.history_steps - 1,
+            "past": cfg.history_steps - 1,
             "future": 0,
             "pad_mode": "nearest",
         }
@@ -1013,8 +1045,7 @@ def get_dynamics(
     }
 
     node = Node(
-        Windowed(Normalized(model, nm_mapping, norm_stats), _widths(nm_mapping),
-                 model.history_steps),
+        Windowed(contract, _widths(nm_mapping), cfg.history_steps),
         ['yn', 'U', 'D'],   # input: reads predicted state + exogenous
         ['yn'],              # output: next predicted state (feedback loop)
         name=cfg.model.upper() + " Node",
@@ -1028,5 +1059,39 @@ def get_dynamics(
         start_iter=cfg.history_steps - 1,  # skip initial history steps
         # Stateful blocks only: clear the hidden state so it cannot leak
         # between batches. None for stateless blocks.
-        init_func=make_reset_init(model),
+        init_func=make_reset_init(stateful),
     )
+
+
+def _user_model(cfg: ModelingConfig, nm_mapping: dict[str, list[str]],
+                norm_stats: dict[str, dict], head_stack: Optional[HeadStack],
+                block_spec: Optional[dict[str, dict]]) -> nn.Module:
+    """`cfg.model` built by the hooks file's `model_families()`: one module
+    over every column, behind the contract as it is (see `contract`).
+
+    What a built-in family adds around its learned maps is the family's own,
+    so the library's per-column machinery is refused here rather than
+    silently ignored: blocks, heads, and the gradient penalty (`build_loss`).
+    """
+    families = getattr(load_modeling_hooks(cfg), "model_families", lambda: {})()
+    if cfg.model not in families:
+        raise ValueError(
+            f"Unknown model {cfg.model!r}. Built-in families: "
+            f"{list(VALID_MODEL_NAMES)}; the hooks file's model_families(): "
+            f"{sorted(families)}.")
+    if block_spec:
+        raise ValueError(
+            f"model {cfg.model!r} is one module over every column, so "
+            "block_mapping has nothing to split: return None from it. Blocks "
+            "are the built-in families' structure.")
+    if head_stack is not None and any(type(h) is not RegressionHead for h in head_stack.heads):
+        raise ValueError(
+            f"model {cfg.model!r} emits its own outputs, so data_head_config "
+            "must give every channel a RegressionHead. Bound or level a "
+            "channel inside the model; `heads` has the activations to use.")
+    column_lags(cfg, nm_mapping)   # the history table names exactly the columns
+    model = families[cfg.model](cfg, nm_mapping, norm_stats)
+    if not isinstance(model, nn.Module):
+        raise TypeError(f"model_families()[{cfg.model!r}] returned "
+                        f"{type(model).__name__}, not a torch.nn.Module.")
+    return model

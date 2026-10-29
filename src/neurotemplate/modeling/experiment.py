@@ -110,12 +110,13 @@ def build_trainer(
         cfg, nm_mapping, norm_stats, head_stack=head_stack, block_spec=block_spec,
     ).to(cfg.device)
 
-    # The normalised family inside the contract. The gradient penalty
-    # differentiates it directly, and the loss reads the head stack it owns
-    # (get_dynamics rescales its own copy), not the caller's — one stack, so
-    # nothing calibrated on it can go stale in the loss.
+    # The normalised family inside the contract, None for a model of the
+    # user's own. The gradient penalty differentiates it directly, and the
+    # loss reads the head stack it owns (get_dynamics rescales its own copy),
+    # not the caller's — one stack, so nothing calibrated on it can go stale
+    # in the loss.
     raw_model = normalized_core(system)
-    head_stack = raw_model.head_stack
+    head_stack = None if raw_model is None else raw_model.head_stack
 
     # Single PenaltyLoss with all objectives:
     #   - Tracking: ref_loss

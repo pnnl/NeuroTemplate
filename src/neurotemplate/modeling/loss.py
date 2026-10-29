@@ -29,7 +29,7 @@ from neurotemplate._typing import beartype
 @beartype
 def build_loss(
     cfg: ModelingConfig,
-    raw_model: torch.nn.Module,
+    raw_model: Optional[torch.nn.Module],
     system: torch.nn.Module,
     grad_masks: dict[str, torch.Tensor],
     nm_mapping: dict[str, list[str]],
@@ -41,7 +41,8 @@ def build_loss(
 
     Args:
         cfg:          ModelingConfig with loss gains and physics parameters
-        raw_model:    the normalised SSMGrad inside the System
+        raw_model:    the normalised SSMGrad inside the System, None for a
+                      model from model_families()
         system:       Neuromancer SystemPreview wrapping the dynamics model
         grad_masks:   {key: Tensor[1,1,ny,nx]} with sign constraints, or empty dict
         nm_mapping, norm_stats: the run's; the tracking loss is scored with
@@ -94,6 +95,12 @@ def build_loss(
     # read from the data dict — it generates its own synthetic inputs.
 
     if grad_masks and cfg.grad_gain > 0:
+        if raw_model is None:
+            raise ValueError(
+                f"grad_gain > 0, but model {cfg.model!r} is the user's own: the "
+                "sampled gradient penalty differentiates a built-in family's "
+                "normalised core. Give the model its signs structurally, or set "
+                "grad_gain: 0.")
         penalty = SampledGradientPenalty(
             model=raw_model,
             grad_mapping=grad_masks,

@@ -79,6 +79,8 @@ class ModelingConfig:
     user_hooks_path: Optional[str] = None
 
     # ---- MODEL ---------------------------------------------------------------
+    # A built-in family (mlp, nssm, lssm, gru, 2r2c), or a name in the hooks
+    # file's model_families() (see modeling.contract).
     model: str = "nssm"
     # Steps before the current one the model reads, per Y, U and D column:
     # `{column: lag}`. Every column is listed. The window every block shares
@@ -218,12 +220,10 @@ class ModelingConfig:
 
         # Imported here rather than at module scope: dynamics imports this
         # config module, so a top-level import would be circular.
-        # VALID_MODEL_NAMES is the single whitelist of valid families (the
-        # union of model_catalog and BLOCK_BUILDERS); check_one_of's list and
-        # PER_BLOCK_FAMILIES both used to be hand-maintained copies of it.
-        from neurotemplate.modeling.dynamics import VALID_MODEL_NAMES, PER_BLOCK_FAMILIES
+        # `model` is checked where it is built (`get_dynamics`): a name that
+        # is no built-in family may be one of the hooks file's own.
+        from neurotemplate.modeling.dynamics import PER_BLOCK_FAMILIES
 
-        check_one_of(self, "model", list(VALID_MODEL_NAMES))
         check_one_of(self, "progress", list(PROGRESS_LEVELS))
         check_one_of(self, "norm_type", ["min_max", "abs_max", "z_score", None])
         check_one_of(self, "save_config", ["last_step", "all", "None", None])

@@ -122,7 +122,7 @@ def main() -> None:
             print(f"  {lm.name}: {lm.balanced_accuracy:.3f} vs "
                   f"{persistence[lm.name].balanced_accuracy:.3f}")
 
-    if grad_masks:
+    if grad_masks and normalized_core(dyn_sys) is not None:
         grad_penalty = _eval_grad_penalty(dyn_sys, cfg, grad_masks)
         print(f"\nGrad Penalty (raw): {grad_penalty:.6f}")
     else:

@@ -61,6 +61,7 @@ def torch_rollout(dyn_sys, nm_mapping: dict[str, list[str]],
     """The trained system's own rollout: seeded with the first `history_steps`
     rows of Y, then open loop over the rest of `frame`."""
     model = contract_model(dyn_sys)
+    history_steps = dyn_sys.nodes[0].callable.history_steps
     blocks = stateful_blocks(model)
 
     def block(key: str) -> torch.Tensor:
@@ -68,7 +69,7 @@ def torch_rollout(dyn_sys, nm_mapping: dict[str, list[str]],
         return torch.tensor(values, dtype=torch.float32).unsqueeze(0)
 
     data = {"Y": block("Y"), "U": block("U"), "D": block("D")}
-    data["yn"] = data["Y"][:, :model.history_steps].clone()
+    data["yn"] = data["Y"][:, :history_steps].clone()
 
     # The state is read after every forward call, which is one rollout step.
     states: list[torch.Tensor] = []
@@ -86,8 +87,8 @@ def torch_rollout(dyn_sys, nm_mapping: dict[str, list[str]],
 
     # The System's last step consumes the final row's inputs and predicts a
     # row past the end of `frame`; keep only predictions of rows that exist.
-    steps = len(frame) - model.history_steps
-    y = yn[model.history_steps:model.history_steps + steps].astype(np.float64)
+    steps = len(frame) - history_steps
+    y = yn[history_steps:history_steps + steps].astype(np.float64)
     state = (torch.cat(states)[:steps].numpy() if blocks
              else np.zeros((steps, 0), np.float32))
     return Rollout(y=y, state=state)

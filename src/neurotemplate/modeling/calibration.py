@@ -119,7 +119,7 @@ def collect_rollout_z(dyn_sys, data: dict, history_steps: int) -> tuple[torch.Te
     at every scored step, [batch, steps, raw_width], with the matching truth
     [batch, steps, ny] in the same (normalised) units as the heads. Read
     through a forward hook on the head stack, so the System's output contract
-    is untouched."""
+    is untouched. Only a built-in family has heads."""
     head_stack = normalized_core(dyn_sys).head_stack
     seen: list[torch.Tensor] = []
     handle = head_stack.register_forward_hook(lambda _m, inp, _out: seen.append(inp[0].detach()))
@@ -185,7 +185,8 @@ def calibrate_decision_thresholds(
     never visits, or with `use_ste=False` (its snap never runs), is
     skipped with a warning. Empty without ordinal heads. Thresholds are in
     the model's normalised units, where its heads compute."""
-    head_stack = normalized_core(dyn_sys).head_stack
+    core = normalized_core(dyn_sys)
+    head_stack = None if core is None else core.head_stack
     if head_stack is None or not any(isinstance(h, OrdinalHead) for h in head_stack.heads):
         return {}
 
@@ -234,10 +235,12 @@ def calibrate_decision_thresholds(
             true_counts = torch.bincount(true_idx, minlength=head.n_levels)
             if (true_counts == 0).any():
                 missing = [k for k in range(head.n_levels) if true_counts[k] == 0]
+                model = contract_model(dyn_sys)
+                physical = lambda x: (x * model.y_stretch[i] + model.y_shift[i]).tolist()  # noqa: E731
                 warnings.warn(
                     f"{name!r}: dev split never visits level(s) {missing} of "
-                    f"{head.level_values.tolist()}, so its decision thresholds "
-                    f"cannot be calibrated and stay at {s['thresholds'].tolist()}.",
+                    f"{physical(head.level_values)}, so its decision thresholds "
+                    f"cannot be calibrated and stay at {physical(s['thresholds'])}.",
                     stacklevel=2,
                 )
                 s["active"] = False

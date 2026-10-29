@@ -65,7 +65,7 @@ from neurotemplate.common.metrics import (
     stability_to_dict,
 )
 from neurotemplate.common.reportcard import write_reportcard as _write_reportcard
-from neurotemplate.modeling.contract import contract_model, normalized_core
+from neurotemplate.modeling.contract import normalized_core
 from neurotemplate.modeling.dynamics import describe_dynamics
 from neurotemplate.modeling.plotting import plot_predictions, plot_synthetic
 from neurotemplate.modeling.reportcard import (
@@ -334,10 +334,10 @@ def evaluate_and_plot(
     persistence_levels = _level_metrics(head_stack, persist, true)
 
     # One unitless headline number: pooling channels is only meaningful
-    # with each normalised by its stats.
-    model = contract_model(dyn_sys)
-    normalized_rmse = (model.normalize("Y", pred) - model.normalize("Y", true)
-                       ).pow(2).mean().sqrt().item()
+    # with each scaled by its stats, as the training loss scales them.
+    stretch = torch.tensor([norm_stats[c]["stretch"] for c in nm_mapping["Y"]],
+                           dtype=pred.dtype, device=pred.device)
+    normalized_rmse = ((pred - true) / stretch).pow(2).mean().sqrt().item()
 
     # Physics assertions on synthetic states the recorded data never visits.
     # The verdicts are the point; the figures are for when one surprises you.
@@ -369,8 +369,10 @@ def evaluate_and_plot(
 def trained_heads(dyn_sys, norm_stats: dict) -> Optional[HeadStack]:
     """The trained model's head stack in physical units, calibrated decision
     thresholds included, or None without heads."""
-    stack = normalized_core(dyn_sys).head_stack
-    return None if stack is None else stack.physical(norm_stats)
+    core = normalized_core(dyn_sys)
+    if core is None or core.head_stack is None:
+        return None
+    return core.head_stack.physical(norm_stats)
 
 
 def _level_metrics(
@@ -844,6 +846,8 @@ def train_and_evaluate(
     # the System's own stack: that is the one carrying the calibrated
     # decision thresholds, which are not in the saved weights.
     trained_stack = trained_heads(dyn_sys, norm_stats)
+    if trained_stack is None:   # a model of the user's own: the stack declared
+        trained_stack = head_stack
     if trained_stack is not None:
         logger.log_dict(trained_stack.to_config(), name="head_config.json")
 

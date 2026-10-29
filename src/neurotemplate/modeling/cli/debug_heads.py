@@ -201,7 +201,8 @@ def main():
     )
     # In the model's own (normalised) units: the activation curves are drawn
     # against the raw output z the family emits.
-    head_stack = normalized_core(dyn_sys).head_stack
+    core = normalized_core(dyn_sys)
+    head_stack = None if core is None else core.head_stack
     if head_stack is None:
         print("Model has no head_stack — nothing to plot.")
         return
