@@ -264,7 +264,7 @@ class _ReferenceBounds(nn.Module):
         self.register_buffer("umax", umax)
         # Each side as (source or None, scale, offset): a source is `("U", column)`
         # for a command, or (positional input, present row, window width, column)
-        # for a reference or disturbance. The named column's normalized value
+        # for a reference. The named column's normalized value
         # maps to the bounded column's normalized space by `value · scale +
         # offset`; a number is the constant `offset`.
         sides = []
@@ -607,12 +607,10 @@ def _reference_bounds(net, cfg, nm_mapping, norm_stats, keys, input_map, r_colum
                       umin, umax) -> _ReferenceBounds:
     """`_ReferenceBounds` from `cfg.command_bounds`, every name checked first.
 
-    A named side is a reference column (read from the R window), a disturbance
-    (the D window), each at its present row (the key's deepest `past`), or
-    another command. Commands are ordered so each follows the bounded commands
+    A named side is a reference column, read from the R window at its present
+    row (the key's deepest `past`), or another command. Commands are ordered so each follows the bounded commands
     its sides name; a cycle is refused."""
     u_columns = list(nm_mapping["U"])
-    readable = {"R": r_columns, "D": list(nm_mapping["D"])}
     sources, problems = {}, []
     after = {}
     for column, pair in cfg.command_bounds.items():
@@ -628,14 +626,13 @@ def _reference_bounds(net, cfg, nm_mapping, norm_stats, keys, input_map, r_colum
                 if side in cfg.command_bounds:
                     after[column].add(side)
                 continue
-            key = next((k for k in ("R", "D") if side in readable[k] and k in keys), None)
-            if key is None:
+            if side not in r_columns or "R" not in keys:
                 problems.append(f"{column!r} is bounded by {side!r}, which is not a "
-                                f"command, or a reference or disturbance column the policy "
-                                f"reads (U {u_columns}, R {r_columns}, D {nm_mapping['D']})")
+                                f"command or a reference column the policy reads "
+                                f"(U {u_columns}, R {r_columns})")
                 continue
-            sources[side] = (keys.index(key), input_map[key]["past"], len(readable[key]),
-                             readable[key].index(side))
+            sources[side] = (keys.index("R"), input_map["R"]["past"], len(r_columns),
+                             r_columns.index(side))
     if problems:
         raise ValueError("command_bounds: " + "; ".join(problems) + ".")
     try:
