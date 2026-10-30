@@ -329,7 +329,8 @@ def _mpc_block(mpc: MPC, cfg, nm_mapping: dict[str, list[str]]) -> dict:
         return {"value": offset} if name is None else {"column": name, "offset": offset}
 
     return {
-        "horizon": mpc.horizon, "iters": mpc.iters, "lr": mpc.lr, "hmax": mpc.hmax,
+        "horizon": mpc.horizon, "lr": mpc.lr, "rtol": mpc.rtol, "patience": mpc.patience,
+        "max_iters": mpc.max_iters, "hmax": mpc.hmax,
         "umin": mpc.umin.tolist(), "umax": mpc.umax.tolist(),
         "command_bounds": [{"column": c, "low": side(cfg.command_bounds[c][0]),
                             "high": side(cfg.command_bounds[c][1])} for c in order],

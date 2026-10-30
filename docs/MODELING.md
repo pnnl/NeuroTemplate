@@ -25,7 +25,7 @@ The hooks in `modeling_user_defined.py`, scaffolded in
 | `synth_cfg` | which outputs are thermal states, for the physics checks (`None` skips them) | required |
 | `sub_plot` | how output plots are grouped | required |
 | `block_mapping` | blocks, a family per block, what each input column is, 2R2C priors | optional |
-| `model_families` | models of your own, by name ("Your own model") | optional |
+| `custom_models` | models of your own, by name ("Your own model") | optional |
 | `hyper_args` | the search space for `nt model optuna` | that command only |
 
 "Required" means the function must exist, even if it returns the trivial
@@ -210,7 +210,7 @@ Every value is in your data's own units. Register a builder by name in
 `modeling_user_defined.py` and set `model` to that name:
 
 ```python
-def model_families():
+def custom_models():
     return {"my_zone": lambda cfg, nm_mapping, norm_stats: MyZone(...)}
 ```
 
@@ -222,8 +222,13 @@ def model_families():
   `[batch, width]` tensor. When the state is `None` the model is cold and
   seeds it from its window; the library resets it between rollouts and
   lifts it into the exported graphs.
-- To fit it from data it must be differentiable; for a fixed model, train
-  with `lr: 0`. The training loss scores each output scaled by its
+- To fit it from data it must be differentiable: at `lr > 0` training
+  refuses a trainable parameter with no gradient path to the loss (freeze
+  one on purpose with `requires_grad_(False)`). A controller trains or plans
+  through its gradient with respect to U, so `nt control train` refuses a
+  model with no gradient path to U. For a fixed model, set `lr: 0`:
+  nothing trains, the run is the model as built, and the reportcard says
+  so. The training loss scores each output scaled by its
   `norm_stats` stretch. `contract.Normalized` puts a model that computes in
   normalised units behind the contract, as the built-in families are.
 - The sampled gradient penalty is a built-in family's (`grad_gain: 0`).

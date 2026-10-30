@@ -96,10 +96,15 @@ class ControlConfig:
     log2_policy_hidden: int = 3
     policy_layers: int = 1
     # `policy: mpc`: steps planned ahead (every D and reference column's
-    # `future` must reach them), Adam steps per control step, and their rate.
+    # `future` must reach them), and each step's solve (`control.solver`):
+    # Adam at `mpc_lr` (a share of each command's range per step), stopped
+    # once `mpc_patience` steps pass without the objective improving by more
+    # than `mpc_rtol` of it, capped at `mpc_max_iters`.
     mpc_horizon: int = 72
-    mpc_iters: int = 20
-    mpc_lr: float = 0.05
+    mpc_lr: float = 0.02
+    mpc_rtol: float = 1e-3
+    mpc_patience: int = 10
+    mpc_max_iters: int = 200
     # The residual, per U column: {column: [below, above]} in that column's
     # physical units. A column named here commands
     # clamp(reference_control(...)[column] + δ, umin, umax) with
@@ -137,10 +142,14 @@ class ControlConfig:
     test_window: int = 287
     test_stride: int = 288
     # The best open-loop plan on the surrogate over the same windows, the
-    # bar the policy is read against (`control.plan`): Adam steps and their
-    # rate. 0 skips it.
-    plan_iters: int = 200
-    plan_lr: float = 0.05
+    # bar the policy is read against (`control.plan`): solved as MPC's is,
+    # from `plan_starts` starts (the controller's commands and random ones),
+    # each window keeping its best. 0 starts skips it.
+    plan_starts: int = 4
+    plan_lr: float = 0.02
+    plan_rtol: float = 1e-3
+    plan_patience: int = 10
+    plan_max_iters: int = 200
 
     # ── Runtime ──────────────────────────────────────────────────
     seed: int = -1
@@ -218,14 +227,15 @@ class ControlConfig:
             "batch_size", "train_pred_steps",
             "log2_policy_hidden", "policy_layers",
             "epochs", "update_every", "lr",
-            "test_window", "test_stride", "plan_lr",
-            "mpc_horizon", "mpc_iters", "mpc_lr",
+            "test_window", "test_stride",
+            "plan_lr", "plan_patience", "plan_max_iters",
+            "mpc_horizon", "mpc_lr", "mpc_patience", "mpc_max_iters",
         ]:
             check_positive(self, name)
         if self.threads is not None:
             check_positive(self, "threads")
 
-        for name in ["warmup", "patience", "plan_iters"]:
+        for name in ["warmup", "patience", "plan_starts", "plan_rtol", "mpc_rtol"]:
             check_non_negative(self, name)
 
         # Column names are resolved against the surrogate's U at policy build.

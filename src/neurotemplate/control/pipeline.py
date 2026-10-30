@@ -162,16 +162,34 @@ def evaluate_closed_loop(
     `test_dfs` is a list of one or more test dataframes. Windows
     from different files are pooled along the batch axis (no rollout spans
     two files). Metrics are computed once across the pooled rollouts.
+
+    `out["issued"]` is what the controller was handed and issued at every
+    step (`rollout_with_commands`): the best plan starts from it, so an MPC
+    controller is not rolled out a second time.
     """
     data, source_idx = evaluation_windows(cfg, sysid_cfg, test_dfs, nm_mapping)
     cl_system.nsteps = eval_pred_steps(cfg, horizons(cfg, sysid_cfg)[2])
     t0 = tic()
-    with torch.no_grad():
-        out = cl_system(data)
+    out, issued = rollout_with_commands(cl_system, data)
     eval_time_s = tic() - t0
     # Plumb source_idx through `out` so plot_closed_loop can route per-batch.
     out["source_idx"] = source_idx
+    out["issued"] = issued
     return score_rollout(cfg, sysid_cfg, out, nm_mapping, norm_stats, eval_time_s), out
+
+
+def rollout_with_commands(cl_system, data: dict) -> tuple[dict, list]:
+    """The closed loop's rollout on `data`, and at every step the windows its
+    controller (the loop's first node) was handed and the command it issued."""
+    seen = []
+    handle = cl_system.nodes[0].callable.register_forward_hook(
+        lambda _m, args, out: seen.append(([a.detach() for a in args], out.detach())))
+    try:
+        with torch.no_grad():
+            out = cl_system(dict(data))
+    finally:
+        handle.remove()
+    return out, seen
 
 
 @beartype

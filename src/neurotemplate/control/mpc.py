@@ -1,12 +1,18 @@
 """
 Receding-horizon MPC through the frozen surrogate (`policy: mpc`).
 
-At every step the controller solves the plan of `control.plan` over the next
-`mpc_horizon` steps: a free command per step through its own copy of the
-surrogate, inside the actuation bounds and `command_bounds`, against the
-run's objective over the horizon, with `mpc_iters` Adam steps at `mpc_lr`.
-It starts from the previous step's plan, shifted by one, and commands the
-first step. Nothing is trained: the surrogate is the controller.
+At every step the controller solves a plan over the next `mpc_horizon`
+steps (`control.solver`): a free command per step through its own copy of
+the surrogate, inside the actuation bounds and `command_bounds`, against the
+run's objective over the horizon. It starts from the previous step's plan,
+shifted by one, and commands the first step. Nothing is trained: the
+surrogate is the controller.
+
+A window's solve stops once `mpc_patience` Adam steps pass without its
+objective improving by more than `mpc_rtol` of it; `mpc_max_iters` caps it,
+so every solve ends, and ends the same on any machine. Every solve's step
+count is kept (`solves`) for the reportcard. A deadline is the
+deployment's: the exported runtime takes one per call.
 
 It reads what a policy reads, the windows of `yn`, `U`, `D` and `R`, `hmax`
 steps back and `mpc_horizon` ahead for `D` and `R`: those previews are its
@@ -29,11 +35,11 @@ from neuromancer.system import Node
 
 from neurotemplate._typing import beartype
 from neurotemplate.common.data_utils import NormStats
-from neurotemplate.control.closed_loop import build_closed_loop, build_control_loss
+from neurotemplate.control.closed_loop import build_closed_loop, build_window_objective
 from neurotemplate.control.losses import resolve_objective
-from neurotemplate.control.plan import _FreePlan
 from neurotemplate.control.policy import with_command_bounds
 from neurotemplate.control.scenarios import horizons
+from neurotemplate.control.solver import SharePlan, share_of, solve
 from neurotemplate.hooks import load_control_hooks
 
 
@@ -59,11 +65,13 @@ class MPC(nn.Module):
         self.r_columns = resolve_objective(cfg, nm_mapping).r_columns
         self.keys = ["yn", "U", "D"] + (["R"] if self.r_columns else [])
         self.hmax = horizons(cfg, sysid_cfg)[2]
-        self.horizon, self.iters, self.lr = cfg.mpc_horizon, cfg.mpc_iters, cfg.mpc_lr
-        self.loss = build_control_loss(cfg, sysid_cfg, nm_mapping)
+        self.horizon, self.lr, self.rtol = cfg.mpc_horizon, cfg.mpc_lr, cfg.mpc_rtol
+        self.patience, self.max_iters = cfg.mpc_patience, cfg.mpc_max_iters
+        self.objective = build_window_objective(cfg, sysid_cfg, nm_mapping)
         self.widths = {"yn": len(nm_mapping["Y"]), "U": len(nm_mapping["U"]),
                        "D": len(nm_mapping["D"]), "R": len(self.r_columns)}
-        self.previous = None    # the last solve's plan, z [b, horizon, nu]
+        self.previous = None    # the last solve's plan, share [b, horizon, nu]
+        self.solves: list[int] = []     # Adam steps each solve took
 
     def input_map(self) -> dict:
         """Each key `hmax` steps back; D and R `horizon` ahead."""
@@ -90,34 +98,26 @@ class MPC(nn.Module):
 
     def forward(self, *args: torch.Tensor) -> torch.Tensor:
         data = self._windows(args)
+        if self.previous is None:   # cold: hold the last command applied
+            start = share_of(data["U"][:, -1:], self.umin, self.umax).expand(
+                -1, self.horizon, -1)
+        else:
+            start = torch.cat([self.previous[:, 1:], self.previous[:, -1:]], dim=1)
+        plan = SharePlan(self.umin, self.umax, start)
+        keys, input_map = _inner_keys(self.r_columns)
+        node = Node(with_command_bounds(plan, self.cfg, self.nm_mapping, keys, input_map,
+                                        self.umin, self.umax),
+                    keys, ["U"], name="mpc plan", input_map=input_map)
+        loop = build_closed_loop(self.plant, node, self.cfg, self.sysid_cfg)
+        loop.nsteps = self.horizon
         with torch.enable_grad():
-            if self.previous is None:
-                last = data["U"][:, -1:].expand(-1, self.horizon, -1)
-                plan = _FreePlan(self.umin, self.umax, last.clamp(self.umin, self.umax))
-            else:
-                plan = _FreePlan(self.umin, self.umax, torch.zeros_like(self.previous))
-                with torch.no_grad():
-                    plan.z.copy_(torch.cat([self.previous[:, 1:], self.previous[:, -1:]], 1))
-            keys, input_map = _inner_keys(self.r_columns)
-            node = Node(with_command_bounds(plan, self.cfg, self.nm_mapping, keys, input_map,
-                                            self.umin, self.umax),
-                        keys, ["U"], name="mpc plan", input_map=input_map)
-            loop = build_closed_loop(self.plant, node, self.cfg, self.sysid_cfg)
-            loop.nsteps = self.horizon
-            optimizer = torch.optim.Adam([plan.z], lr=self.lr)
-            for _ in range(self.iters):
-                plan.step = 0
-                # Summed over the batch, not averaged: each window is its own
-                # problem, and its solve must not depend on its batch-mates
-                # (Adam's epsilon sees the gradient's scale).
-                total = self.loss(loop(dict(data)))["loss"] * len(plan.z)
-                optimizer.zero_grad()
-                total.backward()
-                optimizer.step()
+            result = solve(plan, lambda: self.objective(loop(dict(data))), self.lr,
+                           self.rtol, self.patience, self.max_iters)
+        self.solves.append(result.steps)
         plan.step = 0
         with torch.no_grad():
             first = loop(dict(data))["U"][:, self.hmax - 1]
-        self.previous = plan.z.detach()
+        self.previous = plan.share.detach()
         return first
 
 

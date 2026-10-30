@@ -77,7 +77,7 @@ class EwmaZone(nn.Module):
         return last + self.rate * (memory - last) + self.gain(torch.cat([u[:, -1], d[:, -1]], -1))
 
 
-def model_families():
+def custom_models():
     return {"ewma_zone": lambda cfg, nm, stats: EwmaZone(len(nm["Y"]), len(nm["U"]), len(nm["D"]))}
 
 

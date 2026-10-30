@@ -42,7 +42,7 @@ def build_loss(
     Args:
         cfg:          ModelingConfig with loss gains and physics parameters
         raw_model:    the normalised SSMGrad inside the System, None for a
-                      model from model_families()
+                      model from custom_models()
         system:       Neuromancer SystemPreview wrapping the dynamics model
         grad_masks:   {key: Tensor[1,1,ny,nx]} with sign constraints, or empty dict
         nm_mapping, norm_stats: the run's; the tracking loss is scored with
@@ -97,7 +97,7 @@ def build_loss(
     if grad_masks and cfg.grad_gain > 0:
         if raw_model is None:
             raise ValueError(
-                f"grad_gain > 0, but model {cfg.model!r} is the user's own: the "
+                f"grad_gain > 0, but model {cfg.model!r} is a custom model: the "
                 "sampled gradient penalty differentiates a built-in family's "
                 "normalised core. Give the model its signs structurally, or set "
                 "grad_gain: 0.")

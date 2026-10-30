@@ -291,9 +291,9 @@ def extend_norm_stats(objective: Objective, cfg,
 
 
 @beartype
-def power_mean(h: torch.Tensor, q: float,
-               weight: Optional[torch.Tensor] = None) -> torch.Tensor:
-    """Per window `(mean_t w·|h|^q)^(1/q)`, then the mean over the batch.
+def window_power_mean(h: torch.Tensor, q: float,
+                      weight: Optional[torch.Tensor] = None) -> torch.Tensor:
+    """Per window `(mean_t w·|h|^q)^(1/q)`, [batch].
 
         q = 1 -> mean, q = 2 -> RMS, q -> inf -> max
 
@@ -318,7 +318,7 @@ def power_mean(h: torch.Tensor, q: float,
         safe = torch.where(positive, per_window, torch.ones_like(per_window))
         per_window = torch.where(positive, safe ** (1.0 / q),
                                  torch.zeros_like(per_window))
-    return per_window.mean()
+    return per_window
 
 
 @beartype
@@ -335,7 +335,7 @@ def apply_map(h: torch.Tensor, map_: Optional[str]) -> torch.Tensor:
 def check_weights(objective: Objective, frames: list, label: str) -> None:
     """Refuse a negative weight under a root it cannot pass through.
 
-    `power_mean` with q > 1 takes a root of `mean(w·|h|^q)`, which a negative
+    `window_power_mean` with q > 1 takes a root of `mean(w·|h|^q)`, which a negative
     weight can make negative. q = 1 has no root and keeps the sign.
     """
     for term in objective.terms:

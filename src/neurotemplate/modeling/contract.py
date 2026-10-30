@@ -21,7 +21,7 @@ calls the family, and returns physical units. The family's heads and derived
 inputs live inside it, in its units (`heads.HeadStack.normalized`).
 
 A model of your own is registered by name in the hooks file's
-`model_families()`, `{name: build(cfg, nm_mapping, norm_stats) -> model}`, and
+`custom_models()`, `{name: build(cfg, nm_mapping, norm_stats) -> model}`, and
 `cfg.model` names it. It is one module over every column, honouring the
 contract as written; it may use `Normalized` and the heads itself.
 
@@ -100,7 +100,7 @@ def contract_model(dyn_sys) -> nn.Module:
 
 def normalized_core(dyn_sys) -> nn.Module | None:
     """The normalised family inside a built-in model — where its heads, its
-    derived inputs and its learned maps live — or None for a model of the
-    user's own, which has none of them."""
+    derived inputs and its learned maps live — or None for a custom model,
+    which has none of them."""
     model = contract_model(dyn_sys)
     return model.core if isinstance(model, Normalized) else None

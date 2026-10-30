@@ -57,6 +57,7 @@ from neurotemplate.control.objective import (
 )
 from neurotemplate.control.losses import Objective, resolve_objective
 from neurotemplate.control.scenarios import horizons
+from neurotemplate.control.sensitivity import CommandSensitivity
 
 from neurotemplate._typing import beartype
 
@@ -74,8 +75,11 @@ def _summary_section(
         f"- **Run:** `{run_name}`",
         f"- **Timestamp:** {timestamp}",
         f"- **Sys-id run:** `{cfg.sysid_run_id}` (model: `{sysid_cfg.model}`)",
-        f"- **Best dev loss:** {_fmt_float(best_dev_loss)}",
     ]
+    if cfg.policy == "mpc":
+        rows.append("- **Training:** none (`policy: mpc` plans through the surrogate)")
+    if best_dev_loss is not None:
+        rows.append(f"- **Best dev loss:** {_fmt_float(best_dev_loss)}")
     if train_time_s is not None:
         rows.append(f"- **Train time:** {train_time_s:.1f} s")
     rows.append(f"- **Eval rollout time:** {eval_time_s:.2f} s")
@@ -95,10 +99,19 @@ def _mpc_section(arch: dict) -> str:
         "- **Family:** `mpc`: at every step, the plan over the next steps "
         "through a copy of the surrogate, inside the bounds, against the "
         "objective; the first step is commanded",
-        f"- **Horizon:** {arch['horizon']} steps, {arch['iters']} Adam steps of "
-        f"{arch['lr']:g} per control step, from the last plan shifted",
+        f"- **Horizon:** {arch['horizon']} steps",
+        f"- **Solve:** Adam at {arch['lr']:g} of each command's range per step, from "
+        f"the last plan shifted, until {arch['patience']} steps pass without the "
+        f"objective improving by {arch['rtol']:g} of it, at most "
+        f"{arch['max_iters']} steps",
         "- **Inputs:** " + ", ".join(f"`{key}`" for key in arch["inputs"]),
     ]
+    if arch.get("solves"):
+        steps = sorted(arch["solves"])
+        capped = sum(n >= arch["max_iters"] for n in steps) / len(steps)
+        rows.append(f"- **Solves on the test windows:** {len(steps)}; Adam steps median "
+                    f"{steps[len(steps) // 2]}, max {steps[-1]}; "
+                    f"{capped * 100:.0f}% stopped at the cap")
     if arch.get("command_bounds"):
         rows.append("- **Per-step bounds:**")
         rows += [f"  - `{col}`: [{low}, {high}]"
@@ -107,6 +120,17 @@ def _mpc_section(arch: dict) -> str:
     rows += [f"  - `{col}`: [{lo:.4g}, {hi:.4g}]"
              for col, lo, hi in zip(arch["u_cols"], arch["umin_phys"], arch["umax_phys"])]
     return _section("Controller: MPC", "\n".join(rows))
+
+
+def _sensitivity_section(sensitivity: list[CommandSensitivity]) -> str:
+    rows = ["Each command against the surrogate's next outputs, over recorded "
+            "windows: the share where the derivative is exactly zero, so a "
+            "controller can neither learn nor plan that command there. A share "
+            "near 100% is a model that ignores the command (or a clamp that is "
+            "always saturated), not an operating point.\n",
+            "| Command | Zero gradient |", "|---|---|"]
+    rows += [f"| `{c.column}` | {c.zero_share * 100:.0f}% |" for c in sensitivity]
+    return _section("Surrogate: command sensitivity", "\n".join(rows))
 
 
 def _policy_section(arch: dict) -> str:
@@ -191,7 +215,8 @@ def _scenario_section(cfg, sysid_cfg, nm_mapping: dict,
 def _objective_section(balance: ObjectiveBalance,
                        power: Optional[PowerDiagnostics] = None,
                        notes: Optional[list[str]] = None,
-                       trained: Optional[ObjectiveBalance] = None) -> str:
+                       trained: Optional[ObjectiveBalance] = None,
+                       trains: bool = True) -> str:
     """What the weights actually bought, measured on one batch before training
     and again through the trained policy.
 
@@ -200,11 +225,12 @@ def _objective_section(balance: ObjectiveBalance,
     The trained shares are what a weight can be tuned against: a residual
     policy starts at δ ≡ 0, so its Δu term is exactly zero before training.
     """
+    taken = ("taken before the first optimizer step" if trains
+             else "through the controller, which trains nothing")
     body = [
-        "Each objective term on a single training batch, taken before the "
-        "first optimizer step"
+        f"Each objective term on a single training batch, {taken}"
         + (" and again through the trained policy" if trained is not None else "")
-        + ". The share column is what the policy is really "
+        + ". The share column is what the controller is really "
         "being asked to minimise, whatever the weights suggest.\n",
         balance_to_markdown(balance, trained),
     ]
@@ -303,11 +329,19 @@ def _gap_section(plan, results) -> str:
     body = [
         f"The best plan is a free command per step through the same surrogate, "
         f"bounds and objective, over these test windows, with every step ahead "
-        f"known ({plan.iterations} Adam steps, {plan.time_s:.0f} s): a bar for "
-        f"any controller on this surrogate, not a controller. Its objective is "
-        f"**{plan.gap * 100:.0f}%** below the controller's. That gap is the "
-        "controller's; what the plan does not do either, the surrogate does not "
-        "make pay.\n",
+        f"known ({plan.time_s:.0f} s): a bar for any controller on this "
+        f"surrogate, not a controller. Its objective is **{plan.gap * 100:.0f}%** "
+        "below the controller's. That gap is the controller's; what the plan "
+        "does not do either, the surrogate does not make pay.\n",
+        f"Solved from {plan.starts} start(s), each window keeping its best: the "
+        f"controller's own commands won {plan.own_start_best * 100:.0f}% of "
+        f"windows, and the worst start landed a median "
+        f"{plan.start_spread * 100:.1f}% above the best. "
+        + (f"Every window stopped on patience ({plan.steps} Adam steps)."
+           if plan.converged else
+           f"**Some windows were still improving at plan_max_iters ({plan.steps} "
+           "steps)**: the bar is understated, and the gap with it.")
+        + "\n",
         "| " + " | ".join(head) + " |",
         "|" + "|".join(["---"] + ["---:"] * (len(head) - 1)) + "|",
     ] + ["| " + " | ".join(row) + " |" for row in rows]
@@ -445,6 +479,7 @@ def render_control_reportcard(
     power: Optional[PowerDiagnostics] = None,
     objective_notes: Optional[list[str]] = None,
     plan=None,
+    sensitivity: Optional[list[CommandSensitivity]] = None,
     run_name: Optional[str] = None,
     timestamp: Optional[str] = None,
     best_dev_loss: Optional[float] = None,
@@ -470,6 +505,8 @@ def render_control_reportcard(
         objective_notes: Optional objective.objective_notes(...) prose.
         plan:        Optional plan.PlanResult, the best open-loop plan on the
                      same windows; None renders no gap section.
+        sensitivity: Optional sensitivity.command_sensitivity(...): per
+                     command, how often the surrogate does not move with it.
 
     Returns:
         Markdown string. The caller writes it to disk and logs it.
@@ -486,13 +523,16 @@ def render_control_reportcard(
     ]
     if surrogate_arch is not None:
         parts.append(_architecture_section(surrogate_arch, "Surrogate architecture"))
+    if sensitivity is not None:
+        parts.append(_sensitivity_section(sensitivity))
     parts += [
         _policy_section(arch),
         _scenario_section(cfg, sysid_cfg, nm_mapping,
                           resolve_objective(cfg, nm_mapping)),
     ]
     if balance is not None:
-        parts.append(_objective_section(balance, power, objective_notes, trained_balance))
+        parts.append(_objective_section(balance, power, objective_notes, trained_balance,
+                                        cfg.policy != "mpc"))
     parts.append(_performance_section(results))
     if plan is not None:
         parts.append(_gap_section(plan, results))

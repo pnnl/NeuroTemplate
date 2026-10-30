@@ -34,7 +34,7 @@ test_data_path: data/test.csv
 #          and physics sections before steering with one.
 # Families can be mixed, one per block of Y channels — see `block_mapping`
 # in modeling_user_defined.py (e.g. one 2r2c block per zone, an mlp for a meter).
-# Or the name of a model of your own, from `model_families` there.
+# Or the name of a model of your own, from `custom_models` there.
 # model: nssm
 # Required: steps before the current one the model reads, per column. List
 # every Y, U and D column; there is no default. The names and numbers below

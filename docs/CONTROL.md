@@ -193,10 +193,20 @@ management system's job. Smoothness comes from a `first_difference` row.
 
 `policy: mpc` trains nothing. At every step it plans the next `mpc_horizon`
 commands through its own copy of the surrogate, inside the actuation bounds
-and `command_bounds`, against the same objective, with `mpc_iters` Adam
-steps from its previous plan, and commands the first. Its forecast is what
+and `command_bounds`, against the same objective, with Adam at `mpc_lr` from
+its previous plan, and commands the first. Its forecast is what
 `policy_window` gives a policy, so every D and reference column's `future`
 must reach the horizon. It has no `residual_delta`.
+
+Each command is held as its share of its actuation range, in [0, 1]; Adam
+steps the share by about `mpc_lr` of the range and clamps it back into the
+box. A window's solve stops as early stopping does: once `mpc_patience`
+steps pass without its objective improving by more than `mpc_rtol` of it.
+It keeps the best plan it saw. `mpc_max_iters` caps it, so a solve always
+ends, and ends the same way on any machine. The reportcard gives the steps
+the test windows' solves took and how often one hit the cap; a cap hit
+means a window was still improving. A deadline belongs to deployment: the
+exported `Policy.act(..., time_s=)` stops planning at it.
 
 A trained policy is one forward pass per step and MPC is a solve, so the
 choice is compute against what the Controller gap says a policy leaves on
@@ -210,6 +220,12 @@ against the rule or a previous run.
 
 **Before training:**
 
+- **Command sensitivity**: per command, the share of recorded windows where
+  the surrogate's next outputs do not move with it at all (an exact zero
+  gradient: a saturated clamp, a dead unit, a command the model ignores). A
+  surrogate with no gradient path to its commands at all (numpy, `.detach()`,
+  an integer op inside it) is refused: nothing can be trained or planned
+  through it.
 - **Objective balance**: each term's share of the objective on one real
   batch, with a warning when one term outweighs the rest combined. It is
   taken at the starting point, the rule for a residual policy, so it says a
@@ -242,7 +258,11 @@ against the rule or a previous run.
   training. What the plan does not do either (a pre-cool, riding the band
   edge) the surrogate or the objective does not reward, and no controller
   will find it. It cannot see where the surrogate is wrong about the plant.
-  `plan_iters` sets its effort, 0 skips it.
+  It is solved as MPC's plans are (`plan_lr`, `plan_rtol`, `plan_patience`,
+  `plan_max_iters`) from `plan_starts` starts, the controller's own commands
+  and random ones, each window keeping its best; the reportcard says how far
+  the starts landed apart and whether every window stopped before the cap.
+  `plan_starts: 0` skips it.
 
 [template/README.md](../template/README.md) describes the run-by-run ladder
 (the rule, the band terms only, the full objective, its price-blind twin),

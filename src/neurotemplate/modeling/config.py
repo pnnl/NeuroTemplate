@@ -80,7 +80,7 @@ class ModelingConfig:
 
     # ---- MODEL ---------------------------------------------------------------
     # A built-in family (mlp, nssm, lssm, gru, 2r2c), or a name in the hooks
-    # file's model_families() (see modeling.contract).
+    # file's custom_models() (see modeling.contract).
     model: str = "nssm"
     # Steps before the current one the model reads, per Y, U and D column:
     # `{column: lag}`. Every column is listed. The window every block shares

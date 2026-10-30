@@ -197,6 +197,7 @@ def _head_label(head) -> str:
 def _summary_section(
     run_name: str,
     timestamp: str,
+    trained: bool,
     best_dev_loss: Optional[float],
     train_time_s: Optional[float],
     test_time_s: Optional[float],
@@ -204,8 +205,11 @@ def _summary_section(
     rows = [
         f"- **Run:** `{run_name}`",
         f"- **Timestamp:** {timestamp}",
-        f"- **Best dev loss:** {_fmt_float(best_dev_loss)}",
     ]
+    if not trained:
+        rows.append("- **Training:** none (`lr: 0`): the model as built")
+    if best_dev_loss is not None:
+        rows.append(f"- **Best dev loss:** {_fmt_float(best_dev_loss)}")
     if train_time_s is not None:
         rows.append(f"- **Train time:** {train_time_s:.1f} s")
     if test_time_s is not None:
@@ -795,7 +799,7 @@ def render_reportcard(
 
     parts = [
         f"# Reportcard: {name}\n",
-        _summary_section(name, ts, best_dev_loss, train_time_s, test_time_s),
+        _summary_section(name, ts, cfg.lr > 0, best_dev_loss, train_time_s, test_time_s),
         _architecture_section(arch),
         _data_section(nm_mapping, split_sizes, head_stack, norm_stats),
         _metrics_section(test_metrics, persistence),

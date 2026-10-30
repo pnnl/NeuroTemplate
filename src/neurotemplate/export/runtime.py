@@ -32,6 +32,7 @@ from __future__ import annotations
 import csv
 import json
 import sys
+import time
 import warnings
 from dataclasses import dataclass
 from pathlib import Path
@@ -338,18 +339,24 @@ class Policy:
             self._graph = _graph(policy_dir, "policy", self.spec)
         self._previous = None   # MPC's last plan, between `act` calls
 
-    def act(self, y, u_history=None, d=None, r=None) -> dict[str, float]:
+    def act(self, y, u_history=None, d=None, r=None,
+            time_s: Optional[float] = None) -> dict[str, float]:
         """The command for one step: `{u column: value}`.
 
         Each argument is `[steps, n]` for that input (see `self.inputs`);
         `u_history` only for a policy that reads past commands, `r` only for one
-        whose objective names reference columns.
+        whose objective names reference columns. `time_s`, for an MPC policy
+        only, is the step's deadline: planning stops once that many seconds
+        have passed, if it has not converged first.
         """
         windows = {"y": y, "u_history": u_history, "d": d, "r": r}
         feed = self._feed({name: None if windows[name] is None
                            else np.asarray(windows[name])[None] for name in self.inputs})
         if "mpc" in self.spec:
-            u, self._previous = self._planner.plan(feed, self._previous)
+            u, self._previous = self._planner.plan(feed, self._previous, time_s)
+        elif time_s is not None:
+            raise ValueError("time_s is an MPC policy's planning deadline; this "
+                             "policy is one graph call and does not plan.")
         else:
             u = self._graph(feed)[0]
         return {c: float(v) for c, v in zip(self.u_columns, u[0])}
@@ -379,7 +386,9 @@ class Policy:
                            for name, spec in self.inputs.items())
         plans = ("" if "mpc" not in s else
                  f"\n  plans {s['mpc']['horizon']} steps ahead through model/, "
-                 f"{s['mpc']['iters']} Adam steps per command")
+                 f"until {s['mpc']['patience']} Adam steps pass without the objective "
+                 f"improving by {s['mpc']['rtol']:g} of it (at most "
+                 f"{s['mpc']['max_iters']} steps)")
         return (f"{s['description'] or 'NeuroTemplate policy'}  "
                 f"(run {s['trained_from']['run_id'][:8]}, {s['trained_from']['policy']})\n"
                 f"  commands {len(self.u_columns)} controls from windows {shapes}" + plans)
@@ -389,11 +398,16 @@ class _Planner:
     """MPC, as `policy: mpc` runs it in training (`control.mpc`).
 
     For each window: a free command per step over the next `horizon` steps,
-    `umin + sigmoid(z) * (umax - umin)` mapped onto `command_bounds`, rolled
-    through the model graphs beside the policy, scored by the run's objective
-    table, and improved by `iters` Adam steps at `lr`, starting from the last
-    plan shifted by one step (or, without one, from the last command applied).
-    The first step's command is the action.
+    held as its share of the actuation range in [0, 1], `umin + share *
+    (umax - umin)` mapped onto `command_bounds`, rolled through the model
+    graphs beside the policy and scored by the run's objective table. Adam
+    at `lr` steps the share, clamped back into [0, 1] after every step,
+    starting from the last plan shifted by one step (or, without one, from
+    the last command applied). Each window stops once `patience` steps pass
+    without its objective improving by more than `rtol` of it, and keeps
+    the best plan it saw; the solve ends when every window has stopped, at
+    `max_iters` steps, or at a deadline the caller passes. The first step's
+    command is the action.
     """
 
     def __init__(self, policy_dir: Path, spec: dict):
@@ -401,7 +415,8 @@ class _Planner:
 
         self.torch = torch
         m = spec["mpc"]
-        self.horizon, self.iters, self.lr, self.hmax = m["horizon"], m["iters"], m["lr"], m["hmax"]
+        self.horizon, self.lr, self.hmax = m["horizon"], m["lr"], m["hmax"]
+        self.rtol, self.patience, self.max_iters = m["rtol"], m["patience"], m["max_iters"]
         self.umin, self.umax = torch.tensor(m["umin"]), torch.tensor(m["umax"])
         self.bounds, self.terms = m["command_bounds"], m["terms"]
         model_dir = policy_dir.parent / "model"
@@ -418,33 +433,59 @@ class _Planner:
                    "r": spec["inputs"]["r"]["columns"] if "r" in spec["inputs"] else []}
         self.where = {c: (role, i) for role, cs in columns.items() for i, c in enumerate(cs)}
 
-    def plan(self, feed: dict[str, np.ndarray], previous):
-        """(first commands [batch, nu], the plan to start the next step from)"""
+    def plan(self, feed: dict[str, np.ndarray], previous, time_s: Optional[float] = None):
+        """(first commands [batch, nu], the plan to start the next step from).
+        `time_s` stops the solve once that many seconds have passed."""
         torch = self.torch
+        deadline = None if time_s is None else time.perf_counter() + time_s
         y, d = torch.from_numpy(feed["y"]), torch.from_numpy(feed["d"])
         applied = torch.from_numpy(feed["u_history"])
         r = torch.from_numpy(feed["r"]) if "r" in feed else None
         if previous is None:
-            start = applied[:, -1:].expand(-1, self.horizon, -1).clamp(self.umin, self.umax)
-            share = ((start - self.umin) / (self.umax - self.umin).clamp_min(1e-9)).clamp(1e-3, 1 - 1e-3)
-            z = torch.log(share / (1 - share))
+            start = applied[:, -1:].expand(-1, self.horizon, -1)
+            share = ((start - self.umin) / (self.umax - self.umin).clamp_min(1e-9)).clamp(0, 1)
         else:
-            z = torch.cat([previous[:, 1:], previous[:, -1:]], dim=1)
-        z = z.clone().requires_grad_(True)
-        optimizer = torch.optim.Adam([z], lr=self.lr)
-        for _ in range(self.iters):
-            # Summed over windows: each is its own problem (control.mpc).
-            loss = self._objective(z, y, applied, d, r) * len(z)
+            share = torch.cat([previous[:, 1:], previous[:, -1:]], dim=1)
+        share = share.clone().requires_grad_(True)
+        optimizer = torch.optim.Adam([share], lr=self.lr)
+        n = len(share)
+        best = torch.full((n,), torch.inf)
+        reference = best.clone()
+        best_share = share.detach().clone()
+        wait = torch.zeros(n, dtype=torch.long)
+        stopped = torch.zeros(n, dtype=torch.bool)
+        steps = 0
+        while True:          # the library's `control.solver.solve`, step for step
+            values = self._objective(share, y, applied, d, r)
+            with torch.no_grad():
+                v = values.detach()
+                better = ~stopped & (v < best)
+                best = torch.where(better, v, best)
+                best_share[better] = share[better]
+                improved = ~stopped & (torch.isinf(reference)
+                                       | (v < reference - self.rtol * reference.abs()))
+                reference = torch.where(improved, v, reference)
+                wait = torch.where(improved, torch.zeros_like(wait), wait + 1)
+                stopped |= wait >= self.patience
+            if stopped.all() or steps == self.max_iters:
+                break
+            if deadline is not None and time.perf_counter() >= deadline:
+                break
             optimizer.zero_grad()
-            loss.backward()
+            # Summed over windows: each is its own problem (control.solver).
+            values.sum().backward()
             optimizer.step()
+            steps += 1
+            with torch.no_grad():
+                share.clamp_(0, 1)
+                share[stopped] = best_share[stopped]
         with torch.no_grad():
-            u = self._commands(z, r)
-        return u[:, 0].numpy(), z.detach()
+            u = self._commands(best_share, r)
+        return u[:, 0].numpy(), best_share
 
-    def _commands(self, z, r):
+    def _commands(self, share, r):
         """The plan's commands, [batch, horizon, nu], inside every bound."""
-        u = self.umin + self.torch.sigmoid(z) * (self.umax - self.umin)
+        u = self.umin + share * (self.umax - self.umin)
         columns = list(u.unbind(-1))
         for entry in self.bounds:          # in the order the sides read each other
             j = self.where[entry["column"]][1]
@@ -480,8 +521,9 @@ class _Planner:
             outputs.append(y_next)
         return torch.stack(outputs, dim=1)
 
-    def _objective(self, z, y, applied, d, r):
-        u = self._commands(z, r)
+    def _objective(self, share, y, applied, d, r):
+        """The run's objective per window, [batch]."""
+        u = self._commands(share, r)
         ahead = slice(self.hmax, self.hmax + self.horizon)
         series = {"y": self._rollout(u, y, applied, d), "u": u, "d": d[:, ahead],
                   "r": None if r is None else r[:, ahead]}
@@ -511,8 +553,8 @@ class _Planner:
 
 
 def _power_mean(torch, h, q: float, weight):
-    """Per window `(mean_t w·|h|^q)^(1/q)`, then the batch mean: the
-    training objective's reduction (`control.losses.power_mean`)."""
+    """Per window `(mean_t w·|h|^q)^(1/q)`, [batch]: the training
+    objective's reduction (`control.losses.window_power_mean`)."""
     a = h.abs() if q == 1 else h.abs() ** q
     if weight is not None:
         a = a * weight
@@ -521,7 +563,7 @@ def _power_mean(torch, h, q: float, weight):
         positive = per_window > 0
         safe = torch.where(positive, per_window, torch.ones_like(per_window))
         per_window = torch.where(positive, safe ** (1.0 / q), torch.zeros_like(per_window))
-    return per_window.mean()
+    return per_window
 
 
 # ── reproducing the shipped reference ────────────────────────────

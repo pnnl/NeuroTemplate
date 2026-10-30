@@ -763,7 +763,7 @@ def describe_dynamics(dyn_sys: SystemPreview, cfg: ModelingConfig) -> dict:
     """
     raw = normalized_core(dyn_sys)
     if raw is None:
-        return _describe_user_model(contract_model(dyn_sys), dyn_sys.nodes[0].callable.widths,
+        return _describe_custom_model(contract_model(dyn_sys), dyn_sys.nodes[0].callable.widths,
                                     cfg)
 
     blocks_info: dict[str, Optional[dict]] = {
@@ -797,9 +797,9 @@ def describe_dynamics(dyn_sys: SystemPreview, cfg: ModelingConfig) -> dict:
     }
 
 
-def _describe_user_model(model: nn.Module, widths: tuple[int, int, int],
+def _describe_custom_model(model: nn.Module, widths: tuple[int, int, int],
                          cfg: ModelingConfig) -> dict:
-    """`describe_dynamics` for a model from `model_families()`: what it says
+    """`describe_dynamics` for a model from `custom_models()`: what it says
     about itself (`describe()`, its bounded parameters), and its size."""
     ny, nu, nd = widths
     return {
@@ -977,10 +977,10 @@ def get_dynamics(
     rescaled into them.
 
     A `cfg.model` that is not a built-in family is looked up in the hooks
-    file's `model_families()` (see `contract`).
+    file's `custom_models()` (see `contract`).
     """
     if cfg.model not in VALID_MODEL_NAMES:
-        model = _user_model(cfg, nm_mapping, norm_stats, head_stack, block_spec)
+        model = _custom_model(cfg, nm_mapping, norm_stats, head_stack, block_spec)
         return _rollout_system(model, model, cfg, nm_mapping)
 
     blocks = build_blocks(nm_mapping, block_spec)
@@ -1063,22 +1063,22 @@ def _rollout_system(contract: nn.Module, stateful: nn.Module, cfg: ModelingConfi
     )
 
 
-def _user_model(cfg: ModelingConfig, nm_mapping: dict[str, list[str]],
+def _custom_model(cfg: ModelingConfig, nm_mapping: dict[str, list[str]],
                 norm_stats: dict[str, dict], head_stack: Optional[HeadStack],
                 block_spec: Optional[dict[str, dict]]) -> nn.Module:
-    """`cfg.model` built by the hooks file's `model_families()`: one module
+    """`cfg.model` built by the hooks file's `custom_models()`: one module
     over every column, behind the contract as it is (see `contract`).
 
     What a built-in family adds around its learned maps is the family's own,
     so the library's per-column machinery is refused here rather than
     silently ignored: blocks, heads, and the gradient penalty (`build_loss`).
     """
-    families = getattr(load_modeling_hooks(cfg), "model_families", lambda: {})()
-    if cfg.model not in families:
+    custom = getattr(load_modeling_hooks(cfg), "custom_models", lambda: {})()
+    if cfg.model not in custom:
         raise ValueError(
             f"Unknown model {cfg.model!r}. Built-in families: "
-            f"{list(VALID_MODEL_NAMES)}; the hooks file's model_families(): "
-            f"{sorted(families)}.")
+            f"{list(VALID_MODEL_NAMES)}; the hooks file's custom_models(): "
+            f"{sorted(custom)}.")
     if block_spec:
         raise ValueError(
             f"model {cfg.model!r} is one module over every column, so "
@@ -1090,8 +1090,8 @@ def _user_model(cfg: ModelingConfig, nm_mapping: dict[str, list[str]],
             "must give every channel a RegressionHead. Bound or level a "
             "channel inside the model; `heads` has the activations to use.")
     column_lags(cfg, nm_mapping)   # the history table names exactly the columns
-    model = families[cfg.model](cfg, nm_mapping, norm_stats)
+    model = custom[cfg.model](cfg, nm_mapping, norm_stats)
     if not isinstance(model, nn.Module):
-        raise TypeError(f"model_families()[{cfg.model!r}] returned "
+        raise TypeError(f"custom_models()[{cfg.model!r}] returned "
                         f"{type(model).__name__}, not a torch.nn.Module.")
     return model

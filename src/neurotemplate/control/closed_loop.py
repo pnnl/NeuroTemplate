@@ -27,7 +27,7 @@ from neuromancer.constraint import Loss
 from neuromancer.loss import PenaltyLoss
 
 from neurotemplate.control.losses import (
-    POWER, LossTerm, apply_map, power_mean, resolve_objective,
+    POWER, LossTerm, apply_map, resolve_objective, window_power_mean,
 )
 from neurotemplate.control.scenarios import horizons, scored_series, scored_steps
 from neurotemplate.modeling.dynamics import make_reset_init
@@ -96,11 +96,12 @@ def build_control_loss(
     sysid_cfg,
     nm_mapping: dict[str, list[str]],
 ) -> PenaltyLoss:
-    """One scalar term per entry of `cfg.losses`, scaled by its gain.
+    """One scalar term per entry of `cfg.losses`, scaled by its gain: the
+    batch mean of `build_window_objective`'s terms.
 
     Each term reads the scored horizon of the rollout — the P steps after the
     warm-up, with U read one index earlier (see `scenarios.scored_steps`) —
-    and is reduced by `losses.power_mean`, so a gain tuned at P=48 means the
+    and is reduced by `losses.window_power_mean`, so a gain tuned at P=48 means the
     same thing at P=288. Every series is in physical units.
 
     Every term that names `power` evaluates the same `power_metric` hook on
@@ -112,6 +113,36 @@ def build_control_loss(
     — that is `control.objective`, run once on a real batch before training,
     because it takes a forward pass to know.
     """
+    objective, keys, term_value = _term_values(cfg, sysid_cfg, nm_mapping)
+
+    def term_loss(term: LossTerm):
+        def loss(*tensors):
+            return term_value(term, dict(zip(keys, tensors))).mean()
+        return loss
+
+    return PenaltyLoss(
+        [Loss(keys, term_loss(term), weight=term.gain, name=term.key)
+         for term in objective.terms],
+        constraints=[],
+    )
+
+
+@beartype
+def build_window_objective(cfg, sysid_cfg, nm_mapping: dict[str, list[str]]):
+    """The run's objective per window, `rollout -> [batch]`: each term's
+    window power mean times its gain, summed. Its batch mean is
+    `build_control_loss`'s total. A planner needs it per window: each window
+    is its own problem, and stops and keeps its best on its own."""
+    objective, keys, term_value = _term_values(cfg, sysid_cfg, nm_mapping)
+
+    def window_objective(data: dict) -> torch.Tensor:
+        return sum(term.gain * term_value(term, data) for term in objective.terms)
+    return window_objective
+
+
+def _term_values(cfg, sysid_cfg, nm_mapping: dict[str, list[str]]):
+    """(objective, the rollout keys it reads, `term_value(term, data) ->
+    [batch]`, one term's power mean per window, before its gain)."""
     objective = resolve_objective(cfg, nm_mapping)
     _, _, hmax = horizons(cfg, sysid_cfg)
     keys = ["yn", "U", "D"] + (["R"] if objective.r_columns else [])
@@ -133,26 +164,19 @@ def build_control_loss(
                            for k in ("yn", "U", "D")))
         return scored_series(objective, name, data, hmax, nm_mapping)
 
-    def term_loss(term: LossTerm):
-        def loss(*tensors):
-            data = dict(zip(keys, tensors))
-            h = series(term.column, data)
-            if term.target is not None:
-                h = h - series(term.target, data)
-            h = apply_map(h, term.map)
-            weight = None
-            if term.weight is not None:
-                weight = series(term.weight, data)
-                if term.map == "first_difference":
-                    weight = weight[:, 1:]
-            return power_mean(h, term.norm, weight)
-        return loss
+    def term_value(term: LossTerm, data: dict) -> torch.Tensor:
+        h = series(term.column, data)
+        if term.target is not None:
+            h = h - series(term.target, data)
+        h = apply_map(h, term.map)
+        weight = None
+        if term.weight is not None:
+            weight = series(term.weight, data)
+            if term.map == "first_difference":
+                weight = weight[:, 1:]
+        return window_power_mean(h, term.norm, weight)
 
-    return PenaltyLoss(
-        [Loss(keys, term_loss(term), weight=term.gain, name=term.key)
-         for term in objective.terms],
-        constraints=[],
-    )
+    return objective, keys, term_value
 
 
 @beartype

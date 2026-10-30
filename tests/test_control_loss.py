@@ -9,7 +9,7 @@ import pytest
 import torch
 
 from neurotemplate.control.closed_loop import build_control_loss
-from neurotemplate.control.losses import power_mean
+from neurotemplate.control.losses import window_power_mean
 from neurotemplate.control.scenarios import horizons
 from control_fixtures import HIGH, LOW, SETPT, ZONE, full_setup
 
@@ -71,29 +71,29 @@ def test_a_first_difference_is_scored_per_unit_of_movement():
     assert got == pytest.approx(float(expected), rel=1e-5)
 
 
-# ── power_mean ───────────────────────────────────────────────────
+# ── window_power_mean ───────────────────────────────────────────────────
 
 
 def test_power_mean_is_monotone_in_q_and_bounded_by_the_max():
     p = torch.tensor([[1.0, 2.0, 3.0, 10.0]])
-    values = [float(power_mean(p, q)) for q in (1.0, 2.0, 4.0, 8.0, 32.0)]
+    values = [float(window_power_mean(p, q).mean()) for q in (1.0, 2.0, 4.0, 8.0, 32.0)]
     assert values == sorted(values)
     assert values[-1] <= float(p.max()) + 1e-6
     assert values[-1] > values[0]
 
 
-def test_power_mean_reduces_per_window_then_averages_over_the_batch():
+def test_power_mean_reduces_each_window_on_its_own():
     """A pooled power mean would give most of its gradient to the worst
     window; check the two-window arithmetic by hand."""
     p = torch.tensor([[0.0, 2.0], [6.0, 6.0]])
     w0 = ((0.0 ** 4 + 2.0 ** 4) / 2) ** (1 / 4)
-    assert float(power_mean(p, 4.0)) == pytest.approx((w0 + 6.0) / 2, rel=1e-6)
+    assert window_power_mean(p, 4.0).tolist() == pytest.approx([w0, 6.0], rel=1e-6)
 
 
 def test_an_all_zero_window_does_not_poison_the_gradient():
     """The root has an infinite derivative at 0, and a zone inside its band
     all window is the common case. Pin that it stays finite."""
     h = torch.tensor([[0.0, 0.0, 0.0], [0.0, 1.0, 0.0]], requires_grad=True)
-    power_mean(h, 2.0).backward()
+    window_power_mean(h, 2.0).mean().backward()
     assert torch.isfinite(h.grad).all()
     assert h.grad[1, 1] > 0

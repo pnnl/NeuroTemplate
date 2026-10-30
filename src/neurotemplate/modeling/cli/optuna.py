@@ -61,6 +61,9 @@ def objective(
     # The hook gets a copy, so the trial settings below (and anything the
     # hook sets) never leak into the base config the phase-2 retrain uses.
     trial_cfg = load_modeling_hooks(cfg).hyper_args(trial, deepcopy(cfg))
+    if trial_cfg.lr == 0:
+        raise ValueError("A trial at lr: 0 trains nothing, so it has no dev loss "
+                         "to rank: search lr above 0.")
     trial_cfg.epochs = trial_cfg.trial_epochs
     trial_cfg.progress = "silent"
     trial_cfg.plot = False

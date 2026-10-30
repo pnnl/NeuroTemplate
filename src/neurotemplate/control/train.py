@@ -1,6 +1,6 @@
 """
-One tracked DPC training run, start to finish — `nt control train` without
-the command line:
+One tracked control run, start to finish — `nt control train` without the
+command line:
 
     from neurotemplate.common.config import load_config
     from neurotemplate.control.config import ControlConfig
@@ -11,9 +11,9 @@ the command line:
     policy_run = train_control(cfg)
     policy_run.run_id, policy_run.results.comfort_violation_rate
 
-Loads a frozen sys-id surrogate, builds a closed loop (policy + frozen
-dynamics), trains the policy under the declared objective, evaluates the
-closed loop, and writes a reportcard.
+Loads a frozen sys-id surrogate, builds a closed loop (controller + frozen
+dynamics), trains the policy under the declared objective (`policy: mpc`
+trains nothing), evaluates the closed loop, and writes a reportcard.
 """
 
 from __future__ import annotations
@@ -40,6 +40,7 @@ from neurotemplate.control.scenarios import (
     build_loaders, eval_pred_steps, horizons, load_control_splits,
 )
 from neurotemplate.control.controller import build_controller, describe_controller
+from neurotemplate.control.sensitivity import command_sensitivity
 from neurotemplate.control.closed_loop import (
     build_closed_loop, build_control_loss, build_problem, power_term,
 )
@@ -70,8 +71,8 @@ class TrainedPolicy:
     run_id: str
     cl_system: object
     results: ControlResults   # the closed loop on the test split
-    best_dev_loss: float
-    train_time_s: float
+    best_dev_loss: Optional[float]     # None for `policy: mpc`, which trains nothing
+    train_time_s: Optional[float]
 
 
 @beartype
@@ -119,6 +120,17 @@ def train_control(cfg: ControlConfig,
     # there before spending an hour training against a band nothing can hold.
     hooks = load_control_hooks(cfg)
 
+    # Raises if no output has a gradient path to U: nothing could be trained
+    # or planned through the surrogate. Partial zero shares are the reportcard's.
+    sensitivity = command_sensitivity(dyn_sys, train_dfs, nm_mapping, cfg.device)
+    if cfg.progress != "silent":
+        for c in sensitivity:
+            if c.zero_share == 1.0:
+                print(f"WARNING: the surrogate's outputs never move with {c.column!r} "
+                      "in any recorded window (an exact zero gradient); a controller "
+                      "cannot learn or plan that command.")
+
+    trains = cfg.policy != "mpc"   # MPC plans through the surrogate; nothing to train
     policy_node = build_controller(cfg, sysid_cfg, nm_mapping, norm_stats, dyn_node)
     arch = describe_controller(policy_node, cfg, sysid_cfg, nm_mapping)
     cl_system = build_closed_loop(dyn_node, policy_node, cfg, sysid_cfg)
@@ -136,12 +148,12 @@ def train_control(cfg: ControlConfig,
                   if power is not None and objective.reads_power else None)
     notes = objective_notes(objective, cfg)
     if cfg.progress in ("live", "log"):
-        print(format_objective_report(balance, power_diag, notes))
+        print(format_objective_report(balance, power_diag, notes, trains))
     elif cfg.progress == "summary":
         for line in objective_warnings(balance) + [f"NOTE: {n}" for n in notes]:
             print(line)
 
-    cfg.run = "DPC " + cfg.run
+    cfg.run = ("DPC " if trains else "MPC ") + cfg.run
     term_keys = [term.key for term in objective.terms]
     with tracked_run(
         cfg,
@@ -149,28 +161,31 @@ def train_control(cfg: ControlConfig,
         logout=["train_loss", "dev_loss", "time"] + term_keys,
     ) as logger:
         snapshot_hooks(hooks, CONTROL_SNAPSHOT, logger)
-        if cfg.policy == "mpc":     # nothing to train: the surrogate is the controller
-            save_checkpoint(logger, problem.state_dict())
-            best_dev, train_time_s = float("nan"), 0.0
-        else:
+        best_dev = train_time_s = trained_balance = None
+        if trains:
             cl_system, best_dev, train_time_s = train_policy(
                 cfg, problem, train_loader, dev_loader, logger=logger,
             )
-        # The same batch through the trained policy: the shares a weight can
-        # be tuned against (a residual's Δu term is exactly zero before).
-        trained_balance = objective_balance(
-            loss, run_objective_pass(problem, balance_batch))
-        if cfg.progress in ("live", "log"):
-            print("Objective shares after training: " + ", ".join(
-                f"{t.name} {t.share * 100:.0f}%" for t in trained_balance.terms))
+            # The same batch through the trained policy: the shares a weight can
+            # be tuned against (a residual's Δu term is exactly zero before).
+            trained_balance = objective_balance(
+                loss, run_objective_pass(problem, balance_batch))
+            if cfg.progress in ("live", "log"):
+                print("Objective shares after training: " + ", ".join(
+                    f"{t.name} {t.share * 100:.0f}%" for t in trained_balance.terms))
+        else:
+            save_checkpoint(logger, problem.state_dict())
+            policy_node.callable.solves.clear()   # count the evaluation's solves only
 
         results, out = evaluate_closed_loop(
             cfg, sysid_cfg, cl_system, test_dfs, nm_mapping, norm_stats,
         )
+        if not trains:
+            arch["solves"] = list(policy_node.callable.solves)
         plan = None
-        if cfg.plan_iters:
+        if cfg.plan_starts:
             plan = plan_on_surrogate(cfg, sysid_cfg, cl_system, policy_node, test_dfs,
-                                     nm_mapping, norm_stats)
+                                     out, nm_mapping, norm_stats)
             if cfg.progress != "silent":
                 print(f"Best plan on the surrogate: objective {plan.gap * 100:.0f}% below "
                       "the controller's (control reportcard, Controller gap).")
@@ -191,6 +206,7 @@ def train_control(cfg: ControlConfig,
             train_time_s=train_time_s,
             balance=balance, trained_balance=trained_balance,
             power=power_diag, objective_notes=notes, plan=plan,
+            sensitivity=sensitivity,
         )
         write_reportcard(md, Path(cfg.savedir), logger=logger)
         log_control_results(logger, results)

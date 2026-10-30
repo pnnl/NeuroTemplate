@@ -289,7 +289,7 @@ def block_mapping(
 # code, and any starting values, in this file: the run keeps a copy of it.
 # `nt guide own-model` has the decisions; docs/MODELING.md the full contract.
 #
-# def model_families():
+# def custom_models():
 #     return {"my_zone": lambda cfg, nm_mapping, norm_stats: MyZone(nm_mapping)}
 
 

@@ -261,7 +261,7 @@ model(y, u, d) -> y_next      y, u, d: [batch, history_steps, n]; y_next: [batch
 Physical units throughout; row -1 of `u` and `d` drives this step. The full contract
 is in docs/MODELING.md ("Your own model"). The decisions:
 
-1. **Register it** in `modeling_user_defined.py`, `model_families()` returning
+1. **Register it** in `modeling_user_defined.py`, `custom_models()` returning
    `{name: build(cfg, nm_mapping, norm_stats) -> nn.Module}`, and set `model` to the
    name. The run keeps a copy of that file, so the model's code and its starting
    values live in it, not beside it.
@@ -294,14 +294,15 @@ state lifted, and a policy trained against it exported beside it.
 
 `policy: mpc` trains nothing: every step it plans the next `mpc_horizon` commands
 through its own copy of the model, inside the same bounds, against the same objective,
-with `mpc_iters` Adam steps from its previous plan, and commands the first.
+with Adam from its previous plan until `mpc_patience` steps pass without the objective
+improving by `mpc_rtol` of it (at most `mpc_max_iters`), and commands the first.
 
 1. **Horizon.** Long enough to see the action and its payoff, like a policy's
    preview: every D and reference column's `future` must reach it.
-2. **Effort.** `mpc_iters` per step, starting from the last plan, so it refines as
-   the window moves. The Controller gap sets MPC beside the best plan for the whole
-   window: a gap that falls as `mpc_iters` rises is effort; one that does not is the
-   horizon.
+2. **Effort.** `mpc_rtol` and `mpc_patience` say when a solve is done, `mpc_max_iters`
+   caps it; the reportcard says how often the cap bound. The Controller gap sets MPC
+   beside the best plan for the whole window: a gap that falls as `mpc_rtol` tightens
+   is effort; one that does not is the horizon.
 3. **Cost.** A solve per step, against a policy's one forward pass. The exported
    package's `example.py` times a command. If the plant's control period cannot
    hold a solve, train a policy and read its gap against MPC's on the same model.

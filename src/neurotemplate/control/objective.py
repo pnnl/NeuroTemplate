@@ -265,9 +265,12 @@ def objective_warnings(balance: ObjectiveBalance) -> list[str]:
 @beartype
 def format_objective_report(balance: ObjectiveBalance,
                             power: Optional[PowerDiagnostics] = None,
-                            notes: Optional[list[str]] = None) -> str:
-    """Plain-text version for stdout, printed before training starts."""
-    lines = ["Objective term balance (one batch, before training):"]
+                            notes: Optional[list[str]] = None,
+                            trains: bool = True) -> str:
+    """Plain-text version for stdout, printed before training starts.
+    `trains` is False for a controller that trains nothing (MPC)."""
+    when = "before training" if trains else "through the controller"
+    lines = [f"Objective term balance (one batch, {when}):"]
     for t in balance.terms:
         ratio = "inf" if t.ratio_to_rest == float("inf") else f"{t.ratio_to_rest:.2f}x"
         note = "  <-- dominates" if t.dominates() else ""

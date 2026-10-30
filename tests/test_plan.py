@@ -7,7 +7,7 @@ import torch
 from neurotemplate.control.closed_loop import build_closed_loop, build_control_loss
 from neurotemplate.control.controller import build_controller
 from neurotemplate.control.losses import resolve_objective
-from neurotemplate.control.pipeline import evaluation_windows
+from neurotemplate.control.pipeline import evaluate_closed_loop, evaluation_windows
 from neurotemplate.control.plan import plan_on_surrogate
 from neurotemplate.control.policy import build_policy
 from neurotemplate.control.scenarios import eval_pred_steps, horizons, scored_steps
@@ -16,17 +16,19 @@ from control_fixtures import HIGH, LOW, SETPT, full_setup, make_nm_mapping, make
 
 def test_the_plan_improves_on_the_policy_inside_its_bounds():
     torch.manual_seed(0)   # the fixture surrogate's weights
-    s = full_setup(command_bounds={SETPT: [LOW, [HIGH, -0.5]]}, plan_iters=30,
+    s = full_setup(command_bounds={SETPT: [LOW, [HIGH, -0.5]]}, plan_max_iters=100,
                    test_window=30, test_stride=30)
     cfg, sysid_cfg, nm, ns = s["cfg"], s["sysid_cfg"], s["nm"], s["norm_stats"]
     policy = build_policy(cfg, sysid_cfg, nm, ns)
     cl = build_closed_loop(s["dyn_node"], policy, cfg, sysid_cfg)
     torch.manual_seed(0)
 
-    plan = plan_on_surrogate(cfg, sysid_cfg, cl, policy, [s["frame"]], nm, ns)
+    _, out = evaluate_closed_loop(cfg, sysid_cfg, cl, [s["frame"]], nm, ns)
+    plan = plan_on_surrogate(cfg, sysid_cfg, cl, policy, [s["frame"]], out, nm, ns)
 
     assert plan.plan.total < plan.policy.total
     assert 0 < plan.gap < 1
+    assert plan.converged and plan.starts == cfg.plan_starts > 1
     # The plan's commands obey command_bounds at every step, as the policy's do.
     _, _, hmax = horizons(cfg, sysid_cfg)
     r = resolve_objective(cfg, nm).r_columns
@@ -52,10 +54,12 @@ def test_mpc_beats_an_untrained_policy_inside_its_bounds_and_starts_each_rollout
 
     torch.manual_seed(0)
     untrained, _, _ = objective(build_policy(cfg, sysid_cfg, nm, ns))
-    cfg.policy, cfg.mpc_horizon, cfg.mpc_iters = "mpc", 4, 15
+    cfg.policy, cfg.mpc_horizon = "mpc", 4
     mpc = build_controller(cfg, sysid_cfg, nm, ns, plant)
     planned, out, cl = objective(mpc)
     assert planned < untrained
+    # Every solve stopped on patience, before the cap.
+    assert max(mpc.callable.solves) < cfg.mpc_max_iters
 
     _, _, hmax = horizons(cfg, sysid_cfg)
     r = resolve_objective(cfg, nm).r_columns

@@ -110,8 +110,8 @@ def build_trainer(
         cfg, nm_mapping, norm_stats, head_stack=head_stack, block_spec=block_spec,
     ).to(cfg.device)
 
-    # The normalised family inside the contract, None for a model of the
-    # user's own. The gradient penalty differentiates it directly, and the
+    # The normalised family inside the contract, None for a custom model.
+    # The gradient penalty differentiates it directly, and the
     # loss reads the head stack it owns (get_dynamics rescales its own copy),
     # not the caller's — one stack, so nothing calibrated on it can go stale
     # in the loss.
@@ -146,6 +146,8 @@ def build_trainer(
         name="dev",
         steps=cfg.history_steps + cfg.dev_pred_steps,
     )
+    if cfg.lr > 0:
+        check_parameters_reach_loss(problem, next(iter(train_loader)))
 
     trainer = Trainer(
         problem=problem,
@@ -216,6 +218,28 @@ def create_child_logger(
     return child_logger
 
 
+@beartype
+def check_parameters_reach_loss(problem: Problem, batch: dict) -> None:
+    """Raise if a trainable parameter has no gradient path to the training
+    loss on `batch`: it would never move, though `lr > 0` says it should.
+
+    One forward and one backward pass. A parameter meant to stay put sets
+    `requires_grad=False` and is not checked. A path whose gradient is merely
+    zero here (a saturated clamp) is not this check's: it may move later.
+    """
+    trainable = [(name, p) for name, p in problem.named_parameters() if p.requires_grad]
+    loss = problem(batch)[f"{batch['name']}_loss"]
+    grads = torch.autograd.grad(loss, [p for _, p in trainable], allow_unused=True)
+    cut = [name for (name, _), grad in zip(trainable, grads) if grad is None]
+    if cut:
+        raise ValueError(
+            f"{len(cut)} trainable parameter(s) have no gradient path to the training "
+            f"loss, so they would never train: {cut}. Something between them and the "
+            "output leaves the autograd graph (numpy, .item(), .detach(), an integer "
+            "op), or they are not used. Freeze one deliberately with "
+            "requires_grad_(False), or set lr: 0 to keep the model as built.")
+
+
 # ── Train with Curriculum ────────────────────────────────────────
 
 @beartype
@@ -229,9 +253,12 @@ def train_with_curriculum(
     head_stack: Optional[HeadStack] = None,
     block_spec: Optional[dict[str, dict]] = None,
     global_logger: Optional[RunLog] = None,
-) -> tuple[System, float]:
+) -> tuple[System, Optional[float]]:
     """
     Train with curriculum learning: progressively increase train_pred_steps.
+
+    At `lr: 0` there is nothing to train: the model is kept as built, and
+    there is no dev loss to report (None).
 
     Returns (trained_system, best_dev_loss).
     """
@@ -247,6 +274,28 @@ def train_with_curriculum(
         logger=global_logger,
     )
 
+    if cfg.lr == 0:
+        if cfg.progress != "silent":
+            print("lr: 0: nothing to train; the model is kept as built.")
+    else:
+        _run_curriculum(trainer, cfg, train_dfs, nm_mapping, global_logger)
+
+    # Extract the trained System (first node of the Problem)
+    dyn_sys = trainer.model.nodes[0]
+
+    # The run's own checkpoint, which every reload reads; "all" has also
+    # written each curriculum stage's to that stage's child run. At lr: 0,
+    # best_model is the model as built.
+    if (global_logger is not None) and (cfg.save_config in ("last_step", "all")):
+        save_checkpoint(global_logger, trainer.best_model)
+
+    return dyn_sys, None if cfg.lr == 0 else trainer.get_devloss()
+
+
+def _run_curriculum(trainer: Trainer, cfg: ModelingConfig, train_dfs: list[DataFrame],
+                    nm_mapping: dict[str, list[str]],
+                    global_logger: Optional[RunLog]) -> None:
+    """Every curriculum stage, each leaving its best weights loaded."""
     pred_steps = cfg.train_pred_steps
     for i in range(1 + cfg.curriculum_steps):
         if cfg.curriculum_steps and cfg.progress != "silent":
@@ -280,16 +329,6 @@ def train_with_curriculum(
                 steps=cfg.history_steps + pred_steps,
             )
             _reset_early_stopping(trainer)
-
-    # Extract the trained System (first node of the Problem)
-    dyn_sys = trainer.model.nodes[0]
-
-    # The run's own checkpoint, which every reload reads; "all" has also
-    # written each curriculum stage's to that stage's child run above.
-    if (global_logger is not None) and (cfg.save_config in ("last_step", "all")):
-        save_checkpoint(global_logger, trainer.best_model)
-
-    return dyn_sys, trainer.get_devloss()
 
 
 def _reset_early_stopping(trainer: Trainer) -> None:

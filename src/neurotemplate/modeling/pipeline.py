@@ -263,8 +263,8 @@ class TrainedModel:
     """One finished training run: its MLflow id and what it produced."""
     run_id: str
     dyn_sys: object
-    best_dev_loss: float
-    train_time_s: float
+    best_dev_loss: Optional[float]     # None at lr: 0, which trains nothing
+    train_time_s: Optional[float]
     test_results: TestResults
     # None unless cfg.ensemble_seeds > 1.
     ensemble: Optional[EnsembleSpread]
@@ -824,9 +824,10 @@ def train_and_evaluate(
         nm_mapping=nm_mapping, grad_masks=grad_masks, norm_stats=norm_stats,
         head_stack=head_stack, block_spec=block_spec, logger=logger,
     )
-    train_time_s = tic() - train_t0
+    # At lr: 0 nothing trained, so neither number exists.
+    train_time_s = None if best_dev_loss is None else tic() - train_t0
 
-    metrics_to_log = {
+    metrics_to_log = {} if best_dev_loss is None else {
         "best_dev_loss": best_dev_loss,
         "train_time": train_time_s,
     }
@@ -846,7 +847,7 @@ def train_and_evaluate(
     # the System's own stack: that is the one carrying the calibrated
     # decision thresholds, which are not in the saved weights.
     trained_stack = trained_heads(dyn_sys, norm_stats)
-    if trained_stack is None:   # a model of the user's own: the stack declared
+    if trained_stack is None:   # a custom model: the stack declared
         trained_stack = head_stack
     if trained_stack is not None:
         logger.log_dict(trained_stack.to_config(), name="head_config.json")

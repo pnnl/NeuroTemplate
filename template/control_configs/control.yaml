@@ -139,8 +139,10 @@ gains: {comfort_lower: 1.0, comfort_upper: 1.0, du: 1.0}
 # policy costs one forward pass; the Controller gap says what a policy leaves.
 # policy: linear
 # mpc_horizon: 72      # steps; every D and reference `future` must reach it
-# mpc_iters: 20        # Adam steps per control step, from the last plan
-# mpc_lr: 0.05
+# mpc_lr: 0.02         # Adam, a share of each command's range per step
+# mpc_rtol: 0.001      # an improvement smaller than this share of the objective...
+# mpc_patience: 10     # ...for this many steps ends a window's solve
+# mpc_max_iters: 200   # the cap; the reportcard says how often a solve hit it
 # gelu | relu | tanh | silu (mlp only).
 # policy_nonlin: gelu
 # How the output is squashed into the actuation box: sigmoid_scale (smooth)
@@ -189,10 +191,14 @@ gains: {comfort_lower: 1.0, comfort_upper: 1.0, du: 1.0}
 # test_window: 287
 # test_stride: 288
 # The best open-loop plan over the same windows, the policy's bar on the
-# reportcard ("Controller gap"): Adam steps from the policy's own commands,
-# and their rate. More steps tighten the bar; 0 skips it.
-# plan_iters: 200
-# plan_lr: 0.05
+# reportcard ("Controller gap"), solved as MPC is, from plan_starts starts:
+# the policy's own commands and random ones, each window keeping its best.
+# More starts tighten the bar on a non-convex objective; 0 skips it.
+# plan_starts: 4
+# plan_lr: 0.02
+# plan_rtol: 0.001
+# plan_patience: 10
+# plan_max_iters: 200
 
 # ── RUNTIME ──────────────────────────────────────────────────────
 # One seed is one draw, and nothing reports the spread between seeds here:

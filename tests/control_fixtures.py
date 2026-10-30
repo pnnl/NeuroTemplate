@@ -158,7 +158,7 @@ def make_control_cfg(future: dict[str, int] | None = None, u_past: int = 0,
     cfg.test_stride = 5
     cfg.batch_size = 4
     cfg.epochs = 1
-    cfg.plan_iters = 2      # the plan runs; its convergence is test_plan's
+    cfg.plan_max_iters = 2  # the plan runs; its convergence is test_plan's
     cfg.policy = "mlp"      # the family with more to get wrong; linear is tested on its own
     cfg.seed = 0
     cfg.device = torch.device("cpu")

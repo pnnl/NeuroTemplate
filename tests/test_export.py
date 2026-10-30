@@ -372,7 +372,7 @@ def test_an_mpc_run_exports_a_planner_beside_its_surrogate(tmp_path):
 
     future = {c: 4 for c in (TARIFF, LOW, HIGH, *make_nm_mapping()["D"])}
     s = full_setup(**{**_priced(0), "future": future}, policy="mpc", mpc_horizon=4,
-                   mpc_iters=5)
+                   mpc_max_iters=5)
     cfg, sysid_cfg, nm, ns = s["cfg"], s["sysid_cfg"], s["nm"], s["norm_stats"]
     dyn_sys, plant = make_tracking_plant(sysid_cfg, nm)
     with pytest.raises(FileNotFoundError, match="torch format first"):

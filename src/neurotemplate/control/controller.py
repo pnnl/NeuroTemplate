@@ -35,8 +35,10 @@ def describe_controller(node: Node, cfg, sysid_cfg, nm_mapping: dict[str, list[s
     return {
         "family": "mpc",
         "horizon": mpc.horizon,
-        "iters": mpc.iters,
         "lr": mpc.lr,
+        "rtol": mpc.rtol,
+        "patience": mpc.patience,
+        "max_iters": mpc.max_iters,
         "inputs": list(node.input_keys),
         "u_cols": list(nm_mapping["U"]),
         "umin_phys": mpc.umin.tolist(),
