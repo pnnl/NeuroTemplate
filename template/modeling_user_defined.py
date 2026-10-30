@@ -270,6 +270,30 @@ def block_mapping(
 
 
 # ---------------------------------------------------------------------
+# Optional: models of your own
+# ---------------------------------------------------------------------
+# Any torch module that honours the model contract gets training, the
+# physics checks, reload, control (a policy or MPC) and export:
+#
+#     model(y, u, d) -> y_next
+#       y, u, d  [batch, history_steps, n]   physical units, oldest row first;
+#                                            row -1 of u and d drives this step
+#       y_next   [batch, ny]
+#
+# Return {name: build(cfg, nm_mapping, norm_stats) -> nn.Module} and set
+# `model: <name>` in the YAML. It is one module over every column, so
+# block_mapping returns None and every head is a RegressionHead; bound or
+# level an output inside the model. State that outlives the window goes
+# through `rollout_state()` / `set_rollout_state(state)`, one [batch, width]
+# tensor, None when cold (seed it from the window then). Keep the model's
+# code, and any starting values, in this file: the run keeps a copy of it.
+# `nt guide own-model` has the decisions; docs/MODELING.md the full contract.
+#
+# def model_families():
+#     return {"my_zone": lambda cfg, nm_mapping, norm_stats: MyZone(nm_mapping)}
+
+
+# ---------------------------------------------------------------------
 # Required: the plant's resting state, for the physics checks
 # ---------------------------------------------------------------------
 @beartype
@@ -317,8 +341,8 @@ def synth_cfg(
             responds={zone: {cool_sp: +1}},
         )
 
-    All values are PHYSICAL units; the library normalizes them, and validates
-    the whole spec against the column mapping before anything runs.
+    All values are PHYSICAL units, as the model reads them; the library
+    validates the whole spec against the column mapping before anything runs.
 
     The checks are instruments, not gates. Read a failure as a diagnosis:
     a step that barely moves the state means its forcing is too weak; an
