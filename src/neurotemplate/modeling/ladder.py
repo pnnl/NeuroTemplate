@@ -195,21 +195,26 @@ def whiteness_lags(dt_h: float) -> int:
 
 # ── Data ────────────────────────────────────────────────────────
 
-def zone_series(frame, zone: str, ambient: str, columns: list[str], every: int,
-                dt_h: float) -> Series:
-    """One file on a grid of `every` rows: the zone sampled at each grid
-    point, ambient and the input `columns` averaged over the rows up to the
-    next (heat is a rate, so the average keeps the energy). `dt_h` is the
-    grid's step in hours."""
-    rows = (len(frame) // every) * every
+def zone_series(frame, zone: str, ambient: str, columns: list[str], heat: str,
+                every: int, dt_h: float) -> Series:
+    """One file on a grid of `every` rows, the step from grid point K to
+    K + 1 driven by the rows between them: the zone sampled at each point;
+    ambient and every input column averaged over the step's rows (a rate's
+    average keeps its energy). Delivered `heat` is a meter, its row the heat
+    over the step that ends there, so it is averaged one row later: on the
+    plant buildings that alignment fits far better than the other. `dt_h`
+    is the grid's step in hours."""
+    steps = (len(frame) - 1) // every
 
     def averaged(column):
-        values = torch.tensor(frame[column].to_numpy(dtype=float)[:rows], dtype=DTYPE)
-        return values.reshape(-1, every).mean(dim=1)
+        start = 1 if column == heat else 0
+        values = frame[column].to_numpy(dtype=float)[start:start + steps * every]
+        return torch.tensor(values, dtype=DTYPE).reshape(steps, every).mean(dim=1)
 
-    zone_values = torch.tensor(frame[zone].to_numpy(dtype=float)[:rows:every], dtype=DTYPE)
-    inputs = torch.stack([averaged(c) for c in columns], dim=1) if columns else \
-        torch.zeros(rows // every, 0, dtype=DTYPE)
+    zone_values = torch.tensor(frame[zone].to_numpy(dtype=float)[:steps * every:every],
+                               dtype=DTYPE)
+    inputs = (torch.stack([averaged(c) for c in columns], dim=1) if columns
+              else torch.zeros(steps, 0, dtype=DTYPE))
     return Series(zone_values, averaged(ambient), inputs, dt_h)
 
 

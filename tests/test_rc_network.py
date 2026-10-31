@@ -112,3 +112,24 @@ def test_a_declaration_round_trips_with_its_boxes_and_pins():
     assert parsed.nodes == net.nodes and set(parsed.edges) == set(net.edges)
     assert parsed.pinned == {"C_Tm": 20.0, f"gain_{HEAT}_Ti": 1.0}
     assert boxes["R_Ti_Tm"] == (0.2, 0.8) and noise["sigma_y"] == 0.03
+
+
+def test_the_thermostat_fit_recovers_a_trackers_capacity_and_offset():
+    from neurotemplate.modeling import thermostat as th
+
+    g = torch.Generator().manual_seed(11)
+    steps = 3000
+    setpoint = 24 + torch.randint(-2, 3, (steps // 12 + 1,), generator=g).repeat_interleave(12)
+    setpoint = setpoint[:steps].to(nw.DTYPE)
+    zone = setpoint + torch.randn(steps, generator=g, dtype=nw.DTYPE) * 1.5
+    outdoor = torch.full((steps,), 30.0, dtype=nw.DTYPE)
+    gain, capacity, offset = 20.0, 12.0, 0.4
+    heat = -(gain * (zone - setpoint - offset)).clamp(0, capacity)
+    measured = torch.cat([torch.zeros(1, dtype=nw.DTYPE), heat[:-1]])   # the meter reads at k+1
+    measured = measured + torch.randn(steps, generator=g, dtype=nw.DTYPE) * 0.5
+    record = th.Record(zone, {"cooling": setpoint}, outdoor, measured)
+    fit = th.fit(th.Form(offset=True), ("cooling",), [record])
+    for name, truth, log in (("capacity", capacity, True), ("offset", offset, False)):
+        value, se = fit.values[f"cooling.{name}"], fit.se[f"cooling.{name}"]
+        error = abs(math.log(value / truth)) if log else abs(value - truth)
+        assert error < 3 * se, (name, value, truth, se)

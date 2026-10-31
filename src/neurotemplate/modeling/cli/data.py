@@ -36,6 +36,7 @@ from pathlib import Path
 from typing import Optional
 
 import pandas as pd
+import torch
 
 from neurotemplate._typing import beartype
 
@@ -44,6 +45,7 @@ from neurotemplate.common.data_utils import compute_norm_stats, get_data_splits,
 from neurotemplate.hooks import load_modeling_hooks
 from neurotemplate.modeling import ladder
 from neurotemplate.modeling import network as nw
+from neurotemplate.modeling import thermostat as th
 from neurotemplate.modeling.blocks import build_blocks
 from neurotemplate.modeling.config import ModelingConfig
 from neurotemplate.modeling.ladder import Rung
@@ -383,7 +385,8 @@ def ladder_main() -> None:
         key = (zone.block, network.name)
         if key not in cache:
             data = [ladder.zone_series(raw, zone.zone, zone.ambient,
-                                       ladder.network_columns(network), every, coarse_h)
+                                       ladder.network_columns(network), zone.heat, every,
+                                       coarse_h)
                     for raw in train_raws]
             cache[key] = nw.fit(network, data, start)
         return cache[key]
@@ -442,7 +445,7 @@ def _print_ladder_card(zone: ThermalZone, selection, candidate_fits: dict, dev_r
         scores = [ladder.rollout_rmse(
             fit.network, fit.values,
             ladder.zone_series(raw, zone.zone, zone.ambient,
-                               ladder.network_columns(fit.network), 1, fine_h),
+                               ladder.network_columns(fit.network), zone.heat, 1, fine_h),
             horizon=round(LADDER_HORIZON_H / fine_h), burn_in=round(LADDER_BURN_IN_H / fine_h),
             every=round(LADDER_EVERY_H / fine_h)) for raw in dev_raws]
         scores = [s for s in scores if s is not None]
@@ -492,3 +495,144 @@ def _fit_notes(fit: Fit) -> list[str]:
     if not fit.converged:
         notes.append("The fit stopped at its iteration cap before converging.")
     return notes
+
+
+# ── nt data thermostat ──────────────────────────────────────────
+
+def _declared_network(block) -> tuple:
+    """The block's declared network, at the centre of its boxes."""
+    decl = block.params.get("network")
+    if decl is None:
+        raise SystemExit(
+            f"thermal block {block.name!r} declares no network. Run `nt data ladder`, and "
+            "put its snippet in the block's params as `network`.")
+    network, boxes, noise = nw.parse_declaration(decl, block.name)
+    return network, {**nw.box_centres(boxes), **noise}
+
+
+@beartype
+def thermostat_main() -> None:
+    flags = argparse.ArgumentParser(add_help=False)
+    flags.add_argument("--zone", type=str, default=None,
+                       help="Only the thermal block whose zone is this column.")
+    flags.add_argument("--cooling", type=str, default=None,
+                       help="The cooling setpoint column (a U column of the block).")
+    flags.add_argument("--heating", type=str, default=None,
+                       help="The heating setpoint column (a U column of the block).")
+    cfg, args = load_config_from_cli(
+        sys.argv[1:], cls=ModelingConfig, config_dir=MODEL_CONFIG_DIR,
+        default_config_path=MODEL_CONFIG_DIR / "modeling.yaml",
+        command_flags=flags,
+    )
+    setpoints = {side: col for side, col in (("cooling", args.cooling),
+                                             ("heating", args.heating)) if col}
+    if not setpoints:
+        raise SystemExit("Name the setpoint(s) the thermostat follows: --cooling COL "
+                         "and/or --heating COL.")
+    hooks = load_modeling_hooks(cfg)
+    train_raws, dev_raws, _test_raws, freq_s = get_data_splits(cfg)
+    nm_mapping = resolve_nm_mapping(hooks, train_raws[0], cfg)
+    blocks = [b for b in build_blocks(nm_mapping, resolve_block_spec(hooks, nm_mapping, cfg))
+              if b.heat is not None]
+    if args.zone is not None:
+        blocks = [b for b in blocks if ThermalZone.from_block(b).zone == args.zone]
+    if len(blocks) != 1:
+        raise SystemExit(f"--zone must pick one thermal block; found "
+                         f"{[b.name for b in blocks]}.")
+    block = blocks[0]
+    zone = ThermalZone.from_block(block)
+    missing = [c for c in setpoints.values() if c not in block.u_names]
+    if missing:
+        raise SystemExit(f"setpoint(s) {missing} are not U columns of block {block.name!r} "
+                         f"{list(block.u_names)}.")
+    network, values = _declared_network(block)
+    fine_h = freq_s / 3600.0
+
+    def record(raw) -> th.Record:
+        col = lambda c: torch.tensor(raw[c].to_numpy(dtype=float), dtype=nw.DTYPE)
+        return th.Record(col(zone.zone), {s: col(c) for s, c in setpoints.items()},
+                         col(zone.ambient), col(zone.heat))
+
+    sides = tuple(setpoints)
+    selection = th.forward_select(sides, [record(raw) for raw in train_raws])
+    scores = {name: _thermostat_scores(fit, network, values, zone, setpoints, dev_raws, fine_h)
+              for name, fit in selection.fits.items()}
+
+    print(f"\n{zone.zone} ← {', '.join(f'{s} {c!r}' for s, c in setpoints.items())}"
+          f"   one-step fit on {selection.fits[selection.chosen].n_obs:,} train steps; "
+          f"24 h rollouts on dev through the declared network")
+    print(f"  {'form':<30}{'params':>7}{'log L':>11}{'p vs parent':>13}{'BIC':>11}"
+          f"   zone / heat RMSE: all, " + ", ".join(th.REGIMES))
+    for name, fit in selection.fits.items():
+        parent = selection.parents.get(name)
+        p = ("—" if parent is None else _p_text(ladder.lr_p_value(
+            selection.fits[parent].log_likelihood, selection.fits[parent].n_params,
+            fit.log_likelihood, fit.n_params)))
+        print(f"  {name:<30}{fit.n_params:>7}{fit.log_likelihood:>11.1f}{p:>13}"
+              f"{fit.bic:>11.1f}   {_score_text(scores[name])}")
+    chosen = selection.fits[selection.chosen]
+    print(f"  → {selection.chosen}")
+    twin = selection.fits[selection.latched]
+    if twin.bic < chosen.bic:
+        print(f"  BIC prefers its latched form, {selection.latched}.")
+    ranked = [n for n in scores if scores[n] is not None]
+    if ranked:
+        best = min(ranked, key=lambda n: scores[n]["all"][0])
+        if best != selection.chosen:
+            print(f"  {best} rolls out better on dev (zone RMSE "
+                  f"{scores[best]['all'][0]:.3f} against {scores[selection.chosen]['all'][0]:.3f}).")
+    unplaced = [k for k, se in chosen.se.items() if math.isinf(se)]
+    if unplaced:
+        print(f"  Not placed by this record: {unplaced}. The snippet leaves an offset or "
+              "slope null and a scale's box a factor of 1000 wide: declare those from what "
+              "you know of the equipment.")
+    out_dir = Path("ladder")
+    out_dir.mkdir(exist_ok=True)
+    path = out_dir / f"{zone.block}.thermostat.json"
+    path.write_text(json.dumps(th.declaration(chosen, setpoints), indent=2, ensure_ascii=False))
+    print(f"  snippet: {path}  — the block's params `thermostat`.")
+    print("  Regimes by the measured heat: satisfied under a tenth of the active side's "
+          "capacity, saturated over nine tenths. The one-step fit predicts the heat over "
+          "each step from the row that starts it.")
+
+
+def _thermostat_scores(fit, network, values, zone: ThermalZone, setpoints: dict[str, str],
+                       dev_raws, fine_h: float) -> Optional[dict]:
+    """Zone and heat RMSE of 24 h rollouts on dev, overall and by regime,
+    each started from the filtered state after a day of dev; None when dev
+    is too short."""
+    horizon = round(LADDER_HORIZON_H / fine_h)
+    burn_in, every = round(LADDER_BURN_IN_H / fine_h), round(LADDER_EVERY_H / fine_h)
+    heat_column = 1 + [c for c, _ in network.inputs].index(zone.heat)
+    errors_zone, errors_heat, regime = [], [], []
+    for raw in dev_raws:
+        series = ladder.zone_series(raw, zone.zone, zone.ambient,
+                                    ladder.network_columns(network), zone.heat, 1, fine_h)
+        starts = torch.arange(burn_in, series.y.shape[0] - horizon - 1, every)
+        if not len(starts):
+            continue
+        states = nw.filtered_states(network, values, series)
+        rows = starts[None, :] + 1 + torch.arange(horizon)[:, None]
+        col = lambda c: torch.tensor(raw[c].to_numpy(dtype=float), dtype=nw.DTYPE)
+        outdoor = col(zone.ambient)[rows]
+        measured = col(zone.heat)[rows + 1]
+        zone_path, heat_path = th.composed_rollout(
+            fit, network, values, states[starts], {s: col(c)[rows] for s, c in setpoints.items()},
+            outdoor, nw.drive_matrix(series)[rows], heat_column, fine_h)
+        errors_zone.append((zone_path - series.y[rows]).flatten())
+        errors_heat.append((heat_path - measured).flatten())
+        regime.append(th.regimes(fit, measured, outdoor).flatten())
+    if not errors_zone:
+        return None
+    ez, eh, rg = torch.cat(errors_zone), torch.cat(errors_heat), torch.cat(regime)
+    rmse = lambda e: float(e.pow(2).mean().sqrt()) if len(e) else float("nan")
+    out = {"all": (rmse(ez), rmse(eh))}
+    for i, name in enumerate(th.REGIMES):
+        out[name] = (rmse(ez[rg == i]), rmse(eh[rg == i]))
+    return out
+
+
+def _score_text(score: Optional[dict]) -> str:
+    if score is None:
+        return "dev too short"
+    return ", ".join(f"{z:.2f} / {h:.1f}" for z, h in score.values())

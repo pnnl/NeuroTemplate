@@ -13,6 +13,7 @@ before. Groups mirror the package layout:
     nt data decay           # neurotemplate.modeling.cli.data (what is the envelope time constant?)
     nt data latch           # neurotemplate.modeling.cli.data (does the equipment latch?)
     nt data ladder          # neurotemplate.modeling.cli.data (which RC network fits the zone?)
+    nt data thermostat      # neurotemplate.modeling.cli.data (what heat does a setpoint deliver?)
     nt control train        # neurotemplate.control.cli.train
     nt export model         # neurotemplate.export.cli (trained dynamics -> ONNX package)
     nt export policy        # neurotemplate.export.cli (trained DPC policy -> ONNX package)
@@ -37,6 +38,7 @@ COMMANDS: dict[tuple[str, str], str] = {
     ("data", "decay"):        "neurotemplate.modeling.cli.data:decay_main",
     ("data", "latch"):        "neurotemplate.modeling.cli.data:latch_main",
     ("data", "ladder"):       "neurotemplate.modeling.cli.data:ladder_main",
+    ("data", "thermostat"):   "neurotemplate.modeling.cli.data:thermostat_main",
     ("control", "train"):     "neurotemplate.control.cli.train:main",
     ("export", "model"):      "neurotemplate.export.cli:model_main",
     ("export", "policy"):     "neurotemplate.export.cli:policy_main",

@@ -445,6 +445,27 @@ COLLAPSE_MARGIN = 5.0
 FLAT = 1e-9
 
 
+def standard_errors(hessian: torch.Tensor, collapsed: torch.Tensor
+                    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """`(covariance, se, unplaced)` from the Hessian of −log L, leaving out the
+    `collapsed` parameters (at a limit). A direction with no curvature (see
+    `FLAT`) is unplaced: every parameter on it gets an infinite error bar,
+    and the covariance holds only the placed directions."""
+    n = hessian.shape[0]
+    keep = (~collapsed).nonzero().squeeze(1)
+    sub = hessian[keep][:, keep]
+    curvature, directions = torch.linalg.eigh((sub + sub.T) / 2)
+    placed = curvature > FLAT * curvature.abs().max()
+    inverse = torch.where(placed, 1 / curvature, torch.zeros_like(curvature))
+    covariance = torch.zeros(n, n, dtype=DTYPE)
+    covariance[keep[:, None], keep[None, :]] = (directions * inverse) @ directions.T
+    unplaced = torch.ones(n, dtype=torch.bool)
+    unplaced[keep] = (directions[:, ~placed] ** 2).sum(1) > 1e-6
+    se = torch.where(unplaced, torch.full((n,), math.inf, dtype=DTYPE),
+                     torch.diagonal(covariance).clamp(min=0).sqrt())
+    return covariance, se, unplaced
+
+
 def summarize(network: Network, theta: torch.Tensor, data: list[Series],
               converged: bool = True) -> Fit:
     """The fit's likelihood, error bars, time constants and innovations at
@@ -456,17 +477,8 @@ def summarize(network: Network, theta: torch.Tensor, data: list[Series],
 
     collapsed = torch.zeros(theta.shape[0], dtype=torch.bool)
     collapsed[:k] = theta[:k].abs() > LOG_LIMIT - COLLAPSE_MARGIN
-    keep = (~collapsed).nonzero().squeeze(1)
-    hessian = torch.autograd.functional.hessian(nll, theta)[keep][:, keep]
-    curvature, directions = torch.linalg.eigh((hessian + hessian.T) / 2)
-    placed = curvature > FLAT * curvature.abs().max()
-    inverse = torch.where(placed, 1 / curvature, torch.zeros_like(curvature))
-    covariance = torch.zeros(theta.shape[0], theta.shape[0], dtype=DTYPE)
-    covariance[keep[:, None], keep[None, :]] = (directions * inverse) @ directions.T
-    unplaced = torch.ones(theta.shape[0], dtype=torch.bool)
-    unplaced[keep] = (directions[:, ~placed] ** 2).sum(1) > 1e-6
-    se = torch.where(unplaced, torch.full_like(theta, math.inf),
-                     torch.diagonal(covariance).clamp(min=0).sqrt())
+    covariance, se, unplaced = standard_errors(
+        torch.autograd.functional.hessian(nll, theta), collapsed)
     finite = torch.where(unplaced, torch.ones_like(se), se)
     correlation = (covariance / torch.outer(finite, finite))[:k, :k]
 
