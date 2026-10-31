@@ -72,6 +72,7 @@ from neurotemplate.modeling.rc import (
     TAU_KEYS, RCBlock, RCGroup, demand_boxes, rc_groups, time_constant_boxes,
 )
 from neurotemplate.modeling.blocks import Block, build_blocks
+from neurotemplate.modeling.rc_network import NetworkBlock
 
 
 # ── Per-column lags ──────────────────────────────────────────────
@@ -115,7 +116,9 @@ def block_lags(family: str, block: Block, history: dict[str, int]) -> Lags:
     into its hidden state row by row, so every column it reads shares one
     lag. `2r2c` seeds its mass from one window over its own zones and drives
     them with the current U and D only, so its Y columns share one lag and
-    its U and D are read at 0, whatever they are declared at.
+    its U and D are read at 0, whatever they are declared at. `rc_network`
+    filters one window of its Y and D and reads its setpoints at the current
+    step only.
     """
     y, u, d = (tuple(history[c] for c in names)
                for names in (block.y_in_names, block.u_names, block.d_names))
@@ -129,6 +132,11 @@ def block_lags(family: str, block: Block, history: dict[str, int]) -> Lags:
                        {c: history[c] for c in block.y_in_names},
                        "its Y columns: they share the mass seed window")
         return y, (0,) * len(u), (0,) * len(d)
+    if family == "rc_network":
+        _check_one_lag(f"rc_network block {block.name!r}",
+                       {c: history[c] for c in block.y_in_names + block.d_names},
+                       "its zone, its heat and its D: the window its filter runs over")
+        return y, (0,) * len(u), d
     return y, u, d
 
 
@@ -579,18 +587,42 @@ def _2r2c_block(cfg: ModelingConfig, block: Block, lags: Lags,
     )
 
 
+def _rc_network_block(cfg: ModelingConfig, block: Block, lags: Lags,
+                      norm_stats: Optional[dict]) -> nn.Module:
+    """One thermal zone's declared network and thermostat. See `rc_network`."""
+    problems = []
+    if block.heat is None or block.ambient is None:
+        problems.append("declare its `heat` (a Y column, kW) and `ambient` (a D column)")
+    if block.reads or block.inputs:
+        problems.append("`reads` and `inputs` have no meaning here: the network and the "
+                        "thermostat say where every column goes")
+    if len(block.y_names) != 2:
+        problems.append(f"Y must be the zone temperature and the heat; got {list(block.y_names)}")
+    if problems:
+        raise ValueError(f"rc_network block {block.name!r}: " + "; ".join(problems))
+    return NetworkBlock(
+        block.name, block.y_names, block.u_names, block.d_names, block.heat, block.ambient,
+        block.params, window=lags[0][0] + 1, dt_h=1.0 / cfg.steps_per_hour,
+        norm_stats=norm_stats)
+
+
 BLOCK_BUILDERS: dict[str, Callable[[ModelingConfig, Block, Lags, Optional[dict]],
                                     nn.Module]] = {
     "mlp": _mlp_block,
     "gru": _gru_block,
     "2r2c": _2r2c_block,
+    "rc_network": _rc_network_block,
 }
 
+#: The families whose blocks describe one thermal zone each: built per block
+#: unconditionally, predicting increments, in physical time.
+THERMAL_FAMILIES = ("2r2c", "rc_network")
+
 #: Families that need `per_block: true` to opt into the per-block split.
-#: `2r2c` is excluded even though BLOCK_BUILDERS has a builder for it: it is
-#: per-block unconditionally, so it needs no flag (and
+#: The thermal families are excluded even though BLOCK_BUILDERS has builders
+#: for them: they are per-block unconditionally, so they need no flag (and
 #: ModelingConfig.validate() refuses the combination as redundant).
-PER_BLOCK_FAMILIES = tuple(name for name in BLOCK_BUILDERS if name != "2r2c")
+PER_BLOCK_FAMILIES = tuple(name for name in BLOCK_BUILDERS if name not in THERMAL_FAMILIES)
 
 #: Every valid `cfg.model` name: the union of model_catalog (monolithic
 #: factories) and BLOCK_BUILDERS (per-block-only factories — today just
@@ -662,17 +694,17 @@ def _build_per_block_model(
     """
     ny, nu, nd = _widths(nm_mapping)
 
-    if "2r2c" in families:
+    thermal = sorted(set(families) & set(THERMAL_FAMILIES))
+    if thermal:
         if not cfg.residual:
             raise ValueError(
-                "2r2c requires residual=True: the RC block predicts the "
-                "temperature *increment*, which SSMGrad adds to the current "
-                "state. With residual=False the increment would be read as "
-                "an absolute temperature."
+                f"{thermal[0]} requires residual=True: the block predicts the "
+                "*increment*, which SSMGrad adds to the current state. With "
+                "residual=False the increment would be read as an absolute value."
             )
         if cfg.steps_per_hour is None:
             raise ValueError(
-                "2r2c needs cfg.steps_per_hour to place its time constants. "
+                f"{thermal[0]} needs cfg.steps_per_hour to place its time constants. "
                 "The CLI sets it from the data's sampling frequency; set it "
                 "by hand (steps_per_hour = 3600 / timestep_seconds) if you "
                 "are building a model outside the CLI."
@@ -873,7 +905,7 @@ def _uses_per_block(cfg: ModelingConfig, blocks: list[Block], families: list[str
     vector at once, so there is no monolithic 2r2c to fall back to.
     """
     return (any(b.model is not None for b in blocks)
-            or cfg.per_block or "2r2c" in families)
+            or cfg.per_block or bool(set(families) & set(THERMAL_FAMILIES)))
 
 
 def _check_2r2c_heads(blocks: list[Block], families: list[str],
@@ -885,7 +917,7 @@ def _check_2r2c_heads(blocks: list[Block], families: list[str],
     which are model-wide because SSMGrad's residual flag is not per-channel.
     """
     rc_channels = {
-        name for block, family in zip(blocks, families) if family == "2r2c"
+        name for block, family in zip(blocks, families) if family in THERMAL_FAMILIES
         for name in block.y_names
     }
     if not rc_channels:
@@ -894,7 +926,7 @@ def _check_2r2c_heads(blocks: list[Block], families: list[str],
              if name in rc_channels and not head.residual_compatible]
     if blind:
         raise ValueError(
-            f"2r2c predicts increments, so every Y channel it produces needs "
+            f"{'/'.join(THERMAL_FAMILIES)} predict increments, so every Y channel they produce needs "
             f"a residual-compatible head; {blind} are not."
         )
 
@@ -935,7 +967,7 @@ def _warn_ignored_declarations(blocks: list[Block], families: list[str]) -> None
     family already sees the column as an ordinary input. Say so rather than
     let the declaration sit inert."""
     for block, family in zip(blocks, families):
-        if family == "2r2c":
+        if family in THERMAL_FAMILIES:
             continue
         ignored = [c for c, e in block.inputs.items() if e["kind"] == "linear"]
         if block.ambient:
@@ -988,11 +1020,11 @@ def get_dynamics(
 
     _warn_ignored_declarations(blocks, families)
     unread = [b.name for b, family in zip(blocks, families)
-              if b.params and family != "2r2c"]
+              if b.params and family not in THERMAL_FAMILIES]
     if unread:
         raise ValueError(
-            f"block(s) {unread} declare `params`, but only a 2r2c block reads "
-            "any; the declaration would sit inert."
+            f"block(s) {unread} declare `params`, but only a {' or '.join(THERMAL_FAMILIES)} "
+            "block reads any; the declaration would sit inert."
         )
     lags = column_lags(cfg, nm_mapping)
     _check_demand_lags(blocks, cfg.history)

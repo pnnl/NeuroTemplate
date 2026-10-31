@@ -593,6 +593,11 @@ def declaration(fit: Fit) -> dict:
         "inputs": inputs,
         "noise": {**{node: _round(values[f"sigma_{node}"]) for node in net.nodes},
                   "sensor": _round(values["sigma_y"])},
+        # A record, not a declaration: the time constants this fit found, with
+        # their error bars (null where the data does not place one), for the
+        # model card to hold a later fit against.
+        "time_constants_h": [[_round(t), None if math.isinf(se) else _round(se)]
+                             for t, se in zip(fit.taus_h, fit.taus_se_h)],
     }
 
 
@@ -602,8 +607,10 @@ def parse_declaration(decl: dict, name: str = "") -> tuple[Network, dict[str, tu
     C/R/gain as a `(low, high)` box (a pin is `low == high`), and the noise
     by parameter name. Every problem is named at once."""
     problems = []
-    if set(decl) != {"nodes", "edges", "inputs", "noise"}:
-        problems.append(f"keys must be nodes, edges, inputs and noise; got {sorted(decl)}")
+    keys = set(decl) - {"time_constants_h"}
+    if keys != {"nodes", "edges", "inputs", "noise"}:
+        problems.append("keys must be nodes, edges, inputs and noise (and the ladder's "
+                        f"time_constants_h); got {sorted(decl)}")
         raise ValueError(f"network {name!r}: " + "; ".join(problems))
     boxes: dict[str, tuple[float, float]] = {}
 

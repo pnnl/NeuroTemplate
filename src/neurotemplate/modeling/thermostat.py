@@ -216,7 +216,8 @@ class ThermostatFit:
 def _start(form: Form, sides: tuple[str, ...], records: list[Record],
            seed: Optional[dict[str, float]]) -> torch.Tensor:
     """A gentle tracker, every capacity at the largest heat measured on its
-    side, the second stage half the first; `seed` (a parent's values) wins."""
+    side; a second stage starts nearly empty, so an extension starts as its
+    parent and can only gain likelihood. `seed` (a parent's values) wins."""
     heat = torch.cat([r.heat for r in records])
     start = {"noise": float(heat.std())}
     for side in sides:
@@ -224,7 +225,7 @@ def _start(form: Form, sides: tuple[str, ...], records: list[Record],
         start.update({f"{side}.gain": 10.0, f"{side}.capacity": peak,
                       f"{side}.offset": 0.0, f"{side}.capacity_per_K": 0.0,
                       f"{side}.on_at": 0.0, f"{side}.off_at": 0.5,
-                      f"{side}.capacity2": peak / 2, f"{side}.gap": 0.5})
+                      f"{side}.capacity2": peak / 100, f"{side}.gap": 0.5})
     start.update(seed or {})
     return torch.tensor([math.log(start[name]) if positive else start[name]
                          for name, positive in parameter_names(form, sides)], dtype=DTYPE)

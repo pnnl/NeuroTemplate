@@ -229,7 +229,10 @@ class ModelingConfig:
         check_one_of(self, "save_config", ["last_step", "all", "None", None])
 
         check_lag_table("history", self.history)
-        warn_deep_window("history_steps", self.history_steps)
+        # An rc_network's window is its filter's history, a day of it by
+        # design, not context a learned map reads.
+        if self.model != "rc_network":
+            warn_deep_window("history_steps", self.history_steps)
 
         if self.per_block and self.model not in PER_BLOCK_FAMILIES:
             extra = (" 2r2c is already per-block and needs no flag."

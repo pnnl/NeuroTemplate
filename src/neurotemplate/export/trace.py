@@ -42,7 +42,7 @@ EXPORTERS = ("dynamo", "legacy")
 ALLOWED_OPS = frozenset({
     "Add", "Cast", "Clip", "Concat", "Constant", "ConstantOfShape", "Div",
     "Equal", "Erf", "Exp", "Expand", "GRU", "Gather", "Gemm", "Greater",
-    "Identity", "Max", "Min", "Mul", "Neg", "Range", "Reciprocal", "ReduceMean",
+    "Identity", "MatMul", "Max", "Min", "Mul", "Neg", "Range", "Reciprocal", "ReduceMean",
     "ReduceSum", "Relu", "Reshape", "ScatterND", "Shape", "Sigmoid", "Slice",
     "Softplus", "Split", "Squeeze", "Sub", "Tanh", "Transpose", "Unsqueeze",
     "Where",

@@ -245,6 +245,7 @@ def _block_lines(name: str, info: Optional[dict], indent: str = "") -> list[str]
     for channel, taus in info.get("time_constants_h", {}).items():
         lines.append(f"{indent}  - {channel}: tau_fast={taus['fast']:.2f} h, "
                      f"tau_slow={taus['slow']:.2f} h")
+    lines += _network_lines(info, indent + "  ")
     if "lags" in info:
         lines.append(f"{indent}  - reads, lag per column: {_lag_list(info['lags'])}")
     lines += _bounded_lines(info.get("bounded", {}), indent + "  ")
@@ -254,6 +255,27 @@ def _block_lines(name: str, info: Optional[dict], indent: str = "") -> list[str]
         if sub is not None and sub.get("model"):
             label += f" ({sub['model']})"
         lines += _block_lines(label, sub, indent + "  ")
+    return lines
+
+
+def _network_lines(info: dict, indent: str) -> list[str]:
+    """An rc_network block's time constants against the ladder's, and the
+    share of its stability bound each thermostat gain uses."""
+    if "network_time_constants_h" not in info:
+        return []
+    taus = ", ".join(f"{t:.3g}" for t in info["network_time_constants_h"])
+    lines = [f"{indent}- network {info['network']}: time constants {taus} h"]
+    coarse = info.get("coarse_time_constants_h")
+    if coarse:
+        bars = ", ".join(f"{t:.3g} ± {'?' if se is None else f'{se:.2g}'}" for t, se in coarse)
+        lines.append(f"{indent}- the ladder's, at its coarse step: {bars} h")
+    if info.get("left_coarse_bar"):
+        lines.append(f"{indent}- ⚠️ outside three of the ladder's error bars: "
+                     f"{info['left_coarse_bar']} h. Training moved a time constant the "
+                     "likelihood had placed; read the boxes below for which parameter did it.")
+    shares = ", ".join(f"{side} {share:.0%}" for side, share in info["gain_share"].items())
+    lines.append(f"{indent}- thermostat {info['thermostat']}: gain at {shares} of the "
+                 "bound past which the loop rings")
     return lines
 
 

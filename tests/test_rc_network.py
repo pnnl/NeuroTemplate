@@ -133,3 +133,40 @@ def test_the_thermostat_fit_recovers_a_trackers_capacity_and_offset():
         value, se = fit.values[f"cooling.{name}"], fit.se[f"cooling.{name}"]
         error = abs(math.log(value / truth)) if log else abs(value - truth)
         assert error < 3 * se, (name, value, truth, se)
+
+
+def test_the_trained_block_filters_and_steps_exactly_as_the_ladder_does():
+    from neurotemplate.modeling.rc_network import NetworkBlock
+
+    net = Rung(mass=True).network(HEAT, None, ())
+    values = _truth(net)
+    series = _simulate(net, values, steps=60, seed=2)
+    decl = {"nodes": {"Ti": values["C_Ti"], "Tm": values["C_Tm"]},
+            "edges": {"Ti-Tm": values["R_Ti_Tm"], "Ti-ambient": values["R_Ti_ambient"]},
+            "inputs": {HEAT: {"Ti": 1.0}},
+            "noise": {"Ti": values["sigma_Ti"], "Tm": values["sigma_Tm"],
+                      "sensor": values["sigma_y"]}}
+    thermostat = {"cooling": {"setpoint": "sp", "gain": 4.0, "capacity": 6.0}, "form": "tracker"}
+    columns = ("zone", HEAT, "sp", "out")
+    stats = {c: {"shift": 0.0, "stretch": 1.0} for c in columns}
+    block = NetworkBlock("z", ("zone", HEAT), ("sp",), ("out",), HEAT, "out",
+                         {"network": decl, "thermostat": thermostat}, window=60, dt_h=DT_H,
+                         norm_stats=stats)
+    heat_meter = torch.cat([torch.zeros(1, dtype=nw.DTYPE), series.inputs[:-1, 0]])
+    y = torch.stack([series.y, heat_meter], dim=1)          # the meter reads a step late
+    x = torch.cat([y.flatten(), torch.tensor([20.0], dtype=nw.DTYPE), series.ambient])[None]
+    with torch.no_grad():
+        increment, state = block.step(x.float(), None, block.discrete())
+
+    # The ladder's filter over the same rows, then one step of the network
+    # under the thermostat's heat.
+    ladder_series = nw.Series(series.y, series.ambient, series.inputs, DT_H)
+    nodes = nw.filtered_states(net, values, ladder_series)[-2]
+    a, b, q, r = nw.discrete_model(net, nw.as_tensors(values), DT_H)
+    nodes = nodes + nw.steady_gain(a, q, r) * (series.y[-1] - nodes[0])
+    with torch.no_grad():
+        gain = block.thermostat_values()["cooling.gain"].item()
+    heat = -min(max(gain * (float(nodes[0]) - 20.0), 0.0), 6.0)
+    expected = a @ nodes + b @ torch.tensor([float(series.ambient[-1]), heat], dtype=nw.DTYPE)
+    assert torch.allclose(state[0].double(), expected, atol=1e-4)
+    assert math.isclose(float(increment[0, 1]), heat - float(heat_meter[-1]), abs_tol=1e-4)
