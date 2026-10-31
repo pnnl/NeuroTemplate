@@ -32,8 +32,13 @@ What a block owns
          ordinary network input.
   ambient
          the one D column that is the outdoor temperature, if any. Only
-         `2r2c` acts on it (the explicit conduction term); other families
-         see the column as an ordinary input either way.
+         `2r2c` and `rc_network` act on it (conduction to the outdoors);
+         other families see the column as an ordinary input either way.
+  heat   the one Y column that is the heat delivered to the zone, in kW
+         (positive heats). It makes the block a thermal zone that `nt data
+         ladder` reads; see `ladder`.
+  solar  the one D column that is solar irradiance, if any: the input the
+         ladder may also route into the mass or the envelope.
   params the block's physical priors, read by its family's builder. Today
          only `2r2c` reads any: its three time constants, in hours —
          `{"tau_fast_h": [0.3, 1.0], "tau_ambient_h": [2.0, 8.0],
@@ -152,6 +157,8 @@ class Block:
     #: ordinary input.
     inputs: dict[str, dict] = field(default_factory=dict)
     ambient: Optional[str] = None
+    heat: Optional[str] = None
+    solar: Optional[str] = None
     #: The block's physical priors, `{name: value}`, JSON-safe; validated by
     #: the family's builder, which is the one that knows the names.
     params: dict = field(default_factory=dict)
@@ -226,7 +233,7 @@ def _resolve(columns: list[str], names: list[str], block: str, key: str,
 #: keys change what the block fits without changing its shape, so a
 #: misspelled one has no other way of announcing itself.
 BLOCK_KEYS = frozenset({"Y", "U", "D", "reads", "model", "inputs", "ambient",
-                        "params"})
+                        "heat", "solar", "params"})
 
 INPUT_KINDS = ("demand", "linear")
 DEMAND_BRANCHES = ("saturating", "mlp")
@@ -242,6 +249,12 @@ def _resolve_inputs(spec: dict, block: str, y_names: list[str],
 
     if ambient is not None and ambient not in d_names:
         problems.append(f"`ambient` ({ambient!r}) is not one of this block's D "
+                        f"columns {d_names}.")
+    if spec.get("heat") is not None and spec["heat"] not in y_names:
+        problems.append(f"`heat` ({spec['heat']!r}) is not one of this block's Y "
+                        f"columns {y_names}.")
+    if spec.get("solar") is not None and spec["solar"] not in d_names:
+        problems.append(f"`solar` ({spec['solar']!r}) is not one of this block's D "
                         f"columns {d_names}.")
 
     for column, entry in inputs.items():
@@ -397,7 +410,8 @@ def build_blocks(
         blocks.append(Block(
             name, tuple(y_idx), tuple(u_idx), tuple(y_names), tuple(d_idx),
             tuple(reads_idx), model, tuple(u_names), tuple(d_names), inputs, ambient,
-            dict(params), tuple(y_cols[i] for i in sorted(reads_idx)),
+            spec.get("heat"), spec.get("solar"), dict(params),
+            tuple(y_cols[i] for i in sorted(reads_idx)),
         ))
     _check_one_demand_per_column(blocks)
     return blocks

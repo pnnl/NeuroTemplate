@@ -28,8 +28,12 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import json
 import math
 import sys
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Optional
 
 import pandas as pd
 
@@ -38,7 +42,12 @@ from neurotemplate._typing import beartype
 from neurotemplate.common.config import load_config_from_cli, MODEL_CONFIG_DIR
 from neurotemplate.common.data_utils import compute_norm_stats, get_data_splits, pool_dfs
 from neurotemplate.hooks import load_modeling_hooks
+from neurotemplate.modeling import ladder
+from neurotemplate.modeling import network as nw
+from neurotemplate.modeling.blocks import build_blocks
 from neurotemplate.modeling.config import ModelingConfig
+from neurotemplate.modeling.ladder import Rung
+from neurotemplate.modeling.network import Fit
 from neurotemplate.modeling.dynamics import family_by_channel
 from neurotemplate.modeling.pipeline import resolve_block_spec, resolve_nm_mapping
 from neurotemplate.modeling.diagnostics import (
@@ -292,3 +301,194 @@ def latch_main() -> None:
           "these, and read where the fit lands against them.")
     print("  Memory at a fixed measured error: a deadband, a minimum run time, cycling, or "
           "a thermostat reading another temperature than this one all produce it.")
+
+
+# ── nt data ladder ──────────────────────────────────────────────
+
+#: Rollouts scored on dev: each 24 h long, one every 6 h, after a day of filtering.
+LADDER_HORIZON_H, LADDER_EVERY_H, LADDER_BURN_IN_H = 24.0, 6.0, 24.0
+
+
+@dataclass
+class ThermalZone:
+    block: str
+    zone: str
+    heat: str
+    ambient: str
+    solar: Optional[str]
+    gains: tuple[str, ...]
+
+    @classmethod
+    def from_block(cls, block) -> "ThermalZone":
+        zones = [c for c in block.y_names if c != block.heat]
+        problems = []
+        if len(zones) != 1:
+            problems.append(f"Y must be the zone temperature and `heat`, got {list(block.y_names)}")
+        if block.ambient is None:
+            problems.append("no `ambient`: the outdoor temperature every network conducts to")
+        if problems:
+            raise SystemExit(f"thermal block {block.name!r}: " + "; ".join(problems))
+        gains = tuple(c for c in block.d_names if c not in (block.ambient, block.solar))
+        return cls(block.name, zones[0], block.heat, block.ambient, block.solar, gains)
+
+    def network(self, rung: Rung):
+        return rung.network(self.heat, self.solar, self.gains)
+
+
+def _parse_dt_steps(text: str, freq_s: float) -> int:
+    seconds = pd.Timedelta(text).total_seconds()
+    every = seconds / freq_s
+    if seconds <= 0 or abs(every - round(every)) > 1e-9:
+        raise SystemExit(f"--dt {text} is not a whole number of the data's "
+                         f"{freq_s:g} s steps.")
+    return int(round(every))
+
+
+@beartype
+def ladder_main() -> None:
+    flags = argparse.ArgumentParser(add_help=False)
+    flags.add_argument("--zone", type=str, default=None,
+                       help="Only the thermal block whose zone is this column.")
+    flags.add_argument("--dt", type=str, default="30min",
+                       help="Step of the likelihood fits, e.g. 30min (the default) or 15min.")
+    flags.add_argument("--candidate", type=str, action="append", default=[],
+                       help="A JSON file holding a network declaration of your own, fitted "
+                            "and compared beside the ladder's rungs (repeatable).")
+    cfg, args = load_config_from_cli(
+        sys.argv[1:], cls=ModelingConfig, config_dir=MODEL_CONFIG_DIR,
+        default_config_path=MODEL_CONFIG_DIR / "modeling.yaml",
+        command_flags=flags,
+    )
+    hooks = load_modeling_hooks(cfg)
+    train_raws, dev_raws, _test_raws, freq_s = get_data_splits(cfg)
+    nm_mapping = resolve_nm_mapping(hooks, train_raws[0], cfg)
+    blocks = build_blocks(nm_mapping, resolve_block_spec(hooks, nm_mapping, cfg))
+    zones = [ThermalZone.from_block(b) for b in blocks if b.heat is not None]
+    if args.zone is not None:
+        zones = [z for z in zones if z.zone == args.zone]
+    if not zones:
+        raise SystemExit(
+            "No thermal block to fit. A thermal block declares its zone temperature and "
+            "`heat` (delivered heat, kW) as Y, `ambient` (and `solar`, if any) among its D; "
+            "see `nt guide thermal-zone`.")
+
+    every = _parse_dt_steps(args.dt, freq_s)
+    coarse_h, fine_h = every * freq_s / 3600.0, freq_s / 3600.0
+    candidates = {Path(path).stem: json.loads(Path(path).read_text())
+                  for path in args.candidate}
+
+    cache: dict[tuple[str, str], Fit] = {}
+
+    def fit_zone(zone: ThermalZone, network, start) -> Fit:
+        key = (zone.block, network.name)
+        if key not in cache:
+            data = [ladder.zone_series(raw, zone.zone, zone.ambient,
+                                       ladder.network_columns(network), every, coarse_h)
+                    for raw in train_raws]
+            cache[key] = nw.fit(network, data, start)
+        return cache[key]
+
+    def fit_rung_for(group: list[ThermalZone]):
+        def fit_rung(rung: Rung, parents: Optional[list[Fit]]):
+            return [fit_zone(z, z.network(rung), p.values if p else None)
+                    for z, p in zip(group, parents or [None] * len(group))]
+        return fit_rung
+
+    out_dir = Path("ladder")
+    out_dir.mkdir(exist_ok=True)
+    picks = {}
+    for zone in zones:
+        selection = ladder.forward_select(fit_rung_for([zone]), solar=zone.solar is not None)
+        picks[zone.block] = selection.chosen
+        candidate_fits = {}
+        for name, decl in candidates.items():
+            network, boxes, noise = nw.parse_declaration(decl, name)
+            candidate_fits[name] = fit_zone(
+                zone, network, {**nw.box_centres(boxes), **noise})
+        _print_ladder_card(zone, selection, candidate_fits, dev_raws, every, coarse_h,
+                           fine_h, len(train_raws), out_dir)
+
+    if len(zones) > 1:
+        shared = ladder.forward_select(fit_rung_for(zones),
+                                       solar=all(z.solar is not None for z in zones))
+        print(f"\nShared across {len(zones)} zones: {shared.chosen}  "
+              f"(likelihoods summed; per zone: "
+              + ", ".join(f"{b} {r}" for b, r in picks.items()) + ")")
+        for zone, fit in zip(zones, shared.fits[shared.chosen]):
+            if picks[zone.block] != shared.chosen:
+                path = out_dir / f"{zone.block}.shared.json"
+                path.write_text(json.dumps(nw.declaration(fit), indent=2, ensure_ascii=False))
+                print(f"  {zone.block} at {shared.chosen}: {path}")
+        print("  Same-shaped zones train as one batched call.")
+
+
+def _print_ladder_card(zone: ThermalZone, selection, candidate_fits: dict, dev_raws,
+                       every: int, coarse_h: float, fine_h: float, n_files: int,
+                       out_dir: Path) -> None:
+    fits = {name: fs[0] for name, fs in selection.fits.items()}
+    fits.update(candidate_fits)
+    n_obs = next(iter(fits.values())).n_obs
+    print(f"\n{zone.zone}   coarse dt {coarse_h * 60:g} min, {n_obs:,} train steps"
+          + (f" in {n_files} files" if n_files > 1 else ""))
+    print(f"  {'rung':<14}{'states':>6}{'params':>7}{'log L':>10}{'p vs parent':>13}"
+          f"{'BIC':>10}{'whiteness':>11}   1 h / 24 h RMSE on dev")
+    lags = ladder.whiteness_lags(coarse_h)
+    for name, fit in fits.items():
+        parent = selection.parents.get(name)
+        p = ("—" if parent is None else
+             _p_text(ladder.lr_p_value(fits[parent].log_likelihood, fits[parent].n_params,
+                                       fit.log_likelihood, fit.n_params)))
+        white = _p_text(ladder.ljung_box(fit.innovations, lags))
+        scores = [ladder.rollout_rmse(
+            fit.network, fit.values,
+            ladder.zone_series(raw, zone.zone, zone.ambient,
+                               ladder.network_columns(fit.network), 1, fine_h),
+            horizon=round(LADDER_HORIZON_H / fine_h), burn_in=round(LADDER_BURN_IN_H / fine_h),
+            every=round(LADDER_EVERY_H / fine_h)) for raw in dev_raws]
+        scores = [s for s in scores if s is not None]
+        rmse = (f"{sum(s[0] for s in scores) / len(scores):.3f} / "
+                f"{sum(s[1] for s in scores) / len(scores):.3f}" if scores else "dev too short")
+        label = name + ("  (yours)" if name in candidate_fits else "")
+        print(f"  {label:<14}{len(fit.network.nodes):>6}{fit.n_params:>7}"
+              f"{fit.log_likelihood:>10.1f}{p:>13}{fit.bic:>10.1f}{white:>11}   {rmse}")
+    chosen = fits[selection.chosen]
+    taus = ", ".join(f"{t:.3g} h ± {s:.2g}" for t, s in zip(chosen.taus_h, chosen.taus_se_h))
+    print(f"  → {selection.chosen}   time constants {taus}")
+    by_bic = min(fits, key=lambda n: fits[n].bic)
+    if by_bic != selection.chosen:
+        print(f"  BIC prefers {by_bic}; the likelihood-ratio tests stop at {selection.chosen}.")
+    for note in _fit_notes(chosen):
+        print(f"  {note}")
+    path = out_dir / f"{zone.block}.json"
+    path.write_text(json.dumps(nw.declaration(chosen), indent=2, ensure_ascii=False))
+    print(f"  snippet: {path}  — the block's params `network`; edit it as you like.")
+    print("  p vs parent: the likelihood-ratio test against the rung it extends. "
+          "Whiteness: Ljung–Box on the innovations over "
+          f"{ladder.WHITENESS_HOURS:g} h; small means time structure the network "
+          "leaves out.")
+
+
+def _p_text(p: float) -> str:
+    return "<0.001" if p < 0.001 else f"{p:.3f}"
+
+
+def _fit_notes(fit: Fit) -> list[str]:
+    """The signatures of a fit that is placing noise: a parameter with an
+    error bar wider than a factor of e, and two that move in lockstep."""
+    notes = []
+    limit = nw.at_limit(fit)
+    if limit:
+        notes.append(f"At a limit (zero or infinity): {limit}. A gain there is left out "
+                     "of the snippet; a noise there is a node the network needs no push for.")
+    wide = [k for k, se in fit.log_se.items() if se > 1.0 and k not in limit]
+    if wide:
+        notes.append(f"Barely placed (error bar wider than ×e): {wide}.")
+    names = fit.network.free_names()
+    for i in range(len(names)):
+        for j in range(i + 1, len(names)):
+            r = float(fit.correlation[i, j])
+            if abs(r) > 0.95:
+                notes.append(f"{names[i]} and {names[j]} move together (r = {r:+.2f}).")
+    if not fit.converged:
+        notes.append("The fit stopped at its iteration cap before converging.")
+    return notes
