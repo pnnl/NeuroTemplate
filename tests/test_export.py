@@ -11,7 +11,7 @@ channel-major window layout agrees with the real (time-major) one only when
 a key has a single column.
 
 Cases: each family, the per-block split, each head type, and the
-heterogeneous 2r2c + mlp composition with a prestack and a mixed head stack
+heterogeneous rc_network + mlp composition with a prestack and a mixed head stack
 — the case the old hand-written deliveries could not express. That one runs
 under the default (dynamo) exporter in every format (ONNX, torch programs,
 C); the rest use the faster legacy tracer, which traces the same forward
@@ -73,37 +73,40 @@ SPLIT = {
     "north": {"Y": ["north T"], "U": ["north sp"]},
     "south": {"Y": ["south T"], "U": ["south sp"]},
 }
-#: A 2r2c block's time constants, boxed so the graph carries the bound.
-TAUS = {"tau_fast_h": [0.3, 1.0], "tau_ambient_h": [2.0, 8.0], "tau_slow_h": [10.0, 40.0]}
-RC_SPLIT = {name: {**spec, "params": TAUS} for name, spec in SPLIT.items()}
 MIXED_MAPPING = {
-    "Y": ["north T", "power"],
-    "U": ["north sp", "ahu fan"],
+    "Y": ["north T", "north Q", "south T", "power"],
+    "U": ["north sp", "south sp"],
     "D": ["oat", "ghi"],
     "t": ["sec_elapsed"],
 }
+#: North is a declared network behind a thermostat; south an mlp zone whose
+#: setpoint reaches it as the demand prestack; power an mlp meter on north's heat.
 MIXED = {
     "north": {
-        "Y": ["north T"], "U": ["north sp", "ahu fan"], "model": "2r2c",
-        "ambient": "oat", "params": TAUS,
-        "inputs": {"north sp": {"kind": "demand", "sign": -1, "state": "north T",
-                                "capacity": [0.5, 3.0]},
-                   "ahu fan": {"kind": "linear", "sign": +1}},
+        "Y": ["north T", "north Q"], "U": ["north sp"], "D": ["oat", "ghi"],
+        "model": "rc_network", "heat": "north Q", "ambient": "oat", "solar": "ghi",
+        "params": {
+            "network": {"nodes": {"Ti": [0.5, 2.0], "Tm": [5.0, 20.0]},
+                        "edges": {"Ti-Tm": [0.2, 0.8], "Ti-ambient": [2.0, 8.0]},
+                        "inputs": {"north Q": {"Ti": 1.0}, "ghi": {"Ti": [0.001, 0.01]}},
+                        "noise": {"Ti": 0.1, "Tm": 0.05, "sensor": 0.05}},
+            "thermostat": {"cooling": {"setpoint": "north sp", "gain": [1.0, 5.0],
+                                       "capacity": [2.0, 8.0], "offset": [-0.5, 0.5]},
+                           "form": "tracker+offset"}},
     },
-    "power": {"Y": ["power"], "reads": ["north T"], "model": "mlp"},
+    "south": {"Y": ["south T"], "U": ["south sp"], "model": "mlp",
+              "inputs": {"south sp": {"kind": "demand", "sign": -1, "state": "south T"}}},
+    "power": {"Y": ["power"], "U": [], "reads": ["north Q"], "model": "mlp"},
 }
 
 
-#: Every block 2r2c: U and D are read at the current step only.
-RC_HISTORY = uniform_history(MAPPING, HISTORY_STEPS, at_zero=(*MAPPING["U"], *MAPPING["D"]))
 UNIFORM = uniform_history(MAPPING, HISTORY_STEPS)
-#: The 2r2c zone owns both U columns; the mlp power block reads every D.
-MIXED_HISTORY = uniform_history(MIXED_MAPPING, HISTORY_STEPS,
-                                at_zero=tuple(MIXED_MAPPING["U"]))
+#: The rc_network zone reads its setpoint at the current step only.
+MIXED_HISTORY = uniform_history(MIXED_MAPPING, HISTORY_STEPS, at_zero=("north sp",))
 
 
 def make_cfg(**over) -> Config:
-    return model_cfg(**{"model": "2r2c", "history": RC_HISTORY, "steps_per_hour": 12.0,
+    return model_cfg(**{"model": "nssm", "history": UNIFORM, "steps_per_hour": 12.0,
                         **over})
 
 
@@ -144,7 +147,6 @@ def make(package):
 
 
 CASES = {
-    "2r2c": (make_cfg(), MAPPING, RC_SPLIT, None),
     "nssm": (make_cfg(model="nssm", history=UNIFORM), MAPPING, None, None),
     "gru, 2 layers": (make_cfg(model="gru", num_layers=2, history=UNIFORM), MAPPING, None, None),
     "mlp per block": (make_cfg(model="mlp", per_block=True, history=UNIFORM), MAPPING, SPLIT, None),
@@ -164,11 +166,11 @@ def test_every_family_and_head_exports_as_the_trained_model(tmp_path, name):
 @pytest.mark.parametrize("graph_format", [
     "onnx", "torch", pytest.param("c", marks=needs_c)])
 def test_heterogeneous_model_with_prestack_and_heads_exports(tmp_path, graph_format):
-    """The exit criterion: 2r2c + mlp, a demand prestack, an ordinal head."""
+    """The exit criterion: rc_network + mlp, a demand prestack, an ordinal head."""
     result = export(tmp_path, make_cfg(history=MIXED_HISTORY), MIXED_MAPPING, MIXED,
-                    [RegressionHead(), OrdinalHead(n_levels=3)], exporter="dynamo",
+                    [RegressionHead()] * 3 + [OrdinalHead(n_levels=3)], exporter="dynamo",
                     graph_format=graph_format)
-    assert result.state_width == 1                  # the one zone's mass
+    assert result.state_width == 2                  # the network's two nodes
     if graph_format == "c":
         make(result.out_dir)                        # the Python runner's library
     assert all(check.ok for check in check_reference(result.out_dir))
@@ -227,7 +229,7 @@ def test_an_export_that_disagrees_is_not_written(tmp_path, monkeypatch):
 
     monkeypatch.setattr(export_dynamics, "torch_rollout", off_by_a_degree)
     with pytest.raises(RuntimeError, match="REFUSING TO WRITE"):
-        export(tmp_path, make_cfg(), MAPPING, RC_SPLIT)
+        export(tmp_path, make_cfg(), MAPPING)
     assert not (tmp_path / "pkg").exists()
 
 
@@ -329,7 +331,7 @@ def test_c_runner_reproduces_the_reference(tmp_path, monkeypatch):
     from neurotemplate.control.policy import build_policy
     from neurotemplate.export.policy import export_policy
 
-    package = export(tmp_path, make_cfg(), MAPPING, RC_SPLIT, graph_format="c").out_dir
+    package = export(tmp_path, make_cfg(model="gru"), MAPPING, graph_format="c").out_dir
     s = full_setup(**_priced(1), u_past=1)
     cfg, sysid_cfg, nm, ns = s["cfg"], s["sysid_cfg"], s["nm"], s["norm_stats"]
     policy = build_policy(cfg, sysid_cfg, nm, ns)
@@ -352,7 +354,7 @@ def test_c_runner_reproduces_the_reference(tmp_path, monkeypatch):
             {name: np.zeros((1, 1, 1)) for name in ("y", "u_history", "d", "r")})
 
     _blow_up(monkeypatch)
-    export(tmp_path, make_cfg(), MAPPING, RC_SPLIT, graph_format="c",
+    export(tmp_path, make_cfg(model="gru"), MAPPING, graph_format="c",
            ask=lambda question: True)
     make(package)
     result = subprocess.run(["./validate"], cwd=package, capture_output=True, text=True)

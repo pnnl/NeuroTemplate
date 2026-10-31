@@ -79,7 +79,7 @@ class ModelingConfig:
     user_hooks_path: Optional[str] = None
 
     # ---- MODEL ---------------------------------------------------------------
-    # A built-in family (mlp, nssm, lssm, gru, 2r2c), or a name in the hooks
+    # A built-in family (mlp, nssm, lssm, gru, rc_network), or a name in the hooks
     # file's custom_models() (see modeling.contract).
     model: str = "nssm"
     # Steps before the current one the model reads, per Y, U and D column:
@@ -94,23 +94,21 @@ class ModelingConfig:
     # state and no term reading another block's state on the same step.
     # Which channels form a block comes from the optional `block_mapping`
     # hook; without one there is one block holding everything, and this
-    # flag only costs a wrapper. `2r2c` is per-block by construction and
-    # rejects this flag.
+    # flag only costs a wrapper. `rc_network` is per-block by construction
+    # and rejects this flag.
     per_block: bool = False
     # Timesteps per hour, resolved from the data's sampling frequency by the
-    # CLI (like `device` and `seed`) rather than set in YAML. Only `2r2c`
-    # reads it, to place its time constants in real hours.
+    # CLI (like `device` and `seed`) rather than set in YAML. Only
+    # `rc_network` reads it, to discretise its network in real hours.
     steps_per_hour: Optional[float] = None
 
-    # ---- 2R2C ----------------------------------------------------------------
-    # A 2r2c block's time constants are a property of the zone, so they are
-    # declared per block, in the block_mapping hook's `params` (see
-    # modeling.rc). Here: the learning rate for its physical scalars — the
-    # bounded time constants, linear coefficients, coil capacity and ramp.
-    # Adam moves a raw parameter by about `lr` per update, and these have
-    # units of travel to cover where a network weight has thousandths; at
-    # `lr` they stall near their start.
-    rc_branch_lr: float = 0.05
+    # ---- PHYSICAL PARAMETERS ---------------------------------------------------
+    # A grey box's physical parameters (an rc_network's C, R, gains and
+    # thermostat) are declared per block, as boxes in the block_mapping hook's
+    # `params`. Here: their learning rate. Adam moves a raw parameter by
+    # about `lr` per update, and a box position has the whole box to cover
+    # where a network weight moves by thousandths; at `lr` they stall.
+    physical_lr: float = 0.05
 
     # ---- TRAIN ---------------------------------------------------------------
     epochs: int = 300
@@ -216,7 +214,7 @@ class ModelingConfig:
         ]:
             check_non_negative(self, name)
 
-        check_positive(self, "rc_branch_lr")
+        check_positive(self, "physical_lr")
 
         # Imported here rather than at module scope: dynamics imports this
         # config module, so a top-level import would be circular.
@@ -235,8 +233,8 @@ class ModelingConfig:
             warn_deep_window("history_steps", self.history_steps)
 
         if self.per_block and self.model not in PER_BLOCK_FAMILIES:
-            extra = (" 2r2c is already per-block and needs no flag."
-                     if self.model == "2r2c" else "")
+            extra = (" rc_network is already per-block and needs no flag."
+                     if self.model == "rc_network" else "")
             raise ValueError(
                 f"per_block is not supported for model '{self.model}'; "
                 f"available: {list(PER_BLOCK_FAMILIES)}.{extra}"

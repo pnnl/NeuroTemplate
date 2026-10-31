@@ -46,7 +46,7 @@ microcontroller as well as a host, and a Python runner that calls the same
 compiled C through ctypes. The batch is fixed at 1.
 
 Measured on one model and one policy (macOS arm64, Python 3.11): a 2R2C
-zone plus an MLP power block, 13,897 parameters, history 12, hidden state
+zone (a grey-box family since replaced by `rc_network`) plus an MLP power block, 13,897 parameters, history 12, hidden state
 width 1, and a linear residual policy. Rollouts ran over a 2,004-step test
 split. Installed sizes exclude the interpreter.
 

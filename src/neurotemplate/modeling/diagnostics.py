@@ -2,19 +2,15 @@
 Offline diagnostics: read a dataset, compute one statistic, print a
 recommendation. No training, no pipeline wiring, no extension point.
 
-Two decisions in this library are made by hand today, from the column's
-*name* rather than its data: which head a Y channel gets (`data_head_config`)
-and the 2R2C storage prior (a block's `tau_slow_h` box). Both are questions
-the data can answer, so this module answers them:
+Which head a Y channel gets (`data_head_config`) is otherwise chosen from
+the column's *name*; it is a question the data can answer:
 
   recommend_head   — 1-D k-means over a Y column's values; recommends
                      RegressionHead / BinaryHead / OrdinalHead / BoundedHead
                      from the SHAPE of the distribution, not the column name.
-  estimate_decay   — finds runs where the actuators sit at their `off`
-                     values for a while and fits an exponential envelope
-                     decay, giving the 2R2C storage prior (`tau_slow`)
-                     something to be checked against instead of just
-                     asserted.
+
+A thermal zone's network and thermostat have their own commands (`ladder`,
+`thermostat`).
 
 Everything here is pure: numpy arrays in, dataclasses/strings out. The CLI
 (`modeling/cli/data.py`) owns loading the dataset and hooks and printing
@@ -263,13 +259,13 @@ def recommend_head(
 
     `family` is the model family that produces **this column** -- not the
     run's `cfg.model`. With per-block families those differ: a run whose
-    `cfg.model` is "2r2c" can still produce a power channel under an `mlp`
+    `cfg.model` is "rc_network" can still produce a power channel under an `mlp`
     block, and that channel has no conflict at all. Callers get the per-
     channel answer from `dynamics.family_by_channel`; None means "unknown",
     and no conflict is claimed.
 
-    When the family is "2r2c" and the recommendation is ordinal, the evidence
-    says so: `OrdinalHead.residual_compatible` is False and a 2r2c block
+    When the family is "rc_network" and the recommendation is ordinal, the evidence
+    says so: `OrdinalHead.residual_compatible` is False and an rc_network block
     requires its channels' heads to be residual-compatible (`get_dynamics`
     raises otherwise), so the recommendation cannot be taken as given -- that
     channel's family has to change, or a different head be accepted.
@@ -306,10 +302,10 @@ def recommend_head(
             *_occupancy_lines(centers, list(best.mode_shares)),
             _k_sweep_line(fits, elbow=best.n_levels),
         ]
-        if family == "2r2c":
+        if family == "rc_network":
             lines.append(
-                "2r2c conflict: this channel is produced by a 2r2c block, "
-                "whose channels need residual-compatible heads, and "
+                "rc_network conflict: this channel is produced by an rc_network "
+                "block, whose channels need residual-compatible heads, and "
                 "OrdinalHead.residual_compatible is False -- get_dynamics "
                 "will raise. Recommended anyway on the data's shape; move "
                 "this channel to another family, or accept a different head."
@@ -344,262 +340,3 @@ def recommend_head(
                 f"variance with samples spread through the gaps -- no "
                 f"separable modes\n{_k_sweep_line(fits)}\n{_scope_note(column)}")
     return HeadRecommendation(column, "regression", evidence, fits, "RegressionHead()")
-
-
-# ── nt data decay ──────────────────────────────────────────────────
-
-# Runs shorter than this give too few points for a reliable slope, and a
-# building rarely holds its actuators off for less than an hour anyway. If
-# this misses real free-decay episodes in your data, lower it with
-# --min-hours.
-MIN_RUN_HOURS_DEFAULT = 4.0
-
-# A control sits "at its off value" when within this fraction of its own
-# observed range -- same scale-free convention as scenarios.py's
-# EQUILIBRIUM_DRIFT_FRAC, for a recorded actuator rather than a synthesized
-# equilibrium.
-OFF_TOLERANCE_FRAC = 0.02
-
-# A time constant longer than this multiple of the window it was fitted in is
-# extrapolated, not measured: over a span well short of tau the decay is
-# indistinguishable from a straight line, so the slope -- and tau with it --
-# is set by noise rather than by the plant. Rejecting those windows is
-# arithmetic about what the span can resolve, not a judgment about buildings.
-MAX_TAU_PER_SPAN = 3.0
-
-
-@dataclass(frozen=True)
-class DecayWindow:
-    """One free-decay episode: an off-mask run long enough to fit a slope."""
-    start: int              # row index where the window begins
-    n_steps: int
-    tau_h: float
-    half_life_h: float
-    r_squared: float         # fit quality of log|gap| vs t, for the evidence
-
-
-def actuator_off_mask(
-    values: dict[str, np.ndarray],
-    off: dict[str, float],
-    tol_frac: float = OFF_TOLERANCE_FRAC,
-) -> np.ndarray:
-    """Boolean mask, True where every actuator in `values` sits within
-    `tol_frac` of its own observed range from its declared `off` value.
-
-    `off` must carry an entry for every key in `values` -- the caller is
-    responsible for filling in "recorded minimum" for any control the
-    `SynthSpec.off` hook left out, per that dataclass's own docstring.
-    """
-    n = len(next(iter(values.values())))
-    mask = np.ones(n, dtype=bool)
-    for col, x in values.items():
-        rng = float(x.max() - x.min())
-        tol = tol_frac * rng
-        mask &= np.abs(x - off[col]) <= tol
-    return mask
-
-
-def find_runs(mask: np.ndarray, min_len: int) -> list[tuple[int, int]]:
-    """Maximal True-runs of `mask` at least `min_len` samples long, as
-    (start, stop) index pairs with `stop` exclusive."""
-    runs = []
-    start = None
-    # Sentinel False closes a run that reaches the end of the array.
-    for i, is_on in enumerate(np.append(mask, False)):
-        if is_on and start is None:
-            start = i
-        elif not is_on and start is not None:
-            if i - start >= min_len:
-                runs.append((start, i))
-            start = None
-    return runs
-
-
-def _fit_log_decay(t_hours: np.ndarray, gap: np.ndarray) -> Optional[tuple[float, float]]:
-    """OLS slope of log|gap| against t_hours. Returns (tau_h, r_squared), or
-    None when the window cannot support a fit:
-
-      - the slope must be negative (the gap shrinking),
-      - the gap must never touch zero (log undefined; `estimate_decay` has
-        already cut the run at its first crossing),
-      - and the fitted tau must be short enough that this window could have
-        resolved it (`MAX_TAU_PER_SPAN`).
-
-    The last one is what separates a measurement from an extrapolation, and
-    r_squared does not catch it: a 5-hour window fits a 127-hour constant
-    happily, because over a span that short the exponential *is* a line."""
-    if np.any(gap == 0):
-        return None
-    log_abs_gap = np.log(np.abs(gap))
-    slope, intercept = np.polyfit(t_hours, log_abs_gap, 1)
-    if slope >= 0:
-        return None
-    tau_h = -1.0 / slope
-    span_h = float(t_hours[-1] - t_hours[0])
-    if tau_h > MAX_TAU_PER_SPAN * span_h:
-        return None
-    predicted = slope * t_hours + intercept
-    ss_res = float(np.sum((log_abs_gap - predicted) ** 2))
-    ss_tot = float(np.sum((log_abs_gap - log_abs_gap.mean()) ** 2))
-    r_squared = 1.0 - ss_res / ss_tot if ss_tot > 0 else 1.0
-    return tau_h, r_squared
-
-
-def _before_first_crossing(gap: np.ndarray) -> int:
-    """Length of the prefix of `gap` before it first reaches or changes sign."""
-    crossed = np.sign(gap) != np.sign(gap[0])
-    return int(np.argmax(crossed)) if crossed.any() else len(gap)
-
-
-def estimate_decay(
-    t_hours: np.ndarray,
-    state: np.ndarray,
-    ref: np.ndarray,
-    off: np.ndarray,
-    min_run_steps: int,
-) -> tuple[DecayWindow, ...]:
-    """Find free-decay windows and fit an envelope time constant in each.
-
-    `off` is a boolean mask (see `actuator_off_mask`), True where the plant
-    is uncoupled. Within each run of at least `min_run_steps` consecutive
-    True samples, regress log|state - ref| on elapsed time. A run is cut at
-    the gap's first sign change and only the part before it is fitted: the
-    reference is usually recorded ambient, which moves through the day, so a
-    genuine overnight decay often crosses it once the morning warms, and the
-    decay before the crossing is exactly the measurement wanted. A run whose
-    remaining prefix is shorter than `min_run_steps`, or that is not an
-    exponential decay toward `ref` (flat, growing, or too short to resolve
-    the tau it fits), contributes no window rather than a bogus tau -- see
-    `_fit_log_decay` for the rejections.
-
-    Returns one `DecayWindow` per run that fits cleanly, in time order.
-    Empty means no qualifying window was found in this data -- the `tau_slow_h`
-    box then has to come from what is known about the building, held wide.
-    """
-    gap = np.asarray(state, dtype=float) - np.asarray(ref, dtype=float)
-    windows = []
-    for start, stop in find_runs(np.asarray(off, dtype=bool), min_run_steps):
-        stop = start + _before_first_crossing(gap[start:stop])
-        if stop - start < min_run_steps:
-            continue
-        t0 = t_hours[start:stop] - t_hours[start]
-        fit = _fit_log_decay(t0, gap[start:stop])
-        if fit is None:
-            continue
-        tau_h, r_squared = fit
-        windows.append(DecayWindow(
-            start=start, n_steps=stop - start, tau_h=tau_h,
-            half_life_h=tau_h * math.log(2), r_squared=r_squared,
-        ))
-    return tuple(windows)
-
-
-def summarize_taus(
-    windows: tuple[DecayWindow, ...],
-) -> tuple[Optional[float], Optional[float], Optional[float]]:
-    """(median, min, max) tau_h across windows, or (None, None, None)."""
-    if not windows:
-        return None, None, None
-    taus = [w.tau_h for w in windows]
-    return float(np.median(taus)), min(taus), max(taus)
-
-
-# ── Latching: does the equipment remember whether it was running? ──
-
-#: Bin edges for `latch_table`, in the state's units of error. Fine near zero,
-#: where a thermostat's deadband lives.
-LATCH_EDGES = (-math.inf, -1.0, -0.5, -0.25, 0.0, 0.25, 0.5, 1.0, math.inf)
-
-
-@dataclass(frozen=True)
-class LatchRow:
-    """How often the equipment runs in one bin of error, by its previous step."""
-    low: float
-    high: float
-    p_after_running: Optional[float]
-    n_after_running: int
-    p_after_idle: Optional[float]
-    n_after_idle: int
-
-
-def latch_table(running: np.ndarray, error: np.ndarray,
-                edges: tuple[float, ...] = LATCH_EDGES) -> list[LatchRow]:
-    """P(running now) at the same error, split by whether it ran the step before.
-
-    `running` is a boolean per step, `error` the thermostat's error (positive
-    while the equipment is called for), both over one contiguous record. A
-    memoryless response gives the same probability in both columns of a bin;
-    a latch gives a high one after running and a low one after idling, across
-    the bins either side of zero.
-    """
-    running = np.asarray(running, dtype=bool)
-    error = np.asarray(error, dtype=float)
-    now, before, e = running[1:], running[:-1], error[1:]
-    rows = []
-    for low, high in zip(edges, edges[1:]):
-        in_bin = (e > low) & (e <= high)
-        after_on, after_off = in_bin & before, in_bin & ~before
-        rows.append(LatchRow(
-            low, high,
-            float(now[after_on].mean()) if after_on.any() else None, int(after_on.sum()),
-            float(now[after_off].mean()) if after_off.any() else None, int(after_off.sum()),
-        ))
-    return rows
-
-
-@dataclass(frozen=True)
-class LatchEstimate:
-    """What a record's starts and stops say about a thermostat stage, as
-    (25th, 50th, 75th) percentiles, in the units a demand declaration takes;
-    None when the record has no event to read."""
-    start_error: Optional[tuple[float, float, float]]  # error when a stopped stage starts
-    stop_error: Optional[tuple[float, float, float]]   # error when a running stage stops
-    capacity: Optional[tuple[float, float, float]]     # state units per hour at a switch
-
-
-def _quartiles(values: list[float]) -> Optional[tuple[float, float, float]]:
-    if not values:
-        return None
-    q25, q50, q75 = np.percentile(values, [25, 50, 75])
-    return float(q25), float(q50), float(q75)
-
-
-def latch_estimates(records: list[tuple[np.ndarray, np.ndarray, np.ndarray]],
-                    sign: int, step_h: float) -> LatchEstimate:
-    """The error at each start and stop, and the jump in the state's rate
-    across it, from `(running, error, state)` records, each contiguous.
-
-    Read at the events, conditions on either side of a switch are nearly the
-    same, so the jump in rate is the stage's own effect: the capacity a
-    saturating branch declares, in `sign`'s direction. A comparison of all
-    running steps against all idle ones would not be: the equipment runs
-    under heavier loads than it idles under. Staged equipment switching one
-    stage makes it a lower bound. Advice for centring a box, not a fit.
-    """
-    starts, stops, jumps = [], [], []
-    for running, error, state in records:
-        running = np.asarray(running, dtype=bool)
-        error, state = np.asarray(error, dtype=float), np.asarray(state, dtype=float)
-        rate = np.diff(state) / step_h          # rate[k]: what step k's state did next
-        for k in range(1, len(running) - 1):
-            if running[k] == running[k - 1]:
-                continue
-            (starts if running[k] else stops).append(error[k])
-            switched_on = 1.0 if running[k] else -1.0
-            jumps.append(sign * switched_on * (rate[k] - rate[k - 1]))
-    return LatchEstimate(_quartiles(starts), _quartiles(stops), _quartiles(jumps))
-
-
-def pool_latch_tables(tables: list[list[LatchRow]]) -> list[LatchRow]:
-    """Bin-wise counts and probabilities pooled across several records."""
-    pooled = []
-    for rows in zip(*tables):
-        def pooled_p(p_key, n_key):
-            n = sum(getattr(r, n_key) for r in rows)
-            if not n:
-                return None, 0
-            return sum((getattr(r, p_key) or 0.0) * getattr(r, n_key) for r in rows) / n, n
-        p_on, n_on = pooled_p("p_after_running", "n_after_running")
-        p_off, n_off = pooled_p("p_after_idle", "n_after_idle")
-        pooled.append(LatchRow(rows[0].low, rows[0].high, p_on, n_on, p_off, n_off))
-    return pooled

@@ -187,84 +187,68 @@ def block_mapping(
     blocks get that for free.
 
         return {
-            "zone_a": {"Y": ["Zone A Temp [degC]"],
-                       "U": ["Zone A Setpoint [degC]"],
-                       "model": "2r2c", "params": {
-                           "tau_fast_h": [lo, hi],      # see below
-                           "tau_ambient_h": [lo, hi],
-                           "tau_slow_h": [lo, hi]}},
-            "meter":  {"Y": ["Total Power [kW]"],
-                       "reads": ["Zone A Temp [degC]"],
-                       "model": "mlp"},
+            "zone_a": {"Y": ["Zone A Temp [degC]", "Zone A Heat [kW]"],
+                       "U": ["Zone A Cool SP [degC]", "Zone A Heat SP [degC]"],
+                       "D": ["Outdoor Temp [degC]", "Solar [W/m2]", "Occupied [-]"],
+                       "model": "rc_network", "heat": "Zone A Heat [kW]",
+                       "ambient": "Outdoor Temp [degC]", "solar": "Solar [W/m2]",
+                       "params": {"network": json.load(open("ladder/zone_a.json")),
+                                  "thermostat": json.load(
+                                      open("ladder/zone_a.thermostat.json"))}},
+            "meter":  {"Y": ["Total Power [kW]"], "U": [],
+                       "reads": ["Zone A Heat [kW]"], "model": "mlp"},
         }
 
     Rules: every Y channel is in exactly one block. A block's U are its
     own; a U no block claims is shared by all. D is all of D unless a block
     names a subset, and blocks may overlap on it. `reads` lets a block see
-    other blocks' Y as an ordinary input (not allowed in `2r2c`, whose
-    stability guarantee depends on never reading state through a learned
-    map). `model` omitted means `cfg.model`; under `mlp`/`gru` the split
-    then needs `per_block: true`.
+    other blocks' Y as an ordinary input (not allowed in `rc_network`, whose
+    network and thermostat say where every column goes). `model` omitted
+    means `cfg.model`; under `mlp`/`gru` the split then needs `per_block:
+    true`.
 
-    `2r2c` is a thermal network: a state, a hidden mass, conduction to
-    ambient. It cannot diverge under any input, and its storage reads off in
-    hours, which is why it is the family to try for a temperature a
-    controller will plan against. Each `2r2c` block states its storage prior
-    in `params`, in hours, each a scalar (pinned) or [lo, hi] (fitted
-    inside), in the order fast < ambient < slow with no overlap:
-      tau_fast_h     how fast the state settles after a step of its actuator
-      tau_ambient_h  the initial rate of a drift toward ambient, actuators off
-      tau_slow_h     the same drift, once the mass is involved; `nt data
-                     decay` estimates it from free-float periods, if the
-                     data has any
-    There is no default: a prior about a building is yours to state, held
-    wide when you are unsure, and the reportcard says where each fit landed
-    in its box. A fit pressed against an edge is the data disagreeing.
+    `rc_network` is a thermal zone whose delivered heat is measured (supply
+    flow × (supply − zone) temperature × 1.2 kJ/(m³K), in kW, positive
+    heating; a meter, its row the heat over the step that ends there). Its
+    Y are the zone and that heat; its U the setpoints its thermostat
+    follows; its D the outdoor temperature (`ambient`) and every input
+    that adds heat (`solar`, an occupancy schedule). `params` holds two
+    declarations, every value a scalar (pinned) or [lo, hi] (fitted inside):
+      network     nodes (kWh/K), edges (K/kW), where each input enters and
+                  its gain, and noise. `nt data ladder` fits a ladder of
+                  networks and saves the one its tests pick; edit it freely,
+                  and `--candidate` runs your own through the same tests.
+      thermostat  per side, the setpoint and its gain (kW/K), capacity (kW)
+                  and offset (K), and more by form. `nt data thermostat`
+                  saves it; a side the record never exercised comes back
+                  null where the data placed nothing: declare it.
+    There is no default: a prior about a building is yours to state, and
+    the commands are where the data states it. The reportcard says where
+    each fit landed in its box. A fit pressed against an edge is the data
+    disagreeing.
 
-    A block may also declare what each column *is*, which changes the
+    Any other block may declare a setpoint `demand`, which changes the
     physics rather than the shapes:
 
-        "zone_a": {
+        "zone_b": {
             ...,
-            "ambient": "Outdoor Temp [degC]",
             "inputs": {
-                "Zone A Setpoint [degC]": {"kind": "demand", "sign": -1,
-                                           "state": "Zone A Temp [degC]",
-                                           "capacity": [lo, hi]},
-                "Solar [W/m2]":           {"kind": "linear", "sign": +1},
+                "Zone B Setpoint [degC]": {"kind": "demand", "sign": -1,
+                                           "state": "Zone B Temp [degC]"},
             },
         }
 
-      demand   a setpoint, replaced for every family by the thermostat's
-               clamped error against the block's own predicted state —
-               relu(state − setpoint) for cooling (sign -1), the mirror for
-               heating — so a setpoint past the state commands nothing, as
-               on a real thermostat. Without it a model renders a setpoint
-               as a smooth, always-active push, and a controller trained on
-               it inherits that. Declare every setpoint that drives the
-               block. In `2r2c` it drives a bounded, saturating heat input
-               whose `capacity`, °C per hour at full stage, is a declared
-               scalar or [lo, hi] (`nt data latch` estimates it); `"branch":
-               "mlp"` routes it into the learned residual instead, losing the
-               stability bound. Equipment that latches (starts past its
-               setpoint and runs until the state is some way back) also sets
-               `"hysteresis": {"on_at": [lo, hi], "off_at": [lo, hi]}`, in
-               °C of error; `nt data latch` estimates both.
-      linear   one sign-fixed coefficient times the physical value: metered
-               heat or power delivered, irradiance. An actuator that is a
-               power rather than a setpoint is `linear`, never `demand`.
-      ambient  the outdoor-temperature column, as explicit conduction at the
-               block's `tau_ambient_h` rate.
+      demand   a setpoint, replaced by the thermostat's clamped error
+               against the block's own predicted state — relu(state −
+               setpoint) for cooling (sign -1), the mirror for heating — so
+               a setpoint past the state commands nothing, as on a real
+               thermostat. Without it a model renders a setpoint as a
+               smooth, always-active push, and a controller trained on it
+               inherits that. Declare every setpoint that drives the block.
 
-    `linear` and `ambient` act only inside `2r2c`; other families see those
-    columns as ordinary inputs, with a build-time warning. Undeclared
-    columns feed the block's learned residual, a small MLP (it maps only
-    those columns to a heat flow, so it rarely needs width). A `2r2c` block
-    that declares every column has no residual and no free constant heat
-    gain: the most constrained model. Declaring only the setpoints leaves
-    the rest to the residual. Which is better for your plant is a model
-    iteration, decided by the physics checks and the rollout readouts, not
-    by test NRMSE, which declarations are not expected to improve.
+    Which structure is better for your plant is a model iteration, decided
+    by the physics checks and the rollout readouts, not by test NRMSE,
+    which declarations are not expected to improve.
     """
     return None
 

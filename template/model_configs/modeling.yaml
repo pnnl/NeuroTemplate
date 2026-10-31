@@ -24,16 +24,16 @@ test_data_path: data/test.csv
 # rarely where a controller will drive the plant; it does not pick a
 # surrogate for control. The reportcard's rollout-stability and physics
 # sections are the readouts for that.
-# Family: mlp | nssm | lssm | gru | 2r2c.
-#   2r2c   grey-box thermal network: a state, a hidden mass, conduction to
-#          ambient, a heat input. Stable under any input by construction,
-#          with storage time constants you can read and check — the family
-#          for a temperature a controller will plan against.
+# Family: mlp | nssm | lssm | gru | rc_network.
+#   rc_network   grey-box thermal zone: a declared RC network behind a
+#          thermostat, every parameter physical and boxed, for a zone whose
+#          delivered heat is measured. `nt data ladder` and `nt data
+#          thermostat` write its declarations (`nt guide thermal-zone`).
 #   mlp, nssm, lssm, gru   black boxes. Often the best fit, but nothing
 #          bounds a long rollout; read the reportcard's rollout-stability
 #          and physics sections before steering with one.
 # Families can be mixed, one per block of Y channels — see `block_mapping`
-# in modeling_user_defined.py (e.g. one 2r2c block per zone, an mlp for a meter).
+# in modeling_user_defined.py (e.g. one rc_network block per zone, an mlp for a meter).
 # Or the name of a model of your own, from `custom_models` there.
 # model: nssm
 # Required: steps before the current one the model reads, per column. List
@@ -42,34 +42,32 @@ test_data_path: data/test.csv
 # (history_steps = deepest + 1), the seeded history before the first
 # prediction, and the stride between training windows. Each learned map
 # reads a column at its own lag, except that a gru reads one lag for every
-# column it reads (its window is its warm-up), and a 2r2c block reads its own
-# Y columns at one lag and its U and D at the current step only, so a U or D
-# column only 2r2c blocks read is listed at 0. gru and 2r2c also carry state
-# through a rollout. A lag is worth its inputs when the column still tells
+# column it reads (its window is its warm-up), and an rc_network block reads
+# its Y and D at one lag (the window its filter places the hidden nodes from;
+# a day is enough) and its setpoints at the current step only, so a U column
+# only rc_network blocks read is listed at 0. gru and rc_network also carry
+# state through a rollout. A lag is worth its inputs when the column still tells
 # the model something, that far back, that its other inputs do not; the
 # reportcard lists what each block reads.
 history:
   "Tank Temperature [degC]": 11
   "Heater Command [-]": 0
   "Ambient Temperature [degC]": 3
-# Network width is 2**log2_hidden_size. Under 2r2c this net only maps the
-# columns you left undeclared to a heat flow, and it can be very small.
-# Larger nets tend to buy fit with physics: start small, and grow one when
+# Network width is 2**log2_hidden_size; rc_network has no net. Larger nets tend to buy fit with physics: start small, and grow one when
 # the reportcard says the model underfits, not because dev loss went down.
 # log2_hidden_size: 6
 # num_layers: 3
 # Predict the change from the current state rather than the state.
 # residual: true
 # Split every block under one mlp or gru family. Not needed when a block
-# names its own `model`; 2r2c is always per-block.
+# names its own `model`; rc_network is always per-block.
 # per_block: false
 
-# ── 2R2C ─────────────────────────────────────────────────────────
-# A 2r2c block's time constants are declared per block, in block_mapping's
-# `params` (modeling_user_defined.py). Here only the learning rate for its
-# physical scalars — bounded time constants, declared-branch coefficients.
-# At `lr` they barely leave their start.
-# rc_branch_lr: 0.05
+# ── PHYSICAL PARAMETERS ──────────────────────────────────────────
+# A grey box's parameters are declared as boxes in block_mapping's `params`
+# (modeling_user_defined.py). Here only their learning rate: at `lr` they
+# barely leave their start.
+# physical_lr: 0.05
 
 # ── TRAIN ────────────────────────────────────────────────────────
 # epochs: 300

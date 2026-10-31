@@ -33,8 +33,8 @@ model reads. The Node hands every key one rectangular window,
 `cfg.history_steps = max(lag) + 1` rows deep; each learned map then gathers
 the cells it reads out of it, each column at the lag its family consumes (see
 `block_lags`): any lag for `mlp`, `nssm` and `lssm`, one lag for every column
-a `gru` reads (its window is its warm-up), and for `2r2c` its zones' window
-and the current step of U and D. A uniform table gathers nothing. A stateful
+a `gru` reads (its window is its warm-up), and for `rc_network` one window of
+its Y and D and the current step of U. A uniform table gathers nothing. A stateful
 block (GRU) additionally keeps a hidden state so its memory can run past its
 window during a rollout, but it still takes the same window — it just skips
 the steps already folded into that state (see gru.GRUBlock). The only thing
@@ -68,9 +68,6 @@ from neurotemplate.modeling.prestack import PreStack
 from neurotemplate.modeling.bounded import bounded_parameters
 from neurotemplate.modeling.gru import GRUBlock
 from neurotemplate.modeling.rollout import WindowedSystem
-from neurotemplate.modeling.rc import (
-    TAU_KEYS, RCBlock, RCGroup, demand_boxes, rc_groups, time_constant_boxes,
-)
 from neurotemplate.modeling.blocks import Block, build_blocks
 from neurotemplate.modeling.rc_network import NetworkBlock
 
@@ -114,11 +111,8 @@ def block_lags(family: str, block: Block, history: dict[str, int]) -> Lags:
 
     `mlp` reads every column at its declared lag. `gru` folds its window
     into its hidden state row by row, so every column it reads shares one
-    lag. `2r2c` seeds its mass from one window over its own zones and drives
-    them with the current U and D only, so its Y columns share one lag and
-    its U and D are read at 0, whatever they are declared at. `rc_network`
-    filters one window of its Y and D and reads its setpoints at the current
-    step only.
+    lag. `rc_network` filters one window of its Y and D and reads its
+    setpoints at the current step only, whatever they are declared at.
     """
     y, u, d = (tuple(history[c] for c in names)
                for names in (block.y_in_names, block.u_names, block.d_names))
@@ -127,11 +121,6 @@ def block_lags(family: str, block: Block, history: dict[str, int]) -> Lags:
             f"gru block {block.name!r}",
             {c: history[c] for c in block.y_in_names + block.u_names + block.d_names},
             "every column it reads: its window is its warm-up")
-    if family == "2r2c":
-        _check_one_lag(f"2r2c block {block.name!r}",
-                       {c: history[c] for c in block.y_in_names},
-                       "its Y columns: they share the mass seed window")
-        return y, (0,) * len(u), (0,) * len(d)
     if family == "rc_network":
         _check_one_lag(f"rc_network block {block.name!r}",
                        {c: history[c] for c in block.y_in_names + block.d_names},
@@ -144,8 +133,8 @@ def _check_lags_consumed(blocks: list[Block], lags: list[Lags],
                          history: dict[str, int]) -> None:
     """Every column's declared lag is what some block reading it consumes.
 
-    A deeper declaration would sit inert: a U column read only by 2r2c
-    blocks is read at its current step, whatever its lag says. A D column
+    A deeper declaration would sit inert: a U column read only by
+    rc_network blocks is read at its current step, whatever its lag says. A D column
     no block reads (per-block D subsets that all leave it out) is listed at
     0: the control side may still use it, so it stays a model column.
     """
@@ -167,7 +156,7 @@ def _check_lags_consumed(blocks: list[Block], lags: list[Lags],
             raise ValueError(
                 f"history[{column!r}] is {history[column]}, but no block reads "
                 f"it that far back; the lag each reader consumes: {readers}. A "
-                f"2r2c block reads U and D at the current step only. Set it to "
+                f"rc_network block reads U at the current step only. Set it to "
                 f"{deepest}."
             )
 
@@ -234,8 +223,8 @@ class BlockStack(nn.Module):
     there is no evaluation-order dependency between blocks to break it.
 
     Each block's gather also narrows in time: a column arrives at the lag the
-    block's family consumes (see `block_lags`), so a 2r2c block gets one step
-    of U and D.
+    block's family consumes (see `block_lags`), so an rc_network block gets
+    one step of U.
 
     Args:
         blocks: the partition, from `blocks.build_blocks`.
@@ -275,24 +264,10 @@ class BlockStack(nn.Module):
         self.register_buffer(
             "_gather", torch.tensor(gathers, dtype=torch.long), persistent=False)
 
-        # Same-shaped 2r2c blocks run as one batched call each (`RCGroup`);
-        # the rest one by one. Groups run first, then the solo blocks, and
-        # `_order` is that execution order, block by block.
-        groups = rc_groups(list(self.blocks))
-        grouped = {i for group in groups for i in group}
-        self._groups = [RCGroup([self.blocks[i] for i in group]) for group in groups]
-        self._solo = [i for i in range(len(blocks)) if i not in grouped]
-        self._order = [i for group in groups for i in group] + self._solo
-        for k, group in enumerate(groups):
-            self.register_buffer(
-                f"_group_gather_{k}",
-                torch.cat([self._gather[self._spans[i]] for i in group]),
-                persistent=False)
-
         # Sub-block outputs concatenate in execution order; this puts them
         # back in the order nm_mapping["Y"] lists, which is the order the
         # loss and the autoregressive feedback both assume.
-        exec_order = [i for b in self._order for i in blocks[b].y_idx]
+        exec_order = [i for block in blocks for i in block.y_idx]
         self.register_buffer(
             "_to_y_order",
             torch.tensor(
@@ -303,20 +278,8 @@ class BlockStack(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         dim = x.ndim - 1                    # the feature axis, batched or not
-        # Under vmap (the sampled gradient penalty) there is no batch for a
-        # group to share, and a trace for export cannot run `vmap` over
-        # swapped parameters: in both, every block runs alone. Same
-        # function, same per-block state.
-        if dim == 0 or torch.jit.is_tracing() or torch.compiler.is_compiling():
-            outs = [self.blocks[i](x.index_select(dim, self._gather[self._spans[i]]))
-                    for i in self._order]
-        else:
-            outs = []
-            for k, group in enumerate(self._groups):
-                xg = x.index_select(dim, getattr(self, f"_group_gather_{k}"))
-                outs.append(group(xg.reshape(*x.shape[:-1], len(group.blocks), -1)))
-            outs += [self.blocks[i](x.index_select(dim, self._gather[self._spans[i]]))
-                     for i in self._solo]
+        outs = [block(x.index_select(dim, self._gather[span]))
+                for block, span in zip(self.blocks, self._spans)]
         return torch.cat(outs, dim=-1).index_select(dim, self._to_y_order)
 
 
@@ -506,8 +469,8 @@ def get_gru(cfg: ModelingConfig, nm_mapping: dict[str, list[str]], lags: Lags) -
 
 
 #: Families with a monolithic factory: one network over the whole Y vector.
-#: `2r2c` has no entry here — an RC network describes *a* block, never all
-#: of Y at once (see BLOCK_BUILDERS below and `_uses_per_block`) — so this
+#: `rc_network` has no entry here — it describes *a* zone, never all of Y
+#: at once (see BLOCK_BUILDERS below and `_uses_per_block`) — so this
 #: dict is NOT the model whitelist; see VALID_MODEL_NAMES for that.
 model_catalog = {
     "mlp": get_mlp,
@@ -539,54 +502,6 @@ def _gru_block(cfg: ModelingConfig, block: Block, lags: Lags,
     )
 
 
-def _2r2c_block(cfg: ModelingConfig, block: Block, lags: Lags,
-                norm_stats: Optional[dict]) -> nn.Module:
-    """One block's RC network. See `rc` for the physics.
-
-    Refuses `reads`: `RCBlock`'s unconditional-stability guarantee holds
-    only because its learned forcing map `g` reads `u` and `d` and never
-    state — the state matrix is then fixed by three positive rates whatever
-    `g` does (see rc.py's module docstring for the eigenvalue argument). A
-    `reads` entry would let `g` see another block's Y, which is exactly the
-    state-dependence the guarantee forbids, so it is refused here rather
-    than silently building a block that looks stable and is not.
-
-    A `demand` declaration is the one state read admitted: it reaches the
-    block only as the clamped setpoint error, through the bounded
-    `saturating` branch, whose slope the parameterization keeps inside the
-    stability headroom — never through `g`.
-    """
-    if block.reads:
-        raise ValueError(
-            f"2r2c block {block.name!r} cannot declare `reads`: its "
-            "unconditional-stability guarantee holds only because the "
-            "learned forcing map g reads u and d and never state. A `reads` "
-            "entry would let g see another block's Y — exactly the "
-            "state-dependence the guarantee forbids. Use a different family "
-            "for this block if it needs to see another block's state."
-        )
-    if not block.params:
-        raise ValueError(
-            f"2r2c block {block.name!r} declares no time constants. Give its "
-            f"block_mapping entry `params` with {list(TAU_KEYS)}, in hours — a "
-            "scalar pins one, [min, max] bounds it. They are this zone's "
-            "storage prior, and there is no library default for a building. "
-            "With no block_mapping hook there is nowhere to declare them: "
-            "`model: 2r2c` needs one."
-        )
-    return RCBlock(
-        block.ny, block.nu, block.nd, y_steps=lags[0][0] + 1,
-        steps_per_hour=cfg.steps_per_hour,
-        hidden_size=(2**cfg.log2_hidden_size),
-        num_layers=cfg.num_layers,
-        taus=time_constant_boxes(block.params, cfg.steps_per_hour, block.name),
-        channel_names=block.y_names,
-        u_names=block.u_names, d_names=block.d_names,
-        inputs=block.inputs, ambient=block.ambient, norm_stats=norm_stats,
-        branch_boxes=demand_boxes(block.inputs, block.name),
-    )
-
-
 def _rc_network_block(cfg: ModelingConfig, block: Block, lags: Lags,
                       norm_stats: Optional[dict]) -> nn.Module:
     """One thermal zone's declared network and thermostat. See `rc_network`."""
@@ -610,23 +525,18 @@ BLOCK_BUILDERS: dict[str, Callable[[ModelingConfig, Block, Lags, Optional[dict]]
                                     nn.Module]] = {
     "mlp": _mlp_block,
     "gru": _gru_block,
-    "2r2c": _2r2c_block,
     "rc_network": _rc_network_block,
 }
 
-#: The families whose blocks describe one thermal zone each: built per block
-#: unconditionally, predicting increments, in physical time.
-THERMAL_FAMILIES = ("2r2c", "rc_network")
-
 #: Families that need `per_block: true` to opt into the per-block split.
-#: The thermal families are excluded even though BLOCK_BUILDERS has builders
-#: for them: they are per-block unconditionally, so they need no flag (and
-#: ModelingConfig.validate() refuses the combination as redundant).
-PER_BLOCK_FAMILIES = tuple(name for name in BLOCK_BUILDERS if name not in THERMAL_FAMILIES)
+#: `rc_network` is excluded even though BLOCK_BUILDERS has a builder for it:
+#: it describes one thermal zone and is per-block unconditionally, so it
+#: needs no flag (and ModelingConfig.validate() refuses the combination).
+PER_BLOCK_FAMILIES = tuple(name for name in BLOCK_BUILDERS if name != "rc_network")
 
 #: Every valid `cfg.model` name: the union of model_catalog (monolithic
 #: factories) and BLOCK_BUILDERS (per-block-only factories — today just
-#: `2r2c`, which has no monolithic form at all). This is the whitelist
+#: `rc_network`, which has no monolithic form at all). This is the whitelist
 #: ModelingConfig.validate()'s check_one_of and get_dynamics's "unknown
 #: model" check both read, so a new family only means adding it to one of
 #: the two dicts above, never a third hand-maintained list.
@@ -684,27 +594,26 @@ def _build_per_block_model(
     """Heterogeneous dynamics: one sub-module per block, each in whatever
     family it (or cfg.model, absent a block-level override) declares.
 
-    This is the general form `2r2c` always needed on its own — an RC
-    network describes *a* block, never the whole Y vector at once — so a
-    spec mixing `2r2c` with `mlp` takes exactly the same path, just with
-    more than one family among `blocks`. `2r2c`'s residual/steps_per_hour
-    requirements are checked once here rather than per block, because
+    This is the general form `rc_network` always needs on its own — it
+    describes *a* zone, never the whole Y vector at once — so a spec mixing
+    it with `mlp` takes exactly the same path, just with more than one
+    family among `blocks`. Its residual/steps_per_hour requirements are
+    checked once here rather than per block, because
     SSMGrad.residual gates the whole output, not a per-channel one (see
     SSMGrad.forward).
     """
     ny, nu, nd = _widths(nm_mapping)
 
-    thermal = sorted(set(families) & set(THERMAL_FAMILIES))
-    if thermal:
+    if "rc_network" in families:
         if not cfg.residual:
             raise ValueError(
-                f"{thermal[0]} requires residual=True: the block predicts the "
+                "rc_network requires residual=True: the block predicts the "
                 "*increment*, which SSMGrad adds to the current state. With "
                 "residual=False the increment would be read as an absolute value."
             )
         if cfg.steps_per_hour is None:
             raise ValueError(
-                f"{thermal[0]} needs cfg.steps_per_hour to place its time constants. "
+                "rc_network needs cfg.steps_per_hour to discretise its network. "
                 "The CLI sets it from the data's sampling frequency; set it "
                 "by hand (steps_per_hour = 3600 / timestep_seconds) if you "
                 "are building a model outside the CLI."
@@ -758,12 +667,12 @@ def _describe_block(block: Optional[nn.Module], cfg: ModelingConfig) -> Optional
             # The family is the interesting fact once blocks can mix —
             # spec.model is None for a block that just inherits cfg.model.
             sub_info["model"] = _resolve_family(cfg, spec)
-            # What it reads, which for 2r2c is not what history declares.
+            # What it reads, which for rc_network is not what history declares.
             sub_info["lags"] = dict(zip(
                 spec.y_in_names + spec.u_names + spec.d_names, y + u + d))
             info["blocks"][spec.name] = sub_info
     # A block that can say something about itself in its own vocabulary —
-    # RCBlock reports the time constants it learned — says it here.
+    # NetworkBlock reports the time constants it learned — says it here.
     if hasattr(block, "describe"):
         info.update(block.describe())
     # Every bounded parameter it owns, generically: its box and where the
@@ -886,7 +795,7 @@ def stateful_blocks(model: nn.Module) -> list[nn.Module]:
     """Every submodule carrying rollout state, in `modules()` order.
 
     A block is stateful exactly when it implements the protocol
-    `rollout_state()` / `set_rollout_state(state)` (RCBlock, GRUBlock): the
+    `rollout_state()` / `set_rollout_state(state)` (NetworkBlock, GRUBlock): the
     state as one [batch, width] tensor, None when cold. A new stateful family
     implements those two methods and gets both the per-batch reset and ONNX
     export (see `neurotemplate.export.state`) for free.
@@ -900,24 +809,24 @@ def _uses_per_block(cfg: ModelingConfig, blocks: list[Block], families: list[str
 
     Three independent reasons, any one of which is enough: the spec itself
     names a per-block family (mixed families in one graph), the run opted in
-    with `cfg.per_block`, or a resolved family is `2r2c`, which is per-block
-    unconditionally — an RC network describes *a* block, never the whole Y
-    vector at once, so there is no monolithic 2r2c to fall back to.
+    with `cfg.per_block`, or a resolved family is `rc_network`, which is
+    per-block unconditionally: it describes *a* zone, so there is no
+    monolithic one to fall back to.
     """
     return (any(b.model is not None for b in blocks)
-            or cfg.per_block or bool(set(families) & set(THERMAL_FAMILIES)))
+            or cfg.per_block or "rc_network" in families)
 
 
-def _check_2r2c_heads(blocks: list[Block], families: list[str],
-                      head_stack: HeadStack) -> None:
-    """2r2c predicts an increment; only a residual-compatible head restores
-    the state. Scoped to the channels a 2r2c block actually produces, so a
+def _check_increment_heads(blocks: list[Block], families: list[str],
+                           head_stack: HeadStack) -> None:
+    """rc_network predicts increments; only a residual-compatible head
+    restores the value. Scoped to the channels such a block produces, so a
     mixed-family run's other channels are free to use any head — see
     _build_per_block_model for the analogous residual/steps_per_hour checks,
     which are model-wide because SSMGrad's residual flag is not per-channel.
     """
     rc_channels = {
-        name for block, family in zip(blocks, families) if family in THERMAL_FAMILIES
+        name for block, family in zip(blocks, families) if family == "rc_network"
         for name in block.y_names
     }
     if not rc_channels:
@@ -926,7 +835,7 @@ def _check_2r2c_heads(blocks: list[Block], families: list[str],
              if name in rc_channels and not head.residual_compatible]
     if blind:
         raise ValueError(
-            f"{'/'.join(THERMAL_FAMILIES)} predict increments, so every Y channel they produce needs "
+            f"rc_network predicts increments, so every Y channel it produces needs "
             f"a residual-compatible head; {blind} are not."
         )
 
@@ -941,12 +850,8 @@ def _build_pre_stack(
     `(U column, Y channel)` pair — which is what lets one wiring point in
     `SSMGrad.forward` serve every family.
     """
-    # The transform carries only what defines the feature: a hysteresis
-    # column's error is left signed. `branch` says what a 2r2c block does
-    # with it, and stays there.
     demands = {
-        column: {**{k: entry[k] for k in ("kind", "state", "sign")},
-                 "clamped": not entry.get("hysteresis", False)}
+        column: {k: entry[k] for k in ("kind", "state", "sign")}
         for block in blocks
         for column, entry in block.inputs.items() if entry["kind"] == "demand"
     }
@@ -963,20 +868,18 @@ def _build_pre_stack(
 
 
 def _warn_ignored_declarations(blocks: list[Block], families: list[str]) -> None:
-    """`linear` and `ambient` only mean something to `2r2c`; every other
-    family already sees the column as an ordinary input. Say so rather than
-    let the declaration sit inert."""
+    """`ambient`, `heat` and `solar` only mean something to `rc_network`;
+    every other family already sees those columns as ordinary inputs. Say
+    so rather than let the declaration sit inert."""
     for block, family in zip(blocks, families):
-        if family in THERMAL_FAMILIES:
+        if family == "rc_network":
             continue
-        ignored = [c for c, e in block.inputs.items() if e["kind"] == "linear"]
-        if block.ambient:
-            ignored.append(block.ambient)
+        ignored = [c for c in (block.ambient, block.heat, block.solar) if c]
         if ignored:
             warnings.warn(
                 f"block {block.name!r} builds under {family!r}, which ignores "
-                f"the `linear`/`ambient` declaration of {ignored}: only 2r2c "
-                "gives those columns a structural term.",
+                f"the `ambient`/`heat`/`solar` declaration of {ignored}: only "
+                "rc_network gives those columns a place in its physics.",
                 stacklevel=3,
             )
 
@@ -1020,11 +923,11 @@ def get_dynamics(
 
     _warn_ignored_declarations(blocks, families)
     unread = [b.name for b, family in zip(blocks, families)
-              if b.params and family not in THERMAL_FAMILIES]
+              if b.params and family != "rc_network"]
     if unread:
         raise ValueError(
-            f"block(s) {unread} declare `params`, but only a {' or '.join(THERMAL_FAMILIES)} "
-            "block reads any; the declaration would sit inert."
+            f"block(s) {unread} declare `params`, but only an rc_network block "
+            "reads any; the declaration would sit inert."
         )
     lags = column_lags(cfg, nm_mapping)
     _check_demand_lags(blocks, cfg.history)
@@ -1053,7 +956,7 @@ def get_dynamics(
                 f"head_stack.raw_width={head_stack.raw_width} does not match "
                 f"model.ny={model.ny}; factories (currently) assume width-1 heads."
             )
-        _check_2r2c_heads(blocks, families, head_stack)
+        _check_increment_heads(blocks, families, head_stack)
         # A new stack, in the family's units; post-training calibration
         # writes its decision thresholds into this one, never the caller's.
         model.head_stack = head_stack.normalized(norm_stats)

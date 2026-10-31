@@ -31,9 +31,10 @@ noise is a declaration, not a fitted parameter, here.
 
 Stability: the network is stable for any positive R and C. The thermostat
 closes a loop on the zone, stable and free of oscillation while its gain
-stays under `C_zone / dt`; the block holds it there smoothly, `K_eff =
-bound · (1 − exp(−K / bound))`, so a gain fitted from data that switches
-faster than the step can never make the loop ring.
+stays under `C_zone / dt`; the block holds it there with a smooth minimum,
+`K_eff = K · (1 + (K / bound)^8)^(−1/8)`, which is K itself until close to
+the bound, so a gain fitted from data that switches faster than the step
+can never make the loop ring.
 
 Export: the discretisation and the gain need a matrix exponential and
 linear solves, which do not export. In eval mode the block holds them as
@@ -172,7 +173,7 @@ class NetworkBlock(nn.Module):
         bound = self.gain_bound()
         for side in self.sides:
             gain = p[f"{side}.gain"]
-            p[f"{side}.gain"] = bound * (1 - torch.exp(-gain / bound))
+            p[f"{side}.gain"] = gain * (1 + (gain / bound) ** 8) ** (-1 / 8)
         return p
 
     def gain_bound(self) -> torch.Tensor:
@@ -324,6 +325,7 @@ class NetworkBlock(nn.Module):
             p = self.thermostat_values()
             bound = float(self.gain_bound())
         out = {
+            "zone": self.zone,
             "network": "+".join(self.network.nodes),
             "network_time_constants_h": [round(t, 3) for t in taus],
             "thermostat": self.form.name,

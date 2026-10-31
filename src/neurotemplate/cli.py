@@ -10,8 +10,6 @@ before. Groups mirror the package layout:
     nt model load           # neurotemplate.modeling.cli.load
     nt model debug-heads    # neurotemplate.modeling.cli.debug_heads
     nt data heads           # neurotemplate.modeling.cli.data (which head does this Y column want?)
-    nt data decay           # neurotemplate.modeling.cli.data (what is the envelope time constant?)
-    nt data latch           # neurotemplate.modeling.cli.data (does the equipment latch?)
     nt data ladder          # neurotemplate.modeling.cli.data (which RC network fits the zone?)
     nt data thermostat      # neurotemplate.modeling.cli.data (what heat does a setpoint deliver?)
     nt control train        # neurotemplate.control.cli.train
@@ -35,8 +33,6 @@ COMMANDS: dict[tuple[str, str], str] = {
     ("model", "load"):        "neurotemplate.modeling.cli.load:main",
     ("model", "debug-heads"): "neurotemplate.modeling.cli.debug_heads:main",
     ("data", "heads"):        "neurotemplate.modeling.cli.data:heads_main",
-    ("data", "decay"):        "neurotemplate.modeling.cli.data:decay_main",
-    ("data", "latch"):        "neurotemplate.modeling.cli.data:latch_main",
     ("data", "ladder"):       "neurotemplate.modeling.cli.data:ladder_main",
     ("data", "thermostat"):   "neurotemplate.modeling.cli.data:thermostat_main",
     ("control", "train"):     "neurotemplate.control.cli.train:main",

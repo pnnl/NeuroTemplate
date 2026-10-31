@@ -100,3 +100,14 @@ def edge_note(name: str, fraction: float) -> str | None:
         return (f"{name} at {fraction * 100:.0f}% of the way to its upper "
                 "bound — the data (or the seed) disagrees with the prior")
     return None
+
+
+def physical_parameters(module: nn.Module) -> list[nn.Parameter]:
+    """The raw θ of every bounded parameter under `module`.
+
+    Training steps these at their own learning rate (`cfg.physical_lr`):
+    Adam moves a raw parameter by about `lr` per update, and a box position
+    has its whole box to travel where a network weight moves by thousandths.
+    A pinned one is included too; its gradient is zero, so Adam leaves it.
+    """
+    return [b.theta for b in bounded_parameters(module)]

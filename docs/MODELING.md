@@ -24,7 +24,7 @@ The hooks in `modeling_user_defined.py`, scaffolded in
 | `column_norm_config` | per-column normalization overrides | required |
 | `synth_cfg` | which outputs are thermal states, for the physics checks (`None` skips them) | required |
 | `sub_plot` | how output plots are grouped | required |
-| `block_mapping` | blocks, a family per block, what each input column is, 2R2C priors | optional |
+| `block_mapping` | blocks, a family per block, what each column is, a thermal zone's network and thermostat | optional |
 | `custom_models` | models of your own, by name ("Your own model") | optional |
 | `hyper_args` | the search space for `nt model optuna` | that command only |
 
@@ -57,11 +57,12 @@ block shares, the seeded history before the first prediction, the stride
 between training windows, and the rows of every column an exported model
 takes. Each learned map then reads its columns at their own lags. The
 family constrains the table. A `gru` reads one lag for every column it reads,
-because its window is its warm-up. A `2r2c` block reads its own outputs at
-one lag, which seeds its mass, and its `U` and `D` at the current step only.
-The build refuses a table that misses a column, a lag no block actually reads
-(a `U` or `D` column only 2r2c blocks read must be 0), and a `demand`
-setpoint lagged further back than its state. The reportcard lists the lags
+because its window is its warm-up. An `rc_network` block reads its `Y` and
+`D` at one lag, the window its filter places the hidden nodes from (a day is
+enough), and its setpoints at the current step only. The build refuses a
+table that misses a column, a lag no block actually reads (a `U` column only
+rc_network blocks read must be 0), and a `demand` setpoint lagged further
+back than its state. The reportcard lists the lags
 each block reads.
 
 ## Model families
@@ -72,65 +73,77 @@ each block reads.
 | `nssm` | black box | separable: `fy(y) + fu(u) + fd(d)`, each a network |
 | `lssm` | black box | the same, linear |
 | `gru` | black box | recurrent, with memory that outlives the input window |
-| `2r2c` | grey box | a thermal network: zone air, a hidden mass, a learned heat input |
+| `rc_network` | grey box | a thermal zone: a declared RC network behind a thermostat, all physical |
 
 The black boxes often fit best and are fine for prediction you won't steer
 by. Nothing bounds their long rollouts, so read the stability and physics
 sections of the reportcard before planning against one.
 
-### 2R2C: storage you can read
-
-A black box that predicts the next temperature well can still be wrong
-about the thing load shifting depends on: how long a temperature difference
-survives. `2r2c` builds the storage in. Zone air and the building's mass are
-two capacitances, joined to each other and to ambient by one resistance
-each:
+### rc_network: a thermal zone you can read
 
 ```
-    ambient ──R_o──┬── zone air (C_z) ──R_m── mass (C_m)
-                   │
-               heat input  (learned, from the current u and d)
+    setpoints ─[thermostat]→ heat delivered (kW) ─[RC network]→ zone temperature
 ```
 
-The state update is fixed physics, and only the heat input is learned. That
-input reads `u` and `d`, never the state, so two things hold whatever the
-network learns:
+For a zone whose delivered heat is measured (supply flow and temperature at
+the unit or the VAV box). The block's `Y` are the zone temperature and that
+heat (its `heat`, in kW, positive heating); its `U` the setpoints; its `D`
+the outdoor temperature (`ambient`) and every other input the network takes
+(`solar`, an occupancy schedule). Everything inside is physical:
 
-- **A rollout cannot diverge**, at any horizon and under any input,
-  including the extreme inputs a policy will try.
-- **Its time constants are readable in hours** on the reportcard, so you can
-  check them against the building.
+- **The network** is capacitances (kWh/K) and resistances (K/kW) between the
+  zone air, hidden nodes such as the building's mass or envelope, and the
+  outdoors, with each input entering one node. Stable for any positive
+  values, and its time constants read in hours.
+- **The thermostat** maps each setpoint and the zone to the heat delivered:
+  a tracker with a gain, an offset and a capacity per side, optionally
+  capacity linear in outdoor temperature, a second stage, or a latch. Its
+  gain is held under the bound past which the discrete loop would ring.
+- **The hidden nodes are filtered, not guessed.** The first call of a
+  rollout runs a Kalman filter over the history window, driven by the
+  measured heat, and leaves every node where the record puts it.
 
-On one measured building, a 2 °C head start held with the plant off
-survived about as long in `2r2c` as in the building (half-life 6.1 h
-against 5.8 h), where the black boxes ranged from 1.2 h to 14.5 h. `2r2c`
-paid for that in one-step error, which is the trade the family exists to
-make.
+Two commands write the declarations, so they come from the data rather than
+from guesses:
 
-**Its time constants are a prior you declare.** Each `2r2c` block states
-three time constants in hours, in its `block_mapping` entry. A scalar pins
-one; `[min, max]` lets training move it inside that box. There is no
-default, and a block missing one is refused. They are boxed rather than
-free because the slow mode cannot be identified from a training rollout:
-the mass temperature is never measured, so every rollout seeds it from a
-short window, and a free fit shortens the slow mode to absorb that wrong
-seed. The reportcard prints where each one landed in its box, and says so
-when one sits on an edge. `nt data decay` estimates the slow one from
-free-float periods in your record, which is a reasonable first box.
+- `nt data ladder` fits a ladder of networks (Bacher & Madsen 2011) to the
+  record by maximum likelihood at a coarse step, 30 min by default, and
+  picks one by likelihood-ratio tests. Its card prints every rung's
+  likelihood, BIC, whiteness and 24 h error on dev, and the snippet it saves
+  holds each C and R as a box from its error bar. An agent's own network
+  (`--candidate file.json`) goes through the same tests.
+- `nt data thermostat --cooling COL --heating COL` fits the thermostat's
+  forms one step at a time and rolls each out 24 h on dev through the
+  declared network, with the error split by regime (satisfied, tracking,
+  saturated).
+
+```python
+"zone": {"Y": ["Zone Temp", "Delivered Heat [kW]"], "U": ["Cooling SP", "Heating SP"],
+         "D": ["Outdoor Temp", "Solar", "Occupied"], "model": "rc_network",
+         "heat": "Delivered Heat [kW]", "ambient": "Outdoor Temp", "solar": "Solar",
+         "params": {"network": json.load(open("ladder/zone.json")),
+                    "thermostat": json.load(open("ladder/zone.thermostat.json"))}},
+```
+
+Training then fits every parameter inside its box by the rollout loss. That
+is the fine fit: the likelihood at 5 min chases sensor noise and cycling and
+shortens the slow mode, the rollout loss seeded by the filter does not. The
+reportcard prints the time constants beside the ladder's and flags one the
+training moved outside three of its error bars.
 
 ### Blocks: one model, a family per group of outputs
 
 A block is a group of `Y` columns with its own sub-model: its own
 parameters, family and hidden state. Declaring blocks in `block_mapping` is
-how one model holds, for example, a `2r2c` zone and an `mlp` power meter
-that reads the zone's temperature:
+how one model holds, for example, an `rc_network` zone and an `mlp` power
+meter that reads the zone's delivered heat:
 
 ```python
 def block_mapping(nm_mapping, cfg):
     return {
-        "zone":  {"Y": ["Zone Temperature"], "U": ["Cooling Setpoint"],
-                  "model": "2r2c", "params": {...}},
-        "power": {"Y": ["Total Power"], "reads": ["Zone Temperature"],
+        "zone":  {"Y": ["Zone Temperature", "Delivered Heat"], "U": ["Cooling Setpoint"],
+                  "model": "rc_network", ...},
+        "power": {"Y": ["Total Power"], "U": [], "reads": ["Delivered Heat"],
                   "model": "mlp"},
     }
 ```
@@ -140,8 +153,8 @@ def block_mapping(nm_mapping, cfg):
   serving several zones is. `D` has no partition rule.
 - `reads` lets a block see other blocks' outputs from the history window,
   never their same-step predictions, so evaluation order never matters.
-  `2r2c` refuses `reads`, since its stability guarantee depends on the
-  learned part never seeing a state.
+  `rc_network` refuses `reads`: its network and thermostat say where every
+  column goes.
 
 There is no conduction between blocks: they interact only through shared
 inputs and `reads`.
@@ -154,44 +167,10 @@ physics instead of having to learn it:
 | Declaration | Acts in | Does |
 |---|---|---|
 | `demand` | every family | replaces a setpoint with the thermostat's clamped error against the block's own state, `relu(zone − setpoint)` for cooling, computed from the model's own prediction during a rollout. A setpoint above the zone is then free in the surrogate, as it is in the plant. |
-| `linear` | `2r2c` | one sign-fixed coefficient times the physical value: delivered power, irradiance |
-| `ambient` | `2r2c` | explicit conduction to that column at the block's ambient time constant |
+| `ambient`, `heat`, `solar` | `rc_network` | the outdoor temperature the network conducts to, the delivered heat it is driven by, the irradiance the ladder may route into more than one node |
 
-Inside `2r2c`, a `demand` column becomes a saturating branch, bounded in
-value and in slope, so the stability guarantee survives the one state read
-it admits. Its `capacity`, how fast full stage moves the zone in °C per
-hour, is declared like a time constant: a scalar pins it, `[min, max]` fits
-it inside, and there is no default. When the equipment behind a setpoint
-latches (a thermostat that starts a stage above the setpoint and, once
-running, keeps it running until the zone is some way below), declare
-`"hysteresis": {"on_at": [min, max], "off_at": [min, max]}` in °C of error:
-the branch then carries its stage between steps and fits the two thresholds
-inside those boxes, which may start at 0. The reportcard lists capacities
-and thresholds with the time constants, and flags one pressed against an
-edge.
-
-```python
-"Cooling Setpoint": {"kind": "demand", "sign": -1, "state": "Zone Temp",
-                     "capacity": [lo, hi],                                # °C/h
-                     "hysteresis": {"on_at": [lo, hi], "off_at": [lo, hi]}}   # °C
-```
-
-`nt data latch` estimates all three from the record. It prints how often the
-equipment runs at the same zone-minus-setpoint after a step running and
-after a step idle: equal columns mean a memoryless thermostat, columns that
-split around zero mean a latch. Under the table it reads the record's starts
-and stops: the error at each, and the jump in the zone's rate across each,
-which is the stage's capacity (conditions on either side of a switch are
-nearly the same). Each comes as a median and a middle half. The capacity
-sizes its box directly. The switch points do not: they say where the
-measured zone was when the equipment switched, while the branch's
-thresholds act on the model's own predicted zone and absorb whatever lag the
-model lacks, so they fit wider. Box them from 0 to several times the
-measured points, and read the fit against them. A box held to the measured
-points pins them where the model cannot use them.
 Nothing is inferred from column names. A declaration changes the
-physics but not the shapes, so a wrong one shows only in the reportcard's
-branch lines.
+physics but not the shapes, so a wrong one shows only in the reportcard.
 
 ### Your own model
 
@@ -289,9 +268,9 @@ oat = expand(hourly_oat, "5min", "quadratic")      # a smooth physical one
 ```
 
 `smooth` needs the `prep` extra. Before training, `nt data heads` reports
-which output head a column's distribution suggests, and `nt data decay
---state <column> --ref <ambient column>` fits a state's free-decay
-envelope. Both are advice, not checks.
+which output head a column's distribution suggests, and `nt data ladder`
+and `nt data thermostat` a thermal zone's network and thermostat (see
+"rc_network"). All are advice, not checks.
 
 ## Searching, rescoring, scripting
 

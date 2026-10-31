@@ -62,8 +62,7 @@ def test_a_named_d_subset_narrows_just_that_block():
 
 def test_y_in_idx_puts_own_channels_first_then_reads_sorted():
     """Own channels come first so a family that only ever looks at 'its own
-    state' — 2r2c's fixed linear term — keeps reading the same leading slice
-    it always has."""
+    state' keeps reading the same leading slice it always has."""
     block = Block("power", y_idx=(3,), u_idx=(), y_names=("power",),
                   d_idx=(), reads=(0, 1))
     assert block.y_in_idx == (3, 0, 1)

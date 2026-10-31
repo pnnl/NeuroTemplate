@@ -173,7 +173,7 @@ def prepare_data(cfg: ModelingConfig, hooks) -> PreparedData:
     column's range is the union of the training data; windowing stays per
     file.
     Sets `cfg.steps_per_hour` from the data's own sampling frequency — before
-    the hooks see `cfg`, since `2r2c` and `block_mapping` may read it.
+    the hooks see `cfg`, since `block_mapping` may read it.
     """
     train_raws, dev_raws, test_raws, freq_s = get_data_splits(cfg)
     cfg.steps_per_hour = 3600.0 / freq_s
@@ -647,11 +647,12 @@ def run_summary_metrics(test_results: TestResults) -> dict[str, float]:
 
 
 def _tau_slow_by_channel(arch: dict) -> dict[str, float]:
-    """Flatten describe_dynamics's nested block info to {channel: tau_slow}.
+    """Flatten describe_dynamics's nested block info to {zone: slowest time
+    constant}.
 
     Walks the same `blocks` nesting dynamics._describe_block builds (a
     BlockStack's per-block descriptors, each optionally nested again). Only
-    2r2c blocks carry `time_constants_h`, so every other family is simply
+    rc_network blocks carry time constants, so every other family is simply
     absent from the result.
     """
     out: dict[str, float] = {}
@@ -659,8 +660,8 @@ def _tau_slow_by_channel(arch: dict) -> dict[str, float]:
     def walk(info: Optional[dict]) -> None:
         if info is None:
             return
-        for channel, taus in info.get("time_constants_h", {}).items():
-            out[channel] = taus["slow"]
+        if "network_time_constants_h" in info:
+            out[info["zone"]] = max(info["network_time_constants_h"])
         for sub in info.get("blocks", {}).values():
             walk(sub)
 

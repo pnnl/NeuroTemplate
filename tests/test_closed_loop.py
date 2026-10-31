@@ -117,18 +117,14 @@ def test_gru_surrogate_rolls_out_and_warms_up():
 
 
 def _demand_setup():
-    """full_setup, but the surrogate is a 2r2c zone with the setpoint
-    declared as `demand`, the other channels an MLP block."""
+    """full_setup, but the zone is its own block with the setpoint declared
+    as `demand`, the other channels an MLP block."""
     s = full_setup()
     nm, norm_stats = s["nm"], s["norm_stats"]
-    sysid_cfg = make_sysid_cfg(model="2r2c")
-    sysid_cfg.steps_per_hour = 12.0
-    sysid_cfg.history[SETPT] = 0      # read by the 2r2c zone alone
+    sysid_cfg = make_sysid_cfg(model="mlp")
     spec = {
-        "zone": {"Y": [ZONE], "U": [SETPT], "model": "2r2c", "ambient": DIST[0],
-                 "params": {"tau_fast_h": 0.6, "tau_ambient_h": 2.0, "tau_slow_h": 13.4},
-                 "inputs": {SETPT: {"kind": "demand", "sign": -1, "state": ZONE,
-                                    "capacity": [0.5, 3.0]}}},
+        "zone": {"Y": [ZONE], "U": [SETPT], "model": "mlp",
+                 "inputs": {SETPT: {"kind": "demand", "sign": -1, "state": ZONE}}},
         "rtu": {"Y": [c for c in Y_COLS if c != ZONE], "model": "mlp"},
     }
     dyn_sys = get_dynamics(sysid_cfg, nm, norm_stats, block_spec=spec)

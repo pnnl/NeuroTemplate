@@ -17,7 +17,7 @@ K. The ladder of forms, each one more parameter per side:
     +stage2      a second stage of its own capacity, `gap` K further on
     latched      not a tracker: a stage that switches on at `on_at` past the
                  setpoint and holds until `off_at` back on the satisfied side
-                 (the form of `rc.LatchedTerm`, in kW)
+                 (in kW, one carried stage per side)
 
 The clip is soft on the way back (`soft_clamp_min`'s trick): the value is the
 hard clip, the gradient a softplus's, so a controller parked on the satisfied
@@ -41,7 +41,7 @@ import torch.nn.functional as F
 
 from neurotemplate.modeling.network import (
     COLLAPSE_MARGIN, DTYPE, LOG_LIMIT, affine_scan, standard_errors, suggested_box)
-from neurotemplate.modeling.prestack import straight_through
+from neurotemplate.modeling.heads import straight_through
 
 SIDES = {"cooling": -1, "heating": +1}
 

@@ -18,7 +18,7 @@ settings worked out for it. Start from the one that fits and adapt it:
 
 | guide | for |
 |---|---|
-| `nt guide thermal-zone` | a zone served by staged cooling and heating, with metered power |
+| `nt guide thermal-zone` | a zone served by staged cooling and heating, its delivered heat measured |
 | `nt guide own-model` | a model of your own, given the library's training, checks, control and export |
 | `nt guide mpc` | planning through the model at every step instead of training a policy |
 
@@ -61,7 +61,8 @@ Decide the structure first; it matters more than any hyperparameter.
 
 1. **Family.** A grey box for an output you will plan against: structure the
    physics is sure of (signs, storage, saturation) that a controller cannot argue
-   with. `2r2c` is the built-in one, for temperatures (`nt guide thermal-zone`). A
+   with. `rc_network` is the built-in one, for a zone whose delivered heat is
+   measured (`nt guide thermal-zone`). A
    model of your own goes behind the same contract (`nt guide own-model`). The black
    boxes (`mlp`, `nssm`, `gru`, `lssm`) fit freely; for planning, give them sign
    priors (step 4).
@@ -75,7 +76,7 @@ Decide the structure first; it matters more than any hyperparameter.
    distribution and suggests one. A head that lets a meter dip negative tells a cost
    term that running the equipment earns money.
 4. **Priors.** Boxes on the grey box's parameters, from the data where a command can
-   measure them (`nt data decay`, `nt data latch`), wide where not. For a black box,
+   measure them (`nt data ladder`, `nt data thermostat`), wide where not. For a black box,
    a sign the physics is sure of, such as "more demand never draws less power", goes
    in `grad_path` with `grad_gain` > 0.
 5. **Physics checks**, `synth_cfg`: a few lines that test the model in states the
@@ -150,63 +151,58 @@ torch targets, and what an MPC package carries.
 
 ## thermal-zone
 
-One zone served by staged cooling and heating, with metered power. Syntax, not
-values: the column names, boxes and gains below belong to some other building, and
-every choice is one this guide says how to check on yours.
+One zone served by staged cooling and heating, with its delivered heat measured and
+its power metered. Syntax, not values: the column names, boxes and gains below
+belong to some other building, and every choice is one this guide says how to check
+on yours.
 
-1. **The zone is a `2r2c` block**: a thermal network, stable under any input, with
-   storage you can read in hours. Its time constants are declared boxes in `params`;
-   `nt data decay` estimates the slow one from free-float periods. The `tau_fast_h`
-   box cannot start below two data steps, the floor its stability guarantee needs.
-2. **What each input is**, in the block's `inputs`:
-   - `demand` for a setpoint: the model sees the thermostat's error, not the raw
-     setpoint, so a setpoint past the zone commands nothing.
-   - `linear` for a delivered power or irradiance; `ambient` for the outdoor
-     temperature the zone conducts to.
-3. **Capacity and latching.** A demand declares its `capacity`, °C per hour at full
-   stage. Equipment that latches (starts above the setpoint and runs until the zone
-   is some way below) declares `hysteresis: {on_at: box, off_at: box}` in °C of
-   error. `nt data latch` prints the record's switch points and the jump in the
-   zone's rate across them: the jump sizes the capacity box; the thresholds act on
-   the model's zone, not the sensor's, and fit wider than the measured points, so
-   box them from 0 to several times those.
-4. **Meters in their own block** (`model: mlp`, `reads` the zone). A U column no
-   block claims is shared, and a declared demand reaches every block that sees it:
-   leave the setpoint the meter draws from out of every block's `U` and declare it in
-   the zone's `inputs`. Claim every other actuator in the block it drives (heating in
-   the zone's `U`): a meter that sees heating learns "heating on, so cooling off",
-   and the controller runs the furnace to make the modelled cooling power fall.
-5. **History.** A zone's `history` lag is how much record seeds its hidden mass: an
-   hour leaves the mass at about the zone's temperature, half a day seeds it better.
-   A better-seeded mass makes storage look more valuable, which tends to buy a larger
-   saving and more time outside the band: read it as a trade, not a fix.
-6. **Bounds that suit a thermostat.** The cooling setpoint inside the band with a
-   margin under its ceiling (a latching stage starts only past its setpoint, so a
-   setpoint pinned at the ceiling rides just over it); heating under the floor, which
-   keeps the two from crossing; gas heating bounded when the tariff prices
-   electricity.
+1. **Delivered heat is data prep, yours.** From supply flow and temperature at the
+   unit or the VAV box: `1.2 · flow [m³/s] · (supply − zone) [K]` kW, positive
+   heating. It is a meter: a row is the heat over the step that ends there, which is
+   how a plant reports it. A zone without it takes a black box for now.
+2. **Declare what each column is**, one block per zone, `model: rc_network`: `Y` the
+   zone temperature and its `heat`; `U` the setpoints; `D` the outdoor temperature
+   (`ambient`), the irradiance (`solar`), and any schedule that adds heat. An
+   occupancy flag was worth a third of the day-ahead error on two plant buildings.
+3. **`nt data ladder`** fits a ladder of RC networks to the record, 30 min steps,
+   by maximum likelihood, and picks one by likelihood-ratio tests. Read its card:
+   the 24 h error on dev, whiteness, BIC beside the tests, a parameter at a limit or
+   barely placed. Put its snippet in the block's `params` as `network`, and edit it
+   as you like: a node, an edge, an input into another node. `--candidate mine.json`
+   runs your version through the same tests.
+4. **`nt data thermostat --cooling COL --heating COL`** fits the map from setpoint
+   to heat, one step at a time, and rolls each form out 24 h through your network,
+   by regime. On cycling equipment the likelihood ratio rewards every extra
+   parameter; the rollout error is the one to trust, and the card says when another
+   form rolls out better. Put its snippet in `params` as `thermostat`. A side the
+   record never exercised comes back unplaced (a null offset, a wide box): declare it
+   from what you know of the equipment, or the build refuses.
+5. **History.** A day for the zone, its heat and its `D` (288 steps at 5 min): the
+   window the filter places the hidden nodes from. Setpoints at 0. `train_pred_steps`
+   a day too: one rollout holds an action and its payoff. Training moves every
+   parameter inside its box; the reportcard prints the time constants beside the
+   ladder's and flags one that left its error bars.
+6. **Meters in their own block** (`model: mlp`), reading the zone's heat: the
+   compressor draws what the coil delivers. Claim every actuator in the block it
+   drives: a meter that sees heating learns "heating on, so cooling off", and the
+   controller runs the furnace to make the modelled cooling power fall.
+7. **Bounds that suit a thermostat.** The cooling setpoint inside the band with a
+   margin under its ceiling; heating under the floor, which keeps the two from
+   crossing; gas heating bounded when the tariff prices electricity.
 
 `modeling_user_defined.py`:
 
 ```python
 def block_mapping(nm_mapping, cfg):
     return {
-        # The zone claims heating only. Cooling stays shared, so the meter sees the
-        # cooling demand too, and nothing it does not draw from.
-        "zone": {"Y": ["Zone Temp"], "U": ["Heating Setpoint"], "model": "2r2c",
-                 "ambient": "Outdoor Temp",
-                 "params": {"tau_fast_h": [0.2, 1.5], "tau_ambient_h": [2.0, 20.0],
-                            "tau_slow_h": [24.0, 150.0]},
-                 "inputs": {
-                     "Cooling Setpoint": {"kind": "demand", "sign": -1, "state": "Zone Temp",
-                                          "capacity": [1.0, 6.0],        # °C/h; nt data latch
-                                          "hysteresis": {"on_at": [0.0, 2.5],
-                                                         "off_at": [0.0, 1.0]}},
-                     "Heating Setpoint": {"kind": "demand", "sign": +1, "state": "Zone Temp",
-                                          "capacity": [1.0, 6.0]},
-                     "Solar": {"kind": "linear", "sign": +1}}},
-        "meter": {"Y": ["Compressor Power", "Fan Power"], "reads": ["Zone Temp"],
-                  "model": "mlp"},
+        "zone": {"Y": ["Zone Temp", "Delivered Heat"],
+                 "U": ["Cooling Setpoint", "Heating Setpoint"],
+                 "D": ["Outdoor Temp", "Solar", "Occupied"], "model": "rc_network",
+                 "heat": "Delivered Heat", "ambient": "Outdoor Temp", "solar": "Solar",
+                 "params": {"network": json.load(open("ladder/zone.json")),
+                            "thermostat": json.load(open("ladder/zone.thermostat.json"))}},
+        "meter": {"Y": ["Compressor Power", "Fan Power"], "U": [],
+                  "reads": ["Delivered Heat"], "model": "mlp"},
     }
 
 def data_head_config(nm_mapping, norm_stats):     # meters cannot read below zero
@@ -216,13 +212,12 @@ def data_head_config(nm_mapping, norm_stats):     # meters cannot read below zer
     return HeadStack(heads, nm_mapping["Y"])
 ```
 
-with sign priors on the meter (`grad_path` → `{"Compressor Power": {"Cooling Setpoint": 1},
-"Fan Power": {"Cooling Setpoint": 1}}`, `grad_gain: 1.0`), and `power_channels` naming the
-two meters. `control_configs/control.yaml`:
+with `power_channels` naming the two meters. `control_configs/control.yaml`:
 
 ```yaml
 policy_window:                  # every column; a day of band and price ahead
   "Zone Temp":        {past: 3}
+  "Delivered Heat":   {past: 0}
   "Compressor Power": {past: 0}
   "Fan Power":        {past: 0}
   "Cooling Setpoint": {past: 1}

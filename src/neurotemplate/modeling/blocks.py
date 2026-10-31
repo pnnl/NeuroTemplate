@@ -2,8 +2,8 @@
 Splitting a multi-output model into independent per-block sub-models.
 
 A *block* is a group of Y channels that gets its own sub-model: its own
-parameters, its own architecture, and (for stateful families like `2r2c`
-and `gru`) its own hidden state. Blocks are independent by construction —
+parameters, its own architecture, and (for stateful families like
+`rc_network` and `gru`) its own hidden state. Blocks are independent by construction —
 no term in one block's update reads another block's state on the same
 step. Inter-block conduction is deliberately out of scope; see `reads`
 below for the one kind of cross-block coupling that *is* in scope.
@@ -23,7 +23,7 @@ What a block owns
          with no conflict.
   reads  other blocks' Y channels this block may also see as an ordinary
          input — see the `Block.y_in_idx` docstring for why this is safe.
-  model  the family this block builds under (e.g. "mlp", "2r2c"). None
+  model  the family this block builds under (e.g. "mlp", "rc_network"). None
          defers to `cfg.model`, so a spec that never sets `model` behaves
          like a plain split: one family for everyone, just partitioned
          by block.
@@ -32,7 +32,7 @@ What a block owns
          ordinary network input.
   ambient
          the one D column that is the outdoor temperature, if any. Only
-         `2r2c` and `rc_network` act on it (conduction to the outdoors);
+         `rc_network` acts on it (conduction to the outdoors);
          other families see the column as an ordinary input either way.
   heat   the one Y column that is the heat delivered to the zone, in kW
          (positive heats). It makes the block a thermal zone that `nt data
@@ -40,43 +40,26 @@ What a block owns
   solar  the one D column that is solar irradiance, if any: the input the
          ladder may also route into the mass or the envelope.
   params the block's physical priors, read by its family's builder. Today
-         only `2r2c` reads any: its three time constants, in hours —
-         `{"tau_fast_h": [0.3, 1.0], "tau_ambient_h": [2.0, 8.0],
-         "tau_slow_h": [20.0, 60.0]}`, a scalar pinning one (see `rc`).
+         only `rc_network` reads any: its `network` and `thermostat`
+         declarations, from `nt data ladder` and `nt data thermostat`.
 
 Declaring what a column is
 ==========================
 
     "inputs": {
-        "Cool SP [°C]":   {"kind": "demand", "sign": -1, "state": "Zone Temp [°C]"},
-        "Fan Power [kW]": {"kind": "linear", "sign": +1},
+        "Cool SP [°C]": {"kind": "demand", "sign": -1, "state": "Zone Temp [°C]"},
     }
 
 `demand` turns a setpoint into the thermostat's clamped error against one
 of the block's *own* Y channels, `relu(sign · (setpoint − state))`, before
-any family sees it — see `prestack.Demand`. `sign` is the direction the state
-moves while the demand is active (-1 cooling, +1 heating). Pairing with
-another block's channel is refused: that is what `reads` is for. A block
-with a `demand` entry has exactly one Y channel. Inside a `2r2c` block the
-feature feeds a bounded `saturating` branch by default; `"branch": "mlp"`
-routes it into the learned residual instead, which gives up the stability
-bound and is reported as such. A saturating branch declares its `capacity`,
-°C per hour at full stage, as a scalar or a box (`rc.demand_boxes`).
-
-A saturating `demand` entry may set `"hysteresis": {"on_at": box, "off_at":
-box}`, in °C of error: the branch is then a latched thermostat stage that
-switches on `on_at` past the setpoint and, once on, runs until the zone is
-`off_at` back on the satisfied side (`rc.LatchedTerm`), and the pre-stack
-hands it the signed error rather than the clamped one. Only `2r2c` acts on
-`capacity` and `hysteresis`.
-
-`linear` says the column enters the zone's heat balance as one sign-fixed
-coefficient times the physical value (measured power, solar irradiance).
-Only `2r2c` acts on it; other families see the column as usual.
+the family sees it — see `prestack.Demand`. `sign` is the direction the
+state moves while the demand is active (-1 cooling, +1 heating). Pairing
+with another block's channel is refused: that is what `reads` is for. A
+block with a `demand` entry has exactly one Y channel. An `rc_network`
+block declares none: its thermostat is the setpoint's physics.
 
 Nothing is inferred: a dataset whose actuator is metered power rather than
-a setpoint declares it `linear` (or leaves it to the MLP) and never writes
-a `demand` entry.
+a setpoint never writes a `demand` entry.
 
 Where the split comes from
 ===========================
@@ -87,7 +70,7 @@ An optional `block_mapping` hook in the application's modeling hooks file:
         return {
             "north": {"Y": ["North Zone Air Temperature [°C]"],
                       "U": ["North Cooling Setpoint [°C]"],
-                      "model": "2r2c"},
+                      "model": "rc_network", ...},
             "power": {"Y": ["Total Power [W]"],
                       "reads": ["North Zone Air Temperature [°C]"],
                       "D": ["Ambient Temperature [degC]"],
@@ -95,7 +78,7 @@ An optional `block_mapping` hook in the application's modeling hooks file:
         }
 
 With no hook, `build_blocks` returns a single block holding every channel
-and reading every D column — which for `2r2c` still means one independent
+and reading every D column — which for `rc_network` means one independent
 RC network per Y channel, since that family is per-channel internally. The
 hook is what restricts *which setpoint drives which block* (and, now,
 which block reads which other block's state); you only need it when that
@@ -133,7 +116,7 @@ class Block:
     `nm_mapping["U"]` and `nm_mapping["D"]`. `reads` also indexes into
     `nm_mapping["Y"]`, naming OTHER blocks' channels this block may see.
 
-    `model` is a family name (e.g. "mlp", "2r2c") or None, meaning "use
+    `model` is a family name (e.g. "mlp", "rc_network") or None, meaning "use
     cfg.model" — see the module docstring for why there is no per-block
     hyperparameter override.
     """
@@ -183,10 +166,10 @@ class Block:
         """Y positions this block reads, as opposed to `y_idx` (predicts).
 
         Own channels first, then anything read from other blocks (sorted),
-        so a family that only ever looks at "its own state" — 2r2c's fixed
-        linear term — keeps reading the same leading slice it always has.
+        so a family that only ever looks at "its own state" keeps reading
+        the same leading slice it always has.
 
-        `reads` is an ordinary input for every family except `2r2c`,
+        `reads` is an ordinary input for every family except `rc_network`,
         because all block inputs come from the shared history window,
         never from another block's same-step output: the gather that
         builds this block's window and the scatter that reassembles
@@ -194,9 +177,8 @@ class Block:
         construction (see `dynamics.BlockStack`), with no evaluation-order
         dependency between blocks — which is what keeps the whole stack
         vmap-safe, and so keeps the sampled gradient penalty alive. The one
-        family that cannot accept a `reads` entry is `2r2c`; see the 2r2c
-        per-block builder in `dynamics.py` (and `rc.py`'s module docstring)
-        for why.
+        family that cannot accept a `reads` entry is `rc_network`, whose
+        network and thermostat say where every column goes.
         """
         return tuple(self.y_idx) + tuple(sorted(self.reads))
 
@@ -235,8 +217,7 @@ def _resolve(columns: list[str], names: list[str], block: str, key: str,
 BLOCK_KEYS = frozenset({"Y", "U", "D", "reads", "model", "inputs", "ambient",
                         "heat", "solar", "params"})
 
-INPUT_KINDS = ("demand", "linear")
-DEMAND_BRANCHES = ("saturating", "mlp")
+INPUT_KINDS = ("demand",)
 
 
 def _resolve_inputs(spec: dict, block: str, y_names: list[str],
@@ -270,28 +251,22 @@ def _resolve_inputs(spec: dict, block: str, y_names: list[str],
             problems.append(f"`inputs[{column!r}]` needs `sign` of -1 or +1 — the "
                             "direction the column pushes the state; got "
                             f"{entry.get('sign')!r}.")
-        if kind == "demand":
-            state = entry.get("state")
-            if column not in u_names:
-                problems.append(f"`inputs[{column!r}]` is `demand`, which only a U "
-                                "column (a setpoint) can be.")
-            if state not in y_names:
-                problems.append(f"`inputs[{column!r}]` pairs with state {state!r}, "
-                                f"which is not one of this block's own Y channels "
-                                f"{y_names}. A demand may only read the block's own "
-                                "state; to see another block's, use `reads`.")
-            if len(y_names) != 1:
-                problems.append(f"`inputs[{column!r}]` is `demand`, so this block "
-                                f"must have exactly one Y channel; it has {y_names}.")
-            if entry.get("branch", "saturating") not in DEMAND_BRANCHES:
-                problems.append(f"`inputs[{column!r}]` has branch "
-                                f"{entry.get('branch')!r}; expected one of "
-                                f"{list(DEMAND_BRANCHES)}.")
-        saturating = kind == "demand" and entry.get("branch", "saturating") == "saturating"
-        for key in ("capacity", "hysteresis"):
-            if key in entry and not saturating:
-                problems.append(f"`inputs[{column!r}]` sets `{key}`, which belongs to a "
-                                "saturating `demand` branch and nothing else.")
+        state = entry.get("state")
+        if column not in u_names:
+            problems.append(f"`inputs[{column!r}]` is `demand`, which only a U "
+                            "column (a setpoint) can be.")
+        if state not in y_names:
+            problems.append(f"`inputs[{column!r}]` pairs with state {state!r}, "
+                            f"which is not one of this block's own Y channels "
+                            f"{y_names}. A demand may only read the block's own "
+                            "state; to see another block's, use `reads`.")
+        if len(y_names) != 1:
+            problems.append(f"`inputs[{column!r}]` is `demand`, so this block "
+                            f"must have exactly one Y channel; it has {y_names}.")
+        unknown = sorted(set(entry) - {"kind", "sign", "state"})
+        if unknown:
+            problems.append(f"`inputs[{column!r}]` sets {unknown}; a demand is "
+                            "kind, sign and state.")
 
     if problems:
         raise ValueError(

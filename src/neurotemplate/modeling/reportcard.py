@@ -119,7 +119,7 @@ class EnsembleSpread:
     n_seeds: int
     rmse: dict[str, SeedSpread]        # channel -> spread
     physics: dict[str, SeedSpread]     # "scenario | channel" -> spread
-    tau_slow: dict[str, SeedSpread]    # channel -> spread (2r2c models only)
+    tau_slow: dict[str, SeedSpread]    # zone -> spread of its slowest time constant (rc_network)
     # channel -> spread, levelled (binary / ordinal) channels only. Rare-level
     # heads vary far more across seeds than their RMSE lets on.
     balanced_acc: dict[str, SeedSpread] = field(default_factory=dict)
@@ -222,10 +222,10 @@ def _block_lines(name: str, info: Optional[dict], indent: str = "") -> list[str]
 
     A per-block stack (BlockStack) nests one bullet per block, labelled with
     its family — the interesting fact once a spec can mix families in one
-    graph. A 2R2C block adds the time constants it learned, and any block
-    its bounded parameters. `tau_slow` is the storage number — how long a
-    temperature difference survives — so it is worth reading against what
-    you know about the building.
+    graph. An rc_network block adds the time constants it learned against
+    the ladder's, and any block its bounded parameters. The slowest time
+    constant is the storage number — how long a temperature difference
+    survives — so it is worth reading against what you know of the building.
     """
     if info is None:
         return []
@@ -242,9 +242,6 @@ def _block_lines(name: str, info: Optional[dict], indent: str = "") -> list[str]
         parts.append(f"out={info['out_features']}")
     lines = [f"{indent}- **{name}:** " + ", ".join(parts)]
 
-    for channel, taus in info.get("time_constants_h", {}).items():
-        lines.append(f"{indent}  - {channel}: tau_fast={taus['fast']:.2f} h, "
-                     f"tau_slow={taus['slow']:.2f} h")
     lines += _network_lines(info, indent + "  ")
     if "lags" in info:
         lines.append(f"{indent}  - reads, lag per column: {_lag_list(info['lags'])}")
@@ -690,7 +687,7 @@ def _physics_section(results: list[ScenarioResult],
             "",
             f"*Free decay passes any slow mode shorter than ~{longest_h:.0f} h "
             "at this horizon: it tests the sign of the envelope coupling, not "
-            "its rate, so a pass does not corroborate `tau_slow`.*",
+            "its rate, so a pass does not corroborate the slowest time constant.*",
         ]
     if failed:
         body += [

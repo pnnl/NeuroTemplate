@@ -27,7 +27,7 @@ from neurotemplate.modeling.heads import HeadStack
 from neurotemplate.modeling.contract import normalized_core
 from neurotemplate.modeling.dynamics import get_dynamics
 from neurotemplate.modeling.loss import build_loss
-from neurotemplate.modeling.rc import physical_parameters
+from neurotemplate.modeling.bounded import physical_parameters
 from neurotemplate.modeling.config import ModelingConfig
 
 from neuromancer.problem import Problem
@@ -67,7 +67,7 @@ def resolve_device(requested: Optional[Union[str, torch.device]] = None) -> torc
     else:
         device = torch.device("cpu")
     # CPU is torch's own default, and installing it anyway costs a Python
-    # hook on every torch call (~15% of a 2r2c training step); None also
+    # hook on every torch call (~15% of a grey-box training step); None also
     # clears a device an earlier call set.
     torch.set_default_device(None if device.type == "cpu" else device)
     return device
@@ -170,14 +170,14 @@ def build_trainer(
 
 
 def _parameter_groups(problem: Problem, cfg: ModelingConfig) -> list[dict]:
-    """Network weights at `cfg.lr`; a 2R2C block's physical scalars at
-    `cfg.rc_branch_lr` (see `rc.physical_parameters`)."""
+    """Network weights at `cfg.lr`; boxed physical parameters at
+    `cfg.physical_lr` (see `bounded.physical_parameters`)."""
     physical = physical_parameters(problem)
     physical_ids = {id(p) for p in physical}
     rest = [p for p in problem.parameters() if id(p) not in physical_ids]
     groups = [{"params": rest}]
     if physical:
-        groups.append({"params": physical, "lr": cfg.rc_branch_lr})
+        groups.append({"params": physical, "lr": cfg.physical_lr})
     return groups
 
 

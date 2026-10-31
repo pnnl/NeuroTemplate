@@ -68,17 +68,18 @@ Add the dependency to your `pyproject.toml` and `uv sync` — see
    data never issued, collect data that does before anything else.
 4. **Model structure** — the decisions that matter more than any
    hyperparameter, all in `block_mapping`:
-   - *Family.* `2r2c` is a grey-box thermal network, stable under any input
-     and with storage you can read off; try it for a temperature a
-     controller will plan against. The black boxes (`nssm`, `mlp`, `gru`,
-     `lssm`) often fit better and are fine for prediction you won't steer
-     by.
+   - *Family.* `rc_network` is a grey-box thermal zone (an RC network
+     behind a thermostat, every parameter physical) for a zone whose
+     delivered heat is measured; `nt data ladder` and `nt data thermostat`
+     write its declarations from the data (`nt guide thermal-zone`). The
+     black boxes (`nssm`, `mlp`, `gru`, `lssm`) often fit better and are
+     fine for prediction you won't steer by.
    - *Blocks.* If the plant is several parts that interact mainly through
      shared inputs, give each its own sub-model.
-   - *Declared columns.* Say which column is a setpoint (`demand`), a
-     delivered power or irradiance (`linear`), the outdoor temperature
-     (`ambient`), and the model gets that physics instead of having to
-     learn it.
+   - *Declared columns.* Say which column is a setpoint (`demand`), and
+     the model sees the thermostat's error instead of having to learn it.
+     A thermal zone says which column is its delivered heat, the outdoor
+     temperature and the irradiance (`heat`, `ambient`, `solar`).
 5. **Physics checks** — `synth_cfg`. A few lines; the reportcard then tests
    the model in states the data never visits, which is where a controller
    will take it.
@@ -130,8 +131,8 @@ Each is off until you ask for it — see [CONTROL.md](../docs/CONTROL.md).
 ## Reading a run
 
 - **Sys-id:** `reportcard.md` in the run's artifacts — the physics checks,
-  rollout stability, and (under `2r2c`) the time constants and declared
-  branches in physical units. The `Finished run:` lines and
+  rollout stability, and (under `rc_network`) the time constants against
+  the ladder's and every boxed parameter in physical units. The `Finished run:` lines and
   `test_metrics.json` give per-channel test errors in physical units;
   `test_rmse` in `run_summary.json` is one number pooled over the
   channels, each normalised by its training stats. Test error is measured on your data's excitation, not where a

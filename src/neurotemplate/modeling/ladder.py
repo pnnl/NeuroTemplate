@@ -11,7 +11,7 @@ by likelihood, never tested against each other.
 The rungs (node names as in the paper):
 
     Ti      zone air, to ambient                               1R1C
-    +Tm     interior mass, coupled to the zone only            (`TiTm`: today's 2r2c)
+    +Tm     interior mass, coupled to the zone only            (`TiTm`: the classic 2R2C)
     +Te     envelope between zone and ambient, replacing the zone's own
             edge to ambient                                    (`TiTe`)
     +Am/Ae  solar into the mass or envelope too, one more aperture
@@ -27,7 +27,6 @@ boundary, as in the paper.
 
 from __future__ import annotations
 
-import math
 from dataclasses import dataclass, replace
 from typing import Callable, Optional
 
