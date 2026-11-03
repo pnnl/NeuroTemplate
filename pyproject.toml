@@ -10,17 +10,13 @@ dependencies = [
     "ipython",
     "matplotlib>=3.10.7",
     "mlflow>=3.9.0",
-    # Pinned to the tip of develop on the official pnnl/neuromancer repo as of
-    # 2026-09-15, which carries the linear-memory rollout method this
-    # framework depends on. This is the required state for consumers
-    # installing from git. Bump the SHA when neuromancer's develop advances.
+    # A commit on pnnl/neuromancer develop with the linear-memory rollout
+    # method this library depends on.
     "neuromancer @ git+https://github.com/pnnl/neuromancer.git@1f7b4f1c15210d7db92b9b98e8aa97014a867768",
-    # neuromancer.modules.operators imports SFNO from neuralop, which was
-    # removed in neuraloperator 2.0 and requires torch-harmonics. neuromancer
-    # declares both unpinned, so pin them here to the combination that imports
-    # on macOS arm64 (torch-harmonics 0.9.x ships no darwin wheel; 0.7.3 builds
-    # from source). A dependency, not a [tool.uv] constraint: uv reads
-    # constraints only from the project being synced, never from a dependency.
+    # neuromancer imports neuralop's SFNO without pinning either package:
+    # neuraloperator 2.x lacks SFNO, and torch-harmonics 0.9.x has no macOS
+    # wheel. Pinned as dependencies because uv reads [tool.uv] constraints only
+    # from the project being synced.
     "neuraloperator<2",
     "torch-harmonics<0.8",
     "numpy>=2.2.6",
@@ -48,8 +44,8 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["src/neurotemplate"]
 
-# Required so the git-pinned `neuromancer @ git+ssh://...` direct reference in
-# project.dependencies is accepted by hatchling at build time.
+# Lets hatchling build with the git-pinned `neuromancer @ git+https://...`
+# dependency.
 [tool.hatch.metadata]
 allow-direct-references = true
 

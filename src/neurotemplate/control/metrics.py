@@ -13,10 +13,9 @@ different units:
   - JumpResponse   — whether the loop actually reacted when the reference band
     moved, which the pooled comfort numbers cannot see.
 
-The last two exist because pooled comfort scores are silent about behaviour.
-A controller that pinned one of its two actuators at a bound for 92% of the
-evaluation scored *better* on violation rate than the fixed version of itself,
-and only a hand-written trajectory audit found it.
+The last two exist because pooled comfort scores are silent about behaviour:
+a controller that pins one of its two actuators at a bound most of the time
+can score *better* on violation rate than one that does not.
 
 Neither carries a verdict on its own. Time on a bound is not evidence of a
 fault — a setpoint held at its least-aggressive limit while nothing is demanded

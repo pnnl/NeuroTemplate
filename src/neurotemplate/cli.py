@@ -2,8 +2,8 @@
 
 Dispatches `nt <group> <verb> [args...]` to the matching subcommand `main()`.
 The dispatcher only consumes the two leading tokens (group + verb); everything
-after is left in `sys.argv` so the subcommand parses its own flags exactly as
-before. Groups mirror the package layout:
+after is left in `sys.argv` so the subcommand parses its own flags. Groups
+mirror the package layout:
 
     nt model train          # neurotemplate.modeling.cli.train
     nt model optuna         # neurotemplate.modeling.cli.optuna
@@ -16,6 +16,7 @@ before. Groups mirror the package layout:
     nt export model         # neurotemplate.export.cli (trained dynamics -> ONNX package)
     nt export policy        # neurotemplate.export.cli (trained DPC policy -> ONNX package)
     nt guide [step]         # neurotemplate.guide (the guided flow; takes no verb)
+    nt docs [name]          # neurotemplate.guide (the references; takes no verb)
     nt init [dir]           # neurotemplate.init (a new application from the template; takes no verb)
 """
 from __future__ import annotations
@@ -25,9 +26,8 @@ import warnings
 from importlib import import_module
 from typing import Optional
 
-# (group, verb) -> "module:function". One line per console command that used
-# to live in [project.scripts]; this dict is the single source of truth and
-# the help text is derived from it.
+# (group, verb) -> "module:function", the single source of truth for the
+# commands; the help text is derived from it.
 COMMANDS: dict[tuple[str, str], str] = {
     ("model", "train"):       "neurotemplate.modeling.cli.train:main",
     ("model", "optuna"):      "neurotemplate.modeling.cli.optuna:main",
@@ -45,7 +45,7 @@ COMMANDS: dict[tuple[str, str], str] = {
 def _help_text() -> str:
     lines = ["Usage: nt <group> <verb> [args...]", "",
              "New application: `nt init`. Then `nt guide`: the flow, one step at a time.",
-             "", "Commands:", "  nt init [dir]", "  nt guide [step]"]
+             "", "Commands:", "  nt init [dir]", "  nt guide [step]", "  nt docs [name]"]
     for group, verb in COMMANDS:
         lines.append(f"  nt {group} {verb}")
     lines.append("")
@@ -80,6 +80,12 @@ def main(argv: Optional[list[str]] = None) -> None:
         from neurotemplate.guide import main as guide_main
         sys.argv = ["nt guide", *argv[1:]]
         guide_main()
+        return
+
+    if argv[0] == "docs":
+        from neurotemplate.guide import docs_main
+        sys.argv = ["nt docs", *argv[1:]]
+        docs_main()
         return
 
     if argv[0] == "init":

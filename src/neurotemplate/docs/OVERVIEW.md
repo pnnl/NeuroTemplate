@@ -1,8 +1,8 @@
 # NeuroTemplate: an overview
 
 What the library does, a session end to end, and every command. The guided flow
-(`nt guide`, or [GUIDE.md](../GUIDE.md)) is where to start; this page and the others
-in `docs/` are references it points into.
+(`nt guide`, or [GUIDE.md](../GUIDE.md)) is where to start; this page and the other
+references (`nt docs`) are what it points into.
 
 | To | Read |
 |---|---|
@@ -57,6 +57,7 @@ show the calls.
 |---|---|
 | `nt init [dir]` | start an application: the hooks, the configs, `data/` and `AGENTS.md` |
 | `nt guide [step]` | the guided flow, one step at a time, and the guides beside it |
+| `nt docs [name]` | these references: overview, install, modeling, control, export |
 | `nt model train` | train a surrogate |
 | `nt model optuna` | hyperparameter search, then retrain the best |
 | `nt model load` | score a trained surrogate on other data |

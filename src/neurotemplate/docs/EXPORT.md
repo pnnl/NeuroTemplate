@@ -45,9 +45,9 @@ no I/O. The package carries a C runner around them, which suits a
 microcontroller as well as a host, and a Python runner that calls the same
 compiled C through ctypes. The batch is fixed at 1.
 
-Measured on one model and one policy (macOS arm64, Python 3.11): a 2R2C
-zone (a grey-box family since replaced by `rc_network`) plus an MLP power block, 13,897 parameters, history 12, hidden state
-width 1, and a linear residual policy. Rollouts ran over a 2,004-step test
+Measured on one model and one policy (macOS arm64, Python 3.11): a
+grey-box zone plus an MLP power block, 13,897 parameters, history 12,
+hidden state width 1, and a linear residual policy. Rollouts ran over a 2,004-step test
 split. Installed sizes exclude the interpreter.
 
 | | onnx | torch | c, from Python | c, from C |
@@ -81,7 +81,7 @@ cmake -S . -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build --target o
 ```
 
 Then put `build/onnx2c` on PATH. The pin lives in
-[export/ccode.py](../src/neurotemplate/export/ccode.py) (`ONNX2C_COMMIT`).
+[export/ccode.py](../export/ccode.py) (`ONNX2C_COMMIT`).
 
 ## What the package holds
 
@@ -165,12 +165,12 @@ runner (C) or direct use from torch (torch).
 `neurotemplate.export.policy.export_policy` take the objects
 `load_trained_dynamics` and `load_trained_policy` return, with the same
 options as the command line (`graph_format`, `exporter`, `onnx2c`, ...).
-[export/cli.py](../src/neurotemplate/export/cli.py) shows the calls.
+[export/cli.py](../export/cli.py) shows the calls.
 
 ## Extending the library
 
 - **The operator list is a contract.** `ALLOWED_OPS` in
-  [export/trace.py](../src/neurotemplate/export/trace.py) lists every ONNX
+  [export/trace.py](../export/trace.py) lists every ONNX
   operator the template's models trace to, and an export using any other
   fails. A new entry is a new requirement on every recipient's runtime, and
   for C, onnx2c has to implement it, along with any casts it brings. That is

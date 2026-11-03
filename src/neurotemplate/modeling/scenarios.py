@@ -87,8 +87,8 @@ class SynthSpec:
       states      Y channels that behave like temperatures — they hold when
                   nothing drives them and relax toward `ambient`. Naming these
                   is required: a power channel is not a temperature, and
-                  treating one as though it were is how this subsystem used to
-                  sample "equilibrium temperatures" out of a 0-61728 W range.
+                  sampled as one it would draw "equilibrium temperatures"
+                  across its watt range.
 
                   Only these channels are asserted on. Equilibria are sampled
                   from the window every one of them has been observed at (the

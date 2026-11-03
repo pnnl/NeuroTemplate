@@ -20,3 +20,20 @@ def test_the_guide_is_tracked_so_a_build_from_git_ships_it():
     tracked = subprocess.run(["git", "ls-files", "--error-unmatch", str(GUIDE)],
                              cwd=repo, capture_output=True)
     assert tracked.returncode == 0, "GUIDE.md is not tracked by git"
+
+
+def test_every_reference_is_tracked_and_every_nt_docs_mention_resolves():
+    """The references ship with the package, so `nt docs <name>` in the guide, the
+    template or a doc must name one, and each must be tracked to reach the wheel."""
+    import subprocess
+    from neurotemplate.guide import DOCS, doc_paths
+    from neurotemplate.init import TEMPLATE
+    docs = doc_paths()
+    repo = GUIDE.parents[2]
+    tracked = subprocess.run(["git", "ls-files", str(DOCS)], cwd=repo,
+                             capture_output=True, text=True, check=True).stdout.split()
+    assert {repo / t for t in tracked} >= set(docs.values())
+    shipped = [GUIDE, *docs.values(), *TEMPLATE.rglob("*.py"), *TEMPLATE.rglob("*.md")]
+    mentioned = {name for path in shipped
+                 for name in re.findall(r"`nt docs (\w+)`", path.read_text(encoding="utf-8"))}
+    assert mentioned and mentioned <= set(docs), mentioned - set(docs)

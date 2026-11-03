@@ -178,7 +178,7 @@ def block_mapping(
     Model structure: split Y into blocks, each its own sub-model with its own
     parameters, family (`model`) and hidden state. Return None (or delete
     this function) for one block holding every channel. The "Blocks" and
-    "Declaring what a column is" sections of the library's docs/MODELING.md
+    "Declaring what a column is" sections of `nt docs modeling`
     explain each choice at length; this is the contract.
 
     Worth doing whenever the plant is several parts that interact mainly
@@ -271,7 +271,7 @@ def block_mapping(
 # through `rollout_state()` / `set_rollout_state(state)`, one [batch, width]
 # tensor, None when cold (seed it from the window then). Keep the model's
 # code, and any starting values, in this file: the run keeps a copy of it.
-# `nt guide own-model` has the decisions; docs/MODELING.md the full contract.
+# `nt guide own-model` has the decisions; `nt docs modeling` the full contract.
 #
 # def custom_models():
 #     return {"my_zone": lambda cfg, nm_mapping, norm_stats: MyZone(nm_mapping)}

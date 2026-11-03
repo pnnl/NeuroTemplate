@@ -61,8 +61,7 @@ because its window is its warm-up. An `rc_network` block reads its `Y` and
 enough), and its setpoints at the current step only. The build refuses a
 table that misses a column, a lag no block actually reads (a `U` column only
 rc_network blocks read must be 0), and a `demand` setpoint lagged further
-back than its state. The reportcard lists the lags
-each block reads.
+back than its state. The reportcard lists the lags each block reads.
 
 ## Model families
 

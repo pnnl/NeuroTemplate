@@ -2,7 +2,7 @@
 *.md
 !/README.md
 !/GUIDE.md
-!/docs/*.md
+!/src/neurotemplate/docs/*.md
 !/src/neurotemplate/template/*.md
 !/src/neurotemplate/GUIDE.md
 

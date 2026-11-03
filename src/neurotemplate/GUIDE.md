@@ -1,9 +1,9 @@
 # NeuroTemplate: the guided flow
 
 `nt guide` prints this overview; `nt guide <step>` prints one step or guide. Each
-step is a few decisions, each with the command whose output settles it. Read a step
-when you reach it. The references in `docs/` (OVERVIEW, MODELING, CONTROL, EXPORT) and
-the hook docstrings go deeper; open them when a step points you there, not before.
+step is a few decisions and the command whose output settles each. Read a step when
+you reach it; it points to a reference (`nt docs`) or a hook docstring when you
+need more.
 
 | step | decides | ends with |
 |---|---|---|
@@ -13,8 +13,8 @@ the hook docstrings go deeper; open them when a step points you there, not befor
 | `nt guide control` | the objective, what the controller sees, its bounds | a controller that beats the rule on the model, read against the best plan |
 | `nt guide export` | the package that runs without the library | a verified export and a passing check |
 
-A guide is one kind of system or one way of working, with the structure and the
-settings worked out for it. Start from the one that fits and adapt it:
+A guide works out the structure and settings for one kind of system or way of
+working. Start from the one that fits:
 
 | guide | for |
 |---|---|
@@ -31,15 +31,14 @@ Three things decide most outcomes, in this order:
 3. **Read every result against something**: the rule, the best plan, the previous
    run, the data. A number alone says little.
 
-Every training run ends by printing its run id and its reportcard's path. Read the
-reportcard before deciding the next run.
+Every training run prints its run id and its reportcard's path. Read the reportcard
+before deciding the next run.
 
 ## setup
 
-1. **Project.** `nt init` in the application's directory writes the hooks
-   (`nt_model.py`, `nt_control.py`), the config directories and an empty `data/`;
-   `nt` finds them in the directory it runs from. Put the record in `data/`, split in
-   time order into `train.csv`, `dev.csv` and `test.csv`.
+1. **Project.** `nt init` writes the hooks (`nt_model.py`, `nt_control.py`), the
+   configs and `data/`; run `nt` from that directory. Put the record in `data/` as
+   `train.csv`, `dev.csv` and `test.csv`, split in time order.
 2. **Column roles**, in `nt_model.py`:
    - `Y`: what the model predicts. The states a controller acts on, plus any meter
      the objective prices.
@@ -47,9 +46,8 @@ reportcard before deciding the next run.
    - `D`: what is known without the plant: weather, schedules, a calendar, anything
      a forecast can supply at run time. Nothing forecasts a meter, so a meter is
      never `D`.
-3. **Data paths** in `model_configs/*.yaml`, then
-   `nt model train --config model_configs/debug.yaml`. It takes seconds and catches
-   every wrong name.
+3. **Smoke run**: `nt model train --config model_configs/debug.yaml`. It takes
+   seconds and catches every wrong name.
 4. **Coverage.** The model only knows commands the data issued, and the controller's
    bounds default to that range. If the controller must go somewhere the data never
    went, the model cannot tell it what happens there.
@@ -60,15 +58,14 @@ Everything a hook takes or returns is in your data's own units.
 
 Decide the structure first; it matters more than any hyperparameter.
 
-1. **Family.** A grey box for an output you will plan against: structure the
+1. **Family.** For an output you will plan against, a grey box: structure the
    physics is sure of (signs, storage, saturation) that a controller cannot argue
-   with. `rc_network` is the built-in one, for a zone whose delivered heat is
-   measured (`nt guide thermal-zone`). A
-   model of your own goes behind the same contract (`nt guide own-model`). The black
-   boxes (`mlp`, `nssm`, `gru`, `lssm`) fit freely; for planning, give them sign
-   priors (step 4).
+   with. `rc_network` is built in, for a zone whose delivered heat is measured
+   (`nt guide thermal-zone`); a model of your own fits the same contract
+   (`nt guide own-model`). The black boxes (`mlp`, `nssm`, `gru`, `lssm`) fit
+   freely; for planning, give them sign priors (step 4).
 2. **What reaches each output.** `block_mapping` splits the outputs into blocks, each
-   seeing its own inputs (docs/MODELING.md, "Blocks"). Give an output only the inputs
+   seeing its own inputs (`nt docs modeling`, "Blocks"). Give an output only the inputs
    that drive it: a block that sees an input it does not depend on learns the data's
    correlations through it, and a controller exploits them.
 3. **Heads**, in `data_head_config`, in physical units: a meter cannot read below
@@ -85,10 +82,9 @@ Decide the structure first; it matters more than any hyperparameter.
 
 Reading the reportcard: the physics checks first, then each parameter in physical
 units and where it sits in its box, then test error against persistence. Test error
-is measured where the data went, not where a controller will go. Declaring a column
-(`demand`, `heat`) changes the physics, not the shapes, so a wrong declaration shows
-only on the reportcard. Before comparing two model configs, set `ensemble_seeds` to
-a few: one seed is one draw.
+is measured where the data went, not where a controller will go. A wrong column
+declaration (`demand`, `heat`) shows only here. To compare two configs, set
+`ensemble_seeds` to a few: one seed is one draw.
 
 ## check
 
@@ -106,23 +102,21 @@ against that error. Fix the model, not the controller.
    `first_difference` on each command. For a band you must hold, use `norm: 1` with a
    gain that makes a unit of mean excess outweigh any saving: a squared term makes a
    small overshoot nearly free, and the controller takes it. `power` is
-   `power_metric`, by default the sum of `power_channels`, the meters the model
-   predicts. Before training, the run prints the share each term has of the
-   objective. A term near 0% is not doing anything; size the gains from that print.
-   Build it up a run at a time: the band terms alone first, which should not come
-   out much worse than the rule (if it does, a model iteration is worth more than
-   any gain), then the full objective. The band and the tariff are reference
-   columns, in a reference file per plant file: `python make_references.py --help`.
-2. **What the controller sees**, `policy_window`: every column with a `past`, and for
-   forecasts a `future`. To move load in time, the controller must see the expensive
-   period coming. The tariff's and the band's `future` must cover the stretch from
-   when the action pays off to when it is taken, and `train_pred_steps` must hold
-   both the action and its payoff in one rollout (a day, for daily cycles); a
-   `future` longer than `train_pred_steps` is refused. How far ahead is enough is
-   set by how long the plant takes to respond: compare the preview with the
-   surrogate's time constants on its reportcard. No `future` can be longer than the
+   `power_metric`, by default the sum of `power_channels`. Bands and tariffs are
+   reference columns, one reference file per plant file
+   (`python make_references.py --help`).
+2. **Build it up a run at a time.** The band terms alone first: if they come out
+   much worse than the rule, a model iteration is worth more than any gain. Then the
+   full objective. Before training, a run prints each term's share of the objective;
+   a term near 0% does nothing, so size the gains from that print.
+3. **What the controller sees**, `policy_window`: every column with a `past`, and
+   forecasts with a `future`. To move load in time the controller must see the
+   expensive period coming: the tariff's and the band's `future` must span from the
+   action to its payoff, and `train_pred_steps` must hold both in one rollout (a day,
+   for daily cycles); a `future` longer than it is refused. Size the preview against
+   the surrogate's time constants on its reportcard. No `future` can exceed the
    forecast available at run time: the exported controller refuses to act without it.
-3. **Bounds.** Each command stays inside `actuation_bounds` (by default the data's
+4. **Bounds.** Each command stays inside `actuation_bounds` (by default the data's
    range). `command_bounds` narrows a command to a range that follows a reference at
    each step, `[low, high]`, each side a number, a reference column, `[column,
    offset]`, or another command, which keeps two commands from crossing. Where one
@@ -130,37 +124,37 @@ against that error. Fix the model, not the controller.
    and let the cost term see only half the bill. A rule-anchored residual
    (`reference_control` plus a `residual_delta` box) is an option for a small,
    trusted correction, not the way to make a controller behave on a wrong model.
-4. **Time before you train.** After its first epoch a run prints the seconds per
-   epoch and what the configured epochs will cost. On a fixed budget, size `epochs`,
-   `train_pred_steps` and the previews from that line. The run ends by saying whether
-   patience stopped it or the epoch cap did with the dev loss still falling.
-5. **Train on several draws of the price.** List the plant file once per reference
+5. **Time before you train.** After its first epoch a run prints the seconds per
+   epoch and what the configured epochs will cost; size `epochs`, `train_pred_steps`
+   and the previews from it. The run ends by saying whether patience stopped it or
+   the epoch cap did, with the dev loss still falling.
+6. **Train on several draws of the price.** List the plant file once per reference
    file and give each a different tariff: the same one shifted a few hours each way,
    or with its contrast changed. A policy trained on one tariff learns its hours; one
    trained on several learns to read the price.
-6. **Read the run against the best plan.** The reportcard's Controller gap sets the
+7. **Read the run against the best plan.** The reportcard's Controller gap sets the
    controller beside a free command per step, optimised through the same model,
-   bounds and objective with the whole window known. The gap between them is the
-   controller's: its inputs, structure or training. What the plan does not do either
-   (move load before the expensive period, ride the band edge), the model or the
-   objective does not reward, and no controller will find it.
-7. **Read the plots.** Does the action come before the expensive period, with the
+   bounds and objective with the whole window known. The gap is the controller's:
+   its inputs, structure or training. What the plan does not do either (move load
+   ahead of the expensive period, ride the band edge), the model or the objective
+   does not reward.
+8. **Read the plots.** Does the action come before the expensive period, with the
    relief through it? Is a command pinned at a bound, jittering, or crossing another?
-8. **Its blind twin.** Train the same config with the price gain at 0. The difference
-   between the two is what the price bought; a cost number alone is mostly a fact
-   about the test week. Split a saving into offset and shape: offset is the mean
-   difference from the rule (doing less overall), shape is doing it at different
-   times (the difference in the expensive hours minus that in the cheap ones).
+9. **Its blind twin.** Train the same config with the price gain at 0; the
+   difference is what the price bought. A cost number alone is mostly a fact about
+   the test week. Split a saving into offset (the mean difference from the rule:
+   doing less) and shape (the difference in the expensive hours minus that in the
+   cheap ones: doing it at other times).
 
-Never decide what to ship on the surrogate's band number: it is a fact about the
-surrogate, and has been wrong by several times in both directions. Compare
-controllers on the same surrogate against the rule; judge the winner on the plant.
+Do not choose what to ship by the surrogate's band violation; it has been wrong by
+several times in both directions. Compare controllers on the same surrogate against
+the rule, and judge the winner on the plant.
 
 ## export
 
 `nt export policy --run_id <control run> --out <dir>/nt_package` writes the
 controller as a package that runs without the library, and checks it against the
-trained one before writing it. docs/EXPORT.md covers the package layout, the C and
+trained one before writing it. `nt docs export` covers the package layout, the C and
 torch targets, and what an MPC package carries.
 
 ## thermal-zone
@@ -173,7 +167,7 @@ on yours.
 1. **Delivered heat is data prep, yours.** From supply flow and temperature at the
    unit or the VAV box: `1.2 · flow [m³/s] · (supply − zone) [K]` kW, positive
    heating. It is a meter: a row is the heat over the step that ends there, which is
-   how a plant reports it. A zone without it takes a black box for now.
+   how a plant reports it. A zone without it takes a black box.
 2. **Declare what each column is**, one block per zone, `model: rc_network`: `Y` the
    zone temperature and its `heat`; `U` the setpoints; `D` the outdoor temperature
    (`ambient`), the irradiance (`solar`), and any schedule that adds heat. An
@@ -256,8 +250,6 @@ command_bounds:                 # inside the band, a margin under its ceiling, h
 policy: mlp
 ```
 
-Size `epochs` from the seconds-per-epoch line the run prints after its first epoch.
-
 ## own-model
 
 Any model that fits one contract gets the rest of the library: training, the
@@ -268,7 +260,7 @@ model(y, u, d) -> y_next      y, u, d: [batch, history_steps, n]; y_next: [batch
 ```
 
 Physical units throughout; row -1 of `u` and `d` drives this step. The full contract
-is in docs/MODELING.md ("Your own model"). The decisions:
+is in `nt docs modeling` ("Your own model"). The decisions:
 
 1. **Register it** in `nt_model.py`, `custom_models()` returning
    `{name: build(cfg, nm_mapping, norm_stats) -> nn.Module}`, and set `model` to the
@@ -292,12 +284,9 @@ is in docs/MODELING.md ("Your own model"). The decisions:
 6. **Read its physics checks** like a built-in's: they test your model in states the
    data never visits, with no knowledge of its structure.
 
-A worked case: a multi-timescale zone model (the zone, EWMAs of it over 0.25 to 168 h,
-filtered weather, hour-of-day gains, delivered heat) ported from least squares: the
-EWMAs seeded in closed form as state, each coefficient a `BoundedParameter` started at
-its fitted value, the fitted values inline in the hooks file. At `lr: 0` it reproduced
-its own fit; a few epochs of the rollout loss refined it; it exported to ONNX with its
-state lifted, and a policy trained against it exported beside it.
+A multi-timescale zone model fitted by least squares ports this way: its EWMAs as
+state seeded in closed form, each coefficient a `BoundedParameter` started at its
+fitted value. At `lr: 0` it reproduces its fit, and it exports with a policy beside it.
 
 ## mpc
 

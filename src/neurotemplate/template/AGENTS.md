@@ -6,6 +6,7 @@ exports either one as a package that runs without the library.
 
 **Start with `nt guide`** (`uv run nt guide` if the environment is not active). It
 is the flow in five steps; do them in order and read each when you reach it.
+`nt docs` lists the references the steps point into.
 
 ## What is here
 
