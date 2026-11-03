@@ -1,11 +1,11 @@
 """Discover an application's user-defined hook modules.
 
 An application supplies two files in its working directory:
-- `modeling_user_defined.py` — the modeling hooks
-- `control_user_defined.py`  — the control hooks
+- `nt_model.py` — the modeling hooks
+- `nt_control.py` — the control hooks
 
 This module is the single place that imports them, so library code never
-does `from modeling_user_defined import ...` directly. Resolution order:
+does `from nt_model import ...` directly. Resolution order:
 
 1. If `cfg.user_hooks_path` is set, treat it as a path or dotted module name
    and import that.
@@ -34,8 +34,8 @@ import sys
 from pathlib import Path
 from types import ModuleType
 
-_MODELING_MODULE = "modeling_user_defined"
-_CONTROL_MODULE = "control_user_defined"
+_MODELING_MODULE = "nt_model"
+_CONTROL_MODULE = "nt_control"
 
 #: What each stage's hooks file is logged as in its run.
 MODELING_SNAPSHOT = f"{_MODELING_MODULE}.py"
@@ -46,7 +46,7 @@ def _import_from_file(path: Path) -> ModuleType:
     """Import a hooks file as a module named after its own path.
 
     Not the canonical hooks name, so a hooks file that itself imports
-    `modeling_user_defined` gets the real one rather than a half-initialised
+    `nt_model` gets the real one rather than a half-initialised
     copy of itself; and unique to the path, so a run's snapshot never
     replaces the working directory's file of the same name, or the reverse.
     Its directory goes on sys.path, as it would for a script, so it can

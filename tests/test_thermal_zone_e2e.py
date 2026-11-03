@@ -97,7 +97,7 @@ def _restore_tracking_uri():
     yield
     mlflow.set_tracking_uri(previous)
     for name in list(sys.modules):
-        if name.startswith("modeling_user_defined"):
+        if name.startswith("nt_model"):
             del sys.modules[name]
 
 
@@ -107,14 +107,14 @@ def test_declare_ladder_thermostat_train(tmp_path, monkeypatch):
     for split, days, seed, start in (("train", 8, 0, "2025-07-01"), ("dev", 3, 1, "2025-07-09"),
                                      ("test", 3, 2, "2025-07-12")):
         _plant(days, seed, start).to_csv(tmp_path / "data" / f"{split}.csv")
-    (tmp_path / "modeling_user_defined.py").write_text(HOOKS, encoding="utf-8")
+    (tmp_path / "nt_model.py").write_text(HOOKS, encoding="utf-8")
     window = 24 * STEPS_PER_HOUR
     history = {c: window for c in (ZONE, HEAT, OUTDOOR, SOLAR)} | {SETPOINT: 0}
     config = tmp_path / "zone.yaml"
     config.write_text("\n".join([
         "train_data_path: data/train.csv", "dev_data_path: data/dev.csv",
         "test_data_path: data/test.csv", "model: rc_network",
-        f"user_hooks_path: {tmp_path / 'modeling_user_defined.py'}",
+        f"user_hooks_path: {tmp_path / 'nt_model.py'}",
         "history: " + json.dumps(history, ensure_ascii=False),
         "epochs: 3", "warmup: 0", "patience: 3", f"train_pred_steps: {window}",
         f"dev_pred_steps: {window}", f"test_window: {window + 24 * STEPS_PER_HOUR}",

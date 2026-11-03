@@ -108,7 +108,7 @@ def _current(x: torch.Tensor, block: int, width: int) -> torch.Tensor:
 
 
 class _ReferenceRule(nn.Module):
-    """Adapt `control_user_defined.reference_control` to the policy's inputs.
+    """Adapt `nt_control.reference_control` to the policy's inputs.
 
     The policy is handed *flattened* windows — `(batch, window, dim)` reshaped
     to `(batch, window*dim)`, oldest-first, see `SystemPreview.get_mapped_data`
@@ -494,7 +494,7 @@ def _reference_rule(cfg, hooks, nm_mapping, keys: list[str], now: dict[str, int]
     if rule is None:
         raise NotImplementedError(
             f"residual_delta is set ({cfg.residual_delta}) but "
-            "control_user_defined.reference_control is not defined, so there "
+            "nt_control.reference_control is not defined, so there "
             "is no rule for the residual to deviate from. Implement the hook, "
             "or leave residual_delta empty for a plain policy."
         )

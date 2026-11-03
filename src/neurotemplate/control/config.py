@@ -60,7 +60,7 @@ class ControlConfig:
     reference_scale: dict[str, float] = field(default_factory=dict)
 
     # Optional path or dotted module name for the control hooks file.
-    # If unset, the library looks for `control_user_defined.py` in CWD.
+    # If unset, the library looks for `nt_control.py` in CWD.
     user_hooks_path: Optional[str] = None
 
     # ── Control horizon / policy window ──────────────────────────
@@ -112,7 +112,7 @@ class ControlConfig:
     # is deployed: [0, 0.5] lets a heating setpoint move up off the rule and
     # never down, [0, 0] is the rule exactly. A U column not named is a free
     # policy output over its actuation bounds. Empty: no residual, a plain
-    # policy. Requires the control_user_defined.reference_control hook, which
+    # policy. Requires the nt_control.reference_control hook, which
     # returns exactly the columns named here.
     residual_delta: dict[str, list[float]] = field(default_factory=dict)
 

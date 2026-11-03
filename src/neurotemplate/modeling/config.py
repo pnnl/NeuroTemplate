@@ -75,7 +75,7 @@ class ModelingConfig:
     # Exact column names to drop before Y/U/D mapping.
     exclude_columns: list[str] = field(default_factory=list)
     # Optional path or dotted module name for the modeling hooks file.
-    # If unset, the library looks for `modeling_user_defined.py` in CWD.
+    # If unset, the library looks for `nt_model.py` in CWD.
     user_hooks_path: Optional[str] = None
 
     # ---- MODEL ---------------------------------------------------------------

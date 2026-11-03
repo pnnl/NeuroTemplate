@@ -22,7 +22,7 @@ train_data_path: data/train.csv
 dev_data_path: data/dev.csv
 test_data_path: data/test.csv
 # batch_size: 256
-# Hooks file (path or dotted module). Unset = control_user_defined.py in CWD.
+# Hooks file (path or dotted module). Unset = nt_control.py in CWD.
 # user_hooks_path: null
 
 # ── REFERENCES ───────────────────────────────────────────────────
@@ -34,7 +34,7 @@ test_data_path: data/test.csv
 #
 # Train over every band the policy will be handed in service; make the test
 # reference the one you want it judged on. Check that every test band is
-# reachable inside the actuation box (control_user_defined.actuation_bounds):
+# reachable inside the actuation box (nt_control.actuation_bounds):
 # a band the actuators cannot reach is unreachable by construction.
 train_reference_path: data/train_reference.csv
 dev_reference_path: data/dev_reference.csv
@@ -70,12 +70,12 @@ test_reference_path: data/test_reference.csv
 # The deepest `past` (plus the current step) is the policy's history, which
 # also spaces the training windows. The reportcard lists the table and the
 # input width it gives. Names and numbers below are syntax.
-policy_window:
-  "Zone Air Temperature [°C]":  {past: 3}
-  "Zone Cooling Setpoint [°C]": {past: 1}
-  "Outdoor Temperature [°C]":   {past: 0, future: 12}
-  "Comfort Low [°C]":           {past: 0, future: 2}
-  "Comfort High [°C]":          {past: 0, future: 2}
+policy_window: {}   # replace with your columns, e.g.
+# "Zone Air Temperature [°C]":  {past: 3}
+# "Zone Cooling Setpoint [°C]": {past: 1}
+# "Outdoor Temperature [°C]":   {past: 0, future: 12}
+# "Comfort Low [°C]":           {past: 0, future: 2}
+# "Comfort High [°C]":          {past: 0, future: 2}
 
 # ── OBJECTIVE ────────────────────────────────────────────────────
 # A table of terms, each read in one order: the operand `column − target`
@@ -84,7 +84,7 @@ policy_window:
 # mean per window: 1 = mean, 2 = RMS, larger approaches the max), with an
 # optional per-step `weight` column; then its gain. `column`, `target` and
 # `weight` name a Y, U or D column of the surrogate, a reference column, or
-# `power` (control_user_defined.power_metric). A gain is per physical unit of
+# `power` (nt_control.power_metric). A gain is per physical unit of
 # its operand.
 #
 # Smoothing: one first_difference row per U column, each with its own gain.
@@ -102,13 +102,13 @@ policy_window:
 # cheapest answer is to do less. Only a cost row (power weighted by a
 # tariff) rewards moving power to cheap hours. For load shifting, use cost
 # and leave energy off.
-losses:
-  comfort_lower: {column: "Comfort Low [°C]",  target: "Zone Air Temperature [°C]", map: relu,  norm: 1}
-  comfort_upper: {column: "Comfort High [°C]", target: "Zone Air Temperature [°C]", map: nrelu, norm: 1}
-  du:            {column: "Zone Cooling Setpoint [°C]", map: first_difference, norm: 1}
-  # energy: {column: power, norm: 1}
-  # cost:   {column: power, norm: 1, weight: "Tariff [$/kWh]"}
-  # peak:   {column: power, norm: 4}
+losses: {}   # replace with your terms, e.g.
+# comfort_lower: {column: "Comfort Low [°C]",  target: "Zone Air Temperature [°C]", map: relu,  norm: 1}
+# comfort_upper: {column: "Comfort High [°C]", target: "Zone Air Temperature [°C]", map: nrelu, norm: 1}
+# du:            {column: "Zone Cooling Setpoint [°C]", map: first_difference, norm: 1}
+# energy: {column: power, norm: 1}
+# cost:   {column: power, norm: 1, weight: "Tariff [$/kWh]"}
+# peak:   {column: power, norm: 4}
 # One gain per term, in its own map so a sweep can --set it. Gains are
 # exchange rates between terms in different units, so they do not port
 # between plants; the 1.0s below are placeholders, not starting values.
@@ -126,7 +126,7 @@ losses:
 # (for a residual, the rule itself, where a first_difference term is 0% by
 # construction); it tells you a term is present, not that it is strong
 # enough. Read strength off the trained share and the trajectory.
-gains: {comfort_lower: 1.0, comfort_upper: 1.0, du: 1.0}
+gains: {}   # one per term, e.g. {comfort_lower: 1.0, comfort_upper: 1.0, du: 1.0}
 
 # ── POLICY ───────────────────────────────────────────────────────
 # linear | mlp | mpc. `linear` is one saturated affine law, u = sat(Kx + b):
@@ -160,7 +160,7 @@ gains: {comfort_lower: 1.0, comfort_upper: 1.0, du: 1.0}
 # actuation bounds; leave the map out for a plain policy. Every box [0, 0]
 # is the rule itself: a cheap first run that scores the rule on your
 # surrogate, and the number every later run is read against. How to size a
-# box: the comment above reference_control in control_user_defined.py.
+# box: the comment above reference_control in nt_control.py.
 # residual_delta:
 #   Heating Setpoint [°C]: [0.0, 0.0]
 #   Cooling Setpoint [°C]: [below, above]

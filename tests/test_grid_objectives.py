@@ -50,7 +50,7 @@ def _cost(s, out):
 
 def _power_of(s, out):
     """The scored-horizon power the loss terms all read."""
-    import control_user_defined as hooks
+    import nt_control as hooks
     _, _, hmax = horizons(s["cfg"], s["sysid_cfg"])
     return hooks.power_metric(
         out["yn"][:, scored_steps("yn", hmax), :],

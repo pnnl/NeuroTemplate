@@ -5,6 +5,16 @@ controller against that model, and ship either one as a small package that
 runs without this library. Built on
 [Neuromancer](https://github.com/pnnl/neuromancer).
 
+```bash
+uv init my_app && cd my_app
+uv add "NeuroTemplate @ git+ssh://git@<host>/<owner>/neurotemplate.git@<tag>"
+uv run nt init          # hooks, configs, data/, AGENTS.md
+# put train.csv, dev.csv, test.csv in data/
+uv run nt guide
+```
+
+[docs/INSTALL.md](docs/INSTALL.md) has the details.
+
 **Start with `nt guide`** (the same text is [GUIDE.md](GUIDE.md)). It is the whole
 flow in five short steps, each a few decisions and the command whose output settles
 them, and each step names the reference in [docs/](docs/) or the hook to open when

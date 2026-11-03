@@ -26,8 +26,8 @@ def test_a_hooks_file_runs_once_and_imports_its_siblings(hooks_dir):
         "builtins.site_hooks_runs = getattr(builtins, 'site_hooks_runs', 0) + 1\n"
         "from site_helpers import ZONE\n"
         # The canonical module is the real fixture, not this file.
-        "import modeling_user_defined\n"
-        "assert hasattr(modeling_user_defined, 'data_mapping')\n"
+        "import nt_model\n"
+        "assert hasattr(nt_model, 'data_mapping')\n"
     )
     cfg = SimpleNamespace(user_hooks_path=str(hooks_dir / "site_hooks.py"))
     import builtins

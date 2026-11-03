@@ -16,7 +16,7 @@ test_data_path: data/test.csv
 # norm_type: z_score
 # Substring patterns; data_mapping drops matching columns.
 # exclude_columns: []
-# Hooks file (path or dotted module). Unset = modeling_user_defined.py in CWD.
+# Hooks file (path or dotted module). Unset = nt_model.py in CWD.
 # user_hooks_path: null
 
 # ── MODEL ────────────────────────────────────────────────────────
@@ -33,7 +33,7 @@ test_data_path: data/test.csv
 #          bounds a long rollout; read the reportcard's rollout-stability
 #          and physics sections before steering with one.
 # Families can be mixed, one per block of Y channels — see `block_mapping`
-# in modeling_user_defined.py (e.g. one rc_network block per zone, an mlp for a meter).
+# in nt_model.py (e.g. one rc_network block per zone, an mlp for a meter).
 # Or the name of a model of your own, from `custom_models` there.
 # model: nssm
 # Required: steps before the current one the model reads, per column. List
@@ -49,10 +49,10 @@ test_data_path: data/test.csv
 # state through a rollout. A lag is worth its inputs when the column still tells
 # the model something, that far back, that its other inputs do not; the
 # reportcard lists what each block reads.
-history:
-  "Tank Temperature [degC]": 11
-  "Heater Command [-]": 0
-  "Ambient Temperature [degC]": 3
+history: {}   # replace with your columns, e.g.
+#  "Tank Temperature [degC]": 11
+#  "Heater Command [-]": 0
+#  "Ambient Temperature [degC]": 3
 # Network width is 2**log2_hidden_size; rc_network has no net. Larger nets tend to buy fit with physics: start small, and grow one when
 # the reportcard says the model underfits, not because dev loss went down.
 # log2_hidden_size: 6
@@ -65,7 +65,7 @@ history:
 
 # ── PHYSICAL PARAMETERS ──────────────────────────────────────────
 # A grey box's parameters are declared as boxes in block_mapping's `params`
-# (modeling_user_defined.py). Here only their learning rate: at `lr` they
+# (nt_model.py). Here only their learning rate: at `lr` they
 # barely leave their start.
 # physical_lr: 0.05
 
@@ -131,7 +131,7 @@ run: ""
 # save_config: last_step
 
 # ── OPTUNA (nt model optuna) ─────────────────────────────────────
-# The search space is modeling_user_defined.hyper_args.
+# The search space is nt_model.hyper_args.
 # n_trials: 100
 # study_name: study
 # Epochs per trial; the winner is retrained for the full `epochs`.
@@ -144,7 +144,7 @@ run: ""
 # Gradient-sign penalty, evaluated at random off-trajectory points: the
 # mean sign violation per declared (output, input) pair, so a gain means the
 # same however many channels the plant has. 0 = off; > 0 requires grad_path
-# (written by write_gradient_mapping in modeling_user_defined.py). Size it by
+# (written by write_gradient_mapping in nt_model.py). Size it by
 # what the physics section does, not by switching it on.
 # grad_gain: 0.0
 # grad_path: data/grad/mapping.json

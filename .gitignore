@@ -3,11 +3,12 @@
 !/README.md
 !/GUIDE.md
 !/docs/*.md
-!/template/README.md
+!/src/neurotemplate/template/*.md
 !/src/neurotemplate/GUIDE.md
 
-# Ignore configuration files
+# Ignore configuration files, except the template's
 *.yaml
+!/src/neurotemplate/template/**/*.yaml
 
 # Results directories and files
 mlruns/

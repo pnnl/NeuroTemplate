@@ -28,7 +28,7 @@ Everything here is a pure function over already-denormalized tensors. The
 pipeline does the denormalization and the hook calls; this module only does
 arithmetic, so the numbers are cheap to test against hand-computed cases.
 
-Energy carries no unit conversion. `control_user_defined.power_metric`
+Energy carries no unit conversion. `nt_control.power_metric`
 returns whatever the use case meters, so power is reported in those native
 units and energy in `power·h`. An app metering Watts converts to kWh itself.
 """

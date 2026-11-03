@@ -153,7 +153,7 @@ def _term_values(cfg, sysid_cfg, nm_mapping: dict[str, list[str]]):
                  if POWER in (t.column, t.target)]
         raise NotImplementedError(
             f"losses {names} read `{POWER}`, which needs "
-            "control_user_defined.power_metric implemented (set "
+            "nt_control.power_metric implemented (set "
             "POWER_METRIC_IMPLEMENTED = True)."
         )
 

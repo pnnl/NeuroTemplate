@@ -24,7 +24,7 @@ from neurotemplate.control.scenarios import build_loaders, build_window_dict
 from neurotemplate.hooks import CONTROL_SNAPSHOT, load_control_hooks, snapshot_hooks
 from control_fixtures import SETPT, full_setup, make_norm_stats
 
-FIXTURE_HOOKS = Path(__file__).parent / "fixtures" / "control_user_defined.py"
+FIXTURE_HOOKS = Path(__file__).parent / "fixtures" / "nt_control.py"
 
 
 @pytest.fixture(autouse=True)
@@ -33,7 +33,7 @@ def _restore_tracking_uri():
     yield
     mlflow.set_tracking_uri(previous)
     for name in list(sys.modules):
-        if name.startswith(("site_control", "control_user_defined_")):
+        if name.startswith(("site_control", "nt_control_")):
             del sys.modules[name]
 
 

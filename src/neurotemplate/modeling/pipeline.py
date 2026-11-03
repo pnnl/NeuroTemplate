@@ -12,7 +12,7 @@ non-trivial steps):
   - train_and_evaluate(...) — one full training run (`nt model train`, and
                               `nt model optuna`'s final retrain)
 
-`synth_cfg` is computed once at the entry point (via user_defined.synth_cfg)
+`synth_cfg` is computed once at the entry point (via nt_model.synth_cfg)
 and passed to the evaluation path. None means "physics checks disabled for
 this run" — the single fact, not a re-check at every callsite. Training never
 sees it: the scenarios are assertions on the trained surrogate, not a loss.
@@ -844,7 +844,7 @@ def train_and_evaluate(
     if grad_masks:
         logger.log_dict(grad_masks, name="grad_mask.json")
     # Persist head config so load_model can rebuild the exact head topology
-    # used at training time, independent of user_defined.py drift. Read off
+    # used at training time, independent of nt_model.py drift. Read off
     # the System's own stack: that is the one carrying the calibrated
     # decision thresholds, which are not in the saved weights.
     trained_stack = trained_heads(dyn_sys, norm_stats)

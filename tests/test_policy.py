@@ -8,7 +8,7 @@ from neurotemplate.control.policy import (
     build_policy,
 )
 from neurotemplate.control.closed_loop import build_closed_loop
-from control_user_defined import actuation_bounds
+from nt_control import actuation_bounds
 from control_fixtures import ZONE, full_setup
 
 #: The fixture objective's reference columns: the band's two edges.

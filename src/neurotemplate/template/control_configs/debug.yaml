@@ -12,21 +12,21 @@ test_data_path: data/test.csv
 
 train_pred_steps: 4
 # Your table, as in your real config.
-policy_window:
-  "Zone Air Temperature [°C]":  {past: 3}
-  "Zone Cooling Setpoint [°C]": {past: 1}
-  "Outdoor Temperature [°C]":   {past: 3, future: 0}
-  "Comfort Low [°C]":           {past: 0, future: 0}
-  "Comfort High [°C]":          {past: 0, future: 0}
+policy_window: {}   # replace with your columns, e.g.
+# "Zone Air Temperature [°C]":  {past: 3}
+# "Zone Cooling Setpoint [°C]": {past: 1}
+# "Outdoor Temperature [°C]":   {past: 3, future: 0}
+# "Comfort Low [°C]":           {past: 0, future: 0}
+# "Comfort High [°C]":          {past: 0, future: 0}
 
 train_reference_path: data/train_reference.csv
 dev_reference_path: data/dev_reference.csv
 test_reference_path: data/test_reference.csv
 
-losses:
-  comfort_lower: {column: "Comfort Low [°C]",  target: "Zone Air Temperature [°C]", map: relu,  norm: 1}
-  comfort_upper: {column: "Comfort High [°C]", target: "Zone Air Temperature [°C]", map: nrelu, norm: 1}
-gains: {comfort_lower: 1.0, comfort_upper: 1.0}
+losses: {}   # replace with your terms, e.g.
+# comfort_lower: {column: "Comfort Low [°C]",  target: "Zone Air Temperature [°C]", map: relu,  norm: 1}
+# comfort_upper: {column: "Comfort High [°C]", target: "Zone Air Temperature [°C]", map: nrelu, norm: 1}
+gains: {}   # one per term, e.g. {comfort_lower: 1.0, comfort_upper: 1.0}
 
 epochs: 2
 warmup: 0

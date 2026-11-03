@@ -88,7 +88,7 @@ def main() -> None:
     grad_masks = get_grad_masks(grad_path=grad_path_for_eval, nm_mapping=nm_mapping)
 
     # --no_synth → opt out by passing synth_cfg=None;
-    # otherwise compute from modeling_user_defined.
+    # otherwise compute from nt_model.
     synth_cfg = (
         None if args.no_synth
         else load_modeling_hooks(cfg).synth_cfg(nm_mapping, norm_stats)

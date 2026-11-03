@@ -10,7 +10,6 @@ in `docs/` are references it points into.
 | train a dynamics model (system identification) | [MODELING.md](MODELING.md) |
 | train a controller against it | [CONTROL.md](CONTROL.md) |
 | ship a trained model or controller | [EXPORT.md](EXPORT.md) |
-| fill in an application, step by step | [template/README.md](../template/README.md) |
 
 ## What it does
 
@@ -34,14 +33,14 @@ in `docs/` are references it points into.
   reproduces the trained model.
 
 You bring the data, two hook files of Python and a YAML config per side,
-all scaffolded in [template/](../template/). Each run is tracked in MLflow and
+all scaffolded by `nt init`. Each run is tracked in MLflow and
 leaves a markdown reportcard.
 
 ## A session
 
 ```bash
-cp -r /path/to/neurotemplate/template/. my_app/ && cd my_app/
-# fill in modeling_user_defined.py and model_configs/modeling.yaml
+nt init my_app && cd my_app/
+# data/: train.csv, dev.csv, test.csv; fill in nt_model.py and model_configs/modeling.yaml
 nt model train                                   # ... Finished run: <model_run>
 nt control train --set sysid_run_id=<model_run>  # ... Finished control run: <policy_run>
 nt export model  --run_id <model_run> --data data/test.csv --out delivery
@@ -56,6 +55,7 @@ show the calls.
 
 | Command | Purpose |
 |---|---|
+| `nt init [dir]` | start an application: the hooks, the configs, `data/` and `AGENTS.md` |
 | `nt guide [step]` | the guided flow, one step at a time, and the guides beside it |
 | `nt model train` | train a surrogate |
 | `nt model optuna` | hyperparameter search, then retrain the best |

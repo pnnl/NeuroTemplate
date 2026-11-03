@@ -41,7 +41,7 @@ def _restore_tracking_uri():
     yield
     mlflow.set_tracking_uri(previous)
     for name in list(sys.modules):
-        if name.startswith(("modeling_user_defined_", "control_user_defined_")):
+        if name.startswith(("nt_model_", "nt_control_")):
             del sys.modules[name]
 
 
@@ -128,7 +128,7 @@ device: cpu
     control_cfg = make_control_cfg(
         sysid_run_id=model_run.run_id, location=location,
         savedir=str(tmp_path / "control"), progress="silent", plot=False,
-        user_hooks_path=str(FIXTURES / "control_user_defined.py"),
+        user_hooks_path=str(FIXTURES / "nt_control.py"),
     )
     write_splits(control_cfg, tmp_path, plant, [make_reference_df(plant)])
     return model_run, train_control(control_cfg), plant_path
@@ -137,7 +137,7 @@ device: cpu
 def test_a_trained_surrogate_feeds_a_policy_run_and_both_reload(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)   # MLflow's default artifact root is ./mlruns
     model_run, policy_run, plant_path = _surrogate_then_policy(
-        tmp_path, "mlp", FIXTURES / "modeling_user_defined.py")
+        tmp_path, "mlp", FIXTURES / "nt_model.py")
 
     dyn_sys, sysid_cfg, nm, _ = load_trained_dynamics(model_run.run_id)
     assert sysid_cfg.epochs == 2
@@ -160,8 +160,8 @@ def test_a_model_of_your_own_trains_reloads_controls_and_exports(tmp_path, monke
     whole backend: training, reload from the run's own hooks copy, a policy
     trained against it, and an export that agrees with it."""
     monkeypatch.chdir(tmp_path)
-    hooks_path = tmp_path / "modeling_user_defined.py"
-    hooks_path.write_text((FIXTURES / "modeling_user_defined.py").read_text() + USER_MODEL)
+    hooks_path = tmp_path / "nt_model.py"
+    hooks_path.write_text((FIXTURES / "nt_model.py").read_text() + USER_MODEL)
     model_run, policy_run, plant_path = _surrogate_then_policy(tmp_path, "ewma_zone", hooks_path)
 
     hooks_path.unlink()   # reloading reads the run's own copy

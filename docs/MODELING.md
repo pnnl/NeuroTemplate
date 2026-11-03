@@ -14,8 +14,7 @@ without the plant, such as weather or schedules, since a policy is later fed
 
 ## What you provide
 
-The hooks in `modeling_user_defined.py`, scaffolded in
-[template/](../template/) with a docstring each:
+The hooks in `nt_model.py`, scaffolded by `nt init` with a docstring each:
 
 | Hook | Says | |
 |---|---|---|
@@ -186,7 +185,7 @@ model(y, u, d) -> y_next
 ```
 
 Every value is in your data's own units. Register a builder by name in
-`modeling_user_defined.py` and set `model` to that name:
+`nt_model.py` and set `model` to that name:
 
 ```python
 def custom_models():

@@ -10,10 +10,10 @@ test_data_path: data/test.csv
 
 model: nssm
 # Your columns, as in your real config; short lags keep the smoke run fast.
-history:
-  "Tank Temperature [degC]": 3
-  "Heater Command [-]": 3
-  "Ambient Temperature [degC]": 3
+history: {}   # replace with your columns, e.g.
+#  "Tank Temperature [degC]": 3
+#  "Heater Command [-]": 3
+#  "Ambient Temperature [degC]": 3
 log2_hidden_size: 3
 num_layers: 1
 

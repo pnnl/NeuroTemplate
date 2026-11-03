@@ -10,7 +10,7 @@ from the frozen sys-id run.
 
 Every hook works in physical units, the data's own.
 
-The file must be named `control_user_defined.py` and live in the directory
+The file must be named `nt_control.py` and live in the directory
 you run `nt` from, or be pointed at by `user_hooks_path` in your YAML. Fill
 the hooks in here, in place: each docstring is that hook's specification
 for the library version you have installed. A control run keeps a copy of

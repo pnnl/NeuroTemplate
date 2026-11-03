@@ -22,7 +22,7 @@ from control_fixtures import (
     make_frozen_dynamics, make_nm_mapping, make_norm_stats, make_raw_df,
     make_sysid_cfg,
 )
-import modeling_user_defined as hooks
+import nt_model as hooks
 from fake_logger import FakeLogger
 from model_fixtures import unit_stats
 

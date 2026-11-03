@@ -36,10 +36,11 @@ reportcard before deciding the next run.
 
 ## setup
 
-1. **Project.** `cp -r <template> <project>` and work there; `nt` finds the hooks
-   (`modeling_user_defined.py`, `control_user_defined.py`) and the config
-   directories in the directory it runs from.
-2. **Column roles**, in `modeling_user_defined.py`:
+1. **Project.** `nt init` in the application's directory writes the hooks
+   (`nt_model.py`, `nt_control.py`), the config directories and an empty `data/`;
+   `nt` finds them in the directory it runs from. Put the record in `data/`, split in
+   time order into `train.csv`, `dev.csv` and `test.csv`.
+2. **Column roles**, in `nt_model.py`:
    - `Y`: what the model predicts. The states a controller acts on, plus any meter
      the objective prices.
    - `U`: what the controller writes.
@@ -84,12 +85,15 @@ Decide the structure first; it matters more than any hyperparameter.
 
 Reading the reportcard: the physics checks first, then each parameter in physical
 units and where it sits in its box, then test error against persistence. Test error
-is measured where the data went, not where a controller will go.
+is measured where the data went, not where a controller will go. Declaring a column
+(`demand`, `heat`) changes the physics, not the shapes, so a wrong declaration shows
+only on the reportcard. Before comparing two model configs, set `ensemble_seeds` to
+a few: one seed is one draw.
 
 ## check
 
 Before training a controller, score the rule you would otherwise run, on the model:
-`reference_control` in `control_user_defined.py`, every `residual_delta` box `[0, 0]`,
+`reference_control` in `nt_control.py`, every `residual_delta` box `[0, 0]`,
 the band terms only. Compare its band violation on the model with the rule's in the
 data. If the model says the rule cannot hold a band the data shows it holding, the
 model is wrong about the actuators, and every controller trained on it will optimise
@@ -105,6 +109,10 @@ against that error. Fix the model, not the controller.
    `power_metric`, by default the sum of `power_channels`, the meters the model
    predicts. Before training, the run prints the share each term has of the
    objective. A term near 0% is not doing anything; size the gains from that print.
+   Build it up a run at a time: the band terms alone first, which should not come
+   out much worse than the rule (if it does, a model iteration is worth more than
+   any gain), then the full objective. The band and the tariff are reference
+   columns, in a reference file per plant file: `python make_references.py --help`.
 2. **What the controller sees**, `policy_window`: every column with a `past`, and for
    forecasts a `future`. To move load in time, the controller must see the expensive
    period coming. The tariff's and the band's `future` must cover the stretch from
@@ -140,7 +148,13 @@ against that error. Fix the model, not the controller.
    relief through it? Is a command pinned at a bound, jittering, or crossing another?
 8. **Its blind twin.** Train the same config with the price gain at 0. The difference
    between the two is what the price bought; a cost number alone is mostly a fact
-   about the test week.
+   about the test week. Split a saving into offset and shape: offset is the mean
+   difference from the rule (doing less overall), shape is doing it at different
+   times (the difference in the expensive hours minus that in the cheap ones).
+
+Never decide what to ship on the surrogate's band number: it is a fact about the
+surrogate, and has been wrong by several times in both directions. Compare
+controllers on the same surrogate against the rule; judge the winner on the plant.
 
 ## export
 
@@ -190,7 +204,7 @@ on yours.
    margin under its ceiling; heating under the floor, which keeps the two from
    crossing; gas heating bounded when the tariff prices electricity.
 
-`modeling_user_defined.py`:
+`nt_model.py`:
 
 ```python
 def block_mapping(nm_mapping, cfg):
@@ -256,7 +270,7 @@ model(y, u, d) -> y_next      y, u, d: [batch, history_steps, n]; y_next: [batch
 Physical units throughout; row -1 of `u` and `d` drives this step. The full contract
 is in docs/MODELING.md ("Your own model"). The decisions:
 
-1. **Register it** in `modeling_user_defined.py`, `custom_models()` returning
+1. **Register it** in `nt_model.py`, `custom_models()` returning
    `{name: build(cfg, nm_mapping, norm_stats) -> nn.Module}`, and set `model` to the
    name. The run keeps a copy of that file, so the model's code and its starting
    values live in it, not beside it.

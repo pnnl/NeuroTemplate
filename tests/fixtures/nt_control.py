@@ -1,5 +1,5 @@
 """
-Domain bridge for the DPC controller (mirrors src/user_defined.py).
+Domain bridge for the DPC controller.
 
 These are the user-owned hooks that connect the generic control machinery to
 *this* building: what the actuator limits are, how electrical power is

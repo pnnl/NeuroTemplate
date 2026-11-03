@@ -16,8 +16,7 @@ winner on the plant.
 
 ## What you provide
 
-The hooks in `control_user_defined.py`, scaffolded in
-[template/](../template/) with a docstring each:
+The hooks in `nt_control.py`, scaffolded by `nt init` with a docstring each:
 
 | Hook | Says | |
 |---|---|---|
@@ -61,7 +60,7 @@ and the reportcard scores bands and band changes against exactly those.
 a surrogate column nor `power`, such as a band, a schedule or a tariff, is
 read from reference files: one per plant file, row-aligned with it and
 carrying exactly its timestamps. The policy sees them; the surrogate never
-does. [template/make_references.py](../template/make_references.py) writes
+does. `make_references.py`, written by `nt init`, writes
 such files, and it is example code to edit. Listing one plant file against
 several reference files trains on several draws.
 
@@ -264,9 +263,18 @@ against the rule or a previous run.
   the starts landed apart and whether every window stopped before the cap.
   `plan_starts: 0` skips it.
 
-[template/README.md](../template/README.md) describes the run-by-run ladder
-(the rule, the band terms only, the full objective, its price-blind twin),
-and how to read the plots.
+`nt guide control` is the run-by-run ladder (the rule, the band terms only,
+the full objective, its price-blind twin) and how to read the plots.
+
+Each optional capability is off until you ask for it:
+
+| Want | Implement | Then declare |
+|---|---|---|
+| an energy objective, and the energy section of the reportcard | `power_channels` (or a proxy in `power_metric`) | a `{column: power, norm: 1}` row |
+| price-driven load shifting | `power_channels`, and a tariff column in the reference files (`make_references.py --price`) | a `{column: power, norm: 1, weight: <tariff>}` row, `reference_scale`, a `future` on the tariff in `policy_window` |
+| peak shaving | `power_channels` | a `{column: power, norm: 4}` row |
+| a small correction to a trusted rule, per U column | `reference_control` | `residual_delta` |
+| the rule itself, scored | `reference_control` | `residual_delta` with every box `[0, 0]` |
 
 ## From Python
 

@@ -1,6 +1,6 @@
 [project]
 name = "NeuroTemplate"
-version = "0.1.0"
+version = "0.2.0"
 description = "Neuromancer-based template for system identification and differentiable predictive control."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -15,6 +15,14 @@ dependencies = [
     # framework depends on. This is the required state for consumers
     # installing from git. Bump the SHA when neuromancer's develop advances.
     "neuromancer @ git+https://github.com/pnnl/neuromancer.git@1f7b4f1c15210d7db92b9b98e8aa97014a867768",
+    # neuromancer.modules.operators imports SFNO from neuralop, which was
+    # removed in neuraloperator 2.0 and requires torch-harmonics. neuromancer
+    # declares both unpinned, so pin them here to the combination that imports
+    # on macOS arm64 (torch-harmonics 0.9.x ships no darwin wheel; 0.7.3 builds
+    # from source). A dependency, not a [tool.uv] constraint: uv reads
+    # constraints only from the project being synced, never from a dependency.
+    "neuraloperator<2",
+    "torch-harmonics<0.8",
     "numpy>=2.2.6",
     # ONNX export (neurotemplate.export). onnxruntime 1.24 ships no cp310
     # wheels, and this project still supports 3.10.
@@ -44,16 +52,6 @@ packages = ["src/neurotemplate"]
 # project.dependencies is accepted by hatchling at build time.
 [tool.hatch.metadata]
 allow-direct-references = true
-
-[tool.uv]
-# neuromancer.modules.operators imports SFNO from neuralop, which was removed
-# in neuraloperator 2.0 and requires torch-harmonics. neuromancer declares both
-# unpinned, so constrain them to the combination that imports on macOS arm64
-# (torch-harmonics 0.9.x ships no darwin wheel; 0.7.3 builds from source).
-constraint-dependencies = [
-    "neuraloperator<2",
-    "torch-harmonics<0.8",
-]
 
 [project.optional-dependencies]
 # neurotemplate.prep's smoother; training never imports it.

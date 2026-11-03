@@ -5,7 +5,7 @@ The library calls each function below for a dataset-specific answer (column
 roles, output heads, model structure, physics checks) and knows nothing else
 about your data. Each docstring is that hook's specification.
 
-The file must be named `modeling_user_defined.py` and live in the directory
+The file must be named `nt_model.py` and live in the directory
 you run `nt` from, or be pointed at by `user_hooks_path` in your YAML. Fill
 the hooks in here, in place: each docstring is that hook's specification
 for the library version you have installed. A trained run keeps a copy of
@@ -177,9 +177,9 @@ def block_mapping(
     """
     Model structure: split Y into blocks, each its own sub-model with its own
     parameters, family (`model`) and hidden state. Return None (or delete
-    this function) for one block holding every channel. The framework
-    README's "Blocks" and "Declaring what a column is" sections explain each
-    choice at length; this is the contract.
+    this function) for one block holding every channel. The "Blocks" and
+    "Declaring what a column is" sections of the library's docs/MODELING.md
+    explain each choice at length; this is the contract.
 
     Worth doing whenever the plant is several parts that interact mainly
     through shared inputs. A joint model has to learn that the
@@ -394,7 +394,7 @@ def hyper_args(trial, cfg: Config) -> Config:
 # partial, for one, is zero wherever the setpoint is satisfied. A setpoint
 # declared `demand` in block_mapping is differentiated as the demand feature
 # instead, so its sign here is the declared `sign` (-1 for cooling).
-# Run `python modeling_user_defined.py` to write the file.
+# Run `python nt_model.py` to write the file.
 def write_gradient_mapping(path: str = "data/grad/mapping.json") -> str:
     mapping: dict[str, dict[str, int]] = {
         # "Tank Temperature [degC]": {

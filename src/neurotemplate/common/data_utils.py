@@ -1,6 +1,7 @@
 import json
 import re
 import warnings
+from pathlib import Path
 from typing import Optional, TypedDict
 
 import pandas as pd
@@ -179,6 +180,11 @@ def load_split(paths: list[str], name: str) -> tuple[list[pd.DataFrame], float]:
     dfs: list[pd.DataFrame] = []
     freq: Optional[float] = None
     for i, path in enumerate(paths):
+        if not Path(path).exists():
+            raise FileNotFoundError(
+                f"{name} data file not found: {path} (relative paths are read "
+                f"from the working directory, {Path.cwd()})"
+            )
         df, f = get_data(path)
         if df.isna().any().any():
             raise ValueError(f"NaNs found in {name}[{i}] ({path})")
@@ -576,7 +582,7 @@ def compute_norm_stats(
             - "z_score": (x - mean) / std          →  (-inf, +inf)
             - None:      no normalization (identity)
         column_overrides: Per-column norm_type overrides from
-            user_defined.column_norm_config(). Keys are column names;
+            nt_model.column_norm_config(). Keys are column names;
             values follow the same convention as norm_type, with None
             meaning "skip normalization for this column". Columns not
             present in the dict use the global norm_type.

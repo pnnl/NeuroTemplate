@@ -14,12 +14,6 @@ resolution-markers = [
     "python_full_version < '3.11' and sys_platform != 'linux'",
 ]
 
-[manifest]
-constraints = [
-    { name = "neuraloperator", specifier = "<2" },
-    { name = "torch-harmonics", specifier = "<0.8" },
-]
-
 [[package]]
 name = "aiohappyeyeballs"
 version = "2.6.1"
@@ -2566,7 +2560,7 @@ dependencies = [
 
 [[package]]
 name = "neurotemplate"
-version = "0.1.0"
+version = "0.2.0"
 source = { editable = "." }
 dependencies = [
     { name = "beartype" },
@@ -2574,6 +2568,7 @@ dependencies = [
     { name = "ipython", version = "9.17.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
     { name = "matplotlib" },
     { name = "mlflow" },
+    { name = "neuraloperator" },
     { name = "neuromancer" },
     { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
     { name = "numpy", version = "2.3.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
@@ -2585,6 +2580,7 @@ dependencies = [
     { name = "pandas" },
     { name = "pyyaml" },
     { name = "torch" },
+    { name = "torch-harmonics" },
 ]
 
 [package.optional-dependencies]
@@ -2602,6 +2598,7 @@ requires-dist = [
     { name = "ipython" },
     { name = "matplotlib", specifier = ">=3.10.7" },
     { name = "mlflow", specifier = ">=3.9.0" },
+    { name = "neuraloperator", specifier = "<2" },
     { name = "neuromancer", git = "https://github.com/pnnl/neuromancer.git?rev=1f7b4f1c15210d7db92b9b98e8aa97014a867768" },
     { name = "neurotemplate", extras = ["prep"], marker = "extra == 'dev'" },
     { name = "numpy", specifier = ">=2.2.6" },
@@ -2615,6 +2612,7 @@ requires-dist = [
     { name = "pyyaml", specifier = ">=6.0" },
     { name = "statsmodels", marker = "extra == 'prep'", specifier = ">=0.14" },
     { name = "torch", specifier = ">=2.9.0" },
+    { name = "torch-harmonics", specifier = "<0.8" },
 ]
 provides-extras = ["prep", "dev"]
 

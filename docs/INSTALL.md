@@ -5,39 +5,31 @@ holds your data, hook files and configs. New library features arrive by
 bumping the version the application pins.
 
 It needs Python 3.10 or newer. These instructions use
-[uv](https://docs.astral.sh/uv/); plain pip works, but it cannot apply the
-constraints below.
+[uv](https://docs.astral.sh/uv/); plain pip works too.
 
 ## As a dependency
 
-In the application's `pyproject.toml`:
+From an empty directory:
 
-```toml
-[project]
-dependencies = [
-    "NeuroTemplate @ git+ssh://git@<host>/<owner>/neurotemplate.git@<tag>",
-]
-
-[tool.uv]
-constraint-dependencies = [
-    "neuraloperator<2",
-    "torch-harmonics<0.8",
-]
+```bash
+uv init my_app && cd my_app
+uv add "NeuroTemplate @ git+ssh://git@<host>/<owner>/neurotemplate.git@<tag>"   # a release tag, e.g. v0.2.0
+uv run nt init
 ```
 
-Then `uv sync`. That puts one command, `nt`, on the environment's `PATH`.
-
-**Copy the constraints block.** Neuromancer imports from neuraloperator a
-class that neuraloperator 2.0 removed, and it does not pin either package.
-uv reads `[tool.uv]` only from the project being synced, never from a
-dependency, so the library cannot set these for you. Without them
-`uv sync` succeeds and every `nt` command fails at import, with
-`cannot import name 'SFNO' from 'neuralop.models'`.
+That puts one command, `nt`, on the environment's `PATH`, and `nt init` writes
+the application (below).
 
 **Neuromancer is pinned to one git commit.** If the application lists its
 own Neuromancer source, such as a local checkout, point it at the same
 commit or drop it. Otherwise `uv sync` refuses with conflicting URLs for
 `neuromancer`.
+
+**Numba's JIT is off in any process that imports the library.** Neuromancer
+imports pyts, which compiles numba kernels at import (20-60 s) for a plot this
+library never draws, so `neurotemplate` sets `NUMBA_DISABLE_JIT=1` unless the
+environment already sets it. Your own numba code in the same process then runs
+uncompiled; set `NUMBA_DISABLE_JIT=0` to keep the JIT and pay the import.
 
 ### Optional extras
 
@@ -61,15 +53,18 @@ NeuroTemplate = { path = "../neurotemplate", editable = true }
 ## Setting up an application
 
 ```bash
-cp -r /path/to/neurotemplate/template/. my_app/
+nt init            # or: nt init my_app
 ```
 
-This gives you both hook files, both config directories with every field
-annotated, and a smoke-run config per side.
-[template/README.md](../template/README.md) is the fill-in order.
+This writes both hook files, both config directories with every field
+annotated, a smoke-run config per side, `make_references.py`, an empty
+`data/`, and `AGENTS.md` (with a `CLAUDE.md` pointing at it) for an agent
+working in the directory. It writes nothing if any of those files already
+exists. Put the record in `data/`, split in time order into `train.csv`,
+`dev.csv` and `test.csv`, the paths the configs name; then `nt guide setup`.
 
 Run `nt` from the application's root. The library finds
-`modeling_user_defined.py` and `control_user_defined.py` there, or wherever
+`nt_model.py` and `nt_control.py` there, or wherever
 a config's `user_hooks_path` points.
 
 **A trained run keeps a copy of its hooks file.** Reloading a run, to score

@@ -939,7 +939,7 @@ def build_scenarios(
 ) -> Optional[list]:
     """The scenario objects for this run, or None when the subsystem is off.
 
-    `synth_cfg=None` (the `modeling_user_defined.synth_cfg` hook's opt-out) is
+    `synth_cfg=None` (the `nt_model.synth_cfg` hook's opt-out) is
     the single switch; every caller checks for None rather than re-deriving
     whether the subsystem applies. The spec is validated here, so a mapping it
     cannot describe fails at construction with the list of what to fix.
