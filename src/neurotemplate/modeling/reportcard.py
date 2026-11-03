@@ -1,40 +1,28 @@
 """
-Per-run reportcard.
+Per-run reportcard: the verdicts on one trained model, short enough to read.
 
-A single markdown summary dropped in each run's artifact directory and
-logged to MLflow. Sections (in order):
+A markdown summary dropped in each run's artifact directory and logged to
+MLflow. It reports exceptions, not inventories: a healthy channel is counted,
+not listed, and each check is explained once rather than on every row. The
+full output of every instrument is in the run's `results/` folder, one JSON
+file each, for tools and for looking a channel up.
 
-  1. Summary                — run name, timestamp, dev_loss, train_time
-  2. Architecture           — factory, separable/residual, param count
-  3. Data                   — split sizes, Y/U/D classification,
-                              per-column normalization, head kinds, and any
-                              column left in raw units because it was constant
-  4. Test metrics           — per-channel RMSE/MAE/R²/NRMSE in physical units,
-                              with persistence (hold the last seeded state)
-                              as the reference row beneath
-  4b. Level metrics         — balanced accuracy, per-level recall and
-                              predicted-vs-true level share for every binary /
-                              ordinal channel, beside persistence's; NRMSE
-                              cannot tell a working head from a constant
-  4c. Threshold calibration — the ordinal decision-threshold search's full
-                              trace: what each dev rollout tried and produced,
-                              not just the rule it landed on
-  5. Rollout stability      — per-channel rise fraction and drift vs. the
-                              truth's own, flagging models that have stopped
-                              responding to their inputs and are ramping
-  6. Physics checks         — equilibrium / step response / free decay, each a
-                              pass-fail assertion per thermal state channel, on
-                              synthetic states the recorded data never contains
-  6b. Readout channels      — order statistics for the Y channels that are not
-                              thermal states; reported without a verdict
-  6c. Seed ensemble spread  — min/median/max of test RMSE, physics-check
-                              values, and tau_slow across cfg.ensemble_seeds
-                              independently-trained models. Present only when
-                              ensemble_seeds > 1; every other number on this
-                              page is a single seed's draw.
-  8. Bounded channel coverage — for each bounded head, whether any test
-                              samples fall outside the head's [lo, hi]
-  9. Hyperparameters        — lr, batch_size, train_pred_steps, curriculum, gains
+Sections (in order):
+
+  Verdict       — one line per instrument: accuracy, whiteness, physics,
+                  rollout, staged channels, and any data warning
+  Model         — family, size, history; identical blocks collapsed to one line
+  Data          — split sizes, role counts, head kinds, normalization
+  Accuracy      — rollout RMSE against persistence, and skill; the worst
+                  channels when there are many
+  Whiteness     — one-step-ahead residuals (`whiteness`), grouped by the
+                  period that holds the most residual power
+  Staged channels — balanced accuracy against persistence, decision thresholds
+  Physics       — per check, how many channels pass, and the failures
+  Rollout       — channels that ramp or drift well past the truth; omitted
+                  when none do
+  Seed ensemble — the spread across `cfg.ensemble_seeds` models, when > 1
+  Hyperparameters — one line
 
 Single entry point: render_reportcard(...) returns the markdown string.
 The caller (pipeline.py) is responsible for writing it to disk and
@@ -45,6 +33,7 @@ from __future__ import annotations
 
 import math
 import statistics
+from collections import Counter
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Optional
@@ -56,25 +45,28 @@ from neurotemplate.modeling.bounded import edge_note
 from neurotemplate.modeling.config import ModelingConfig
 from neurotemplate.modeling.calibration import Calibration
 from neurotemplate.modeling.heads import BoundedHead, HeadStack, OrdinalHead
+from neurotemplate.modeling.whiteness import PERIOD_BANDS, Whiteness
 from neurotemplate.common.metrics import (
     ChannelMetrics,
     LevelMetrics,
     RolloutStability,
-    level_metrics_to_markdown,
-    metrics_to_markdown,
-    stability_to_markdown,
+    skill,
 )
 from neurotemplate.modeling.scenarios import (
     DECAY_MIN_CLOSED,
     FreeDecayScenario,
-    ReadoutSummary,
     ScenarioResult,
-    checks_to_markdown,
-    readouts_to_markdown,
 )
-from neurotemplate.common.reportcard import _fmt_float, _section
+from neurotemplate.common.reportcard import RESULTS_DIR, _names, _section
 
 from neurotemplate._typing import beartype
+
+#: A table with more rows than this shows only its worst rows.
+MAX_ROWS = 12
+#: How many worst rows a capped table shows.
+WORST_ROWS = 8
+#: A rollout drifting more than this multiple of the truth's drift is flagged.
+DRIFT_RATIO_WARN = 2.0
 
 
 # ── Seed ensemble spread ──────────────────────────────────────────
@@ -133,53 +125,268 @@ def _spread_table(rows: list[tuple[str, SeedSpread]]) -> list[str]:
     """A 4-column min/median/max markdown table, one row per named spread."""
     lines = ["| Channel | Min | Median | Max |", "|---|---:|---:|---:|"]
     for name, s in rows:
-        lines.append(f"| {name} | {s.min:.4g} | {s.median:.4g} | {s.max:.4g} |")
+        lines.append(f"| `{name}` | {s.min:.4g} | {s.median:.4g} | {s.max:.4g} |")
     return lines
 
 
-def _ensemble_section(ensemble: Optional[EnsembleSpread]) -> Optional[str]:
-    """Min/median/max across the seed ensemble, one table per metric family.
+def _widest(spreads: dict[str, SeedSpread]) -> list[tuple[str, SeedSpread]]:
+    """The spreads widest relative to their median, at most MAX_ROWS."""
+    def width(s: SeedSpread) -> float:
+        return (s.max - s.min) / abs(s.median) if s.median else float("inf")
+    return sorted(spreads.items(), key=lambda kv: -width(kv[1]))[:MAX_ROWS]
 
-    Returns None when there is no ensemble (cfg.ensemble_seeds == 1), which
-    is what keeps that case's rendering byte-identical to a run built before
-    this feature existed.
-    """
+
+def _ensemble_section(ensemble: Optional[EnsembleSpread]) -> Optional[str]:
+    """Min/median/max across the seed ensemble; None without one."""
     if ensemble is None:
         return None
-
-    body = [
-        f"Across **{ensemble.n_seeds}** independently-trained seeds "
-        f"(`cfg.seed` .. `cfg.seed + {ensemble.n_seeds - 1}`). Only the "
-        "first seed's weights are logged, plotted, and behind every other "
-        "number on this page — this section is the error bar around them.\n"
-    ]
-
-    if ensemble.rmse:
-        body.append("**Test RMSE (physical units):**\n")
-        body += _spread_table(sorted(ensemble.rmse.items()))
-        body.append("")
-
-    if ensemble.tau_slow:
-        body.append("**`tau_slow` (hours):**\n")
-        body += _spread_table(sorted(ensemble.tau_slow.items()))
-        body.append("")
-
-    if ensemble.balanced_acc:
-        body.append("**Test balanced accuracy (staged channels):**\n")
-        body += _spread_table(sorted(ensemble.balanced_acc.items()))
-        body.append("")
-
+    body = [f"Across **{ensemble.n_seeds}** seeds (`cfg.seed` .. `cfg.seed + "
+            f"{ensemble.n_seeds - 1}`). Every other number on this card is the "
+            "first seed's; this is the error bar around them.\n"]
+    for title, spreads in (("Test RMSE", ensemble.rmse),
+                           ("`tau_slow` (hours)", ensemble.tau_slow),
+                           ("Balanced accuracy", ensemble.balanced_acc)):
+        if spreads:
+            shown = _widest(spreads)
+            more = (f" (the {len(shown)} widest of {len(spreads)})"
+                    if len(shown) < len(spreads) else "")
+            body += [f"**{title}**{more}:\n", *_spread_table(shown), ""]
+    flips = {key: n for key, n in ensemble.physics_passed.items()
+             if 0 < n < ensemble.n_seeds}
     if ensemble.physics:
-        body.append("**Physics-check values:**\n")
-        body.append("| Scenario | Channel | Passed | Min | Median | Max |")
-        body.append("|---|---|---:|---:|---:|---:|")
-        for key, s in sorted(ensemble.physics.items()):
-            scenario, channel = key.split(" | ", 1)
-            passed = ensemble.physics_passed.get(key, 0)
-            body.append(f"| {scenario} | `{channel}` | {passed}/{ensemble.n_seeds} | "
-                        f"{s.min:.4g} | {s.median:.4g} | {s.max:.4g} |")
-
+        body.append("**Physics verdicts that change with the seed:** "
+                    + (", ".join(f"`{key}` ({n}/{ensemble.n_seeds})"
+                                 for key, n in sorted(flips.items()))
+                       if flips else "none") + ".")
     return _section("Seed ensemble spread", "\n".join(body))
+
+
+# ── Header and verdict ────────────────────────────────────────────
+
+
+def _header(name: str, timestamp: str, trained: bool,
+            best_dev_loss: Optional[float], train_time_s: Optional[float],
+            test_time_s: Optional[float]) -> str:
+    parts = [timestamp]
+    if not trained:
+        parts.append("not trained (`lr: 0`): the model as built")
+    if best_dev_loss is not None:
+        parts.append(f"dev loss {best_dev_loss:.4g}")
+    if train_time_s is not None:
+        parts.append(f"trained {train_time_s:.0f} s")
+    if test_time_s is not None:
+        parts.append(f"test rollout {test_time_s:.2f} s")
+    return f"# Reportcard: {name}\n\n" + " · ".join(parts) + "\n"
+
+
+def ranked_skills(metrics: list[ChannelMetrics],
+            persistence: list[ChannelMetrics]) -> list[tuple[ChannelMetrics, float, float]]:
+    """(metrics, persistence RMSE, skill) per channel, worst skill first;
+    a channel persistence already predicts exactly (NaN skill) goes last."""
+    reference = {m.name: m.rmse for m in persistence}
+    rows = [(m, reference[m.name], skill(m.rmse, reference[m.name])) for m in metrics]
+    return sorted(rows, key=lambda r: (math.isnan(r[2]), r[2]))
+
+
+def _verdict_section(
+    rows: list[tuple[ChannelMetrics, float, float]],
+    white: list[Whiteness],
+    physics: Optional[list[ScenarioResult]],
+    flagged: list[RolloutStability],
+    test_window: int,
+    levels: list[LevelMetrics],
+    persistence_levels: list[LevelMetrics],
+    warnings: list[str],
+) -> str:
+    lines = []
+    scored = [r for r in rows if not math.isnan(r[2])]
+    if scored:
+        beats = sum(r[2] > 0 for r in scored)
+        median = statistics.median(r[2] for r in scored)
+        worst = ", ".join(f"`{m.name}` {s:.2f}" for m, _, s in scored[:3])
+        lines.append(f"- **Accuracy:** beats persistence on {beats} of {len(scored)} "
+                     f"channels, median skill {median:.2f}; worst {worst}.")
+    if white:
+        n_white = sum(w.white for w in white)
+        lines.append(f"- **One-step residuals:** {n_white} of {len(white)} continuous "
+                     "channels white" + ("." if n_white == len(white)
+                                         else "; the rest carry structure (Whiteness)."))
+    if physics is not None:
+        by_check = _group_checks(physics)
+        counts = ", ".join(f"{check} {sum(r.passed for r in rs)}/{len(rs)}"
+                           for check, rs in by_check.items())
+        passed = sum(r.passed for r in physics)
+        lines.append(f"- **Physics:** {passed} of {len(physics)} checks pass ({counts}).")
+    lines.append(
+        f"- **Rollout:** {len(flagged)} channel(s) ramp or drift past "
+        f"{DRIFT_RATIO_WARN:g}× the truth over {test_window} steps (Rollout)."
+        if flagged else
+        f"- **Rollout:** no channel ramps or drifts past {DRIFT_RATIO_WARN:g}× "
+        f"the truth over {test_window} steps.")
+    if levels:
+        reference = {lm.name: lm.balanced_accuracy for lm in persistence_levels}
+        worst = min(levels, key=lambda lm: lm.balanced_accuracy)
+        lines.append(f"- **Staged channels:** worst balanced accuracy `{worst.name}` "
+                     f"{worst.balanced_accuracy:.2f} (persistence "
+                     f"{reference.get(worst.name, float('nan')):.2f}).")
+    lines += [f"- ⚠️ {w}" for w in warnings]
+    lines.append(f"\nEvery instrument's full output is in `{RESULTS_DIR}/` beside this card.")
+    return _section("Verdict", "\n".join(lines))
+
+
+# ── Model ─────────────────────────────────────────────────────────
+
+
+def _lag_list(lags: dict[str, int]) -> str:
+    return ", ".join(f"{column} {lag}" for column, lag in lags.items())
+
+
+def _lags_by_value(lags: dict[str, int]) -> str:
+    """Columns grouped by their lag, longest first: `lag 5: a, b, … (+n)`."""
+    groups: dict[int, list[str]] = {}
+    for column, lag in lags.items():
+        groups.setdefault(lag, []).append(column)
+    return "; ".join(f"lag {lag}: {_names(cols)}"
+                     for lag, cols in sorted(groups.items(), reverse=True))
+
+
+def _block_parts(info: dict) -> list[str]:
+    parts = [f"`{info['class']}`", f"{info['param_count']:,} params"]
+    if info.get("hsizes"):
+        parts.append(f"hsizes {info['hsizes']}")
+    for key in ("hidden_size", "num_layers"):
+        if key in info:
+            parts.append(f"{key} {info[key]}")
+    return parts
+
+
+def _network_lines(info: dict, indent: str) -> list[str]:
+    """An rc_network block's time constants against the ladder's, and the
+    share of its stability bound each thermostat gain uses."""
+    if "network_time_constants_h" not in info:
+        return []
+    taus = ", ".join(f"{t:.3g}" for t in info["network_time_constants_h"])
+    line = f"{indent}- network {info['network']}: time constants {taus} h"
+    coarse = info.get("coarse_time_constants_h")
+    if coarse:
+        line += "; the ladder's " + ", ".join(
+            f"{t:.3g} ± {'?' if se is None else f'{se:.2g}'}" for t, se in coarse) + " h"
+    lines = [line]
+    if info.get("left_coarse_bar"):
+        lines.append(f"{indent}- ⚠️ outside three of the ladder's error bars: "
+                     f"{info['left_coarse_bar']} h — training moved a time constant "
+                     "the likelihood had placed.")
+    shares = ", ".join(f"{side} {share:.0%}" for side, share in info["gain_share"].items())
+    lines.append(f"{indent}- thermostat {info['thermostat']}: gain at {shares} of "
+                 "the bound past which the loop rings")
+    return lines
+
+
+def _edge_lines(bounded: dict, indent: str) -> list[str]:
+    """Only the bounded parameters the box stopped: a value pressed against
+    an edge says the data (or the seed) disagrees with the prior."""
+    lines = []
+    for name, b in bounded.items():
+        if b["pinned"]:
+            continue
+        for label, fraction in b["fraction"].items():
+            note = edge_note(name, fraction)
+            if note is not None:
+                which = f" ({label})" if len(b["fraction"]) > 1 else ""
+                lines.append(f"{indent}- ⚠️ {name}{which} = {b['value'][label]:.3g} "
+                             f"in [{b['low']:g}, {b['high']:g}]: {note}")
+    return lines
+
+
+def _forcing_lines(forcing: Optional[dict], indent: str) -> list[str]:
+    """Which column feeds which branch of a forcing block. A demand routed
+    into the mlp voids the block's stability guarantee, so it is called out."""
+    if not forcing:
+        return []
+    branches = []
+    if forcing.get("ambient"):
+        branches.append(f"ambient {forcing['ambient']['column']}")
+    branches += [f"linear {c} (k={t['k']:.3g})" for c, t in forcing.get("linear", {}).items()]
+    branches += [f"{'latched' if t['latched'] else 'saturating'} {c} "
+                 f"(w={t['w']:.3g}, slope_share={t['slope_share']:.2f})"
+                 for c, t in forcing.get("saturating", {}).items()]
+    if forcing.get("mlp"):
+        branches.append(f"mlp {', '.join(forcing['mlp'])}")
+    lines = [f"{indent}- forcing: " + "; ".join(branches)]
+    if forcing.get("demand_in_mlp"):
+        lines.append(f"{indent}- ⚠️ demand routed into the mlp: "
+                     f"{', '.join(forcing['demand_in_mlp'])} — the stability "
+                     "guarantee does not hold for this block")
+    return lines
+
+
+def _own_lines(info: dict, indent: str) -> list[str]:
+    """What a single block reports about itself beyond its size."""
+    return (_network_lines(info, indent)
+            + _edge_lines(info.get("bounded", {}), indent)
+            + _forcing_lines(info.get("forcing"), indent))
+
+
+def _block_signature(info: dict) -> tuple:
+    """Blocks with the same signature print as one line."""
+    return (info.get("model"), info["class"], info["param_count"], str(info.get("hsizes")),
+            info.get("hidden_size"), info.get("num_layers"),
+            tuple(info.get("lags", {}).values()))
+
+
+def _stack_lines(info: dict) -> list[str]:
+    """One line per group of identical plain blocks; a block with something
+    of its own to say (time constants, a parameter at an edge, forcing)
+    gets its own line."""
+    groups: dict[tuple, list[str]] = {}
+    lines = []
+    for name, sub in info["blocks"].items():
+        if sub is None:
+            continue
+        own = _own_lines(sub, "  ")
+        if own:
+            lines.append(f"- block `{name}` ({sub.get('model')}): " + ", ".join(_block_parts(sub)))
+            lines += own
+        else:
+            groups.setdefault(_block_signature(sub), []).append(name)
+    for names in groups.values():
+        first = info["blocks"][names[0]]
+        label = (f"block `{names[0]}`" if len(names) == 1
+                 else f"{len(names)} blocks {_names(names, limit=3)}")
+        each = "" if len(names) == 1 else " each"
+        line = f"- {label} ({first.get('model')}): " + ", ".join(_block_parts(first)) + each
+        if "lags" in first:
+            line += (f"; reads {_lag_list(first['lags'])}" if len(names) == 1
+                     else f"; `{names[0]}` reads {_lag_list(first['lags'])}")
+        lines.append(line)
+    return lines
+
+
+def _architecture_section(arch: dict) -> str:
+    flags = [f for f, on in (("separable", arch["separable"]),
+                             ("residual", arch["residual"])) if on]
+    lines = [
+        f"- `{arch['factory']}`" + (f" ({', '.join(flags)})" if flags else "")
+        + f", {arch['param_count']:,} trainable params, history {arch['history_steps']} steps; "
+        f"ny={arch['ny']}, nu={arch['nu']}, nd={arch['nd']}",
+        f"- History: {_lags_by_value(arch['history'])}",
+    ]
+    for key in ("fy", "fu", "fd"):
+        info = arch.get("blocks", {}).get(key)
+        if info is None:
+            continue
+        if info.get("blocks"):
+            lines += _stack_lines(info)
+        else:
+            lines.append(f"- {key}: " + ", ".join(_block_parts(info)))
+            lines += _own_lines(info, "  ")
+    for column, entry in (arch.get("pre_stack") or {}).items():
+        lines.append(f"- derived input {column}: {entry['kind']} of {entry['state']}, "
+                     f"sign {entry['sign']:+d}, scale {entry['scale']:.3g}")
+    return _section("Model", "\n".join(lines))
+
+
+# ── Data ──────────────────────────────────────────────────────────
 
 
 def _head_label(head) -> str:
@@ -194,559 +401,211 @@ def _head_label(head) -> str:
     return label
 
 
-def _summary_section(
-    run_name: str,
-    timestamp: str,
-    trained: bool,
-    best_dev_loss: Optional[float],
-    train_time_s: Optional[float],
-    test_time_s: Optional[float],
-) -> str:
-    rows = [
-        f"- **Run:** `{run_name}`",
-        f"- **Timestamp:** {timestamp}",
-    ]
-    if not trained:
-        rows.append("- **Training:** none (`lr: 0`): the model as built")
-    if best_dev_loss is not None:
-        rows.append(f"- **Best dev loss:** {_fmt_float(best_dev_loss)}")
-    if train_time_s is not None:
-        rows.append(f"- **Train time:** {train_time_s:.1f} s")
-    if test_time_s is not None:
-        rows.append(f"- **Test inference time:** {test_time_s:.2f} s")
-    return _section("Summary", "\n".join(rows))
+def _norm_line(nm_mapping: dict, norm_stats: dict) -> str:
+    """The commonest normalization, and the columns that differ from it."""
+    columns = [c for role in ("Y", "U", "D") for c in nm_mapping.get(role, [])]
+    kinds = {c: norm_stats.get(c, {}).get("norm_type", "?") for c in columns}
+    common = Counter(kinds.values()).most_common(1)[0][0]
+    others: dict[str, list[str]] = {}
+    for c, kind in kinds.items():
+        if kind != common:
+            others.setdefault(kind, []).append(c)
+    return (f"- Normalization: {common}"
+            + "".join(f"; {kind}: {_names(cols)}" for kind, cols in others.items()))
 
 
-def _block_lines(name: str, info: Optional[dict], indent: str = "") -> list[str]:
-    """One bullet for a block, plus nested bullets for what it reports itself.
-
-    A per-block stack (BlockStack) nests one bullet per block, labelled with
-    its family — the interesting fact once a spec can mix families in one
-    graph. An rc_network block adds the time constants it learned against
-    the ladder's, and any block its bounded parameters. The slowest time
-    constant is the storage number — how long a temperature difference
-    survives — so it is worth reading against what you know of the building.
-    """
-    if info is None:
-        return []
-    parts = [f"`{info['class']}`", f"params={info['param_count']:,}"]
-    if "hsizes" in info and info["hsizes"]:
-        parts.append(f"hsizes={info['hsizes']}")
-    if "hidden_size" in info:
-        parts.append(f"hidden_size={info['hidden_size']}")
-    if "num_layers" in info:
-        parts.append(f"num_layers={info['num_layers']}")
-    if "in_features" in info:
-        parts.append(f"in={info['in_features']}")
-    if "out_features" in info:
-        parts.append(f"out={info['out_features']}")
-    lines = [f"{indent}- **{name}:** " + ", ".join(parts)]
-
-    lines += _network_lines(info, indent + "  ")
-    if "lags" in info:
-        lines.append(f"{indent}  - reads, lag per column: {_lag_list(info['lags'])}")
-    lines += _bounded_lines(info.get("bounded", {}), indent + "  ")
-    lines += _forcing_lines(info.get("forcing"), indent + "  ")
-    for block_name, sub in info.get("blocks", {}).items():
-        label = f"block `{block_name}`"
-        if sub is not None and sub.get("model"):
-            label += f" ({sub['model']})"
-        lines += _block_lines(label, sub, indent + "  ")
-    return lines
-
-
-def _network_lines(info: dict, indent: str) -> list[str]:
-    """An rc_network block's time constants against the ladder's, and the
-    share of its stability bound each thermostat gain uses."""
-    if "network_time_constants_h" not in info:
-        return []
-    taus = ", ".join(f"{t:.3g}" for t in info["network_time_constants_h"])
-    lines = [f"{indent}- network {info['network']}: time constants {taus} h"]
-    coarse = info.get("coarse_time_constants_h")
-    if coarse:
-        bars = ", ".join(f"{t:.3g} ± {'?' if se is None else f'{se:.2g}'}" for t, se in coarse)
-        lines.append(f"{indent}- the ladder's, at its coarse step: {bars} h")
-    if info.get("left_coarse_bar"):
-        lines.append(f"{indent}- ⚠️ outside three of the ladder's error bars: "
-                     f"{info['left_coarse_bar']} h. Training moved a time constant the "
-                     "likelihood had placed; read the boxes below for which parameter did it.")
-    shares = ", ".join(f"{side} {share:.0%}" for side, share in info["gain_share"].items())
-    lines.append(f"{indent}- thermostat {info['thermostat']}: gain at {shares} of the "
-                 "bound past which the loop rings")
-    return lines
-
-
-def _lag_list(lags: dict[str, int]) -> str:
-    return ", ".join(f"{column} {lag}" for column, lag in lags.items())
-
-
-def _bounded_lines(bounded: dict, indent: str) -> list[str]:
-    """Each bounded parameter's box and where the fit landed in it.
-
-    A parameter pressed against a bound is the diagnostic: the box stopped
-    the fit, which says the data (or the seed) disagrees with the prior.
-    """
-    lines = []
-    for name, b in bounded.items():
-        if b["pinned"]:
-            lines.append(f"{indent}- {name}: pinned at {b['low']:g}")
-            continue
-        if len(b["value"]) > _LISTED_VALUES:
-            lines.append(f"{indent}- {_bounded_summary(name, b)}")
-            continue
-        for label, value in b["value"].items():
-            fraction = b["fraction"][label]
-            note = edge_note(name, fraction)
-            which = f" ({label})" if len(b["value"]) > 1 else ""
-            lines.append(
-                f"{indent}- {name}{which}: {value:.3g} in [{b['low']:g}, "
-                f"{b['high']:g}], {fraction * 100:.0f}% of the way up"
-                + ("" if note is None else f" — ⚠️ {note}"))
-    return lines
-
-
-#: A bounded parameter with more values than this prints as one line.
-_LISTED_VALUES = 4
-
-
-def _bounded_summary(name: str, b: dict) -> str:
-    """One line for a many-valued bounded parameter: its spread, and how many
-    values the box stopped at each edge."""
-    values = list(b["value"].values())
-    low = sum(edge_note(name, f) is not None and f < 0.5 for f in b["fraction"].values())
-    high = sum(edge_note(name, f) is not None and f > 0.5 for f in b["fraction"].values())
-    return (f"{name}: {len(values)} values in [{b['low']:g}, {b['high']:g}], "
-            f"{min(values):.3g} to {max(values):.3g}; {low} near the lower edge, "
-            f"{high} near the upper")
-
-
-def _forcing_lines(forcing: Optional[dict], indent: str) -> list[str]:
-    """Which column feeds which branch of a 2R2C block, and what each learned.
-
-    `slope_share` is the fraction of the stability headroom a saturating
-    branch's slope uses; at 1.0 the coil has arrived at the bound the
-    parameterization enforces. Capacities and latch thresholds are bounded
-    parameters, listed with the time constants.
-    """
-    if not forcing:
-        return []
-    lines = []
-    if forcing.get("ambient"):
-        lines.append(f"{indent}- ambient: {forcing['ambient']['column']}")
-    for column, term in forcing.get("linear", {}).items():
-        lines.append(f"{indent}- linear: {column}, k={term['k']:.4g} °C/step per unit")
-    for column, term in forcing.get("saturating", {}).items():
-        lines.append(f"{indent}- {'latched' if term['latched'] else 'saturating'}: "
-                     f"{column}, w={term['w']:.3g} °C, "
-                     f"slope_share={term['slope_share']:.2f}")
-    if forcing.get("mlp"):
-        hsizes = forcing.get("mlp_hsizes") or []
-        size_s = f", hsizes={hsizes}" if hsizes else ""
-        lines.append(f"{indent}- mlp: {', '.join(forcing['mlp'])}{size_s}")
-    if forcing.get("demand_in_mlp"):
-        lines.append(f"{indent}- demand routed into the mlp: "
-                     f"{', '.join(forcing['demand_in_mlp'])} — unbounded slope, "
-                     "the stability guarantee does not hold for this block")
-    return lines
-
-
-def _architecture_section(arch: dict, title: str = "Architecture") -> str:
-    lines = [
-        f"- **Factory:** `{arch['factory']}`",
-        f"- **Separable:** {arch['separable']}",
-        f"- **Residual:** {arch['residual']}",
-        f"- **Shapes:** history_steps={arch['history_steps']}, "
-        f"ny={arch['ny']}, nu={arch['nu']}, nd={arch['nd']}",
-        f"- **History (lag per column):** {_lag_list(arch['history'])}",
-        f"- **Total trainable params:** {arch['param_count']:,}",
-    ]
-    blocks = arch.get("blocks", {})
-    block_lines = [
-        line
-        for key in ("fy", "fu", "fd")
-        for line in _block_lines(key, blocks.get(key))
-    ]
-    if block_lines:
-        lines.append("")
-        lines.append("Blocks:")
-        lines.extend(block_lines)
-    pre_stack = arch.get("pre_stack")
-    if pre_stack:
-        lines.append("")
-        lines.append("Derived inputs (replace the raw column before every family):")
-        for column, entry in pre_stack.items():
-            lines.append(f"- {column}: {entry['kind']} of {entry['state']}, "
-                         f"sign={entry['sign']:+d}, scale={entry['scale']:.3g}")
-    return _section(title, "\n".join(lines))
-
-
-def _norm_label(stats: Optional[dict]) -> str:
-    """Short normalization tag for a column, e.g. 'min_max' or 'none'."""
-    if stats is None:
-        return "?"
-    return stats.get("norm_type", "?")
-
-
-def _data_section(
-    nm_mapping: dict,
-    split_sizes: Optional[dict[str, dict[str, int]]],
-    head_stack: Optional[HeadStack] = None,
-    norm_stats: Optional[dict] = None,
-) -> str:
-    """`split_sizes` is `{split: {"rows": int, "files": int}}`; the file
-    count is only printed when a split spans more than one."""
-    def cols(key: str) -> str:
-        names = nm_mapping.get(key, [])
-        if not names:
-            return "*(none)*"
-        lines = []
-        for name in names:
-            entry = f"`{name}`"
-            tags = []
-            if norm_stats is not None:
-                tags.append(f"norm: {_norm_label(norm_stats.get(name))}")
-            if key == "Y" and head_stack is not None:
-                idx = head_stack.channel_names.index(name)
-                label = _head_label(head_stack.heads[idx])
-                if label != "regression":
-                    tags.append(label)
-            if tags:
-                entry += " *(" + "; ".join(tags) + ")*"
-            lines.append(entry)
-        return "\n  - " + "\n  - ".join(lines)
-
-    def _fmt_size(v):
-        rows, files = v["rows"], v["files"]
-        return f"{rows:,}" if files == 1 else f"{rows:,} across {files} files"
-
-    parts = []
-    if split_sizes:
-        size_rows = ", ".join(
-            f"{k}={_fmt_size(v)}" for k, v in split_sizes.items()
-        )
-        parts.append(f"- **Split sizes (rows):** {size_rows}")
-    parts.append(f"- **Y ({len(nm_mapping.get('Y', []))} states):**" + cols("Y"))
-    parts.append(f"- **U ({len(nm_mapping.get('U', []))} controls):**" + cols("U"))
-    parts.append(f"- **D ({len(nm_mapping.get('D', []))} disturbances):**" + cols("D"))
-    if norm_stats is not None:
-        frozen = degenerate_mapped_columns(norm_stats, nm_mapping)
-        if frozen:
-            parts.append(
-                "\n**⚠️ Constant in this data:** "
-                + ", ".join(f"`{c}`" for c in frozen)
-                + ". Normalization had nothing to scale, so these columns fall "
-                "back to raw physical units. If any of them varies at evaluation "
-                "time — a furnace that never fired here but does there — its "
-                "value arrives orders of magnitude out of range and the rollout "
-                "diverges. Either exclude the column from the mapping or widen "
-                "the excitation so training covers the regime."
-            )
-    return _section("Data", "\n".join(parts))
-
-
-def _bounded_coverage_section(
-    head_stack: Optional[HeadStack],
-    test_df: Optional[pd.DataFrame],
-) -> Optional[str]:
-    """
-    For each bounded Y channel, check whether the test set contains any
-    values outside the head's [lo, hi]. A non-zero count means the channel
-    was set up to fail — the model literally cannot reach those samples
-    because the head clamps/squashes them away.
-
-    `test_df` and the bounds are both in physical units.
-
-    Returns None if any input is missing (section is just skipped).
-    """
+def _outside_bounds(head_stack: Optional[HeadStack],
+                    test_df: Optional[pd.DataFrame]) -> list[str]:
+    """Bounded channels whose test data leaves the head's [lo, hi]: the model
+    cannot reach those samples, so the channel was set up to fail."""
     if head_stack is None or test_df is None:
-        return None
-
-    rows = []
-    for i, head in enumerate(head_stack.heads):
-        if not isinstance(head, BoundedHead):
-            continue
-        name = head_stack.channel_names[i]
-        if name not in test_df.columns:
+        return []
+    out = []
+    for name, head in zip(head_stack.channel_names, head_stack.heads):
+        if not isinstance(head, BoundedHead) or name not in test_df.columns:
             continue
         vals = test_df[name].to_numpy()
-        n_below = int((vals < head.lo).sum())
-        n_above = int((vals > head.hi).sum())
-        n_total = vals.size
-        n_out = n_below + n_above
-        pct = 100.0 * n_out / n_total if n_total else 0.0
-        lo_s = "−∞" if head.lo == float("-inf") else f"{head.lo:g}"
-        hi_s = "+∞" if head.hi == float("inf") else f"{head.hi:g}"
-        rows.append((
-            name,
-            f"{vals.min():.4g}",
-            f"{vals.max():.4g}",
-            f"[{lo_s}, {hi_s}]",
-            f"{n_below}",
-            f"{n_above}",
-            f"{pct:.2f}%",
-        ))
+        n_out = int(((vals < head.lo) | (vals > head.hi)).sum())
+        if n_out:
+            out.append(f"`{name}` has {n_out} test samples ({100 * n_out / vals.size:.1f}%) "
+                       f"outside its head's {_head_label(head)}, which it cannot reach.")
+    return out
 
-    if not rows:
+
+def _data_section(nm_mapping: dict, split_sizes: Optional[dict[str, dict[str, int]]],
+                  head_stack: Optional[HeadStack], norm_stats: Optional[dict]) -> str:
+    """`split_sizes` is `{split: {"rows": int, "files": int}}`."""
+    lines = []
+    if split_sizes:
+        lines.append("- Rows: " + " · ".join(
+            f"{split} {v['rows']:,}" + (f" in {v['files']} files" if v["files"] > 1 else "")
+            for split, v in split_sizes.items()))
+    roles = " · ".join(f"{role} {len(nm_mapping.get(role, []))}" for role in ("Y", "U", "D"))
+    lines.append(f"- Columns: {roles} (by name in `nm_mapping.json`)")
+    if head_stack is not None:
+        kinds = Counter(_head_label(h) for h in head_stack.heads)
+        lines.append("- Heads: " + ", ".join(f"{n} {kind}" for kind, n in kinds.items()))
+    if norm_stats is not None:
+        lines.append(_norm_line(nm_mapping, norm_stats))
+    return _section("Data", "\n".join(lines))
+
+
+# ── Accuracy ──────────────────────────────────────────────────────
+
+
+def _accuracy_section(rows: list[tuple[ChannelMetrics, float, float]],
+                      test_window: int) -> str:
+    shown = rows if len(rows) <= MAX_ROWS else rows[:WORST_ROWS]
+    body = [f"RMSE of {test_window}-step rollouts, in each channel's units, against "
+            "persistence (hold the last seeded value). Skill = 1 − RMSE / "
+            "persistence; at or below 0 the model adds nothing to a copy-forward.\n"]
+    if len(shown) < len(rows):
+        body[0] += (f"The {len(shown)} lowest-skill of {len(rows)} channels; all are in "
+                    f"`{RESULTS_DIR}/test_metrics.json`.\n")
+    body += ["| Channel | RMSE | Persistence | Skill |", "|---|---:|---:|---:|"]
+    for m, reference, s in shown:
+        body.append(f"| `{m.name}` | {m.rmse:.4g} | {reference:.4g} | "
+                    + ("n/a" if math.isnan(s) else f"{s:.2f}") + " |")
+    return _section("Accuracy", "\n".join(body))
+
+
+# ── Whiteness ─────────────────────────────────────────────────────
+
+
+def _whiteness_section(white: list[Whiteness]) -> Optional[str]:
+    if not white:
         return None
-
-    header = (
-        "| Channel | Test min | Test max | Bounds | "
-        "# below lo | # above hi | % outside |"
-    )
-    sep = "|" + "|".join(["---"] * 7) + "|"
-    body_lines = [
-        "A non-zero outside count means the channel was set up to fail — "
-        "the model literally cannot reach those samples.\n",
-        header,
-        sep,
-    ]
-    for r in rows:
-        body_lines.append("| " + " | ".join(r) + " |")
-    return _section("Bounded channel coverage", "\n".join(body_lines))
-
-
-def _metrics_section(
-    metrics: list[ChannelMetrics],
-    persistence: Optional[list[ChannelMetrics]] = None,
-) -> str:
-    if not metrics:
-        return _section("Test Metrics (per channel)", "*(no metrics computed)*")
-    body = (
-        "All values are in the physical units of each channel. "
-        "NRMSE is normalized by the channel range (max − min) of the test set.\n\n"
-        + metrics_to_markdown(metrics)
-    )
-    if persistence:
-        body += (
-            "\n\n**Persistence reference** — hold the last seeded state for the "
-            "whole window. Same information the rollout starts from, so this "
-            "is the bar to clear: a surrogate at or below it has learned "
-            "nothing a copy-forward does not already know.\n\n"
-            + metrics_to_markdown(persistence)
-        )
-    return _section("Test Metrics (per channel)", body)
+    body = ["One-step-ahead residuals: every test step predicted from the recorded "
+            "history before it. A model that has the dynamics leaves white noise — "
+            "ACF inside ±1.96/√n and a straight cumulated periodogram (Bacher & "
+            "Madsen 2011). Structure is grouped by the period holding the most "
+            "residual power: under an hour is a missing fast state or lag, daily "
+            "is a daily driver no input carries, the longest periods a slow drift.\n"]
+    structured = [w for w in white if not w.white]
+    if structured:
+        body += ["| Most residual power at | Channels | ACF at lag 1 |", "|---|---|---|"]
+        for label, _, _ in PERIOD_BANDS:
+            group = [w for w in structured if w.period_band == label]
+            if group:
+                lo, hi = min(w.lag1 for w in group), max(w.lag1 for w in group)
+                lag1 = f"{lo:.2f}" if lo == hi else f"{lo:.2f} to {hi:.2f}"
+                body.append(f"| {label} | {len(group)}: {_names([w.name for w in group])} | "
+                            f"{lag1} |")
+    clean = [w.name for w in white if w.white]
+    body.append(f"\nWhite: {len(clean)} of {len(white)}"
+                + (f" ({_names(clean)})." if clean else "."))
+    return _section("Whiteness", "\n".join(body))
 
 
-def _levels_section(
-    levels: list[LevelMetrics],
-    persistence_levels: list[LevelMetrics],
-    head_stack: Optional[HeadStack],
-) -> Optional[str]:
-    """Classification view of the binary / ordinal channels.
+# ── Staged channels ───────────────────────────────────────────────
 
-    The regression metrics above are anti-correlated with event detection on
-    a rare-event channel — a model that never fires the furnace posts the best
-    NRMSE on the page — so a staged channel has to be read here. Balanced
-    accuracy is mean per-level recall: a constant predictor scores 1/K, and
-    that is the floor, not 0.
-    """
+
+def _levels_section(levels: list[LevelMetrics], persistence_levels: list[LevelMetrics],
+                    head_stack: Optional[HeadStack],
+                    calibration: Optional[dict[str, Calibration]]) -> Optional[str]:
+    """Balanced accuracy is mean per-level recall: a constant predictor scores
+    1/K, and that is the floor, not 0. RMSE ranks a head that never fires
+    above one that does, so a staged channel is read here."""
     if not levels:
         return None
-    body = [
-        "Balanced accuracy is the mean of per-level recall — a constant "
-        "predictor scores 1/K (0.5 for two levels), so read gains against that "
-        "floor. Predicted share beside true share says whether the head emits "
-        "a level at all; NRMSE above cannot.\n",
-        level_metrics_to_markdown(levels, persistence_levels or None),
-    ]
-    if head_stack is not None:
-        rules = []
-        for name, head in zip(head_stack.channel_names, head_stack.heads):
-            # With use_ste=False the smooth activation is fed back and the
-            # snap never runs, so there is no decision rule to report.
-            if isinstance(head, OrdinalHead) and head.use_ste:
-                rules.append(f"`{name}`: " + ", ".join(
-                    f"{t:.4g}" for t in head.decision_thresholds.tolist()))
-        if rules:
-            body.append(
-                "\nDecision thresholds (physical units, where the ordinal snap "
-                "happens): " + "; ".join(rules) + "."
-            )
-    return _section("Level metrics (staged channels)", "\n".join(body))
+    reference = {lm.name: lm.balanced_accuracy for lm in persistence_levels}
+    body = ["Balanced accuracy (mean per-level recall; a constant predictor scores "
+            f"1/K). Per-level shares and recall: `{RESULTS_DIR}/level_metrics.json`.\n",
+            "| Channel | Balanced acc | Persistence | Thresholds |", "|---|---:|---:|---|"]
+    heads = {} if head_stack is None else dict(zip(head_stack.channel_names, head_stack.heads))
+    for lm in levels:
+        head = heads.get(lm.name)
+        # With use_ste=False the smooth activation is fed back and the snap
+        # never runs, so there is no decision rule to report.
+        rule = (", ".join(f"{t:.4g}" for t in head.decision_thresholds.tolist())
+                if isinstance(head, OrdinalHead) and head.use_ste else "—")
+        if calibration and lm.name in calibration:
+            c = calibration[lm.name]
+            rule += f" (calibrated, share error {c.trace[c.kept].error:.3f})"
+        body.append(f"| `{lm.name}` | {lm.balanced_accuracy:.3f} | "
+                    f"{reference.get(lm.name, float('nan')):.3f} | {rule} |")
+    return _section("Staged channels", "\n".join(body))
 
 
-def _calibration_section(
-    calibration: Optional[dict[str, Calibration]],
-    norm_stats: Optional[dict],
-) -> Optional[str]:
-    """The threshold search's full trace, in physical units: what each dev
-    rollout was run with and what it actually produced. `error` (the L1
-    distance between predicted and true level shares) is what the search
-    minimises; the kept row is not always the last one tried, since a later
-    pass can overshoot — see `calibration.calibrate_decision_thresholds`.
-    """
-    if not calibration or norm_stats is None:
-        return None
-    body = [
-        "One row per dev rollout tried. Balanced accuracy rides along for "
-        "context; the search matches level shares, not it. **Bold** marks "
-        "the pass that was kept.\n",
-    ]
-    for name, c in calibration.items():
-        stats = norm_stats[name]
-        def to_phys(vals):
-            return [v * stats["stretch"] + stats["shift"] for v in vals]
-        true_s = ", ".join(f"{s * 100:.1f}%" for s in c.true_shares)
-        body.append(f"**`{name}`** — true level shares: {true_s}\n")
-        body.append("| Pass | Thresholds | Predicted shares | Error | Balanced acc |")
-        body.append("|---:|---|---|---:|---:|")
-        for i, step in enumerate(c.trace):
-            thr_s = ", ".join(f"{t:.4g}" for t in to_phys(step.thresholds))
-            pred_s = ", ".join(f"{s * 100:.1f}%" for s in step.pred_shares)
-            cells = [str(i + 1), thr_s, pred_s, f"{step.error:.3f}",
-                    f"{step.balanced_accuracy:.3f}"]
-            if i == c.kept:
-                cells = [f"**{cell}**" for cell in cells]
-            body.append("| " + " | ".join(cells) + " |")
-        body.append("")
-    return _section("Threshold calibration", "\n".join(body))
+# ── Physics ───────────────────────────────────────────────────────
 
 
-def _stability_section(
-    stability: list[RolloutStability], test_window: Optional[int] = None
-) -> str:
-    """Rollout shape vs. the truth's own shape — catches ramping models.
-
-    A model that has stopped responding to its inputs can still post a
-    tolerable RMSE on a short test window and then diverge by many degrees in
-    closed loop. Comparing rise fraction and drift against the ground truth
-    surfaces that before a policy is ever trained on the model.
-
-    Everything here is measured over `test_window` steps, so the horizon is
-    stated alongside the table. Two of four measured submissions passed this
-    check at a 47-step window and diverged past ~300 steps on the same data;
-    the diagnostic was right, it was just asked about a horizon far shorter
-    than the one the controller would be evaluated over.
-    """
-    if not stability:
-        return _section("Rollout stability", "*(no stability computed)*")
-    flagged = [s.name for s in stability if s.looks_like_ramp()]
-    body = stability_to_markdown(stability)
-    if test_window is not None:
-        body = (
-            f"Measured over a **{test_window}-step** rollout. A model can be "
-            "stable here and diverge over a longer one, so treat a short window "
-            "as a weak check: closed-loop evaluation runs for thousands of "
-            "steps.\n\n"
-        ) + body
-    if flagged:
-        body += (
-            "\n\n**⚠️ Likely ramping:** "
-            + ", ".join(f"`{n}`" for n in flagged)
-            + ". These channels move nearly monotonically, unlike the truth. A "
-            "monotone rollout means the model is ignoring its inputs; RMSE on a "
-            "short window will not show it. Free-run the model over a long "
-            "horizon before training a controller on it."
-        )
-    # A high excess with a mid-range rise fraction is the staged-equipment case,
-    # not a ramp: the truth holds a constant value most of the time and the model
-    # jitters instead of holding. Say so, or the table reads as eight failures.
-    noisy = [s.name for s in stability
-             if s.rise_excess > 0.25 and not s.looks_like_ramp()]
-    if noisy:
-        body += (
-            "\n\nHigh rise excess but *not* monotone: "
-            + ", ".join(f"`{n}`" for n in noisy)
-            + ". This is the expected signature for staged equipment (fans, "
-            "compressors, flow), whose truth holds one value for long stretches "
-            "while a continuous model jitters around it. Judge these channels on "
-            "RMSE and R², not on rise excess."
-        )
-    return _section("Rollout stability", body)
+def _group_checks(results: list[ScenarioResult]) -> dict[str, list[ScenarioResult]]:
+    """Results by check, in run order; a step response's actuator is dropped
+    from its name ("Step response: X to v" -> "Step response")."""
+    groups: dict[str, list[ScenarioResult]] = {}
+    for r in results:
+        groups.setdefault(r.name.split(":")[0], []).append(r)
+    return groups
 
 
-def _physics_section(results: list[ScenarioResult],
-                     hours: Optional[float] = None,
-                     n_steps: Optional[int] = None) -> str:
-    """Assertions on synthetic states the recorded data never contains.
-
-    The test split cannot ask whether the model has learned any physics,
-    because it never contains the HVAC fully off or the weather stepping to a
-    new value. These do, and each answer is a number in physical units and a
-    verdict rather than a loss.
-    """
-    if not results:
-        return _section("Physics checks", "*(no scenarios ran)*")
-    failed = [r for r in results if not r.passed]
-    horizon = (
-        f" Each rollout runs **{hours:g} h** ({n_steps} steps)."
-        if hours is not None and n_steps is not None else ""
-    )
-    body = [
-        f"{len(results) - len(failed)} of {len(results)} passed.{horizon} Each "
-        "scenario puts the surrogate in a state the training data never "
-        "visits and asserts what has to happen next, once per state channel — "
-        "so a channel you are not relying on cannot hide one you are.\n",
-        checks_to_markdown(results),
-    ]
+def _physics_section(results: list[ScenarioResult], hours: Optional[float],
+                     n_steps: Optional[int]) -> str:
+    """Assertions on synthetic states the recorded data never contains: the
+    HVAC fully off, the weather stepped, a zone left to decay. Each check runs
+    once per state channel, so a channel you rely on cannot hide behind one
+    you do not."""
+    horizon = (f" over {hours:g} h ({n_steps} steps)"
+               if hours is not None and n_steps is not None else "")
+    body = [f"Each check puts the model in a state the data never visits{horizon} "
+            "and asserts what has to happen next, per state channel. A controller "
+            "goes to these states, so failing here is not out-of-scope.\n",
+            "| Check | Pass | Failed: value (limit) |", "|---|---:|---|"]
+    examples = []
+    for check, rs in _group_checks(results).items():
+        failed = [r for r in rs if not r.passed]
+        cells = _names([f"{r.channel} {r.value:.3g} ({r.tolerance:.3g})" for r in failed],
+                       quote=False)
+        body.append(f"| {check} | {len(rs) - len(failed)}/{len(rs)} | {cells or '—'} |")
+        if failed:
+            examples.append(f"- {check}, e.g. `{failed[0].channel}`: {failed[0].headline}")
+    body += [""] + examples if examples else []
     if hours is not None and any(r.name == FreeDecayScenario.label for r in results):
         # closed = 1 - exp(-hours / tau) clears DECAY_MIN_CLOSED for any tau
         # up to this, so the check cannot falsify a slow-mode prior.
         longest_h = hours / -math.log(1 - DECAY_MIN_CLOSED)
-        body += [
-            "",
-            f"*Free decay passes any slow mode shorter than ~{longest_h:.0f} h "
-            "at this horizon: it tests the sign of the envelope coupling, not "
-            "its rate, so a pass does not corroborate the slowest time constant.*",
-        ]
-    if failed:
-        body += [
-            "",
-            "**⚠️ Failed:** " + ", ".join(f"`{r.key}`" for r in failed)
-            + ". A surrogate that fails these is not physically coherent, "
-            "whatever its NRMSE says, and a policy trained against it will "
-            "be optimising against the incoherence. These scenarios are "
-            "deliberately outside the training distribution — which is also "
-            "where a controller will take the model — so widening the "
-            "excitation is as valid a fix as changing the architecture.",
-        ]
-    return _section("Physics checks", "\n".join(body))
+        body.append(f"\nFree decay tests the sign of the envelope coupling, not its "
+                    f"rate: any slow mode under ~{longest_h:.0f} h passes.")
+    return _section("Physics", "\n".join(body))
 
 
-def _readouts_section(readouts: list[ReadoutSummary]) -> Optional[str]:
-    """What the non-state channels did, with no verdict attached.
+# ── Rollout ───────────────────────────────────────────────────────
 
-    Readouts are seeded at their resting value and then run free — the model's
-    own predictions feed back every step. Nothing asserts on them, because what
-    a readout *should* do depends on the scenario (hold at off during
-    equilibrium, move under a step response). The spread is still worth seeing:
-    a readout that goes somewhere absurd is also an input to the next state
-    prediction, which is otherwise an unattributable drift in the table above.
-    """
-    if not readouts:
+
+def _flagged(stability: list[RolloutStability]) -> list[RolloutStability]:
+    return [s for s in stability
+            if s.looks_like_ramp() or s.drift_ratio > DRIFT_RATIO_WARN]
+
+
+def _rollout_section(flagged: list[RolloutStability], test_window: int) -> Optional[str]:
+    """Shape, not error: a model that stopped responding to its inputs emits
+    a ramp a short window's RMSE can hide."""
+    if not flagged:
         return None
-    body = [
-        "Y channels not named in `states`, so nothing above asserts on them. "
-        "Statistics are over the free-running steps of each scenario — the "
-        "seeded prefix is the channel's own resting value by construction, and "
-        "is shown separately as the reference point.\n",
-        readouts_to_markdown(readouts),
-    ]
-    return _section("Readout channels (reported, not asserted)",
-                    "\n".join(body))
+    ramps = [s.name for s in flagged if s.looks_like_ramp()]
+    drifts = [s for s in flagged if not s.looks_like_ramp()]
+    body = [f"Over {test_window}-step rollouts; closed loop runs far longer, so free-run "
+            "a flagged channel over a long horizon before training a controller on it.\n"]
+    if ramps:
+        body.append(f"- Ramping (monotone, unlike the truth): {_names(ramps, limit=WORST_ROWS)}")
+    if drifts:
+        worst = sorted(drifts, key=lambda s: -s.drift_ratio)
+        body.append(f"- Drifting past {DRIFT_RATIO_WARN:g}× the truth: " + _names(
+            [f"{s.name} {s.drift_ratio:.1f}×" for s in worst], limit=WORST_ROWS, quote=False))
+    return _section("Rollout", "\n".join(body))
 
 
-def _hyperparameters_section(cfg: ModelingConfig) -> str:
-    rows = [
-        f"- **lr:** {cfg.lr}",
-        f"- **batch_size:** {cfg.batch_size}",
-        f"- **epochs:** {cfg.epochs}",
-        f"- **train_pred_steps:** {cfg.train_pred_steps}",
-        f"- **dev_pred_steps:** {cfg.dev_pred_steps}",
-        f"- **test_window:** {cfg.test_window}",
-        f"- **curriculum_steps:** {cfg.curriculum_steps}, "
-        f"ratio={cfg.curriculum_ratio}",
-        f"- **norm_type (default):** {cfg.norm_type} "
-        "*(per-column overrides reported in the Data section)*",
-        f"- **seed:** {cfg.seed}",
-    ]
-    gains = []
-    if cfg.ref_gain != 0:
-        gains.append(f"ref={cfg.ref_gain}")
-    if cfg.grad_gain != 0:
-        gains.append(f"grad={cfg.grad_gain}")
-    rows.append(f"- **Loss gains:** {', '.join(gains) if gains else 'ref-only'}")
-    return _section("Hyperparameters", "\n".join(rows))
+# ── Hyperparameters ───────────────────────────────────────────────
+
+
+def _hyperparameters_line(cfg: ModelingConfig) -> str:
+    gains = ", ".join(f"{name} {gain}" for name, gain in
+                      (("ref", cfg.ref_gain), ("grad", cfg.grad_gain)) if gain != 0)
+    return _section("Hyperparameters", (
+        f"lr {cfg.lr} · batch {cfg.batch_size} · epochs {cfg.epochs} · pred steps "
+        f"{cfg.train_pred_steps}/{cfg.dev_pred_steps} (train/dev) · test window "
+        f"{cfg.test_window} · curriculum {cfg.curriculum_steps} (ratio "
+        f"{cfg.curriculum_ratio}) · seed {cfg.seed} · loss gains {gains or 'none'}"))
 
 
 @beartype
@@ -759,7 +618,7 @@ def render_reportcard(
     stability: Optional[list[RolloutStability]] = None,
     physics: Optional[list[ScenarioResult]] = None,
     physics_steps: Optional[int] = None,
-    readouts: Optional[list[ReadoutSummary]] = None,
+    whiteness: Optional[list[Whiteness]] = None,
     levels: Optional[list[LevelMetrics]] = None,
     persistence: Optional[list[ChannelMetrics]] = None,
     persistence_levels: Optional[list[LevelMetrics]] = None,
@@ -782,30 +641,19 @@ def render_reportcard(
         cfg:           Resolved ModelingConfig used for the run.
         arch:          Output of models.describe_dynamics(dyn_sys, cfg).
         test_metrics:  Output of metrics.per_channel_metrics(...).
-        stability:     Output of metrics.rollout_stability(...). Omitted for
-                       callers that only have per-channel metrics; the section
-                       is then skipped.
+        persistence:   The same for persistence, the bar `test_metrics` is
+                       scored against; required for the accuracy section.
+        whiteness:     One-step residual whiteness per continuous channel.
         levels:        Classification metrics for the binary / ordinal
-                       channels; `persistence` / `persistence_levels` are the
-                       copy-forward reference for both tables. All optional —
-                       absent, the page reads as it did before they existed.
+                       channels, beside `persistence_levels`.
         calibration:   Optional {channel: Calibration} from
-                       calibrate_decision_thresholds. None renders no extra
-                       section.
-        nm_mapping:    {"Y": [...], "U": [...], "D": [...]} from data_mapping.
-        ensemble:      Optional EnsembleSpread from cfg.ensemble_seeds > 1
-                       independently-trained models. None (the default)
-                       renders no extra section, which is what keeps
-                       ensemble_seeds=1 byte-identical to a run built before
-                       this feature existed.
-        head_stack:    Optional HeadStack, physical units; when provided, non-regression Y
-                       columns are annotated with their head kind in the data
-                       section (e.g. "bounded [0, +∞]").
+                       calibrate_decision_thresholds.
+        ensemble:      Optional EnsembleSpread from cfg.ensemble_seeds > 1.
+        head_stack:    Optional HeadStack, physical units: head kinds,
+                       decision thresholds, and bounded-coverage warnings
+                       against `test_df`.
         run_name:      MLflow run name (falls back to cfg.run).
         timestamp:     ISO-ish timestamp string (defaults to now()).
-        best_dev_loss: Best dev loss across training.
-        train_time_s:  Total training wall-clock seconds.
-        test_time_s:   Test rollout wall-clock seconds.
         split_sizes:   Optional {split: {"rows": N, "files": K}} per split.
 
     Returns:
@@ -815,33 +663,34 @@ def render_reportcard(
     ts = timestamp if timestamp is not None else datetime.now().isoformat(
         timespec="seconds"
     )
+    rows = ranked_skills(test_metrics, persistence or [])
+    white = whiteness or []
+    flagged = _flagged(stability or [])
+
+    warnings = _outside_bounds(head_stack, test_df)
+    if norm_stats is not None:
+        frozen = degenerate_mapped_columns(norm_stats, nm_mapping)
+        if frozen:
+            warnings.append(
+                f"Constant in this data: {_names(frozen)}. Normalization had nothing "
+                "to scale, so they stay in raw units; one that varies at evaluation "
+                "time arrives far out of range. Exclude it or widen the excitation.")
 
     parts = [
-        f"# Reportcard: {name}\n",
-        _summary_section(name, ts, cfg.lr > 0, best_dev_loss, train_time_s, test_time_s),
+        _header(name, ts, cfg.lr > 0, best_dev_loss, train_time_s, test_time_s),
+        _verdict_section(rows, white, physics, flagged, cfg.test_window,
+                         levels or [], persistence_levels or [], warnings),
         _architecture_section(arch),
         _data_section(nm_mapping, split_sizes, head_stack, norm_stats),
-        _metrics_section(test_metrics, persistence),
+        _accuracy_section(rows, cfg.test_window),
     ]
-    levels_md = _levels_section(levels or [], persistence_levels or [], head_stack)
-    if levels_md is not None:
-        parts.append(levels_md)
-    calibration_md = _calibration_section(calibration, norm_stats)
-    if calibration_md is not None:
-        parts.append(calibration_md)
-    if stability is not None:
-        parts.append(_stability_section(stability, cfg.test_window))
-    if physics is not None:
-        parts.append(_physics_section(physics, cfg.synth_hours, physics_steps))
-    if readouts is not None:
-        readout_md = _readouts_section(readouts)
-        if readout_md is not None:
-            parts.append(readout_md)
-    ensemble_md = _ensemble_section(ensemble)
-    if ensemble_md is not None:
-        parts.append(ensemble_md)
-    coverage = _bounded_coverage_section(head_stack, test_df)
-    if coverage is not None:
-        parts.append(coverage)
-    parts.append(_hyperparameters_section(cfg))
+    optional = [
+        _whiteness_section(white),
+        _levels_section(levels or [], persistence_levels or [], head_stack, calibration),
+        None if physics is None else _physics_section(physics, cfg.synth_hours, physics_steps),
+        _rollout_section(flagged, cfg.test_window),
+        _ensemble_section(ensemble),
+    ]
+    parts += [p for p in optional if p is not None]
+    parts.append(_hyperparameters_line(cfg))
     return "\n".join(parts)

@@ -190,7 +190,7 @@ def main() -> None:
             metrics=run_summary_metrics(result.test_results),
             mapping=data.nm_mapping,
         )
-        print_finished(result.run_id, result.test_results.metrics)
+        print_finished(result.run_id, result.test_results)
         print(f"Optuna dashboard: uv run optuna-dashboard sqlite:///{db_path}")
 
 

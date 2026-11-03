@@ -27,9 +27,9 @@ from neurotemplate._typing import beartype
 
 import mlflow
 
+from neurotemplate.common.reportcard import RESULTS_DIR
 from neurotemplate.common.run_summary import write_run_summary
 from neurotemplate.common.tracking import save_checkpoint, tracked_run
-from neurotemplate.modeling.dynamics import describe_dynamics
 from neurotemplate.modeling.experiment import resolve_device, set_seeds, set_threads
 
 from neurotemplate.control.config import ControlConfig
@@ -99,7 +99,6 @@ def train_control(cfg: ControlConfig,
         load_frozen_dynamics(cfg.sysid_run_id, cfg.run_dir, cfg.weights,
                              device=cfg.device)
     )
-    surrogate_arch = describe_dynamics(dyn_sys, sysid_cfg)
     # The objective's names resolve against the surrogate's columns, so this
     # is the first point a misnamed column can fail — before any data loads.
     objective = resolve_objective(cfg, nm_mapping)
@@ -201,7 +200,6 @@ def train_control(cfg: ControlConfig,
 
         md = render_control_reportcard(
             cfg, sysid_cfg, arch, nm_mapping, results,
-            surrogate_arch=surrogate_arch,
             best_dev_loss=best_dev,
             train_time_s=train_time_s,
             balance=balance, trained_balance=trained_balance,
@@ -217,7 +215,9 @@ def train_control(cfg: ControlConfig,
                                 "plan_violation_rate": plan.results.comfort_violation_rate})
         logger.log_dict(objective_to_dict(balance, power_diag, notes,
                                           trained_balance),
-                        name="objective_diagnostics.json")
+                        name=f"{RESULTS_DIR}/objective_diagnostics.json")
+        logger.log_dict({c.column: c.zero_share for c in sensitivity},
+                        name=f"{RESULTS_DIR}/command_sensitivity.json")
 
         write_run_summary(
             logger, stage="control", config_path=config_path, cfg=cfg,

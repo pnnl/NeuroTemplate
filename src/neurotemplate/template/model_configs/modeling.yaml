@@ -22,16 +22,16 @@ test_data_path: data/test.csv
 # ── MODEL ────────────────────────────────────────────────────────
 # Test error is measured on whatever excitation your data has, which is
 # rarely where a controller will drive the plant; it does not pick a
-# surrogate for control. The reportcard's rollout-stability and physics
-# sections are the readouts for that.
+# surrogate for control. The reportcard's rollout and physics sections
+# are the readouts for that.
 # Family: mlp | nssm | lssm | gru | rc_network.
 #   rc_network   grey-box thermal zone: a declared RC network behind a
 #          thermostat, every parameter physical and boxed, for a zone whose
 #          delivered heat is measured. `nt data ladder` and `nt data
 #          thermostat` write its declarations (`nt guide thermal-zone`).
 #   mlp, nssm, lssm, gru   black boxes. Often the best fit, but nothing
-#          bounds a long rollout; read the reportcard's rollout-stability
-#          and physics sections before steering with one.
+#          bounds a long rollout; read the reportcard's rollout and
+#          physics sections before steering with one.
 # Families can be mixed, one per block of Y channels — see `block_mapping`
 # in nt_model.py (e.g. one rc_network block per zone, an mlp for a meter).
 # Or the name of a model of your own, from `custom_models` there.

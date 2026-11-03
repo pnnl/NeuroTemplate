@@ -30,6 +30,7 @@ from pathlib import Path
 from time import perf_counter as tic
 from typing import Optional
 
+import numpy as np
 import torch
 from pandas import DataFrame
 
@@ -49,6 +50,7 @@ from neurotemplate.modeling.calibration import (
     Calibration,
     balance_level_weights,
     calibrate_decision_thresholds,
+    calibration_to_dict,
 )
 from neurotemplate.modeling.experiment import set_seeds, train_with_curriculum
 from neurotemplate.modeling.heads import HeadStack
@@ -62,9 +64,10 @@ from neurotemplate.common.metrics import (
     metrics_to_dict,
     per_channel_metrics,
     rollout_stability,
+    skill,
     stability_to_dict,
 )
-from neurotemplate.common.reportcard import write_reportcard as _write_reportcard
+from neurotemplate.common.reportcard import RESULTS_DIR, write_reportcard as _write_reportcard
 from neurotemplate.modeling.contract import normalized_core
 from neurotemplate.modeling.dynamics import describe_dynamics
 from neurotemplate.modeling.plotting import plot_predictions, plot_synthetic
@@ -73,6 +76,7 @@ from neurotemplate.modeling.reportcard import (
     render_reportcard as _render_reportcard,
     spread_stats,
 )
+from neurotemplate.modeling.whiteness import Whiteness, whiteness, whiteness_to_dict
 from neurotemplate.modeling.scenarios import (
     ReadoutSummary,
     ScenarioOutcome,
@@ -248,7 +252,7 @@ class TestResults:
     # Order statistics for the Y channels that are not thermal states. These
     # carry no verdict — see scenarios.ReadoutSummary.
     readouts: Optional[list[ReadoutSummary]] = None
-    # Classification view of the binary / ordinal channels: NRMSE cannot tell
+    # Classification view of the binary / ordinal channels: RMSE cannot tell
     # a head that works from one that never fires, these can. Empty when the
     # stack has no levelled head.
     levels: list[LevelMetrics] = field(default_factory=list)
@@ -257,6 +261,8 @@ class TestResults:
     # a staged channel learns exactly this and then collapses in the rollout.
     persistence: list[ChannelMetrics] = field(default_factory=list)
     persistence_levels: list[LevelMetrics] = field(default_factory=list)
+    # Whiteness of the one-step-ahead residuals, per continuous Y channel.
+    whiteness: list[Whiteness] = field(default_factory=list)
 
 
 @dataclass
@@ -340,6 +346,15 @@ def evaluate_and_plot(
                            dtype=pred.dtype, device=pred.device)
     normalized_rmse = ((pred - true) / stretch).pow(2).mean().sqrt().item()
 
+    # Whiteness is a question for continuous channels; a staged one is read
+    # by its level metrics. A residual that never varies has nothing to test.
+    residuals = one_step_residuals(cfg, dyn_sys, test_dfs, nm_mapping)
+    white = []
+    for i, name in enumerate(nm_mapping["Y"]):
+        levelled = head_stack is not None and head_stack.heads[i].levels() is not None
+        if not levelled and residuals[:, i].std() > 0:
+            white.append(whiteness(residuals[:, i], name, freq_s))
+
     # Physics assertions on synthetic states the recorded data never visits.
     # The verdicts are the point; the figures are for when one surprises you.
     outcome = _run_physics_checks(
@@ -364,7 +379,31 @@ def evaluate_and_plot(
         levels=levels,
         persistence=persistence,
         persistence_levels=persistence_levels,
+        whiteness=white,
     )
+
+
+#: Windows per forward pass of the one-step residual sweep.
+_ONE_STEP_BATCH = 4096
+
+
+def one_step_residuals(cfg, dyn_sys, test_dfs: list[DataFrame],
+                       nm_mapping: dict[str, list[str]]) -> np.ndarray:
+    """[n, ny] one-step-ahead prediction errors over the test split, in
+    physical units and time order: every step seeded from the recorded
+    history before it and predicted one step ahead. Files are concatenated;
+    the one seam per file is noise to the whiteness tests."""
+    data = get_sw_dict_multi(dfs=test_dfs, cfg=cfg, nm_mapping=nm_mapping,
+                             steps=cfg.history_steps + 1, stride=1)
+    data.pop("source_idx")
+    n = data["Y"].shape[0]
+    errors = []
+    with torch.no_grad():
+        for start in range(0, n, _ONE_STEP_BATCH):
+            out = dyn_sys({k: v[start:start + _ONE_STEP_BATCH] for k, v in data.items()})
+            h = cfg.history_steps
+            errors.append((out["yn"][:, h, :] - out["Y"][:, h, :]).cpu().numpy())
+    return np.concatenate(errors)
 
 
 def trained_heads(dyn_sys, norm_stats: dict) -> Optional[HeadStack]:
@@ -515,7 +554,7 @@ def render_reportcard(
         stability=test_results.stability,
         physics=test_results.physics,
         physics_steps=test_results.physics_steps,
-        readouts=test_results.readouts,
+        whiteness=test_results.whiteness,
         levels=test_results.levels,
         persistence=test_results.persistence,
         persistence_levels=test_results.persistence_levels,
@@ -550,30 +589,30 @@ def log_test_results(
     test_results: TestResults,
     nm_mapping: dict[str, list[str]],
 ) -> None:
-    """Flatten per-channel metrics into MLflow-safe metric keys + log dict."""
+    """Flatten per-channel metrics into MLflow-safe metric keys, and log each
+    instrument's full output under `results/`."""
     if logger is None:
         return
 
+    persistence_rmse = {m.name: m.rmse for m in test_results.persistence}
     flat: dict[str, float] = {"test_rmse": test_results.normalized_rmse}
     for m in test_results.metrics:
         safe = metric_key(m.name)
         flat[f"test_{safe}_rmse"] = m.rmse
-        flat[f"test_{safe}_mae"] = m.mae
-        flat[f"test_{safe}_r2"] = m.r2
-        if not math.isnan(m.nrmse):
-            flat[f"test_{safe}_nrmse"] = m.nrmse
+        flat[f"persistence_{safe}_rmse"] = persistence_rmse[m.name]
+        channel_skill = skill(m.rmse, persistence_rmse[m.name])
+        if not math.isnan(channel_skill):
+            flat[f"test_{safe}_skill"] = channel_skill
     for st in test_results.stability:
-        safe = metric_key(st.name)
-        flat[f"test_{safe}_rise_excess"] = st.rise_excess
-        flat[f"test_{safe}_drift_ratio"] = st.drift_ratio
-    # Balanced accuracy is the number to sort a staged channel by — NRMSE
+        flat[f"test_{metric_key(st.name)}_drift_ratio"] = st.drift_ratio
+    # Balanced accuracy is the number to sort a staged channel by — RMSE
     # ranks a head that never fires above one that does.
     for lm in test_results.levels:
         flat[f"test_{metric_key(lm.name)}_balanced_acc"] = lm.balanced_accuracy
-    for m in test_results.persistence:
-        flat[f"persistence_{metric_key(m.name)}_rmse"] = m.rmse
     for lm in test_results.persistence_levels:
         flat[f"persistence_{metric_key(lm.name)}_balanced_acc"] = lm.balanced_accuracy
+    for w in test_results.whiteness:
+        flat[f"test_{metric_key(w.name)}_white"] = float(w.white)
     if test_results.physics is not None:
         # One gate number to sort a leaderboard by, plus per-(scenario, channel)
         # detail — so a channel someone does not care about can be excluded from
@@ -588,48 +627,39 @@ def log_test_results(
             flat[f"physics_{key}_passed"] = float(r.passed)
 
     logger.log_metrics(flat)
-    logger.log_dict(
-        metrics_to_dict(test_results.metrics), name="test_metrics.json"
-    )
-    logger.log_dict(
-        stability_to_dict(test_results.stability),
-        name="rollout_stability.json",
-    )
-    logger.log_dict(
-        metrics_to_dict(test_results.persistence), name="persistence_metrics.json"
-    )
+    results = {
+        "test_metrics.json": metrics_to_dict(test_results.metrics),
+        "persistence_metrics.json": metrics_to_dict(test_results.persistence),
+        "rollout_stability.json": stability_to_dict(test_results.stability),
+        "whiteness.json": whiteness_to_dict(test_results.whiteness),
+    }
     if test_results.levels:
-        logger.log_dict(
-            {
-                "model": level_metrics_to_dict(test_results.levels),
-                "persistence": level_metrics_to_dict(test_results.persistence_levels),
-            },
-            name="level_metrics.json",
-        )
+        results["level_metrics.json"] = {
+            "model": level_metrics_to_dict(test_results.levels),
+            "persistence": level_metrics_to_dict(test_results.persistence_levels),
+        }
     if test_results.physics is not None:
-        logger.log_dict(
-            checks_to_dict(test_results.physics),
-            name="physics_checks.json",
-        )
+        results["physics_checks.json"] = checks_to_dict(test_results.physics)
     if test_results.readouts:
-        logger.log_dict(
-            readouts_to_dict(test_results.readouts),
-            name="readout_channels.json",
-        )
+        results["readout_channels.json"] = readouts_to_dict(test_results.readouts)
+    for name, data in results.items():
+        logger.log_dict(data, name=f"{RESULTS_DIR}/{name}")
 
 
 @beartype
 def run_summary_metrics(test_results: TestResults) -> dict[str, float]:
-    """The two headline numbers a submission audit checks, for run_summary.json.
+    """The headline numbers a submission audit checks, for run_summary.json.
 
-    `worst_channel_r2` is the min of the per-channel R² that
-    `log_test_results` already logs, so it is the weakest channel rather
-    than an average that can hide one. `worst_level_balanced_acc` is the
-    same idea for the staged channels, present only when there are any.
+    `worst_channel_skill` is the lowest per-channel skill against
+    persistence, so it is the weakest channel rather than an average that
+    can hide one. `worst_level_balanced_acc` is the same idea for the staged
+    channels, present only when there are any.
     """
+    persistence_rmse = {m.name: m.rmse for m in test_results.persistence}
+    skills = [skill(m.rmse, persistence_rmse[m.name]) for m in test_results.metrics]
     out = {
         "test_rmse": test_results.normalized_rmse,
-        "worst_channel_r2": min(m.r2 for m in test_results.metrics),
+        "worst_channel_skill": min(x for x in skills if not math.isnan(x)),
     }
     if test_results.levels:
         out["worst_level_balanced_acc"] = min(
@@ -875,6 +905,11 @@ def train_and_evaluate(
             block_spec=block_spec, plot_run_dir=plot_run_dir,
             primary_dyn_sys=dyn_sys, primary_test_results=test_results,
         )
+
+    if calibration:
+        logger.log_dict({name: calibration_to_dict(c, norm_stats[name])
+                         for name, c in calibration.items()},
+                        name=f"{RESULTS_DIR}/threshold_calibration.json")
 
     md = render_reportcard(
         cfg=cfg, dyn_sys=dyn_sys, test_results=test_results,

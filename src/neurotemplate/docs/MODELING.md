@@ -216,28 +216,37 @@ def custom_models():
 
 ## What every run reports
 
-Fit metrics cannot see the failures that cost the most, so every run also
-reports these, in `reportcard.md` and in MLflow. Each is an instrument: read
-it against the previous run or against persistence, not against a fixed
+`reportcard.md` opens with a verdict, one line per instrument, then reports
+exceptions rather than inventories: healthy channels are counted, the worst
+are named. Each instrument's full output is a JSON file in the run's
+`results/` folder, and the headline numbers are MLflow metrics. Read each
+against the previous run or against persistence, not against a fixed
 threshold.
 
-- **Rollout stability**: how far a long rollout rises and drifts, against
-  the ground truth's own. This catches a model that has stopped responding
-  to its inputs and emits a ramp, which a short-window error will not.
+- **Accuracy**: rollout RMSE over `test_window` steps beside persistence
+  (holding the last measured state), and skill, 1 − RMSE / persistence. At
+  or below 0 the model adds nothing to a copy-forward.
+- **Whiteness** of the one-step-ahead residuals, every test step predicted
+  from the recorded history before it: the autocorrelation function and the
+  cumulated periodogram (Bacher & Madsen 2011). A model that has a channel's
+  dynamics leaves white noise; what it leaves instead is grouped by the
+  period holding the most residual power. Under an hour is a missing fast
+  state or lag, daily is a daily driver no input carries (occupancy,
+  internal gains), the longest periods a slow drift. Continuous outputs
+  only; staged ones have level metrics.
 - **Physics checks**, when `synth_cfg` describes the thermal states. They
   test four things in synthetic states the data never contains:
   equilibrium, step response, reachability and free decay, each answered in
   physical units. A failed step response means not to plan against this
   surrogate. A small equilibrium drift after an honest attempt is worth
-  noting and moving past.
-- **Readout channels**: order statistics for every output that is not a
-  thermal state. There is no verdict, but a readout that is wrong at
-  equilibrium feeds back into the states that are checked.
-- **Level metrics** for binary and ordinal outputs, scored as a classifier
-  per level. Staged equipment is a rare-event channel, where a low error
-  can mean the model never predicts the event.
-- **Persistence**: the same metrics for holding the last measured state,
-  beneath the model's.
+  noting and moving past. What the other outputs did in each scenario is in
+  `results/readout_channels.json`.
+- **Rollout**: channels whose rollout ramps (monotone, unlike the truth) or
+  drifts more than twice the truth's own drift. A model that has stopped
+  responding to its inputs emits a ramp that a short window's error hides.
+- **Level metrics** for binary and ordinal outputs, scored as a classifier:
+  balanced accuracy beside persistence's. Staged equipment is a rare-event
+  channel, where a low error can mean the model never predicts the event.
 
 Staged outputs get two things set from the data, both on by default: each
 level's loss is weighted by how rare it is, and an ordinal head's decision
@@ -245,7 +254,7 @@ thresholds are moved after training until the predicted level shares match
 the true ones. The kept thresholds are saved with the run.
 
 Test error is measured on the excitation in your data, which is rarely
-where a controller will drive the plant. The stability and physics sections
+where a controller will drive the plant. The rollout and physics sections
 are the better guide to a surrogate for control.
 
 ## Preparing the record

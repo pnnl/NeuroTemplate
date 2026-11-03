@@ -50,7 +50,7 @@ HIGH_VARIANCE_EXPLAINED = 0.90
 LOW_GAP_OCCUPANCY = 0.05
 
 # A mode holding less than this share of the samples is a rare event. Every
-# default in the training stack -- MSE, a midpoint snap, NRMSE -- is
+# default in the training stack -- MSE, a midpoint snap, RMSE -- is
 # indifferent to a level this rare by construction, so the recommendation
 # says so rather than handing over a head whose rare level will be ignored.
 RARE_MODE_FRAC = 0.05
@@ -201,9 +201,9 @@ def _occupancy_lines(centers: list[float], shares: list[float]) -> list[str]:
             "RARE LEVEL: " + ", ".join(f"{c:g} holds {s * 100:.1f}%" for c, s in rare)
             + f" of samples (under {RARE_MODE_FRAC * 100:.0f}%). This is a "
             "rare-event channel: an unweighted loss and a midpoint snap "
-            "will learn to never emit it, and NRMSE will reward that. Keep "
+            "will learn to never emit it, and RMSE will reward that. Keep "
             "balance_levels and calibrate_thresholds on, and judge the head "
-            "by the reportcard's level metrics, not its NRMSE."
+            "by the reportcard's level metrics, not its RMSE."
         )
     return lines
 

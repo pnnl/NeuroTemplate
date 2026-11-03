@@ -214,8 +214,12 @@ the table. Both are scored the same way, and both export (MPC with
 
 ## What every run reports
 
-In `control_reportcard.md` and in MLflow. These are instruments, read
-against the rule or a previous run.
+`control_reportcard.md` opens with a verdict: comfort, the gap to the best
+plan, the band-jump response, and a warning for each check below that fired.
+The rest reports exceptions rather than inventories; each instrument's full
+output is a JSON file in the run's `results/` folder, and the headline
+numbers are MLflow metrics. The surrogate is described on its own run's
+reportcard. These are instruments, read against the rule or a previous run.
 
 **Before training:**
 

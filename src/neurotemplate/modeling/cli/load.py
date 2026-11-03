@@ -10,6 +10,7 @@ from datetime import datetime
 from pathlib import Path
 
 from neurotemplate.common.data_utils import get_grad_masks
+from neurotemplate.common.metrics import skill
 from neurotemplate.modeling.experiment import set_seeds
 from neurotemplate.modeling.gradient_sampling import SampledGradientPenalty
 from neurotemplate.modeling.load import evaluate_trained, load_trained_dynamics
@@ -112,9 +113,11 @@ def main() -> None:
 
     print(f"Normalized RMSE: {test_results.normalized_rmse:.4f}")
 
-    print("\nPer-channel metrics (physical units):")
+    print("\nPer-channel RMSE (physical units), model vs persistence:")
+    persistence_rmse = {m.name: m.rmse for m in test_results.persistence}
     for m in test_results.metrics:
-        print(f"  {m.name}: RMSE={m.rmse:.4f} R²={m.r2:.4f} NRMSE={m.nrmse:.4f}")
+        print(f"  {m.name}: {m.rmse:.4f} vs {persistence_rmse[m.name]:.4f}, "
+              f"skill {skill(m.rmse, persistence_rmse[m.name]):.2f}")
     if test_results.levels:
         persistence = {lm.name: lm for lm in test_results.persistence_levels}
         print("\nStaged channels (balanced accuracy, model vs persistence):")

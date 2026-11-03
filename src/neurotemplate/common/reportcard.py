@@ -10,17 +10,24 @@ filename differ.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Optional
+
+
+#: Where a run keeps each instrument's full output, one JSON file each. The
+#: reportcard is the summary; these are for tools and for looking things up.
+RESULTS_DIR = "results"
 
 
 def _section(title: str, body: str) -> str:
     return f"## {title}\n\n{body}\n"
 
 
-def _fmt_float(x: Optional[float], precision: int = 6) -> str:
-    if x is None:
-        return "n/a"
-    return f"{x:.{precision}f}"
+def _names(names: list[str], limit: int = 6, quote: bool = True) -> str:
+    """`a`, `b`, `c` — or, past `limit`, the first `limit` and how many more.
+    The full list is always in the run's results; the card names enough to
+    recognise the pattern."""
+    shown = [f"`{n}`" if quote else n for n in names[:limit]]
+    more = len(names) - len(shown)
+    return ", ".join(shown) + (f", … (+{more})" if more else "")
 
 
 def write_reportcard(

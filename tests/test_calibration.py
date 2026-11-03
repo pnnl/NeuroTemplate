@@ -152,8 +152,6 @@ def test_a_run_persists_the_calibrated_rule_and_reports_its_search(tmp_path):
     assert trained.level_weights[1] > trained.level_weights[0]
     assert torch.equal(midpoint, 0.5 * (stack.heads[0].level_values[:-1]
                                         + stack.heads[0].level_values[1:]))
-    reportcard = (tmp_path / "reportcard.md").read_text()
-    assert "## Level metrics (staged channels)" in reportcard
-    assert "Decision thresholds" in reportcard
-    assert "## Threshold calibration" in reportcard
-    assert "true level shares" in reportcard
+    search = logger.dicts["results/threshold_calibration.json"]["stage"]
+    assert search["trace"][search["kept"]]["thresholds"] == pytest.approx(
+        trained.decision_thresholds.tolist(), abs=1e-4)

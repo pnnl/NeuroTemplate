@@ -5,16 +5,16 @@ import math
 import pytest
 import torch
 
-from neurotemplate.common.metrics import per_channel_metrics
+from neurotemplate.common.metrics import skill
 
 
-def test_constant_truth_marks_nrmse_nan():
-    """When channel is constant (range = 0), NRMSE should be NaN."""
-    y_true = torch.ones(2, 10, 1)
-    y_pred = torch.zeros(2, 10, 1)
-    metrics = per_channel_metrics(y_pred, y_true, ["constant"])
-    assert metrics[0].rmse == pytest.approx(1.0)
-    assert math.isnan(metrics[0].nrmse)
+def test_skill_is_measured_against_persistence():
+    """0 is no better than holding the last value, below 0 is worse, and a
+    channel persistence already predicts exactly has no skill to score."""
+    assert skill(1.0, 1.0) == 0.0
+    assert skill(0.25, 1.0) == pytest.approx(0.75)
+    assert skill(2.0, 1.0) < 0
+    assert math.isnan(skill(0.1, 0.0))
 
 
 # ── Level metrics: the classification view of a staged channel ────

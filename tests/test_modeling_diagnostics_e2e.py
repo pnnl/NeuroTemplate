@@ -127,7 +127,7 @@ def test_a_staged_channel_is_scored_as_a_classifier_and_against_persistence(tmp_
 
     logger = FakeLogger()
     log_test_results(logger, results, nm)
-    assert "level_metrics.json" in logger.dicts
-    assert "persistence_metrics.json" in logger.dicts
+    assert "results/level_metrics.json" in logger.dicts
+    assert "results/persistence_metrics.json" in logger.dicts
     key = [k for k in logger.metrics if k.endswith("_balanced_acc") and k.startswith("test_")]
     assert len(key) == 1

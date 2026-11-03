@@ -1,40 +1,31 @@
 """
-Per-run DPC control reportcard.
+Per-run control reportcard: the verdicts on one controller, short enough to read.
 
-The control-side counterpart of modeling/reportcard.py, with the same shape:
-one private `_*_section` per block, assembled by a single pure entry point
-that returns markdown. The caller writes it to disk and logs it.
+The control-side counterpart of modeling/reportcard.py, on the same rules:
+exceptions rather than inventories, each check explained once, the full
+output of every instrument in the run's `results/` folder.
 
 Sections (in order):
 
-   1. Summary              — run, timestamp, surrogate, dev loss, timings
-   2. Surrogate architecture — the frozen sys-id model's own describe_dynamics
-                             output (num_layers, hidden size, RC forcing
-                             mappings, ...); reuses modeling/reportcard.py's
-                             renderer so the two cards never drift apart
-   3. Policy architecture  — from control.policy.describe_policy
-   4. Scenario             — horizons, regulated channels, the objective table
-   5. Objective balance    — which term was actually being optimised, and the
-                             magnitude and shape of the power signal
-   6. Closed-loop performance — comfort table, actuation, energy
-   7. Actuation            — per-control effort and time at each bound
-   8. Band-jump response   — did the loop react when the reference moved
-   9. Tracking error       — per-channel error vs. the comfort-band midpoint
-  10. Hyperparameters      — the knobs that produced this run
+  Verdict      — comfort, the gap to the best plan, band-jump response, and a
+                 warning for each check that fired (a dominated objective, a
+                 dead power gradient, a command the surrogate ignores, a
+                 residual pinned at its box, MPC solves at the cap)
+  Controller   — family, size, window and bounds, identical entries grouped;
+                 the surrogate is described on its own run's card
+  Objective    — the loss table with each term's share before and after
+                 training, the power diagnostic, and the objective's notes
+  Comfort      — per regulated channel, worst first when there are many;
+                 energy and effort on one line each
+  Controller gap — the controller beside the best open-loop plan
+  Actuation    — per command, or only the ones parked or idle when there are
+                 many; residual boxes
+  Band jumps   — did the loop react when the reference moved
+  Hyperparameters — one line
 
-Whether a band is reachable at all is answered on the sys-id side,
-by the reachability scenario in modeling/scenarios.py, against a declared
-equilibrium rather than whatever weather a test file happened to contain.
-
-Sections 5, 7 and 8 are the behavioural ones. They exist because the comfort
-table above them is silent about dominated objectives, what the actuators did,
-and ignored setpoint changes — every one of which has been shipped in a run
-whose pooled numbers looked fine.
-
-Only two of them assert anything: a dominated objective term and an ignored
-band jump. Actuation and power-term shape are reported without a verdict,
-because bound-sitting and monotone power terms are both normal in a correct
-controller.
+Only the dominated objective and the ignored band jump are verdicts on the
+controller. Time at a bound is reported, not judged: a setpoint parked at its
+least-aggressive limit while nothing is asked of it is correct control.
 """
 
 from __future__ import annotations
@@ -42,48 +33,38 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Optional
 
-from neurotemplate.common.metrics import metrics_to_markdown
-from neurotemplate.common.reportcard import _fmt_float, _section
-from neurotemplate.modeling.reportcard import _architecture_section
-from neurotemplate.control.metrics import (
-    actuation_to_markdown,
-    comfort_to_markdown,
-    response_to_markdown,
-)
-from neurotemplate.control.objective import (
-    ObjectiveBalance,
-    PowerDiagnostics,
-    balance_to_markdown,
-)
+from neurotemplate.common.reportcard import RESULTS_DIR, _names, _section
 from neurotemplate.control.losses import Objective, resolve_objective
+from neurotemplate.control.metrics import SATURATION_TOL
+from neurotemplate.control.objective import ObjectiveBalance, PowerDiagnostics
 from neurotemplate.control.scenarios import horizons
 from neurotemplate.control.sensitivity import CommandSensitivity
+from neurotemplate.modeling.reportcard import MAX_ROWS, WORST_ROWS
 
 from neurotemplate._typing import beartype
 
+#: A band-jump request actuated less often than this is "largely ignored".
+IGNORED_BELOW = 0.5
+#: A command whose surrogate gradient is zero this often cannot be learned.
+INSENSITIVE_AT = 0.5
+#: A residual pinned at a box edge this often is reported.
+PINNED_AT = 0.5
+#: Below this share of power steps passing no gradient, the clamp is not worth a line.
+DEAD_POWER_AT = 0.01
 
-def _summary_section(
-    run_name: str,
-    timestamp: str,
-    cfg,
-    sysid_cfg,
-    eval_time_s: float,
-    best_dev_loss: Optional[float],
-    train_time_s: Optional[float],
-) -> str:
-    rows = [
-        f"- **Run:** `{run_name}`",
-        f"- **Timestamp:** {timestamp}",
-        f"- **Sys-id run:** `{cfg.sysid_run_id}` (model: `{sysid_cfg.model}`)",
-    ]
+
+def _header(name: str, timestamp: str, cfg, sysid_cfg, eval_time_s: float,
+            best_dev_loss: Optional[float], train_time_s: Optional[float]) -> str:
+    parts = [timestamp, f"sys-id run `{cfg.sysid_run_id}` ({sysid_cfg.model}; "
+             "its reportcard describes the surrogate)"]
     if cfg.policy == "mpc":
-        rows.append("- **Training:** none (`policy: mpc` plans through the surrogate)")
+        parts.append("MPC: nothing trained")
     if best_dev_loss is not None:
-        rows.append(f"- **Best dev loss:** {_fmt_float(best_dev_loss)}")
+        parts.append(f"dev loss {best_dev_loss:.4g}")
     if train_time_s is not None:
-        rows.append(f"- **Train time:** {train_time_s:.1f} s")
-    rows.append(f"- **Eval rollout time:** {eval_time_s:.2f} s")
-    return _section("Summary", "\n".join(rows))
+        parts.append(f"trained {train_time_s:.0f} s")
+    parts.append(f"evaluation {eval_time_s:.2f} s")
+    return f"# Control reportcard: {name}\n\n" + " · ".join(parts) + "\n"
 
 
 def _box(below: float, above: float) -> str:
@@ -94,375 +75,290 @@ def _box(below: float, above: float) -> str:
     return f"[{lo}, {hi}]"
 
 
-def _mpc_section(arch: dict) -> str:
-    rows = [
-        "- **Family:** `mpc`: at every step, the plan over the next steps "
-        "through a copy of the surrogate, inside the bounds, against the "
-        "objective; the first step is commanded",
-        f"- **Horizon:** {arch['horizon']} steps",
-        f"- **Solve:** Adam at {arch['lr']:g} of each command's range per step, from "
-        f"the last plan shifted, until {arch['patience']} steps pass without the "
-        f"objective improving by {arch['rtol']:g} of it, at most "
-        f"{arch['max_iters']} steps",
-        "- **Inputs:** " + ", ".join(f"`{key}`" for key in arch["inputs"]),
-    ]
+# ── Verdict ───────────────────────────────────────────────────────
+
+
+def _verdict_section(results, balance: Optional[ObjectiveBalance],
+                     trained: Optional[ObjectiveBalance],
+                     power: Optional[PowerDiagnostics], plan,
+                     sensitivity: Optional[list[CommandSensitivity]], arch: dict) -> str:
+    worst = max(results.comfort, key=lambda m: m.mean_exceedance)
+    lines = [f"- **Comfort:** {results.comfort_violation_rate * 100:.1f}% of steps outside "
+             f"the band, mean exceedance {results.comfort_mean_exceedance:.4g} over "
+             f"{len(results.comfort)} regulated channel(s); worst `{worst.name}` "
+             f"{worst.mean_exceedance:.4g}."]
+    if plan is not None:
+        lines.append(f"- **Controller gap:** the best plan on the surrogate scores "
+                     f"{plan.gap * 100:.0f}% below the controller (Controller gap).")
+    if results.response:
+        jumps = sum(r.n_jumps for r in results.response)
+
+        def share(attr: str) -> float:
+            return sum(getattr(r, attr) * r.n_jumps for r in results.response) / jumps
+        lines.append(f"- **Band jumps:** {jumps} requests; actuated on "
+                     f"{share('frac_actuated') * 100:.0f}%, moved the right way on "
+                     f"{share('frac_closed') * 100:.0f}%, back in band on "
+                     f"{share('frac_resolved') * 100:.0f}%.")
+        ignored = [r for r in results.response if r.frac_actuated < IGNORED_BELOW]
+        if ignored:
+            lines.append("- ⚠️ Requests largely ignored: " + _names(
+                [f"{r.name} / {r.direction} ({r.frac_actuated * 100:.0f}% actuated)"
+                 for r in ignored], quote=False) + " (Band jumps).")
+    else:
+        lines.append("- **Band jumps:** none left a channel outside its band, so the "
+                     "response is untested; a test reference whose band steps tests it.")
+    for b, when in ((balance, "before training"), (trained, "after training")):
+        if b is not None:
+            for t in b.dominant():
+                lines.append(f"- ⚠️ `{t.name}` runs the objective {when}: "
+                             f"{t.ratio_to_rest:.1f}× every other term combined (Objective).")
+    if power is not None and power.frac_dead > DEAD_POWER_AT:
+        lines.append(f"- ⚠️ No gradient through power on {power.frac_dead * 100:.0f}% of "
+                     "scored steps: a clamp on the power path (Objective).")
+    for s in sensitivity or []:
+        if s.zero_share >= INSENSITIVE_AT:
+            lines.append(f"- ⚠️ The surrogate ignores `{s.column}` on "
+                         f"{s.zero_share * 100:.0f}% of recorded windows: its gradient is "
+                         "zero there, so no controller can learn or plan it.")
+    for r in results.residual:
+        for side, frac in (("lower", r.frac_at_below), ("upper", r.frac_at_above)):
+            if frac is not None and frac >= PINNED_AT:
+                lines.append(f"- ⚠️ `{r.name}` sits on its residual box's {side} edge "
+                             f"{frac * 100:.0f}% of the time (Actuation).")
     if arch.get("solves"):
-        steps = sorted(arch["solves"])
-        capped = sum(n >= arch["max_iters"] for n in steps) / len(steps)
-        rows.append(f"- **Solves on the test windows:** {len(steps)}; Adam steps median "
-                    f"{steps[len(steps) // 2]}, max {steps[-1]}; "
-                    f"{capped * 100:.0f}% stopped at the cap")
+        capped = sum(n >= arch["max_iters"] for n in arch["solves"]) / len(arch["solves"])
+        if capped > 0:
+            lines.append(f"- ⚠️ {capped * 100:.0f}% of MPC solves stopped at "
+                         f"`mpc_max_iters` ({arch['max_iters']}) rather than converging.")
+    lines.append(f"\nEvery instrument's full output is in `{RESULTS_DIR}/` beside this card.")
+    return _section("Verdict", "\n".join(lines))
+
+
+# ── Controller ────────────────────────────────────────────────────
+
+
+def _grouped(entries: dict[str, str]) -> list[str]:
+    """{column: description} as one line per distinct description."""
+    groups: dict[str, list[str]] = {}
+    for column, text in entries.items():
+        groups.setdefault(text, []).append(column)
+    return [f"  - {text}: {_names(cols)}" for text, cols in groups.items()]
+
+
+def _bounds_lines(arch: dict) -> list[str]:
+    lines = ["- Actuation bounds:"] + _grouped({
+        col: f"[{lo:.4g}, {hi:.4g}]"
+        for col, lo, hi in zip(arch["u_cols"], arch["umin_phys"], arch["umax_phys"])})
     if arch.get("command_bounds"):
-        rows.append("- **Per-step bounds:**")
-        rows += [f"  - `{col}`: [{low}, {high}]"
-                 for col, (low, high) in arch["command_bounds"].items()]
-    rows.append("- **Actuation bounds (physical units):**")
-    rows += [f"  - `{col}`: [{lo:.4g}, {hi:.4g}]"
-             for col, lo, hi in zip(arch["u_cols"], arch["umin_phys"], arch["umax_phys"])]
-    return _section("Controller: MPC", "\n".join(rows))
-
-
-def _sensitivity_section(sensitivity: list[CommandSensitivity]) -> str:
-    rows = ["Each command against the surrogate's next outputs, over recorded "
-            "windows: the share where the derivative is exactly zero, so a "
-            "controller can neither learn nor plan that command there. A share "
-            "near 100% is a model that ignores the command (or a clamp that is "
-            "always saturated), not an operating point.\n",
-            "| Command | Zero gradient |", "|---|---|"]
-    rows += [f"| `{c.column}` | {c.zero_share * 100:.0f}% |" for c in sensitivity]
-    return _section("Surrogate: command sensitivity", "\n".join(rows))
-
-
-def _policy_section(arch: dict) -> str:
-    if arch["family"] == "mpc":
-        return _mpc_section(arch)
-    hsizes = arch["hsizes"] if arch["hsizes"] else "*(none — single affine map)*"
-    bounds = "\n".join(
-        f"  - `{col}`: [{lo:.4g}, {hi:.4g}]"
-        for col, lo, hi in zip(
-            arch["u_cols"], arch["umin_phys"], arch["umax_phys"]
-        )
-    )
-    rows = [
-        f"- **Family:** `{arch['family']}`",
-        f"- **Nonlinearity:** {arch['nonlin']}",
-        f"- **Bound method:** `{arch['bound_method']}`",
-        f"- **Hidden sizes:** {hsizes}",
-        f"- **Trainable params:** {arch['param_count']:,}",
-        f"- **Input width:** {arch['insize']}, over "
-        + ", ".join(f"`{key}`" for key in arch["inputs"]),
-        "- **Window (steps before / after the current one; a U column's "
-        "window ends at the last command applied):**",
-        *(f"  - `{col}`: past {entry['past']}"
-          + (f", future {entry['future']}" if "future" in entry else "")
-          for col, entry in arch["window"].items()),
-        f"- **Output width:** {arch['outsize']}",
-        f"- **Observation:** Policy observes all {arch['ny']} Y channels — "
-        "no measurement restriction.",
-    ]
-    if arch["residual_box"] is not None:
-        rows.append(
-            "- **Residual boxes** around `reference_control` *(an anchored "
-            "column commands the deviation, not the setpoint; the box bounds "
-            "the action, not the zone temperature; a column not listed is a "
-            "free output over its actuation bounds)*:"
-        )
-        rows += [f"  - `{col}`: {_box(*box)}"
-                 for col, box in arch["residual_box"].items()]
-    if arch.get("command_bounds"):
-        rows.append("- **Per-step bounds** *(the actuation box mapped onto [low, high] "
-                    "at each step; a name is a reference column)*:")
-        rows += [f"  - `{col}`: [{low}, {high}]"
-                 for col, (low, high) in arch["command_bounds"].items()]
-    rows += [
-        "- **Actuation bounds (physical units):**",
-        bounds,
-    ]
-    return _section("Policy architecture", "\n".join(rows))
-
-
-def _objective_table(objective: Objective) -> str:
-    rows = ["| Term | Operand | Map | Norm | Weight | Gain |",
-            "|---|---|---|---:|---|---:|"]
-    for t in objective.terms:
-        operand = f"`{t.column}`" + ("" if t.target is None else f" − `{t.target}`")
-        rows.append(
-            f"| {t.name} | {operand} | {t.map or '—'} | {t.norm:g} | "
-            f"{'—' if t.weight is None else f'`{t.weight}`'} | {t.gain:g} |"
-        )
-    return "\n".join(rows)
-
-
-def _scenario_section(cfg, sysid_cfg, nm_mapping: dict,
-                      objective: Objective) -> str:
-    h_sys, h_ctrl, _ = horizons(cfg, sysid_cfg)
-    rows = [
-        f"- **Horizons:** H_sys={h_sys}, H_ctrl={h_ctrl}, "
-        f"train_pred_steps={cfg.train_pred_steps}, "
-        f"test_window={cfg.test_window}",
-        f"- **Regulated channels ({len(objective.regulated)}):** "
-        + ", ".join(f"`{c}`" for c in objective.regulated)
-        + " *(the Y targets of the bound terms)*",
-        f"- **Control U ({len(nm_mapping['U'])}):** "
-        + ", ".join(f"`{c}`" for c in nm_mapping["U"]),
-        "- **Objective:** each term is `gain · power-mean(map(operand))` per "
-        "window, averaged over the batch, the operand in physical units.\n",
-        _objective_table(objective),
-    ]
-    return _section("Scenario", "\n".join(rows))
-
-
-def _objective_section(balance: ObjectiveBalance,
-                       power: Optional[PowerDiagnostics] = None,
-                       notes: Optional[list[str]] = None,
-                       trained: Optional[ObjectiveBalance] = None,
-                       trains: bool = True) -> str:
-    """What the weights actually bought, measured on one batch before training
-    and again through the trained policy.
-
-    Objective weights do not port across datasets, and the library's job is
-    not a better default — it is making a bad one visible on iteration 1.
-    The trained shares are what a weight can be tuned against: a residual
-    policy starts at δ ≡ 0, so its Δu term is exactly zero before training.
-    """
-    taken = ("taken before the first optimizer step" if trains
-             else "through the controller, which trains nothing")
-    body = [
-        f"Each objective term on a single training batch, {taken}"
-        + (" and again through the trained policy" if trained is not None else "")
-        + ". The share column is what the controller is really "
-        "being asked to minimise, whatever the weights suggest.\n",
-        balance_to_markdown(balance, trained),
-    ]
-    dominant = balance.dominant()
-    if dominant:
-        body += [
-            "",
-            "**⚠️ One term is running the objective:** "
-            + ", ".join(
-                f"`{t.name}` at {t.ratio_to_rest:.1f}× everything else combined"
-                for t in dominant
-            )
-            + ". Re-derive its weight against the magnitude of the quantity "
-            "it multiplies. A weight that was right on the last dataset is "
-            "not evidence about this one.",
-        ]
-    if power is not None:
-        body += [
-            "",
-            f"- **Power exactly zero on {power.frac_zero * 100:.1f}% of "
-            f"scored steps, of which the clamp kills the gradient on "
-            f"{power.frac_dead * 100:.1f}%** (of all scored steps). The "
-            "second number is the one to act on. A zero power reading is not "
-            "itself a defect — an ordinal or staged head predicting "
-            "\"compressor off\" is being right, and a straight-through "
-            "estimator still passes gradient there. A *dead* step is a "
-            "clamp on the power signal's path passing no gradient: a power "
-            "head predicting negative power, or a `relu`/`clamp_min` in "
-            "`power_metric` itself. That is harmless for a mean energy term "
-            "and not harmless for a cost term, because those steps are "
-            "disproportionately the cheap hours load is supposed to move "
-            "*into*. A large dead fraction is fixed where the clamp is, not "
-            "with a weight; a proxy's clamp keeps its zero and passes "
-            "gradient with `soft_clamp_min` (`neurotemplate.modeling.prestack`).",
-        ]
-    if notes:
-        body += [""] + [f"- {n}" for n in notes]
-    return _section("Objective balance", "\n".join(body))
-
-
-def _energy_lines(energy) -> list[str]:
-    if energy is None:
-        return ["- **Energy:** n/a *(power_metric not implemented)*"]
-    lines = [
-        "- **Energy** *(native units of `power_metric`; energy is power·h)*:",
-        f"  - Mean power: {energy.mean_power:.4g}",
-        f"  - Energy per window: {energy.total_energy:.4g}",
-        f"  - Peak power (worst instant): {energy.peak_power:.4g}",
-        f"  - Mean per-window peak: {energy.mean_window_peak:.4g}",
-    ]
-    for name, value in energy.weighted_energy.items():
-        lines.append(
-            f"  - ∫`{name}`·power dt per window: {value:.4g} *(unconverted — "
-            "Watts against $/kWh is off by 1000)*"
-        )
+        lines += ["- Per-step bounds (a name is a reference column):"] + _grouped({
+            col: f"[{low}, {high}]" for col, (low, high) in arch["command_bounds"].items()})
+    if arch.get("residual_box") is not None:
+        lines += ["- Residual box around `reference_control` (bounds the action, "
+                  "not the zone):"] + _grouped({
+                      col: _box(*box) for col, box in arch["residual_box"].items()})
     return lines
 
 
-def _performance_section(results) -> str:
-    body = [
-        "Comfort, per regulated channel. Excursions and degree-hours are in "
-        "the physical units of each channel.\n",
-        comfort_to_markdown(results.comfort),
-        "",
-        f"- **Pooled mean exceedance:** "
-        f"**{results.comfort_mean_exceedance:.4f}** *(mean over all steps — "
-        "tune on this)*",
-        f"- **Pooled violation rate:** "
-        f"{results.comfort_violation_rate * 100:.2f}% "
-        "*(acceptance criterion — report it, don't tune on it)*",
-        f"- **Mean |ΔU|** (all U columns, physical units): {results.mean_abs_du:.4g}",
+def _controller_section(arch: dict) -> str:
+    inputs = ", ".join(f"`{key}`" for key in arch["inputs"])
+    if arch["family"] == "mpc":
+        lines = [
+            f"- `mpc`: at every step, Adam plans {arch['horizon']} steps through the "
+            f"surrogate (lr {arch['lr']:g} of each range, patience {arch['patience']}, "
+            f"rtol {arch['rtol']:g}, cap {arch['max_iters']}) and commands the first; "
+            f"reads {inputs}",
+        ]
+        if arch.get("solves"):
+            steps = sorted(arch["solves"])
+            lines.append(f"- {len(steps)} solves on the test windows; Adam steps median "
+                         f"{steps[len(steps) // 2]}, max {steps[-1]}")
+        return _section("Controller", "\n".join(lines + _bounds_lines(arch)))
+    hsizes = arch["hsizes"] or "none (one affine map)"
+    lines = [
+        f"- `{arch['family']}` ({arch['nonlin']}, `{arch['bound_method']}`), hidden "
+        f"{hsizes}, {arch['param_count']:,} params; {arch['insize']} inputs over {inputs}, "
+        f"{arch['outsize']} outputs",
+        "- Window, steps before / after now (a U column's ends at the last command):",
+        *_grouped({col: f"past {e['past']}" + (f", future {e['future']}" if "future" in e else "")
+                   for col, e in arch["window"].items()}),
     ]
-    body += _energy_lines(results.energy)
-    return _section("Closed-loop performance", "\n".join(body))
+    return _section("Controller", "\n".join(lines + _bounds_lines(arch)))
+
+
+# ── Objective ─────────────────────────────────────────────────────
+
+
+def _objective_section(cfg, sysid_cfg, objective: Objective,
+                       balance: Optional[ObjectiveBalance],
+                       trained: Optional[ObjectiveBalance],
+                       power: Optional[PowerDiagnostics],
+                       notes: Optional[list[str]], trains: bool) -> str:
+    """Objective weights do not port across datasets; the shares say what the
+    controller was really asked to minimise, whatever the weights suggest."""
+    h_sys, h_ctrl, _ = horizons(cfg, sysid_cfg)
+    before = {} if balance is None else {t.name.removesuffix("_loss"): t for t in balance.terms}
+    after = {} if trained is None else {t.name.removesuffix("_loss"): t for t in trained.terms}
+    when = "before training" if trains else "through the controller"
+    body = [
+        f"Horizons H_sys={h_sys}, H_ctrl={h_ctrl}; train_pred_steps {cfg.train_pred_steps}, "
+        f"test window {cfg.test_window}. Regulated: {_names(objective.regulated)}. "
+        "Each term is `gain · power-mean(map(operand))` per window, in physical units; "
+        f"its share of the objective is measured on one batch {when}"
+        + (" and after." if trained is not None else ".") + "\n",
+        "| Term | Operand | Map | Norm | Weight | Gain | Share"
+        + (" | Trained |" if trained is not None else " |"),
+        "|---|---|---|---:|---|---:|---:|" + ("---:|" if trained is not None else ""),
+    ]
+    for t in objective.terms:
+        operand = f"`{t.column}`" + ("" if t.target is None else f" − `{t.target}`")
+        row = (f"| {t.name} | {operand} | {t.map or '—'} | {t.norm:g} | "
+               f"{'—' if t.weight is None else f'`{t.weight}`'} | {t.gain:g} | ")
+        row += f"{before[t.name].share * 100:.0f}% |" if t.name in before else "— |"
+        if trained is not None:
+            row += f" {after[t.name].share * 100:.0f}% |" if t.name in after else " — |"
+        body.append(row)
+    if power is not None:
+        body.append(f"\n- Power reads exactly zero on {power.frac_zero * 100:.1f}% of scored "
+                    f"steps and passes no gradient on {power.frac_dead * 100:.1f}%. Zero is "
+                    "fine (equipment off); no gradient is a clamp on the power path — a "
+                    "negative power head, or `relu`/`clamp_min` in `power_metric` — and "
+                    "starves a cost term of exactly the cheap hours. `soft_clamp_min` "
+                    "keeps the zero and passes gradient.")
+    body += [f"- {n}" for n in notes or []]
+    return _section("Objective", "\n".join(body))
+
+
+# ── Comfort ───────────────────────────────────────────────────────
+
+
+def _comfort_section(results) -> str:
+    rows = sorted(results.comfort, key=lambda m: -m.mean_exceedance)
+    shown = rows if len(rows) <= MAX_ROWS else rows[:WORST_ROWS]
+    body = ["Mean exceedance is over all steps (tune on it); violation is the share "
+            "of steps outside the band (accept on it). Physical units.\n"]
+    if len(shown) < len(rows):
+        body[0] += (f"The {len(shown)} worst of {len(rows)} channels; all are in "
+                    f"`{RESULTS_DIR}/control_metrics.json`.\n")
+    body += ["| Channel | Mean exceedance | Violation | Below | Above | Max excursion | "
+             "Degree-hours |", "|---|---:|---:|---:|---:|---:|---:|"]
+    for m in shown:
+        body.append(f"| `{m.name}` | {m.mean_exceedance:.4g} | {m.violation_rate * 100:.1f}% | "
+                    f"{m.frac_below * 100:.1f}% | {m.frac_above * 100:.1f}% | "
+                    f"{m.max_violation:.4g} | {m.degree_hours:.4g} |")
+    body.append(f"\n- Effort: mean |ΔU| {results.mean_abs_du:.4g} over every command.")
+    e = results.energy
+    if e is None:
+        body.append("- Energy: n/a (no `power_metric`).")
+    else:
+        weighted = "".join(f" · ∫`{w}`·power {v:.4g}" for w, v in e.weighted_energy.items())
+        body.append(f"- Energy, in `power_metric`'s units (energy is power·h; a weighted "
+                    f"integral is not unit-converted): mean power {e.mean_power:.4g} · per "
+                    f"window {e.total_energy:.4g} · peak {e.peak_power:.4g} · mean window "
+                    f"peak {e.mean_window_peak:.4g}{weighted}")
+    return _section("Comfort", "\n".join(body))
 
 
 def _gap_section(plan, results) -> str:
-    """The policy beside the best open-loop plan on the same windows
-    (`control.plan`), term by term."""
+    """The controller beside the best open-loop plan on the same windows
+    (`control.plan`): a bar for any controller on this surrogate."""
     names = [term.name for term in plan.policy.terms]
     by_name = [{term.name: term.value for term in balance.terms}
                for balance in (plan.policy, plan.plan)]
     cost = {} if results.energy is None else results.energy.weighted_energy
     plan_cost = {} if plan.results.energy is None else plan.results.energy.weighted_energy
     head = (["", "Objective"] + [n.removesuffix("_loss") for n in names]
-            + ["Violation", "Mean exceedance"]
-            + [f"∫`{w}`·power" for w in cost])
+            + ["Violation", "Mean exceedance"] + [f"∫`{w}`·power" for w in cost])
     rows = []
     for label, values, scored, weighted in (("Controller", by_name[0], results, cost),
                                             ("Best plan", by_name[1], plan.results, plan_cost)):
-        total = sum(values.values())
-        rows.append([label, f"{total:.4g}"] + [f"{values[n]:.4g}" for n in names]
-                    + [f"{scored.comfort_violation_rate * 100:.2f}%",
+        rows.append([label, f"{sum(values.values()):.4g}"]
+                    + [f"{values[n]:.4g}" for n in names]
+                    + [f"{scored.comfort_violation_rate * 100:.1f}%",
                        f"{scored.comfort_mean_exceedance:.4g}"]
                     + [f"{weighted[w]:.4g}" for w in cost])
+    converged = ("every window stopped on patience" if plan.converged else
+                 f"**some windows were still improving at `plan_max_iters` "
+                 f"({plan.steps})**, so the bar and the gap are understated")
     body = [
-        f"The best plan is a free command per step through the same surrogate, "
-        f"bounds and objective, over these test windows, with every step ahead "
-        f"known ({plan.time_s:.0f} s): a bar for any controller on this "
-        f"surrogate, not a controller. Its objective is **{plan.gap * 100:.0f}%** "
-        "below the controller's. That gap is the controller's; what the plan "
-        "does not do either, the surrogate does not make pay.\n",
-        f"Solved from {plan.starts} start(s), each window keeping its best: the "
-        f"controller's own commands won {plan.own_start_best * 100:.0f}% of "
-        f"windows, and the worst start landed a median "
-        f"{plan.start_spread * 100:.1f}% above the best. "
-        + (f"Every window stopped on patience ({plan.steps} Adam steps)."
-           if plan.converged else
-           f"**Some windows were still improving at plan_max_iters ({plan.steps} "
-           "steps)**: the bar is understated, and the gap with it.")
-        + "\n",
+        f"The best plan is a free command per step through the same surrogate, bounds "
+        f"and objective, knowing every step ahead ({plan.time_s:.0f} s, {plan.starts} "
+        f"start(s); {converged}). What it cannot do either, the surrogate does not make "
+        "pay.\n",
         "| " + " | ".join(head) + " |",
         "|" + "|".join(["---"] + ["---:"] * (len(head) - 1)) + "|",
     ] + ["| " + " | ".join(row) + " |" for row in rows]
     return _section("Controller gap", "\n".join(body))
 
 
-def _actuation_section(results) -> str:
-    """Per-control effort and time-at-bound, as measured.
+# ── Actuation ─────────────────────────────────────────────────────
 
-    A pooled mean |Δu| hides an actuator that never moves, so these are broken
-    out per control. No verdict is attached to a high bound fraction: sitting a
-    cooling setpoint at its least-aggressive limit through a period that needs
-    no cooling is correct, conservative control, not a stuck actuator. Read it
-    together with the band-jump response below, which is what distinguishes
-    "parked because nothing was asked of it" from "did not answer".
-    """
-    body = [
-        "What each control input actually did, in its own physical units. "
-        "\"At bound\" counts commands within 1% of the actuation range of a "
-        "limit, because a smooth bound method never reaches one exactly. A "
-        "high fraction is a fact about the run, not a fault — a setpoint held "
-        "at its least-aggressive limit while nothing is demanded of it reads "
-        "the same way here as one that is stuck.\n",
-        actuation_to_markdown(results.actuation),
-    ]
+
+def _actuation_section(results) -> str:
+    """Per-command effort and time at a bound, without a verdict: read it
+    with the band jumps, which tell "parked because nothing was asked" from
+    "did not answer"."""
+    body = [f"\"At a bound\" is within {SATURATION_TOL:.0%} of the range of a limit. "
+            "Time there is a fact, not a fault.\n"]
+    acts = results.actuation
+    if len(acts) <= MAX_ROWS:
+        body += ["| Command | Bounds | Mean | Mean \\|Δu\\| | At lower | At upper |",
+                 "|---|---|---:|---:|---:|---:|"]
+        body += [f"| `{a.name}` | [{a.u_min:.4g}, {a.u_max:.4g}] | {a.mean_value:.4g} | "
+                 f"{a.mean_abs_du:.4g} | {a.frac_at_min * 100:.0f}% | "
+                 f"{a.frac_at_max * 100:.0f}% |" for a in acts]
+    else:
+        parked = [f"{a.name} {a.frac_saturated * 100:.0f}%" for a in acts
+                  if a.frac_saturated > 0.5]
+        idle = [a.name for a in acts
+                if a.mean_abs_du < SATURATION_TOL * (a.u_max - a.u_min)]
+        body.append(f"- {len(acts)} commands; per command in "
+                    f"`{RESULTS_DIR}/control_metrics.json`.")
+        body.append("- At a bound more than half the time: "
+                    + (_names(parked, quote=False) if parked else "none"))
+        body.append(f"- Moving less than {SATURATION_TOL:.0%} of their range per step: "
+                    + (_names(idle) if idle else "none"))
     for r in results.residual:
-        body += [
-            "",
-            f"- **Residual of `{r.name}` vs. the reference rule** (box "
-            f"{_box(r.below_cap, r.above_cap)}):",
-            f"  - Mean |δ|: {r.mean_abs_delta:.4g}   max |δ|: "
-            f"{r.max_abs_delta:.4g}",
-        ]
-        if r.frac_at_below is None and r.frac_at_above is None:
-            body += [
-                "  - Pinned at an edge: n/a — the box is zero-width, so this "
-                "column *is* the reference rule and the box has no interior "
-                "to bind. Mean |δ| above is the check that the residual path "
-                "is inert; anything but zero there is a bug.",
-            ]
-        else:
-            body += [
-                f"  - Pinned at the {name} edge on {frac * 100:.1f}% of steps"
-                for name, frac in (("lower", r.frac_at_below),
-                                   ("upper", r.frac_at_above))
-                if frac is not None
-            ]
-    if any(r.frac_at_below is not None or r.frac_at_above is not None
-           for r in results.residual):
-        body += [
-            "",
-            "An edge that binds most of the time means one of three things: "
-            "the reference is wrong for this plant, the optimizer is riding a "
-            "surrogate artifact into the wall, or the incentive has simply "
-            "outgrown what the box can express. The third is the box doing its "
-            "job. Read this before the comfort number either way. Each δ is "
-            "the *realized* deviation, measured after the actuator clamp.",
-        ]
+        pinned = ", ".join(f"{side} edge {frac * 100:.0f}%" for side, frac in
+                           (("lower", r.frac_at_below), ("upper", r.frac_at_above))
+                           if frac is not None)
+        body.append(f"- Residual `{r.name}` in {_box(r.below_cap, r.above_cap)}: mean "
+                    f"|δ| {r.mean_abs_delta:.4g}, max {r.max_abs_delta:.4g}"
+                    + (f"; pinned at the {pinned}" if pinned else
+                       " (zero-width box: this column is the rule, and |δ| must be 0)"))
     return _section("Actuation", "\n".join(body))
 
 
-def _response_section(results, u_names: list[str]) -> str:
-    """Did the loop answer when the reference band moved?
+# ── Band jumps ────────────────────────────────────────────────────
 
-    The comparison that motivates this section: two controllers, 16.6% vs
-    17.9% pooled violation, and the *better*-scoring one reacted to 0% of the
-    band jumps that demanded cooling while the worse one reacted to 75%. The
-    pooled metric ranked them backwards.
-    """
+
+def _response_section(results) -> Optional[str]:
+    """Pooled violation ranked two real controllers backwards once: 16.6% vs
+    17.9%, and the better-scoring one reacted to none of the band jumps that
+    demanded cooling. This is the audit that tells them apart."""
     if not results.response:
-        return _section(
-            "Band-jump response",
-            "*(no band jumps left a regulated channel outside its band, so "
-            "there was nothing to audit — a test reference file whose bounds "
-            "step is what exercises the controller.)*",
-        )
-    body = [
-        "Every step change in a band that left a regulated "
-        "channel outside the new band, scored over the segment until the next "
-        "jump. **Actuated** is whether any control moved on the same step; "
-        "**moved right way** and **back in band** are whether the channel "
-        "then followed. The per-control Δ columns name the actuator that did "
-        "(or did not) do the work.\n",
-        response_to_markdown(results.response, u_names),
-    ]
-    ignored = [r for r in results.response if r.frac_actuated < 0.5]
-    if ignored:
-        body += [
-            "",
-            "**⚠️ Requests largely ignored:** "
-            + ", ".join(f"`{r.name}` / {r.direction} "
-                        f"({r.frac_actuated * 100:.0f}% actuated)"
-                        for r in ignored)
-            + ". The band asked the loop to move the channel and the controls "
-            "mostly stayed put. Check the Δ columns for which actuator is "
-            "inert, then the Actuation section for whether it is pinned.",
-        ]
-    return _section("Band-jump response", "\n".join(body))
+        return None
+    rows = sorted(results.response, key=lambda r: r.frac_actuated)
+    shown = rows if len(rows) <= MAX_ROWS else rows[:WORST_ROWS]
+    body = ["Each band step that left a channel outside the new band, scored until the "
+            "next one: did a command move on that step, did the channel then move the "
+            "demanded way, and was it back in band by the end.\n"]
+    if len(shown) < len(rows):
+        body[0] += f"The {len(shown)} least actuated of {len(rows)}.\n"
+    body += ["| Channel | Demand | Jumps | Actuated | Right way | Back in band | "
+             "Largest Δ command |", "|---|---|---:|---:|---:|---:|---|"]
+    for r in shown:
+        name, du = max(r.mean_du.items(), key=lambda kv: abs(kv[1]))
+        body.append(f"| `{r.name}` | {r.direction} | {r.n_jumps} | "
+                    f"{r.frac_actuated * 100:.0f}% | {r.frac_closed * 100:.0f}% | "
+                    f"{r.frac_resolved * 100:.0f}% | `{name}` {du:+.3g} |")
+    return _section("Band jumps", "\n".join(body))
 
 
-def _tracking_section(results) -> str:
-    body = (
-        "Error of each regulated channel with a two-sided band against the "
-        "band's midpoint, in physical units. Tracking the midpoint is not the "
-        "objective — staying inside the band is — so treat this as a shape "
-        "diagnostic.\n\n"
-        + metrics_to_markdown(results.tracking)
-    )
-    return _section("Tracking error vs. band midpoint", body)
-
-
-def _hyperparameters_section(cfg) -> str:
-    rows = [
-        f"- **lr:** {cfg.lr}",
-        f"- **batch_size:** {cfg.batch_size}",
-        f"- **epochs:** {cfg.epochs}",
-        f"- **warmup:** {cfg.warmup}, patience={cfg.patience}",
-        f"- **test_stride:** {cfg.test_stride}",
-        f"- **seed:** {cfg.seed}",
-    ]
-    return _section("Hyperparameters", "\n".join(rows))
+def _hyperparameters_line(cfg) -> str:
+    return _section("Hyperparameters", (
+        f"lr {cfg.lr} · batch {cfg.batch_size} · epochs {cfg.epochs} · warmup "
+        f"{cfg.warmup} · patience {cfg.patience} · test stride {cfg.test_stride} · "
+        f"seed {cfg.seed}"))
 
 
 @beartype
@@ -473,7 +369,6 @@ def render_control_reportcard(
     nm_mapping: dict[str, list[str]],
     results,
     *,
-    surrogate_arch: Optional[dict] = None,
     balance: Optional[ObjectiveBalance] = None,
     trained_balance: Optional[ObjectiveBalance] = None,
     power: Optional[PowerDiagnostics] = None,
@@ -486,22 +381,14 @@ def render_control_reportcard(
     train_time_s: Optional[float] = None,
 ) -> str:
     """
-    Render the markdown reportcard for one DPC run.
+    Render the markdown reportcard for one control run.
 
     Args:
         arch:        Output of control.policy.describe_policy(...).
-        results:     ControlResults for the learned policy.
-        surrogate_arch: Optional output of modeling.dynamics.describe_dynamics
-                     for the frozen sys-id model this policy was trained
-                     against (num_layers, hidden size, RC forcing maps, ...).
-                     None renders no extra section.
+        results:     ControlResults for the controller.
         balance:     Optional objective.ObjectiveBalance from the pre-training
-                     forward pass; the section is skipped without it.
-        trained_balance: Optional ObjectiveBalance of the same batch through
-                     the trained policy, shown beside `balance`.
-        power:       Optional objective.power_diagnostics(...): how often the
-                     power signal reads zero, and how much of that is a dead
-                     gradient.
+                     forward pass; `trained_balance` the same batch after.
+        power:       Optional objective.power_diagnostics(...).
         objective_notes: Optional objective.objective_notes(...) prose.
         plan:        Optional plan.PlanResult, the best open-loop plan on the
                      same windows; None renders no gap section.
@@ -515,31 +402,20 @@ def render_control_reportcard(
     ts = timestamp if timestamp is not None else datetime.now().isoformat(
         timespec="seconds"
     )
-
+    trains = cfg.policy != "mpc"
     parts = [
-        f"# Control Reportcard: {name}\n",
-        _summary_section(name, ts, cfg, sysid_cfg, results.eval_time_s,
-                         best_dev_loss, train_time_s),
+        _header(name, ts, cfg, sysid_cfg, results.eval_time_s, best_dev_loss, train_time_s),
+        _verdict_section(results, balance, trained_balance, power, plan, sensitivity, arch),
+        _controller_section(arch),
+        _objective_section(cfg, sysid_cfg, resolve_objective(cfg, nm_mapping), balance,
+                           trained_balance, power, objective_notes, trains),
+        _comfort_section(results),
     ]
-    if surrogate_arch is not None:
-        parts.append(_architecture_section(surrogate_arch, "Surrogate architecture"))
-    if sensitivity is not None:
-        parts.append(_sensitivity_section(sensitivity))
-    parts += [
-        _policy_section(arch),
-        _scenario_section(cfg, sysid_cfg, nm_mapping,
-                          resolve_objective(cfg, nm_mapping)),
-    ]
-    if balance is not None:
-        parts.append(_objective_section(balance, power, objective_notes, trained_balance,
-                                        cfg.policy != "mpc"))
-    parts.append(_performance_section(results))
     if plan is not None:
         parts.append(_gap_section(plan, results))
-    parts += [
-        _actuation_section(results),
-        _response_section(results, nm_mapping["U"]),
-        _tracking_section(results),
-        _hyperparameters_section(cfg),
-    ]
+    parts.append(_actuation_section(results))
+    response = _response_section(results)
+    if response is not None:
+        parts.append(response)
+    parts.append(_hyperparameters_line(cfg))
     return "\n".join(parts)

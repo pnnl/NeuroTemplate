@@ -1,21 +1,17 @@
 """
 Per-channel evaluation metrics in physical units.
 
-Computes RMSE, MAE, R², and NRMSE per Y channel rather than a single
-aggregate, so each row of the report has units that make sense
-(averaging across channels with different units is uninterpretable).
+Computes RMSE per Y channel rather than a single aggregate, so each number
+has units that make sense (averaging across channels with different units
+is uninterpretable), and `skill` against persistence: 1 − RMSE / the RMSE
+of holding the last seeded value. Skill is the unitless comparison; a
+persistence reference makes a range normalisation unnecessary.
 
 The single entry point is `per_channel_metrics(...)`, which takes
 unnormalized [batch, time, ny] tensors plus the column-name list.
 
-NRMSE is normalized by the per-channel range (max - min) of the true
-values in this evaluation set. This is the most common convention in
-system-ID literature and gives a bounded interpretation: 0.1 ≈ 10% of
-channel range. If a channel is constant (max == min), NRMSE is set to
-NaN to signal it's undefined.
-
-None of those can see a rare event. A staged channel that is off 97% of
-the time is scored *better* by NRMSE when the model never turns it on —
+Neither can see a rare event. A staged channel that is off 97% of
+the time is scored *better* by RMSE when the model never turns it on —
 the best-NRMSE furnace surrogate in the head bake-off never fired once.
 `level_metrics` is the classification view for such channels: per-level
 recall and balanced accuracy (mean recall, so a constant predictor scores
@@ -26,7 +22,6 @@ level, which is what distinguishes a working head from a constant.
 import math
 import re
 from dataclasses import dataclass
-from typing import Optional
 
 import torch
 
@@ -43,13 +38,19 @@ def metric_key(name: str) -> str:
 
 @dataclass
 class ChannelMetrics:
-    """Metrics for one Y channel, all in the channel's physical units."""
+    """RMSE for one Y channel, in the channel's physical units."""
     name: str
     rmse: float
-    mae: float
-    r2: float
-    nrmse: float  # NaN if channel is constant
     n_samples: int
+
+
+def skill(rmse: float, persistence_rmse: float) -> float:
+    """1 − RMSE / persistence RMSE: 0 is no better than holding the last seeded
+    value, 1 is perfect, below 0 is worse than holding it. NaN when
+    persistence is already exact (a channel that never moves)."""
+    if persistence_rmse == 0:
+        return float("nan")
+    return 1.0 - rmse / persistence_rmse
 
 
 @dataclass
@@ -193,27 +194,9 @@ def per_channel_metrics(
         p = pred[:, :, i]
         t = true[:, :, i]
         err = p - t
-
-        rmse = err.pow(2).mean().sqrt().item()
-        mae = err.abs().mean().item()
-
-        # R²: 1 - SS_res / SS_tot. Undefined when SS_tot == 0
-        # (constant truth) — fall back to 0.0 to keep it a real number,
-        # the NaN NRMSE flags the constant-channel case anyway.
-        ss_res = err.pow(2).sum().item()
-        t_mean = t.mean().item()
-        ss_tot = (t - t_mean).pow(2).sum().item()
-        r2 = 1.0 - ss_res / ss_tot if ss_tot > 0 else 0.0
-
-        t_range = t.max().item() - t.min().item()
-        nrmse = rmse / t_range if t_range > 0 else float("nan")
-
         results.append(ChannelMetrics(
             name=name,
-            rmse=rmse,
-            mae=mae,
-            r2=r2,
-            nrmse=nrmse,
+            rmse=err.pow(2).mean().sqrt().item(),
             n_samples=int(n_per_channel),
         ))
 
@@ -296,28 +279,6 @@ def rollout_stability(
 
 
 @beartype
-def stability_to_markdown(
-    stability: list[RolloutStability], rise_excess_warn: float = 0.25
-) -> str:
-    """Render rollout stability as a markdown table, flagging likely ramps."""
-    header = (
-        "| Channel | Rise frac (pred / true) | Excess | "
-        "Drift (pred / true) | Ratio | |"
-    )
-    sep = "|---|---:|---:|---:|---:|---|"
-    rows = [header, sep]
-    for s in stability:
-        flag = "⚠️ ramp?" if s.looks_like_ramp(rise_excess_warn) else ""
-        rows.append(
-            f"| {s.name} | {s.pred_rise_fraction:.3f} / "
-            f"{s.true_rise_fraction:.3f} | {s.rise_excess:.3f} | "
-            f"{s.pred_drift:.4g} / {s.true_drift:.4g} | "
-            f"{s.drift_ratio:.2f} | {flag} |"
-        )
-    return "\n".join(rows)
-
-
-@beartype
 def stability_to_dict(stability: list[RolloutStability]) -> dict:
     """JSON-serializable rollout stability (for MLflow / disk)."""
     return {
@@ -338,13 +299,7 @@ def stability_to_dict(stability: list[RolloutStability]) -> dict:
 def metrics_to_dict(metrics: list[ChannelMetrics]) -> dict:
     """Convert metrics list to a JSON-serializable dict (for MLflow / disk)."""
     return {
-        m.name: {
-            "rmse": m.rmse,
-            "mae": m.mae,
-            "r2": m.r2,
-            "nrmse": m.nrmse,
-            "n_samples": m.n_samples,
-        }
+        m.name: {"rmse": m.rmse, "n_samples": m.n_samples}
         for m in metrics
     }
 
@@ -365,48 +320,3 @@ def level_metrics_to_dict(metrics: list[LevelMetrics]) -> dict:
     }
 
 
-def _fmt_recall(r: float) -> str:
-    return "n/a" if math.isnan(r) else f"{r:.3f}"
-
-
-@beartype
-def level_metrics_to_markdown(
-    metrics: list[LevelMetrics],
-    reference: Optional[list[LevelMetrics]] = None,
-) -> str:
-    """Two tables: balanced accuracy per channel (beside `reference`'s, when
-    given — persistence, on the reportcard), then one row per level."""
-    ref_by_name = {m.name: m for m in (reference or [])}
-    summary = ["| Channel | Balanced acc" + (" | Persistence |" if reference else " |"),
-               "|---|---:" + ("|---:|" if reference else "|")]
-    for m in metrics:
-        row = f"| {m.name} | {_fmt_recall(m.balanced_accuracy)} |"
-        if reference:
-            ref = ref_by_name.get(m.name)
-            row += f" {_fmt_recall(ref.balanced_accuracy) if ref else 'n/a'} |"
-        summary.append(row)
-
-    detail = ["| Channel | Level | True share | Pred share | Recall |",
-              "|---|---:|---:|---:|---:|"]
-    for m in metrics:
-        for level, t, p, r in zip(m.levels, m.true_share, m.pred_share, m.recall):
-            detail.append(
-                f"| {m.name} | {level:g} | {t * 100:.1f}% | {p * 100:.1f}% | "
-                f"{_fmt_recall(r)} |"
-            )
-    return "\n".join(summary) + "\n\n" + "\n".join(detail)
-
-
-@beartype
-def metrics_to_markdown(metrics: list[ChannelMetrics]) -> str:
-    """Render metrics as a markdown table for the reportcard."""
-    header = "| Channel | RMSE | MAE | R² | NRMSE |"
-    sep = "|---|---:|---:|---:|---:|"
-    rows = [header, sep]
-    for m in metrics:
-        nrmse_str = "n/a" if math.isnan(m.nrmse) else f"{m.nrmse:.4f}"
-        rows.append(
-            f"| {m.name} | {m.rmse:.4f} | {m.mae:.4f} | "
-            f"{m.r2:.4f} | {nrmse_str} |"
-        )
-    return "\n".join(rows)

@@ -208,30 +208,6 @@ def objective_notes(objective: Objective, cfg) -> list[str]:
 
 
 @beartype
-def balance_to_markdown(balance: ObjectiveBalance,
-                        trained: Optional[ObjectiveBalance] = None) -> str:
-    """One row per term. With `trained` (the same batch through the trained
-    policy), its value and share sit beside the pre-training ones."""
-    after = {} if trained is None else {t.name: t for t in trained.terms}
-    head = "| Term | Value | Share | vs. the rest | |"
-    rule = "|---|---:|---:|---:|---|"
-    if trained is not None:
-        head += " Value, trained | Share, trained |"
-        rule += "---:|---:|"
-    rows = [head, rule]
-    for t in balance.terms:
-        ratio = "∞" if t.ratio_to_rest == float("inf") else f"{t.ratio_to_rest:.2f}×"
-        flag = "⚠️ dominates" if t.dominates() else ""
-        row = f"| {t.name} | {t.value:.4g} | {t.share * 100:.0f}% | {ratio} | {flag} |"
-        if trained is not None:
-            a = after.get(t.name)
-            row += (" n/a | n/a |" if a is None
-                    else f" {a.value:.4g} | {a.share * 100:.0f}% |")
-        rows.append(row)
-    return "\n".join(rows)
-
-
-@beartype
 def objective_to_dict(balance: ObjectiveBalance,
                       power: Optional[PowerDiagnostics] = None,
                       notes: Optional[list[str]] = None,

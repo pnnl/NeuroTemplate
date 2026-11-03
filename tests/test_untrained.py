@@ -45,8 +45,8 @@ def test_lr_zero_trains_nothing_and_reports_no_training(tmp_path, monkeypatch):
 
     assert run.best_dev_loss is None and run.train_time_s is None
     card = next(tmp_path.glob("*reportcard*.md")).read_text()
-    assert "**Training:** none (`lr: 0`)" in card
-    assert "Best dev loss" not in card and "Train time" not in card
+    assert "not trained (`lr: 0`)" in card
+    assert "dev loss" not in card
 
 
 def test_a_parameter_with_no_gradient_path_is_refused_before_training(tmp_path, monkeypatch):

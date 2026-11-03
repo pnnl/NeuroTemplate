@@ -19,13 +19,8 @@ from neuromancer.trainer import Trainer
 
 from neurotemplate.common.data_utils import NormStats, axis_label
 from neurotemplate.common.progress import Progress
-from neurotemplate.common.metrics import (
-    ChannelMetrics,
-    metric_key,
-    metrics_to_dict,
-    per_channel_metrics,
-)
-from neurotemplate.common.reportcard import write_reportcard as _write_reportcard
+from neurotemplate.common.metrics import metric_key
+from neurotemplate.common.reportcard import RESULTS_DIR, write_reportcard as _write_reportcard
 from neurotemplate.common.tracking import save_checkpoint
 from neurotemplate.control.metrics import (
     ActuationMetrics,
@@ -66,7 +61,6 @@ class ControlResults:
     mean_abs_du: float                 # mean |ΔU| over every U column (physical units)
     actuation: list[ActuationMetrics]  # per-control effort + saturation
     response: list[JumpResponse]       # reaction to band jumps
-    tracking: list[ChannelMetrics]     # error vs band midpoint, two-sided bands
     energy: Optional[EnergyMetrics]    # None if power_metric not implemented
     eval_time_s: float
     # Per anchored U column; empty without a residual.
@@ -241,13 +235,6 @@ def score_rollout(
     violation_rate = (excursion > 0).float().mean().item()
     mean_exceedance = excursion.mean().item()
 
-    # The midpoint exists only for a band with both edges.
-    two_sided = [j for j, b in enumerate(objective.bands)
-                 if b.lower is not None and b.upper is not None]
-    mid = 0.5 * (lower + upper)
-    tracking = per_channel_metrics(y_ctrl[..., two_sided], mid[..., two_sided],
-                                   [regulated[j] for j in two_sided])
-
     u_cols = nm_mapping["U"]
     U = out["U"][:, scored_steps("U", hmax), :]
     mean_abs_du = (U[:, 1:, :] - U[:, :-1, :]).abs().mean().item()
@@ -300,7 +287,6 @@ def score_rollout(
         mean_abs_du=mean_abs_du,
         actuation=actuation,
         response=response,
-        tracking=tracking,
         energy=energy,
         eval_time_s=eval_time_s,
         residual=deviations,
@@ -318,7 +304,7 @@ def log_control_results(logger, results: ControlResults) -> None:
     if logger is None:
         return
     logger.log_metrics(_flat_control_metrics(results))
-    logger.log_dict(_control_metrics_dict(results), name="control_metrics.json")
+    logger.log_dict(_control_metrics_dict(results), name=f"{RESULTS_DIR}/control_metrics.json")
 
 
 def _flat_control_metrics(results: ControlResults) -> dict:
@@ -373,7 +359,6 @@ def _control_metrics_dict(results: ControlResults) -> dict:
         "response": response_to_dict(results.response),
         "energy": None if results.energy is None else asdict(results.energy),
         "residual": [asdict(r) for r in results.residual],
-        "tracking": metrics_to_dict(results.tracking),
     }
 
 

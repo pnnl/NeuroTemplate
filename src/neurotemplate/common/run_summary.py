@@ -18,10 +18,11 @@ reportcards.
 from typing import Any, Optional
 
 from neurotemplate._typing import beartype
+from neurotemplate.common.reportcard import RESULTS_DIR
 
 
 SCHEMA_VERSION = 1
-RUN_SUMMARY_NAME = "run_summary.json"
+RUN_SUMMARY_NAME = f"{RESULTS_DIR}/run_summary.json"
 
 # The fields a submission audit compares against the config it claims to
 # have run. Keep in step with the audit, not with the full config.

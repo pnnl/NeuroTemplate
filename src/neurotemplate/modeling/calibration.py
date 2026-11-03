@@ -100,6 +100,20 @@ class Calibration:
     kept: int
 
 
+def calibration_to_dict(c: Calibration, stats: dict) -> dict:
+    """The search's full trace, thresholds in physical units (`stats` is the
+    channel's norm stats): what each dev rollout tried and produced."""
+    def physical(thresholds: list[float]) -> list[float]:
+        return [t * stats["stretch"] + stats["shift"] for t in thresholds]
+    return {
+        "true_shares": c.true_shares,
+        "kept": c.kept,
+        "trace": [{"thresholds": physical(step.thresholds), "pred_shares": step.pred_shares,
+                   "error": step.error, "balanced_accuracy": step.balanced_accuracy}
+                  for step in c.trace],
+    }
+
+
 @beartype
 def balance_level_weights(head_stack: HeadStack, train_dfs: list[DataFrame]) -> None:
     """Set every levelled head's `level_weights` to the inverse square-root

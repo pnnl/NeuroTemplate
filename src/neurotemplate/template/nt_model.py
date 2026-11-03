@@ -115,7 +115,7 @@ def data_head_config(
 
     Levelled heads are rebalanced and threshold-calibrated for you
     (`balance_levels`, `calibrate_thresholds`). Judge them by the
-    reportcard's level metrics against its persistence row, not by NRMSE:
+    reportcard's level metrics against persistence's, not by RMSE:
     a regression head on staged equipment fits near the mean and can score
     well while never predicting the equipment on. Pin either by hand with
     `level_weights=` / `decision_thresholds=` and the flag off.
@@ -242,7 +242,7 @@ def block_mapping(
                inherits that. Declare every setpoint that drives the block.
 
     Which structure is better for your plant is a model iteration, decided
-    by the physics checks and the rollout readouts, not by test NRMSE,
+    by the physics checks, the rollout and the whiteness, not by test RMSE,
     which declarations are not expected to improve.
     """
     return None

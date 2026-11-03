@@ -506,73 +506,10 @@ def response_audit(
 
 
 @beartype
-def comfort_to_markdown(metrics: list[ComfortMetrics]) -> str:
-    """Render comfort metrics as a markdown table for the reportcard."""
-    header = (
-        "| Channel | Mean exceedance | RMS exceedance | Violation rate | "
-        "Below | Above | Mean excursion (violating only) | Max excursion | "
-        "Degree-hours |"
-    )
-    sep = "|---|---:|---:|---:|---:|---:|---:|---:|---:|"
-    rows = [header, sep]
-    for m in metrics:
-        rows.append(
-            f"| {m.name} | {m.mean_exceedance:.4f} | {m.rms_exceedance:.4f} | "
-            f"{m.violation_rate * 100:.2f}% | "
-            f"{m.frac_below * 100:.2f}% | {m.frac_above * 100:.2f}% | "
-            f"{m.mean_violation:.4f} | {m.max_violation:.4f} | "
-            f"{m.degree_hours:.4f} |"
-        )
-    return "\n".join(rows)
-
-
-@beartype
 def comfort_to_dict(metrics: list[ComfortMetrics]) -> dict:
     """JSON-serializable comfort metrics (for MLflow / disk)."""
     return {m.name: {k: v for k, v in asdict(m).items() if k != "name"}
             for m in metrics}
-
-
-@beartype
-def actuation_to_markdown(metrics: list[ActuationMetrics]) -> str:
-    """Render per-control actuation as a markdown table.
-
-    No flag column: time spent on a bound is reported, not judged. A setpoint
-    parked at its least-aggressive limit through a period that demands nothing
-    of it is correct control and produces the same number as a stuck one.
-    """
-    rows = [
-        "| Control | Bounds | Mean | Mean \\|Δu\\| | At lower bound | "
-        "At upper bound |",
-        "|---|---|---:|---:|---:|---:|",
-    ]
-    for m in metrics:
-        rows.append(
-            f"| {m.name} | [{m.u_min:.4g}, {m.u_max:.4g}] | "
-            f"{m.mean_value:.4g} | {m.mean_abs_du:.4g} | "
-            f"{m.frac_at_min * 100:.1f}% | {m.frac_at_max * 100:.1f}% |"
-        )
-    return "\n".join(rows)
-
-
-@beartype
-def response_to_markdown(responses: list[JumpResponse],
-                         u_names: list[str]) -> str:
-    """Render the band-jump audit: one row per (channel, demand direction)."""
-    du_cols = "".join(f" Δ`{n}` |" for n in u_names)
-    rows = [
-        "| Channel | Demand | Jumps | Steps scored | Actuated | Moved right "
-        f"way | Back in band | Mean move |{du_cols}",
-        "|---|---|---:|---:|---:|---:|---:|---:|" + "---:|" * len(u_names),
-    ]
-    for r in responses:
-        du = "".join(f" {r.mean_du[n]:+.3g} |" for n in u_names)
-        rows.append(
-            f"| {r.name} | {r.direction} | {r.n_jumps} | {r.mean_span:.0f} | "
-            f"{r.frac_actuated * 100:.0f}% | {r.frac_closed * 100:.0f}% | "
-            f"{r.frac_resolved * 100:.0f}% | {r.mean_move:+.3g} |{du}"
-        )
-    return "\n".join(rows)
 
 
 @beartype

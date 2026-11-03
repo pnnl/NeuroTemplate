@@ -971,32 +971,10 @@ def run_scenarios(scenarios: list, n: Optional[int] = None) -> ScenarioOutcome:
 
 
 @beartype
-def checks_to_markdown(results: list[ScenarioResult]) -> str:
-    rows = ["| Scenario | Channel | Verdict | What happened |",
-            "|---|---|---|---|"]
-    for r in results:
-        rows.append(f"| {r.name} | `{r.channel}` | "
-                    f"{'pass' if r.passed else '**FAIL**'} | {r.headline} |")
-    return "\n".join(rows)
-
-
-@beartype
 def checks_to_dict(results: list[ScenarioResult]) -> dict:
     """Keyed by scenario *and* channel, since each scenario reports on every
     state channel."""
     return {r.key: r.to_dict() for r in results}
-
-
-@beartype
-def readouts_to_markdown(readouts: list[ReadoutSummary]) -> str:
-    """Order statistics per readout channel, per scenario. No verdicts."""
-    rows = ["| Scenario | Channel | Seeded at | Min | 25% | Median | 75% | Max |",
-            "|---|---|---:|---:|---:|---:|---:|---:|"]
-    for r in readouts:
-        cells = " | ".join(f"{v:.4g}" for v in r.quantiles)
-        rows.append(f"| {r.scenario} | `{r.name}` | {r.seeded_at:.4g} | "
-                    f"{cells} |")
-    return "\n".join(rows)
 
 
 @beartype
