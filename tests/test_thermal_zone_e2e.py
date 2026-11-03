@@ -32,7 +32,7 @@ HOOKS = f'''
 import json, os
 from neurotemplate.modeling.heads import HeadStack, RegressionHead
 
-def data_mapping(df, cfg):
+def data_mapping(df):
     return {{"Y": [{ZONE!r}, {HEAT!r}], "U": [{SETPOINT!r}], "D": [{OUTDOOR!r}, {SOLAR!r}],
             "t": ["sec_elapsed"]}}
 

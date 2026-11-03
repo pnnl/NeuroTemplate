@@ -40,39 +40,25 @@ def _col_match(col, exact_list, partial_list):
 
 
 @beartype
-def data_mapping(
-    df: pd.DataFrame,
-    cfg: Config,
-) -> dict[str, list[str]]:
+def data_mapping(df: pd.DataFrame) -> dict[str, list[str]]:
     """
     Assign each dataframe column to a role: Y (states), U (controls),
     D (disturbances), or t (time).
 
     Returns a dict with keys "Y", "U", "D", "t", each mapping to a list of
-    column names from `df` in dataframe order. `cfg.exclude_columns`
-    contributes additional substring patterns to drop; patterns that match
-    nothing raise to flag typos. A column landing in two roles raises.
+    column names from `df` in dataframe order. A column landing in two roles
+    raises.
 
     The `t` slot is currently fixed to the "sec_elapsed" column produced by
     the data loader.
     """
-
-    # Fail fast on typos: a pattern in cfg.exclude_columns that matches no
-    # column is almost certainly a mistake, not an intentional no-op.
-    missing = [c for c in cfg.exclude_columns if not any(c in col for col in df.columns)]
-    if missing:
-        raise ValueError(
-            f"cfg.exclude_columns lists patterns matching no columns in dataframe: {missing}"
-        )
 
     # Exact column names that should be dropped entirely.
     EXCLUDE_EXACT = [
         "Time [s]",
     ]
     # Partial patterns: any column whose name contains one of these is excluded.
-    # cfg.exclude_columns entries are treated as partial patterns so short
-    # substrings (e.g. "VAV Box 1") match without writing the full column name.
-    EXCLUDE_PARTIAL = list(cfg.exclude_columns)
+    EXCLUDE_PARTIAL = []
 
     # Y — building model outputs.
     Y_EXACT   = []

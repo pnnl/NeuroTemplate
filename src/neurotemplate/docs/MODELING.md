@@ -18,7 +18,7 @@ The hooks in `nt_model.py`, scaffolded by `nt init` with a docstring each:
 
 | Hook | Says | |
 |---|---|---|
-| `data_mapping` | which columns are `Y`, `U` and `D` | required |
+| `data_mapping` | which columns are `Y`, `U` and `D`; config's `exclude_columns` then drops some | required |
 | `data_head_config` | an output head per `Y` column: regression, binary, bounded or ordinal | required |
 | `column_norm_config` | per-column normalization overrides | required |
 | `synth_cfg` | which outputs are thermal states, for the physics checks (`None` skips them) | required |
@@ -265,7 +265,11 @@ hourly_oat = hourly_oat.fillna(smooth(hourly_oat, period="1D"))  # longer gaps
 oat = expand(hourly_oat, "5min", "quadratic")      # a smooth physical one
 ```
 
-`smooth` needs the `prep` extra. Before training, `nt data heads` reports
+`smooth` needs the `prep` extra. `nt data plot FILE` shows a record as
+recorded, one channel at a time, gaps as breaks in the line; run from the
+application directory, its channel list is grouped by `data_mapping`'s roles
+(`--column C --output P.png` writes one channel to an image instead). Before
+training, `nt data heads` reports
 which output head a column's distribution suggests, and `nt data ladder`
 and `nt data thermostat` a thermal zone's network and thermostat (see
 "rc_network"). All are advice, not checks.

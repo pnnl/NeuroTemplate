@@ -14,7 +14,7 @@ test_data_path: data/test.csv
 # batch_size: 256
 # min_max | abs_max | z_score | null. Per-column overrides: column_norm_config.
 # norm_type: z_score
-# Substring patterns; data_mapping drops matching columns.
+# Substring patterns; every column matching one is dropped from data_mapping's roles.
 # exclude_columns: []
 # Hooks file (path or dotted module). Unset = nt_model.py in CWD.
 # user_hooks_path: null

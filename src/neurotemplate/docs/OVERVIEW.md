@@ -62,6 +62,7 @@ show the calls.
 | `nt model optuna` | hyperparameter search, then retrain the best |
 | `nt model load` | score a trained surrogate on other data |
 | `nt model debug-heads` | inspect how the output heads behave |
+| `nt data plot` | look at a record one channel at a time, grouped by role |
 | `nt data heads` | before training: which output head a column wants |
 | `nt data ladder` | before training: which RC network a thermal zone's record supports |
 | `nt data thermostat` | before training: the heat a zone's setpoints deliver |

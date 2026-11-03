@@ -93,16 +93,16 @@ ROLES = ("Y", "U", "D", "t")
 
 
 def resolve_nm_mapping(hooks, df: DataFrame, cfg: ModelingConfig) -> dict[str, list[str]]:
-    """Call the hooks module's `data_mapping` and check what it returns.
+    """Call the hooks module's `data_mapping`, check what it returns, and drop
+    every column matching a `cfg.exclude_columns` pattern.
 
     Checked here rather than in the hook, so a rewritten hook gets the same
     checks: the four roles and nothing else, every name a column of `df`,
-    no column in two roles or twice in one, a non-empty Y, and
-    `cfg.exclude_columns` both matching some column (a pattern that matches
-    nothing is a typo) and matching no mapped column. Every problem is listed
-    at once.
+    no column in two roles or twice in one, every exclude pattern matching
+    some column (one that matches nothing is a typo), and a non-empty Y once
+    the excluded columns are gone. Every problem is listed at once.
     """
-    nm_mapping = hooks.data_mapping(df=df, cfg=cfg)
+    nm_mapping = hooks.data_mapping(df=df)
     problems = []
     if set(nm_mapping) != set(ROLES):
         problems.append(f"keys must be exactly {list(ROLES)}, got {sorted(nm_mapping)}")
@@ -113,14 +113,15 @@ def resolve_nm_mapping(hooks, df: DataFrame, cfg: ModelingConfig) -> dict[str, l
     repeated = sorted({c for c in named if named.count(c) > 1})
     if repeated:
         problems.append(f"columns in more than one role (or twice in one): {repeated}")
-    if not nm_mapping.get("Y"):
-        problems.append("Y is empty, so the model has nothing to predict")
     unmatched = [p for p in cfg.exclude_columns if not any(p in c for c in df.columns)]
     if unmatched:
         problems.append(f"cfg.exclude_columns patterns match no column: {unmatched}")
-    excluded = [c for c in named if any(p in c for p in cfg.exclude_columns)]
-    if excluded:
-        problems.append(f"columns matching cfg.exclude_columns are still mapped: {excluded}")
+    nm_mapping = {
+        role: [c for c in names if not any(p in c for p in cfg.exclude_columns)]
+        for role, names in nm_mapping.items()
+    }
+    if not nm_mapping.get("Y"):
+        problems.append("Y is empty, so the model has nothing to predict")
     if problems:
         raise ValueError("data_mapping returned an unusable mapping:\n  - "
                          + "\n  - ".join(problems))

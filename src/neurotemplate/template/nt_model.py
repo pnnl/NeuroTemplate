@@ -70,23 +70,18 @@ D_COLUMNS: list[str] = [
 
 
 @beartype
-def data_mapping(
-    df: pd.DataFrame,
-    cfg: Config,
-) -> dict[str, list[str]]:
+def data_mapping(df: pd.DataFrame) -> dict[str, list[str]]:
     """
     Return {"Y": [...], "U": [...], "D": [...], "t": ["sec_elapsed"]}.
 
     Names must match `df` columns exactly; `sec_elapsed` is added by the CSV
-    loader from the timestamp index. `cfg.exclude_columns` holds substring
-    patterns to drop. The library checks what this returns (unknown or
-    doubly-assigned columns, an empty Y, an exclude pattern matching
-    nothing), so the hook only has to say which column plays which role.
+    loader from the timestamp index. The library checks what this returns
+    (unknown or doubly-assigned columns, an empty Y) and then drops any
+    column matching the config's `exclude_columns`, so the hook only has to
+    say which column plays which role. `nt data plot` groups its channels by
+    this mapping, so it takes no config.
     """
-    def keep(names: list[str]) -> list[str]:
-        return [c for c in names if not any(p in c for p in cfg.exclude_columns)]
-
-    return {"Y": keep(Y_COLUMNS), "U": keep(U_COLUMNS), "D": keep(D_COLUMNS),
+    return {"Y": Y_COLUMNS, "U": U_COLUMNS, "D": D_COLUMNS,
             "t": ["sec_elapsed"]}
 
 

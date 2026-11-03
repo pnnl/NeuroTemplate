@@ -34,13 +34,12 @@ NormStats = dict[str, ColumnStats]
 # ---------------------- Data utilities ---------------------- #
 
 @beartype
-def get_data(path: str) -> tuple[pd.DataFrame, float]:
-    """Load one CSV onto a regular DatetimeIndex, with a `sec_elapsed` column.
+def read_timestamped_csv(path: str) -> pd.DataFrame:
+    """Load one CSV indexed by its parsed time column, named `timestamp`.
 
-    Returns `(df, timestep_seconds)`. The time column is auto-detected by name.
-    The timestep is the most common spacing between rows, and every row must
-    keep it: the loader neither fills nor splits at a gap, so a missing or
-    out-of-order timestamp is refused with where it happens.
+    The time column is auto-detected by name. Rows are left as recorded:
+    nothing here checks the spacing, so a gap or a ragged step survives for
+    whoever reads the result (`get_data` refuses one; `nt data plot` shows it).
     """
     df = pd.read_csv(path)
 
@@ -51,7 +50,9 @@ def get_data(path: str) -> tuple[pd.DataFrame, float]:
     t_col = next((c for c in df.columns if c.lower() in time_candidates), None)
 
     if t_col is None:
-        raise ValueError("Could not auto-detect time column in dataset.")
+        raise ValueError(
+            f"{path}: could not auto-detect a time column; name one of "
+            f"{time_candidates} (any case).")
 
     parsed_ts = pd.to_datetime(df[t_col], errors="coerce")
     if parsed_ts.isna().any():
@@ -61,22 +62,29 @@ def get_data(path: str) -> tuple[pd.DataFrame, float]:
             f"Example invalid values: {bad_examples}"
         )
 
-    df["timestamp"] = parsed_ts
+    return df.drop(columns=t_col).set_index(pd.DatetimeIndex(parsed_ts, name="timestamp"))
 
-    # Drop time column if it doesn't have name "timestamp", this doesn't
-    # change the base dataset just standardizes the data in this flow
-    if t_col != "timestamp":
-        df = df.drop(columns=t_col, axis=1)
 
-    spacing = df["timestamp"].diff().iloc[1:]
+@beartype
+def get_data(path: str) -> tuple[pd.DataFrame, float]:
+    """Load one CSV onto a regular DatetimeIndex, with a `sec_elapsed` column.
+
+    Returns `(df, timestep_seconds)`. The time column is auto-detected by name
+    (`read_timestamped_csv`). The timestep is the most common spacing between
+    rows, and every row must keep it: the loader neither fills nor splits at
+    a gap, so a missing or out-of-order timestamp is refused with where it
+    happens.
+    """
+    df = read_timestamped_csv(path)
+
+    spacing = df.index.to_series().diff().iloc[1:]
     if spacing.empty:
         raise ValueError(f"{path}: need at least two rows to find the timestep.")
     backwards = spacing[spacing <= pd.Timedelta(0)]
     if not backwards.empty:
-        row = backwards.index[0]
         raise ValueError(
             f"{path}: timestamps must be strictly increasing; "
-            f"{df['timestamp'][row]} does not come after the row before it "
+            f"{backwards.index[0]} does not come after the row before it "
             f"({len(backwards)} such row(s))."
         )
     step = spacing.mode().iloc[0]
@@ -86,13 +94,11 @@ def get_data(path: str) -> tuple[pd.DataFrame, float]:
         raise ValueError(
             f"{path}: timestamps are not evenly spaced. The timestep is {step}, "
             f"but {len(off_step)} row(s) break it, the first at "
-            f"{df['timestamp'][row]} ({spacing[row]} after the row before). "
+            f"{row} ({off_step.iloc[0]} after the row before). "
             "Gaps are not filled or split automatically: repair the record, or "
             "split the file at each gap and pass the pieces as a list of paths."
         )
     freq_seconds = step.total_seconds()
-
-    df = df.set_index("timestamp")
 
     # get datetime in seconds from epoch
     # to undo this, run pd.to_datetime(1e9*df['time_sec'])+start_time

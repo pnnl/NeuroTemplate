@@ -12,6 +12,7 @@ mirror the package layout:
     nt data heads           # neurotemplate.modeling.cli.data (which head does this Y column want?)
     nt data ladder          # neurotemplate.modeling.cli.data (which RC network fits the zone?)
     nt data thermostat      # neurotemplate.modeling.cli.data (what heat does a setpoint deliver?)
+    nt data plot            # neurotemplate.modeling.cli.data_plot (look at a record, one channel at a time)
     nt control train        # neurotemplate.control.cli.train
     nt export model         # neurotemplate.export.cli (trained dynamics -> ONNX package)
     nt export policy        # neurotemplate.export.cli (trained DPC policy -> ONNX package)
@@ -36,6 +37,7 @@ COMMANDS: dict[tuple[str, str], str] = {
     ("data", "heads"):        "neurotemplate.modeling.cli.data:heads_main",
     ("data", "ladder"):       "neurotemplate.modeling.cli.data:ladder_main",
     ("data", "thermostat"):   "neurotemplate.modeling.cli.data:thermostat_main",
+    ("data", "plot"):         "neurotemplate.modeling.cli.data_plot:main",
     ("control", "train"):     "neurotemplate.control.cli.train:main",
     ("export", "model"):      "neurotemplate.export.cli:model_main",
     ("export", "policy"):     "neurotemplate.export.cli:policy_main",

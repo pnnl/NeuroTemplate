@@ -38,3 +38,18 @@ def test_a_hooks_file_runs_once_and_imports_its_siblings(hooks_dir):
     assert load_modeling_hooks(cfg) is first
     assert first.ZONE == "Zone [°C]"
     assert builtins.site_hooks_runs == 1
+
+
+def test_the_library_drops_excluded_columns_and_flags_a_typo():
+    import pandas as pd
+    from neurotemplate.modeling.pipeline import resolve_nm_mapping
+
+    df = pd.DataFrame(columns=["Zone [°C]", "Zone Spare [°C]", "Setpoint [°C]", "sec_elapsed"])
+    hooks = SimpleNamespace(data_mapping=lambda df: {
+        "Y": ["Zone [°C]", "Zone Spare [°C]"], "U": ["Setpoint [°C]"], "D": [],
+        "t": ["sec_elapsed"]})
+
+    mapping = resolve_nm_mapping(hooks, df, SimpleNamespace(exclude_columns=["Spare"]))
+    assert mapping["Y"] == ["Zone [°C]"]
+    with pytest.raises(ValueError, match="match no column: \\['Sapre'\\]"):
+        resolve_nm_mapping(hooks, df, SimpleNamespace(exclude_columns=["Sapre"]))

@@ -46,6 +46,9 @@ before deciding the next run.
    - `D`: what is known without the plant: weather, schedules, a calendar, anything
      a forecast can supply at run time. Nothing forecasts a meter, so a meter is
      never `D`.
+
+   `nt data plot data/train.csv` then lists the record's channels under those
+   roles; one left over is one the model never reads.
 3. **Smoke run**: `nt model train --config model_configs/debug.yaml`. It takes
    seconds and catches every wrong name.
 4. **Coverage.** The model only knows commands the data issued, and the controller's
