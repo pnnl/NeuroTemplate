@@ -80,6 +80,11 @@ def data_mapping(df: pd.DataFrame) -> dict[str, list[str]]:
     column matching the config's `exclude_columns`, so the hook only has to
     say which column plays which role. `nt data plot` groups its channels by
     this mapping, so it takes no config.
+
+    Timing is by role, assumed and never shifted for you: Y at row t is
+    sampled at t, or measured over the step that ends at t; U and D at row
+    t are held over the step that starts at t. Shift a column recorded the
+    other way here.
     """
     return {"Y": Y_COLUMNS, "U": U_COLUMNS, "D": D_COLUMNS,
             "t": ["sec_elapsed"]}
@@ -202,21 +207,25 @@ def block_mapping(
     means `cfg.model`; under `mlp`/`gru` the split then needs `per_block:
     true`.
 
-    `rc_network` is a thermal zone whose delivered heat is measured (supply
-    flow × (supply − zone) temperature × 1.2 kJ/(m³K), in kW, positive
-    heating; a meter, its row the heat over the step that ends there). Its
-    Y are the zone and that heat; its U the setpoints its thermostat
-    follows; its D the outdoor temperature (`ambient`) and every input
-    that adds heat (`solar`, an occupancy schedule). `params` holds two
-    declarations, every value a scalar (pinned) or [lo, hi] (fitted inside):
+    `rc_network` is a thermal zone whose delivered heat is known (supply
+    flow × (supply − zone) temperature × 1.2 kJ/(m³K), or stage × capacity,
+    in kW, positive heating). As above, the heat is a Y: Y the zone and
+    that heat, U the setpoints its thermostat follows. If the controller
+    commands the heat instead, it is a U: Y the zone alone, U the heat
+    alone, and no thermostat. Its rows mean what its role says (see
+    `data_mapping`).
+    D is the outdoor temperature (`ambient`) and every input that adds heat
+    (`solar`, an occupancy schedule). `params` holds the declarations,
+    every value a scalar (pinned) or [lo, hi] (fitted inside):
       network     nodes (kWh/K), edges (K/kW), where each input enters and
                   its gain, and noise. `nt data ladder` fits a ladder of
                   networks and saves the one its tests pick; edit it freely,
                   and `--candidate` runs your own through the same tests.
-      thermostat  per side, the setpoint and its gain (kW/K), capacity (kW)
-                  and offset (K), and more by form. `nt data thermostat`
-                  saves it; a side the record never exercised comes back
-                  null where the data placed nothing: declare it.
+      thermostat  heat in Y only. Per side, the setpoint and its gain
+                  (kW/K), capacity (kW) and offset (K), and more by form.
+                  `nt data thermostat` saves it; a side the record never
+                  exercised comes back null where the data placed nothing:
+                  declare it.
     There is no default: a prior about a building is yours to state, and
     the commands are where the data states it. The reportcard says where
     each fit landed in its box. A fit pressed against an edge is the data

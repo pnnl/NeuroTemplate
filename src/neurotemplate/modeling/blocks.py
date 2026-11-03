@@ -34,14 +34,18 @@ What a block owns
          the one D column that is the outdoor temperature, if any. Only
          `rc_network` acts on it (conduction to the outdoors);
          other families see the column as an ordinary input either way.
-  heat   the one Y column that is the heat delivered to the zone, in kW
+  heat   the one column that is the heat delivered to the zone, in kW
          (positive heats). It makes the block a thermal zone that `nt data
-         ladder` reads; see `ladder`.
+         ladder` reads; see `ladder`. As a Y, a thermostat produces it
+         from setpoints; as a U, the controller commands it. Its rows mean
+         what its role says, like every column's: a Y over the step that
+         ends at its row, a U over the step that starts there.
   solar  the one D column that is solar irradiance, if any: the input the
          ladder may also route into the mass or the envelope.
   params the block's physical priors, read by its family's builder. Today
-         only `rc_network` reads any: its `network` and `thermostat`
-         declarations, from `nt data ladder` and `nt data thermostat`.
+         only `rc_network` reads any: its `network` declaration from `nt
+         data ladder` and, when the heat is a Y, its `thermostat` from `nt
+         data thermostat`.
 
 Declaring what a column is
 ==========================
@@ -231,9 +235,9 @@ def _resolve_inputs(spec: dict, block: str, y_names: list[str],
     if ambient is not None and ambient not in d_names:
         problems.append(f"`ambient` ({ambient!r}) is not one of this block's D "
                         f"columns {d_names}.")
-    if spec.get("heat") is not None and spec["heat"] not in y_names:
+    if spec.get("heat") is not None and spec["heat"] not in y_names + u_names:
         problems.append(f"`heat` ({spec['heat']!r}) is not one of this block's Y "
-                        f"columns {y_names}.")
+                        f"{y_names} or U {u_names} columns.")
     if spec.get("solar") is not None and spec["solar"] not in d_names:
         problems.append(f"`solar` ({spec['solar']!r}) is not one of this block's D "
                         f"columns {d_names}.")

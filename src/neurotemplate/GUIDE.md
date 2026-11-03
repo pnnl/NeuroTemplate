@@ -47,6 +47,9 @@ before deciding the next run.
      a forecast can supply at run time. Nothing forecasts a meter, so a meter is
      never `D`.
 
+   Timing is by role, and assumed, never shifted for you: `Y` at row t is sampled at t, or measured over the step that ends at t; `U` and `D` at row t are held over the step that starts at t, `[t, t+1)`.
+   A column recorded the other way is shifted in `data_mapping`.
+
    `nt data plot data/train.csv` then lists the record's channels under those
    roles; one left over is one the model never reads.
 3. **Smoke run**: `nt model train --config model_configs/debug.yaml`. It takes
@@ -169,18 +172,27 @@ on yours.
 
 1. **Delivered heat is data prep, yours.** From supply flow and temperature at the
    unit or the VAV box: `1.2 · flow [m³/s] · (supply − zone) [K]` kW, positive
-   heating. It is a meter: a row is the heat over the step that ends there, which is
-   how a plant reports it. A zone without it takes a black box.
+   heating; or the stage times the equipment's capacity. It enters with its gain
+   pinned at 1, so its error is C's and R's. A zone without it takes a black box.
 2. **Declare what each column is**, one block per zone, `model: rc_network`: `Y` the
    zone temperature and its `heat`; `U` the setpoints; `D` the outdoor temperature
    (`ambient`), the irradiance (`solar`), and any schedule that adds heat. An
    occupancy flag was worth a third of the day-ahead error on two plant buildings.
+   A heat-gain input is fitted with a gain ≥ 0, so it must be non-negative: a 0/1
+   flag per part of the day, not sin/cos of the hour, which fits at zero. If the
+   controller commands the heat rather than setpoints, `Y` is the zone alone and
+   `U` the heat alone, with no thermostat (skip step 4). The heat's rows mean what
+   its role says (setup, step 2): a metered heat that becomes a `U` is shifted back
+   one row.
 3. **`nt data ladder`** fits a ladder of RC networks to the record, 30 min steps,
    by maximum likelihood, and picks one by likelihood-ratio tests. Read its card:
    the 24 h error on dev, whiteness, BIC beside the tests, a parameter at a limit or
    barely placed. Put its snippet in the block's `params` as `network`, and edit it
    as you like: a node, an edge, an input into another node. `--candidate mine.json`
-   runs your version through the same tests.
+   runs your version through the same tests. The ladder needs no setpoints, only the
+   zone, its heat and the weather. It will not select a node the record cannot place (an infinite error bar, or slower than the
+   record is long); on closed-loop data, where the HVAC holds the zone, that is often
+   the envelope, and the card says so.
 4. **`nt data thermostat --cooling COL --heating COL`** fits the map from setpoint
    to heat, one step at a time, and rolls each form out 24 h through your network,
    by regime. On cycling equipment the likelihood ratio rewards every extra
@@ -189,7 +201,8 @@ on yours.
    record never exercised comes back unplaced (a null offset, a wide box): declare it
    from what you know of the equipment, or the build refuses.
 5. **History.** A day for the zone, its heat and its `D` (288 steps at 5 min): the
-   window the filter places the hidden nodes from. Setpoints at 0. `train_pred_steps`
+   window the filter places the hidden nodes from, whether the heat is a `Y` or a
+   `U`. Setpoints at 0. `train_pred_steps`
    a day too: one rollout holds an action and its payoff. Training moves every
    parameter inside its box; the reportcard prints the time constants beside the
    ladder's and flags one that left its error bars.

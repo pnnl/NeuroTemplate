@@ -25,14 +25,12 @@ HISTORY_WARN_THRESHOLD = 12
 
 
 def check_lag_table(name: str, table: dict) -> None:
-    """A per-column table of steps: non-empty, every value an int >= 0.
+    """A per-column table of steps, every value an int >= 0.
 
-    Which columns it must name is checked where the columns are known.
+    Which columns it must name is checked where the model is built
+    (`dynamics.column_lags`), so commands that build no model, `nt data`'s,
+    run without one.
     """
-    if not table:
-        raise ValueError(
-            f"{name} is empty. List every column with its number of steps; "
-            "there is no default.")
     for column, steps in table.items():
         if isinstance(steps, bool) or not isinstance(steps, int) or steps < 0:
             raise ValueError(

@@ -1,27 +1,35 @@
 """
-`rc_network` — a thermal zone as a declared RC network behind a thermostat.
+`rc_network` — a thermal zone as a declared RC network, driven by the heat
+delivered to it.
 
     setpoints ─[thermostat]→ heat delivered (kW) ─[RC network]→ zone temperature
+                             heat commanded (kW) ─[RC network]→ zone temperature
 
-The block's Y are the zone temperature and the heat delivered to it (the
-block's `heat`); its U the setpoints its thermostat follows; its D the
-outdoor temperature (`ambient`) and every other input the network takes.
-`params` holds the two declarations, `network` (`nt data ladder`, see
-`network`) and `thermostat` (`nt data thermostat`, see `thermostat`), with
-every C, R, gain and thermostat parameter fitted inside its box. Everything
-inside is in physical units: kWh/K, K/kW, kW, °C, hours.
+The role of the block's `heat` decides which. As a Y, the block models
+the thermostat that delivers it: Y the zone temperature and the heat, U the
+setpoints the thermostat follows. As a U, there is no thermostat: Y the
+zone temperature alone, U the heat alone. D is the outdoor temperature
+(`ambient`) and every other input the network takes either way. Rows mean
+what their role says: a Y row is measured over the step that ends there, a
+U or D row held over the step that starts there.
+
+`params` holds the declarations: `network` (`nt data ladder`, see
+`network`) always, and `thermostat` (`nt data thermostat`, see
+`thermostat`) with the heat a Y. Every C, R, gain and thermostat
+parameter is fitted inside its box. Everything inside is in physical units:
+kWh/K, K/kW, kW, °C, hours.
 
 One step, from the history window to the next row
 =================================================
 
 - **Cold** (the first call of a rollout): a Kalman filter runs over the
-  window, the zone measured and the measured heat driving the network, and
-  leaves every node's temperature at the current row. This is what places
-  the hidden nodes: on two plant buildings a day of history did it as well
-  as the whole record. **Warm**: the nodes carry over.
-- The thermostat turns the current setpoints and the zone node into the heat
-  delivered over the step, which is also the block's heat output: the meter
-  reports the heat over the step at the row that ends it.
+  window, the zone measured and the heat driving the network, and leaves every node's temperature at the current row.
+  This is what places the hidden nodes: on two plant buildings a day of
+  history did it as well as the whole record. **Warm**: the nodes carry
+  over.
+- The heat over the step: the current row's U, or the thermostat's answer
+  to the current setpoints and the zone node, which is then also the
+  block's heat output, at the row that ends the step.
 - The network steps once with that heat, the current outdoor temperature
   and the other inputs, `x ← A x + B u`, with A and B the exact
   zero-order hold at the data's step.
@@ -67,18 +75,25 @@ def _form(name: str) -> th.Form:
 
 
 class NetworkBlock(nn.Module):
-    """One thermal zone: its network, its thermostat and its filter.
+    """One thermal zone: its network, its filter and, with the heat a Y,
+    its thermostat.
 
-    Reads a key-major window of `window` rows of its Y (zone and heat) and D,
-    and the current row of U, all normalised; returns the increment of both
-    Y channels, normalised (`residual=True` adds the current row back).
+    Reads a key-major window of `window` rows of its Y and D, and of U when
+    U is the heat, else the current row of U (the setpoints), all
+    normalised; returns the increment of every Y channel, normalised
+    (`residual=True` adds the current row back).
     """
 
     def __init__(self, name: str, y_names: tuple[str, ...], u_names: tuple[str, ...],
                  d_names: tuple[str, ...], heat: str, ambient: str, params: dict,
                  window: int, dt_h: float, norm_stats: dict[str, dict]):
         super().__init__()
-        if set(params) != {"network", "thermostat"}:
+        self.heat_in_u = heat in u_names
+        if self.heat_in_u and set(params) != {"network"}:
+            raise ValueError(f"rc_network block {name!r}: with the heat a U there is no "
+                             f"thermostat, so params must be `network` (nt data ladder) "
+                             f"alone; got {sorted(params)}")
+        if not self.heat_in_u and set(params) != {"network", "thermostat"}:
             raise ValueError(f"rc_network block {name!r}: params must be `network` "
                              f"(nt data ladder) and `thermostat` (nt data thermostat); got "
                              f"{sorted(params)}")
@@ -91,7 +106,7 @@ class NetworkBlock(nn.Module):
         self.heat_name = heat
 
         # The drive's columns: ambient, then the network's inputs, each read
-        # from the D window, except the heat, which is the Y channel.
+        # from the D window, except the heat, which is the Y or U channel.
         inputs = [c for c, _ in self.network.inputs]
         problems = []
         if heat not in inputs:
@@ -107,11 +122,11 @@ class NetworkBlock(nn.Module):
 
         # The thermostat: each side's setpoint must be a U column, and every U
         # column some side's setpoint.
-        decl = params["thermostat"]
-        self.form = _form(decl.get("form", ""))
+        decl = params.get("thermostat", {})
+        self.form = None if self.heat_in_u else _form(decl.get("form", ""))
         self.sides = tuple(s for s in th.SIDES if s in decl)
         setpoints = [decl[s]["setpoint"] for s in self.sides]
-        if sorted(setpoints) != sorted(u_names):
+        if not self.heat_in_u and sorted(setpoints) != sorted(u_names):
             problems.append(f"the thermostat's setpoints {setpoints} must be the block's U "
                             f"{list(u_names)}")
         if problems:
@@ -147,8 +162,9 @@ class NetworkBlock(nn.Module):
             for field in ("shift", "stretch"):
                 self.register_buffer(f"_{key}_{field}", torch.tensor(
                     [float(norm_stats[c][field]) for c in columns]), persistent=False)
-        self._zone_col, self._heat_col = y_names.index(self.zone), y_names.index(heat)
-        self.n_latched = len(self.sides) if self.form.latched else 0
+        self._zone_col = y_names.index(self.zone)
+        self._heat_col = None if self.heat_in_u else y_names.index(heat)
+        self.n_latched = len(self.sides) if self.form and self.form.latched else 0
 
         self._state: Optional[torch.Tensor] = None
         self._cache: Optional[tuple] = None
@@ -256,41 +272,58 @@ class NetworkBlock(nn.Module):
              ) -> tuple[torch.Tensor, torch.Tensor]:
         """`(increment, state)` after one step; `state` None is a cold call."""
         a, b, gain = matrices[:3]
-        rows, ny, nu, nd = self.window, len(self.y_names), len(self.u_names), len(self.d_names)
+        rows, ny, nd = self.window, len(self.y_names), len(self.d_names)
+        u_cells = rows if self.heat_in_u else len(self.u_names)
         y = x[..., :rows * ny].reshape(-1, rows, ny) * self._y_stretch + self._y_shift
-        u = x[..., rows * ny:rows * ny + nu] * self._u_stretch + self._u_shift
-        d = x[..., rows * ny + nu:].reshape(-1, rows, nd) * self._d_stretch + self._d_shift
-        zone, heat = y[..., self._zone_col], y[..., self._heat_col]
+        u = x[..., rows * ny:rows * ny + u_cells] * self._u_stretch + self._u_shift
+        d = x[..., rows * ny + u_cells:].reshape(-1, rows, nd) * self._d_stretch + self._d_shift
+        zone = y[..., self._zone_col]
+        # The heat over each step of the window: a U row starts its step, a
+        # Y row ends it.
+        heat = u if self.heat_in_u else y[..., self._heat_col]
+        step_heat = heat[:, :-1] if self.heat_in_u else heat[:, 1:]
         n = len(self.network.nodes)
         if state is None:
-            nodes, stages = self._filter(zone, heat, d, matrices[3:]), None
+            nodes, stages = self._filter(zone, step_heat, d, matrices[3:]), None
         else:
             nodes, stages = state[:, :n], state[:, n:] if self.n_latched else None
         # The measurement at the current row: a no-op on a warm call, whose
         # zone row is this block's own last prediction.
         nodes = nodes + gain * (zone[:, -1:] - nodes[:, :1])
 
+        if self.heat_in_u:
+            delivered, new_stages = heat[:, -1], []
+        else:
+            delivered, new_stages = self._thermostat_heat(u, nodes[:, 0], d[:, -1], stages)
+        drive = self._drive_row(d[:, -1], delivered)
+        nodes = nodes @ a.T + drive @ b.T
+
+        change = {self._zone_col: nodes[:, 0] - zone[:, -1]}
+        if not self.heat_in_u:
+            change[self._heat_col] = delivered - heat[:, -1]
+        increment = torch.stack([change[i] for i in range(ny)], dim=-1) / self._y_stretch
+        state = torch.cat([nodes, torch.stack(new_stages, dim=-1)], dim=-1) \
+            if new_stages else nodes
+        return increment, state
+
+    def _thermostat_heat(self, u: torch.Tensor, zone_node: torch.Tensor, d_row: torch.Tensor,
+                         stages: Optional[torch.Tensor]) -> tuple[torch.Tensor, list]:
+        """The heat the thermostat delivers over the step from the current
+        setpoints `u` [B, nu] and zone node [B], and each latched side's new
+        stage."""
         p = self.thermostat_values()
-        delivered = torch.zeros_like(nodes[:, 0])
+        delivered = torch.zeros_like(zone_node)
         new_stages = []
-        outdoor = d[:, -1, self._ambient]
+        outdoor = d_row[:, self._ambient]
         for i, side in enumerate(self.sides):
-            error = th.SIDES[side] * (u[:, self._setpoints[i]] - nodes[:, 0])
+            error = th.SIDES[side] * (u[:, self._setpoints[i]] - zone_node)
             carried = stages[:, i] if stages is not None else None
             q, stage = th.side_heat(p, side, self.form, error, outdoor, self.reference,
                                     smooth=False, stage=carried)
             delivered = delivered + q
             if self.form.latched:
                 new_stages.append(stage)
-        drive = self._drive_row(d[:, -1], delivered)
-        nodes = nodes @ a.T + drive @ b.T
-
-        change = {self._zone_col: nodes[:, 0] - zone[:, -1],
-                  self._heat_col: delivered - heat[:, -1]}
-        increment = torch.stack([change[i] for i in range(2)], dim=-1) / self._y_stretch
-        state = torch.cat([nodes, torch.stack(new_stages, dim=-1)], dim=-1) \
-            if new_stages else nodes
-        return increment, state
+        return delivered, new_stages
 
     def _drive_row(self, d_row: torch.Tensor, heat: torch.Tensor) -> torch.Tensor:
         """The network's drive, [..., 1 + m], from D rows [..., nd] and the heat
@@ -299,39 +332,41 @@ class NetworkBlock(nn.Module):
         columns += [heat if pos is None else d_row[..., pos] for pos in self._drive]
         return torch.stack(columns, dim=-1)
 
-    def _filter(self, zone, heat, d, weights) -> torch.Tensor:
+    def _filter(self, zone, step_heat, d, weights) -> torch.Tensor:
         """The nodes predicted for the current row, before its measurement:
         the stationary filter over the window from every node at its first
-        zone reading, the step from row j driven by row j's inputs and row
-        j+1's heat. Linear in the window, so it is the fixed map `weights`
-        (`discrete`) rather than a loop or a scan, which is also what lets it
-        export as plain matrix products."""
+        zone reading, the step from row j driven by row j's inputs and
+        `step_heat[j]`, the heat over it. Linear in the window, so it is the
+        fixed map `weights` (`discrete`) rather than a loop or a scan, which
+        is also what lets it export as plain matrix products."""
         power, weights_y, weights_d = weights
         steps, n = zone.shape[1] - 1, power.shape[0]
         nodes = zone[:, :1].expand(-1, n) @ power.T
         if steps == 0:
             return nodes
-        drive = self._drive_row(d[:, :steps], heat[:, 1:]).reshape(zone.shape[0], -1)
+        drive = self._drive_row(d[:, :steps], step_heat).reshape(zone.shape[0], -1)
         return nodes + zone[:, :steps] @ weights_y + drive @ weights_d.reshape(-1, n)
 
     # ── description ─────────────────────────────────────────────
 
     def describe(self) -> dict:
         """The network's time constants now and from the ladder, and how much
-        of its stability bound each thermostat gain uses."""
+        of its stability bound each thermostat gain uses, if it has one."""
         with torch.no_grad():
             values = {k: float(v) for k, v in self.values().items()}
             taus = nw.time_constants_h(self.network, nw.as_tensors(values)).tolist()
-            p = self.thermostat_values()
-            bound = float(self.gain_bound())
         out = {
             "zone": self.zone,
             "network": "+".join(self.network.nodes),
             "network_time_constants_h": [round(t, 3) for t in taus],
-            "thermostat": self.form.name,
-            "gain_share": {side: round(float(p[f"{side}.gain"]) / bound, 3)
-                           for side in self.sides},
         }
+        if not self.heat_in_u:
+            with torch.no_grad():
+                p = self.thermostat_values()
+                bound = float(self.gain_bound())
+            out["thermostat"] = self.form.name
+            out["gain_share"] = {side: round(float(p[f"{side}.gain"]) / bound, 3)
+                                 for side in self.sides}
         if self.coarse_taus is not None:
             out["coarse_time_constants_h"] = self.coarse_taus
             out["left_coarse_bar"] = [

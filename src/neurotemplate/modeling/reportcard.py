@@ -41,7 +41,7 @@ from typing import Optional
 import pandas as pd
 
 from neurotemplate.common.data_utils import degenerate_mapped_columns
-from neurotemplate.modeling.bounded import edge_note
+from neurotemplate.modeling.bounded import NEAR_EDGE, edge
 from neurotemplate.modeling.config import ModelingConfig
 from neurotemplate.modeling.calibration import Calibration
 from neurotemplate.modeling.heads import BoundedHead, HeadStack, OrdinalHead
@@ -276,6 +276,8 @@ def _network_lines(info: dict, indent: str) -> list[str]:
         lines.append(f"{indent}- ⚠️ outside three of the ladder's error bars: "
                      f"{info['left_coarse_bar']} h — training moved a time constant "
                      "the likelihood had placed.")
+    if "thermostat" not in info:
+        return lines
     shares = ", ".join(f"{side} {share:.0%}" for side, share in info["gain_share"].items())
     lines.append(f"{indent}- thermostat {info['thermostat']}: gain at {shares} of "
                  "the bound past which the loop rings")
@@ -283,19 +285,24 @@ def _network_lines(info: dict, indent: str) -> list[str]:
 
 
 def _edge_lines(bounded: dict, indent: str) -> list[str]:
-    """Only the bounded parameters the box stopped: a value pressed against
-    an edge says the data (or the seed) disagrees with the prior."""
+    """The bounded parameters the box stopped, one line per parameter and
+    edge: the box, not the data, set those values."""
     lines = []
     for name, b in bounded.items():
         if b["pinned"]:
             continue
-        for label, fraction in b["fraction"].items():
-            note = edge_note(name, fraction)
-            if note is not None:
-                which = f" ({label})" if len(b["fraction"]) > 1 else ""
-                lines.append(f"{indent}- ⚠️ {name}{which} = {b['value'][label]:.3g} "
-                             f"in [{b['low']:g}, {b['high']:g}]: {note}")
-    return lines
+        for side in ("lower", "upper"):
+            hits = [f"{b['value'][label]:.3g}" if len(b["value"]) == 1
+                    else f"{label} {b['value'][label]:.3g}"
+                    for label, fraction in b["fraction"].items() if edge(fraction) == side]
+            if hits:
+                lines.append(f"{indent}  - {name} [{b['low']:g}, {b['high']:g}], {side}: "
+                             + _names(hits, quote=False))
+    if not lines:
+        return []
+    return [f"{indent}- ⚠️ At a box edge (within {NEAR_EDGE:.0%} of it), so the box, "
+            "not the data, set these; every value is in "
+            f"`{RESULTS_DIR}/architecture.json`:"] + lines
 
 
 def _forcing_lines(forcing: Optional[dict], indent: str) -> list[str]:

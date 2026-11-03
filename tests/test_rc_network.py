@@ -102,6 +102,22 @@ def test_the_ladder_does_not_climb_past_the_two_node_network_that_made_the_data(
     assert _select(Rung(mass=True), seed=7).chosen == "TiTm"
 
 
+def test_an_extension_whose_new_mode_the_data_cannot_place_is_not_selected():
+    """A decoupled node (a mode slower than the record) buys likelihood
+    from noise; the ladder stops below it rather than selecting it."""
+    from types import SimpleNamespace
+
+    def stub(ll, n_params, unplaced):
+        return SimpleNamespace(log_likelihood=ll, n_params=n_params,
+                               unplaced_modes=[1e9] * unplaced, bic=-2 * ll)
+
+    fits = {"Ti": stub(0.0, 4, 0), "TiTm": stub(50.0, 8, 1), "TiTe": stub(1.0, 8, 0)}
+    selection = ladder.forward_select(lambda rung, parents: [fits[rung.name]], solar=False)
+    assert selection.chosen == "Ti"
+    assert selection.steps[0].unidentified == ["TiTm"]
+    assert selection.steps[0].best == "TiTe"
+
+
 def test_a_declaration_round_trips_with_its_boxes_and_pins():
     net = Rung(mass=True).network(HEAT, None, ())
     decl = {"nodes": {"Ti": [1.0, 2.0], "Tm": 20.0},
@@ -170,3 +186,34 @@ def test_the_trained_block_filters_and_steps_exactly_as_the_ladder_does():
     expected = a @ nodes + b @ torch.tensor([float(series.ambient[-1]), heat], dtype=nw.DTYPE)
     assert torch.allclose(state[0].double(), expected, atol=1e-4)
     assert math.isclose(float(increment[0, 1]), heat - float(heat_meter[-1]), abs_tol=1e-4)
+
+
+def test_a_block_whose_heat_is_commanded_filters_and_steps_on_the_command():
+    """Heat as a U: no thermostat, the window's commands drive the filter,
+    and the current row's command drives the step."""
+    from neurotemplate.modeling.rc_network import NetworkBlock
+
+    net = Rung(mass=True).network(HEAT, None, ())
+    values = _truth(net)
+    series = _simulate(net, values, steps=60, seed=2)
+    decl = {"nodes": {"Ti": values["C_Ti"], "Tm": values["C_Tm"]},
+            "edges": {"Ti-Tm": values["R_Ti_Tm"], "Ti-ambient": values["R_Ti_ambient"]},
+            "inputs": {HEAT: {"Ti": 1.0}},
+            "noise": {"Ti": values["sigma_Ti"], "Tm": values["sigma_Tm"],
+                      "sensor": values["sigma_y"]}}
+    stats = {c: {"shift": 0.0, "stretch": 1.0} for c in ("zone", HEAT, "out")}
+    block = NetworkBlock("z", ("zone",), (HEAT,), ("out",), HEAT, "out", {"network": decl},
+                         window=60, dt_h=DT_H, norm_stats=stats)
+    command = series.inputs[:, 0]                           # row k: the heat over k → k+1
+    x = torch.cat([series.y, command, series.ambient])[None]
+    with torch.no_grad():
+        increment, state = block.step(x.float(), None, block.discrete())
+
+    nodes = nw.filtered_states(net, values, series)[-2]
+    a, b, q, r = nw.discrete_model(net, nw.as_tensors(values), DT_H)
+    nodes = nodes + nw.steady_gain(a, q, r) * (series.y[-1] - nodes[0])
+    expected = a @ nodes + b @ torch.tensor([float(series.ambient[-1]), float(command[-1])],
+                                            dtype=nw.DTYPE)
+    assert torch.allclose(state[0].double(), expected, atol=1e-4)
+    assert increment.shape == (1, 1)
+    assert math.isclose(float(increment[0, 0]), float(expected[0] - series.y[-1]), abs_tol=1e-4)

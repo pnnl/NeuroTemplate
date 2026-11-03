@@ -12,6 +12,12 @@ needs, `U` is what a controller can command, and `D` is what you could know
 without the plant, such as weather or schedules, since a policy is later fed
 `D` from a forecast.
 
+**Timing, by role.** `Y` at row t is sampled at t, or measured over the step
+that ends at t (a meter). `U` and `D` at row t are held over the step that
+starts at t, `[t, t+1)`: the command applied, the weather in force. The
+library assumes this and never shifts a column; a column recorded the other
+way is shifted in `data_mapping`.
+
 ## What you provide
 
 The hooks in `nt_model.py`, scaffolded by `nt init` with a docstring each:
@@ -56,12 +62,12 @@ block shares, the seeded history before the first prediction, the stride
 between training windows, and the rows of every column an exported model
 takes. Each learned map then reads its columns at their own lags. The
 family constrains the table. A `gru` reads one lag for every column it reads,
-because its window is its warm-up. An `rc_network` block reads its `Y` and
-`D` at one lag, the window its filter places the hidden nodes from (a day is
-enough), and its setpoints at the current step only. The build refuses a
-table that misses a column, a lag no block actually reads (a `U` column only
-rc_network blocks read must be 0), and a `demand` setpoint lagged further
-back than its state. The reportcard lists the lags each block reads.
+because its window is its warm-up. An `rc_network` block reads its `Y`,
+`D` and a commanded heat at one lag, the window its filter places the hidden
+nodes from (a day is enough), and its setpoints at the current step only.
+The build refuses a table that misses a column, a lag no block actually reads
+(a setpoint only rc_network blocks read must be 0), and a `demand` setpoint
+lagged further back than its state. The reportcard lists the lags each block reads.
 
 ## Model families
 
@@ -71,7 +77,7 @@ back than its state. The reportcard lists the lags each block reads.
 | `nssm` | black box | separable: `fy(y) + fu(u) + fd(d)`, each a network |
 | `lssm` | black box | the same, linear |
 | `gru` | black box | recurrent, with memory that outlives the input window |
-| `rc_network` | grey box | a thermal zone: a declared RC network behind a thermostat, all physical |
+| `rc_network` | grey box | a thermal zone: a declared RC network driven by its heat, commanded or behind a thermostat, all physical |
 
 The black boxes often fit best and are fine for prediction you won't steer
 by. Nothing bounds their long rollouts, so read the stability and physics
@@ -81,25 +87,35 @@ sections of the reportcard before planning against one.
 
 ```
     setpoints ─[thermostat]→ heat delivered (kW) ─[RC network]→ zone temperature
+                             heat commanded (kW) ─[RC network]→ zone temperature
 ```
 
-For a zone whose delivered heat is measured (supply flow and temperature at
-the unit or the VAV box). The block's `Y` are the zone temperature and that
-heat (its `heat`, in kW, positive heating); its `U` the setpoints; its `D`
-the outdoor temperature (`ambient`) and every other input the network takes
-(`solar`, an occupancy schedule). Everything inside is physical:
+For a zone whose delivered heat is known (metered from supply flow and
+temperature, or estimated from the stage and the equipment's capacity), in
+kW, positive heating: the block's `heat`. Its role says which form, and
+what its rows mean (see "Timing, by role"):
+
+- **A `Y`: behind a thermostat.** The controller moves setpoints. `Y` is the
+  zone temperature and the heat; `U` the setpoints.
+- **A `U`: commanded.** The controller moves the heat itself. `Y` is the
+  zone temperature alone; `U` the heat alone. No thermostat.
+
+Its `D` is the outdoor temperature (`ambient`) and every other input the
+network takes (`solar`, an occupancy schedule). The heat enters with its
+gain pinned at 1, which is what makes C and R physical, so an estimated heat
+off by a fifth puts C and R off by a fifth. Everything inside is physical:
 
 - **The network** is capacitances (kWh/K) and resistances (K/kW) between the
   zone air, hidden nodes such as the building's mass or envelope, and the
   outdoors, with each input entering one node. Stable for any positive
   values, and its time constants read in hours.
-- **The thermostat** maps each setpoint and the zone to the heat delivered:
+- **The thermostat** (heat in `Y`) maps each setpoint and the zone to the heat delivered:
   a tracker with a gain, an offset and a capacity per side, optionally
   capacity linear in outdoor temperature, a second stage, or a latch. Its
   gain is held under the bound past which the discrete loop would ring.
 - **The hidden nodes are filtered, not guessed.** The first call of a
   rollout runs a Kalman filter over the history window, driven by the
-  measured heat, and leaves every node where the record puts it.
+  recorded heat, and leaves every node where the record puts it.
 
 Two commands write the declarations, so they come from the data rather than
 from guesses:
@@ -109,11 +125,16 @@ from guesses:
   picks one by likelihood-ratio tests. Its card prints every rung's
   likelihood, BIC, whiteness and 24 h error on dev, and the snippet it saves
   holds each C and R as a box from its error bar. An agent's own network
-  (`--candidate file.json`) goes through the same tests.
+  (`--candidate file.json`) goes through the same tests. It reads the
+  thermal blocks, either form, and needs no setpoints. It does not select a node the record cannot place: an infinite error bar,
+  or a time constant longer than the record. Across several zones the
+  summed BIC must fall as well as the ratio test pass, since a likelihood
+  summed over many zones passes it for almost any parameter. Every gain
+  input is fitted ≥ 0: give it as non-negative indicators or schedules.
 - `nt data thermostat --cooling COL --heating COL` fits the thermostat's
   forms one step at a time and rolls each out 24 h on dev through the
   declared network, with the error split by regime (satisfied, tracking,
-  saturated).
+  saturated). Heat in `Y` only.
 
 ```python
 "zone": {"Y": ["Zone Temp", "Delivered Heat [kW]"], "U": ["Cooling SP", "Heating SP"],
@@ -121,6 +142,11 @@ from guesses:
          "heat": "Delivered Heat [kW]", "ambient": "Outdoor Temp", "solar": "Solar",
          "params": {"network": json.load(open("ladder/zone.json")),
                     "thermostat": json.load(open("ladder/zone.thermostat.json"))}},
+# commanded: the heat is the U, and there is no thermostat
+"zone": {"Y": ["Zone Temp"], "U": ["Heat Command [kW]"],
+         "D": ["Outdoor Temp", "Solar", "Occupied"], "model": "rc_network",
+         "heat": "Heat Command [kW]", "ambient": "Outdoor Temp", "solar": "Solar",
+         "params": {"network": json.load(open("ladder/zone.json"))}},
 ```
 
 Training then fits every parameter inside its box by the rollout loss. That

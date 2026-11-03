@@ -364,10 +364,20 @@ class Fit:
     #: One-step innovations per series, for the whiteness check.
     innovations: list[torch.Tensor]
     converged: bool
+    #: Hours of record the fit saw, summed over its series.
+    record_h: float
 
     @property
     def bic(self) -> float:
         return -2 * self.log_likelihood + self.n_params * math.log(self.n_obs)
+
+    @property
+    def unplaced_modes(self) -> list[float]:
+        """The time constants the data does not place: an infinite error bar,
+        or slower than the record is long, which no record can measure. A
+        node that slow is decoupled from ambient over this record."""
+        return [t for t, se in zip(self.taus_h, self.taus_se_h)
+                if math.isinf(se) or t > self.record_h]
 
 
 def default_start(network: Network) -> dict[str, float]:
@@ -421,11 +431,15 @@ def fit(network: Network, data: list[Series], start: Optional[dict[str, float]] 
 
     def closure():
         optimizer.zero_grad()
-        loss = negative_log_likelihood(network, squash(raw), data)
+        # A trial step into a degenerate network — a node so decoupled that
+        # A_c is singular to working precision, and the Lyapunov solve with
+        # it — is reported as far worse than anything seen, so the line
+        # search backs off instead of failing or comparing against NaN.
+        try:
+            loss = negative_log_likelihood(network, squash(raw), data)
+        except torch.linalg.LinAlgError:
+            return torch.tensor(1e12, dtype=DTYPE)
         if not torch.isfinite(loss):
-            # A trial step into a degenerate network (a solve gone singular):
-            # report it as far worse than anything seen, so the line search
-            # backs off instead of comparing against NaN.
             return torch.tensor(1e12, dtype=DTYPE)
         loss.backward()
         return loss
@@ -508,6 +522,7 @@ def summarize(network: Network, theta: torch.Tensor, data: list[Series],
                    zip(taus_unplaced, taus_var.clamp(min=0).sqrt())],
         innovations=innovations,
         converged=converged,
+        record_h=sum((series.y.shape[0] - 1) * series.dt_h for series in data),
     )
 
 

@@ -91,14 +91,13 @@ def bounded_parameters(module: nn.Module) -> list[BoundedParameter]:
     return [m for m in module.modules() if isinstance(m, BoundedParameter)]
 
 
-def edge_note(name: str, fraction: float) -> str | None:
-    """The diagnostic for a parameter pressed against a bound, or None."""
+def edge(fraction: float) -> str | None:
+    """"lower" or "upper" for a parameter pressed against that edge of its
+    box (within NEAR_EDGE of it), else None."""
     if fraction <= NEAR_EDGE:
-        return (f"{name} at {(1 - fraction) * 100:.0f}% of the way to its lower "
-                "bound — the data (or the seed) disagrees with the prior")
+        return "lower"
     if fraction >= 1 - NEAR_EDGE:
-        return (f"{name} at {fraction * 100:.0f}% of the way to its upper "
-                "bound — the data (or the seed) disagrees with the prior")
+        return "upper"
     return None
 
 

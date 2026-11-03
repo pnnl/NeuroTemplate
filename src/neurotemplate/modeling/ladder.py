@@ -129,8 +129,11 @@ class Step:
 
     parent: str
     candidates: dict[str, float]      # name -> log-likelihood
-    best: str
+    best: Optional[str]               # None when no candidate was admissible
     p_value: float
+    #: Candidates left out because they add a mode the data cannot place in
+    #: some zone (see `Fit.unplaced_modes`).
+    unidentified: list[str]
 
 
 @dataclass
@@ -154,16 +157,36 @@ class Selection:
         return min(self.fits, key=self.bic)
 
 
+def _identified(child: list[Fit], parent: list[Fit]) -> bool:
+    """No zone gains a mode the data cannot place: the extension's new node
+    is measured, not a near-free node whose likelihood gain is noise."""
+    return all(len(c.unplaced_modes) <= len(p.unplaced_modes)
+               for c, p in zip(child, parent))
+
+
 def forward_select(fit_rung: Callable[[Rung, Optional[list[Fit]]], list[Fit]],
-                   solar: bool, p_stop: float = P_STOP) -> Selection:
+                   solar: bool, p_stop: float = P_STOP, bic: bool = False) -> Selection:
     """Forward selection from `Ti`. `fit_rung(rung, parent_fits)` fits one
     rung on every zone, seeded from its parent's fits, and returns one fit
     per zone; the likelihoods add over zones, so one zone and several
-    sharing a rung run the same selection."""
+    sharing a rung run the same selection.
+
+    An extension is admissible only if it adds no mode the data cannot place
+    in any zone. With `bic`, the best one must also lower the summed BIC: a
+    likelihood summed over many zones clears the ratio test for almost any
+    extra parameter, which the penalty per parameter and observation does not.
+    """
     start = Rung()
     fits = {start.name: fit_rung(start, None)}
     rungs, parents, steps = {start.name: start}, {}, []
     current = start
+
+    def total(name):
+        return sum(f.log_likelihood for f in fits[name])
+
+    def summed_bic(name):
+        return sum(f.bic for f in fits[name])
+
     while True:
         candidates = current.extensions(solar)
         if not candidates:
@@ -173,16 +196,18 @@ def forward_select(fit_rung: Callable[[Rung, Optional[list[Fit]]], list[Fit]],
                 fits[rung.name] = fit_rung(rung, fits[current.name])
                 rungs[rung.name] = rung
                 parents[rung.name] = current.name
-
-        def total(name):
-            return sum(f.log_likelihood for f in fits[name])
-
-        best = max(candidates, key=lambda r: total(r.name))
+        admissible = [r for r in candidates
+                      if _identified(fits[r.name], fits[current.name])]
+        unidentified = [r.name for r in candidates if r not in admissible]
+        scores = {r.name: total(r.name) for r in candidates}
+        if not admissible:
+            steps.append(Step(current.name, scores, None, 1.0, unidentified))
+            break
+        best = max(admissible, key=lambda r: total(r.name))
         p = lr_p_value(total(current.name), sum(f.n_params for f in fits[current.name]),
                        total(best.name), sum(f.n_params for f in fits[best.name]))
-        steps.append(Step(current.name, {r.name: total(r.name) for r in candidates},
-                          best.name, p))
-        if p > p_stop:
+        steps.append(Step(current.name, scores, best.name, p, unidentified))
+        if p > p_stop or (bic and summed_bic(best.name) >= summed_bic(current.name)):
             break
         current = best
     return Selection(fits, rungs, parents, steps, current.name)
@@ -194,19 +219,20 @@ def whiteness_lags(dt_h: float) -> int:
 
 # ── Data ────────────────────────────────────────────────────────
 
-def zone_series(frame, zone: str, ambient: str, columns: list[str], heat: str,
+def zone_series(frame, zone: str, ambient: str, columns: list[str], y_input: Optional[str],
                 every: int, dt_h: float) -> Series:
     """One file on a grid of `every` rows, the step from grid point K to
     K + 1 driven by the rows between them: the zone sampled at each point;
     ambient and every input column averaged over the step's rows (a rate's
-    average keeps its energy). Delivered `heat` is a meter, its row the heat
-    over the step that ends there, so it is averaged one row later: on the
-    plant buildings that alignment fits far better than the other. `dt_h`
-    is the grid's step in hours."""
+    average keeps its energy). The timing is by role: a U or D row is held
+    over the step that starts there, a Y row measured over the step that
+    ends there, so `y_input`, the one input that is a Y of the model (a
+    heat behind a thermostat), is averaged one row later. `dt_h` is the
+    grid's step in hours."""
     steps = (len(frame) - 1) // every
 
     def averaged(column):
-        start = 1 if column == heat else 0
+        start = 1 if column == y_input else 0
         values = frame[column].to_numpy(dtype=float)[start:start + steps * every]
         return torch.tensor(values, dtype=DTYPE).reshape(steps, every).mean(dim=1)
 

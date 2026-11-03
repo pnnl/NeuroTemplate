@@ -906,6 +906,7 @@ def train_and_evaluate(
             primary_dyn_sys=dyn_sys, primary_test_results=test_results,
         )
 
+    logger.log_dict(describe_dynamics(dyn_sys, cfg), name=f"{RESULTS_DIR}/architecture.json")
     if calibration:
         logger.log_dict({name: calibration_to_dict(c, norm_stats[name])
                          for name, c in calibration.items()},

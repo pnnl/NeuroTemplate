@@ -110,22 +110,43 @@ class ThermalZone:
     ambient: str
     solar: Optional[str]
     gains: tuple[str, ...]
+    heat_in_y: bool     # behind a thermostat; else a U, commanded
 
     @classmethod
     def from_block(cls, block) -> "ThermalZone":
         zones = [c for c in block.y_names if c != block.heat]
         problems = []
         if len(zones) != 1:
-            problems.append(f"Y must be the zone temperature and `heat`, got {list(block.y_names)}")
+            problems.append(f"Y must be the zone temperature, and `heat` too when it is not "
+                            f"a U; got {list(block.y_names)}")
         if block.ambient is None:
             problems.append("no `ambient`: the outdoor temperature every network conducts to")
         if problems:
             raise SystemExit(f"thermal block {block.name!r}: " + "; ".join(problems))
         gains = tuple(c for c in block.d_names if c not in (block.ambient, block.solar))
-        return cls(block.name, zones[0], block.heat, block.ambient, block.solar, gains)
+        return cls(block.name, zones[0], block.heat, block.ambient, block.solar, gains,
+                   heat_in_y=block.heat in block.y_names)
 
     def network(self, rung: Rung):
         return rung.network(self.heat, self.solar, self.gains)
+
+    def series(self, raw, network, every: int, dt_h: float) -> nw.Series:
+        """One file's data for `network`, on a grid of `every` rows."""
+        return ladder.zone_series(raw, self.zone, self.ambient, ladder.network_columns(network),
+                                  self.heat if self.heat_in_y else None, every, dt_h)
+
+
+def _warn_signed_gains(zones: list[ThermalZone], train_raws) -> None:
+    """A gain input enters as gain · value with gain ≥ 0, so a column that
+    goes negative cannot push both ways and fits at zero. Solar is left out:
+    irradiance reads a little below zero at night, which is sensor noise."""
+    columns = sorted({c for z in zones for c in z.gains})
+    signed = [c for c in columns if min(float(raw[c].min()) for raw in train_raws) < 0]
+    if signed:
+        print(f"WARNING: gain input(s) {signed} take negative values. Every gain is fitted "
+              ">= 0, so a signed feature (sin/cos of the hour, a centred flag) enters at "
+              "zero. Use non-negative indicators or schedules, e.g. a 0/1 flag per part "
+              "of the day.")
 
 
 def _parse_dt_steps(text: str, freq_s: float) -> int:
@@ -161,9 +182,10 @@ def ladder_main() -> None:
         zones = [z for z in zones if z.zone == args.zone]
     if not zones:
         raise SystemExit(
-            "No thermal block to fit. A thermal block declares its zone temperature and "
-            "`heat` (delivered heat, kW) as Y, `ambient` (and `solar`, if any) among its D; "
-            "see `nt guide thermal-zone`.")
+            "No thermal block to fit. A thermal block declares its zone temperature as Y, "
+            "`heat` (delivered heat, kW) as a Y (behind a thermostat) or a U, and "
+            "`ambient` (and `solar`, if any) among its D; see `nt guide thermal-zone`.")
+    _warn_signed_gains(zones, train_raws)
 
     every = _parse_dt_steps(args.dt, freq_s)
     coarse_h, fine_h = every * freq_s / 3600.0, freq_s / 3600.0
@@ -175,10 +197,7 @@ def ladder_main() -> None:
     def fit_zone(zone: ThermalZone, network, start) -> Fit:
         key = (zone.block, network.name)
         if key not in cache:
-            data = [ladder.zone_series(raw, zone.zone, zone.ambient,
-                                       ladder.network_columns(network), zone.heat, every,
-                                       coarse_h)
-                    for raw in train_raws]
+            data = [zone.series(raw, network, every, coarse_h) for raw in train_raws]
             cache[key] = nw.fit(network, data, start)
         return cache[key]
 
@@ -204,10 +223,13 @@ def ladder_main() -> None:
 
     if len(zones) > 1:
         shared = ladder.forward_select(fit_rung_for(zones),
-                                       solar=all(z.solar is not None for z in zones))
+                                       solar=all(z.solar is not None for z in zones),
+                                       bic=True)
         print(f"\nShared across {len(zones)} zones: {shared.chosen}  "
-              f"(likelihoods summed; per zone: "
+              f"(likelihoods summed, and the summed BIC must fall too; per zone: "
               + ", ".join(f"{b} {r}" for b, r in picks.items()) + ")")
+        for note in _selection_notes(shared):
+            print(f"  {note}")
         for zone, fit in zip(zones, shared.fits[shared.chosen]):
             if picks[zone.block] != shared.chosen:
                 path = out_dir / f"{zone.block}.shared.json"
@@ -233,9 +255,7 @@ def _print_ladder_card(zone: ThermalZone, selection, candidate_fits: dict, dev_r
                                        fit.log_likelihood, fit.n_params)))
         white = _p_text(ladder.ljung_box(fit.innovations, lags))
         scores = [ladder.rollout_rmse(
-            fit.network, fit.values,
-            ladder.zone_series(raw, zone.zone, zone.ambient,
-                               ladder.network_columns(fit.network), zone.heat, 1, fine_h),
+            fit.network, fit.values, zone.series(raw, fit.network, 1, fine_h),
             horizon=round(LADDER_HORIZON_H / fine_h), burn_in=round(LADDER_BURN_IN_H / fine_h),
             every=round(LADDER_EVERY_H / fine_h)) for raw in dev_raws]
         scores = [s for s in scores if s is not None]
@@ -250,8 +270,13 @@ def _print_ladder_card(zone: ThermalZone, selection, candidate_fits: dict, dev_r
     by_bic = min(fits, key=lambda n: fits[n].bic)
     if by_bic != selection.chosen:
         print(f"  BIC prefers {by_bic}; the likelihood-ratio tests stop at {selection.chosen}.")
-    for note in _fit_notes(chosen):
+    for note in _selection_notes(selection) + _fit_notes(chosen):
         print(f"  {note}")
+    if ladder.ljung_box(chosen.innovations, lags) < 0.05:
+        print("  Innovations not white: time structure the network leaves out. On "
+              "closed-loop data that is often the controller answering the zone's own "
+              "error, or a daily driver no input carries; add the latter as a "
+              "non-negative D column (an occupancy or schedule indicator) and rerun.")
     path = out_dir / f"{zone.block}.json"
     path.write_text(json.dumps(nw.declaration(chosen), indent=2, ensure_ascii=False))
     print(f"  snippet: {path}  — the block's params `network`; edit it as you like.")
@@ -265,10 +290,25 @@ def _p_text(p: float) -> str:
     return "<0.001" if p < 0.001 else f"{p:.3f}"
 
 
+def _selection_notes(selection) -> list[str]:
+    """The extensions left out because they add a mode the data cannot place."""
+    return [f"Not selected from {step.parent}: {', '.join(step.unidentified)} — each adds "
+            "a mode this record does not place (an infinite error bar, or slower than "
+            "the record is long)." for step in selection.steps if step.unidentified]
+
+
 def _fit_notes(fit: Fit) -> list[str]:
-    """The signatures of a fit that is placing noise: a parameter with an
-    error bar wider than a factor of e, and two that move in lockstep."""
+    """The signatures of a fit that is placing noise: a mode the record does
+    not place, a parameter with an error bar wider than a factor of e, and
+    two that move in lockstep."""
     notes = []
+    if fit.unplaced_modes:
+        notes.append(
+            "Not placed by this record: " + ", ".join(f"{t:.3g} h" for t in fit.unplaced_modes)
+            + f" (fitted on {fit.record_h:.0f} h). A node that slow is decoupled from "
+            "ambient over the record; on closed-loop data, where the HVAC holds the zone, "
+            "the envelope often cannot be identified. Keep the snippet's wide box, or set "
+            "the value from design data.")
     limit = nw.at_limit(fit)
     if limit:
         notes.append(f"At a limit (zero or infinity): {limit}. A gain there is left out "
@@ -331,6 +371,9 @@ def thermostat_main() -> None:
                          f"{[b.name for b in blocks]}.")
     block = blocks[0]
     zone = ThermalZone.from_block(block)
+    if not zone.heat_in_y:
+        raise SystemExit(f"block {block.name!r} commands its heat ({zone.heat!r} is a U), so "
+                         "it has no thermostat to fit.")
     missing = [c for c in setpoints.values() if c not in block.u_names]
     if missing:
         raise SystemExit(f"setpoint(s) {missing} are not U columns of block {block.name!r} "
@@ -397,8 +440,7 @@ def _thermostat_scores(fit, network, values, zone: ThermalZone, setpoints: dict[
     heat_column = 1 + [c for c, _ in network.inputs].index(zone.heat)
     errors_zone, errors_heat, regime = [], [], []
     for raw in dev_raws:
-        series = ladder.zone_series(raw, zone.zone, zone.ambient,
-                                    ladder.network_columns(network), zone.heat, 1, fine_h)
+        series = zone.series(raw, network, 1, fine_h)
         starts = torch.arange(burn_in, series.y.shape[0] - horizon - 1, every)
         if not len(starts):
             continue

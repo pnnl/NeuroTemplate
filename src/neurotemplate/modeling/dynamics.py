@@ -34,7 +34,8 @@ model reads. The Node hands every key one rectangular window,
 the cells it reads out of it, each column at the lag its family consumes (see
 `block_lags`): any lag for `mlp`, `nssm` and `lssm`, one lag for every column
 a `gru` reads (its window is its warm-up), and for `rc_network` one window of
-its Y and D and the current step of U. A uniform table gathers nothing. A stateful
+its Y, D and a commanded heat, and the current step of a setpoint. A uniform
+table gathers nothing. A stateful
 block (GRU) additionally keeps a hidden state so its memory can run past its
 window during a rollout, but it still takes the same window — it just skips
 the steps already folded into that state (see gru.GRUBlock). The only thing
@@ -111,8 +112,9 @@ def block_lags(family: str, block: Block, history: dict[str, int]) -> Lags:
 
     `mlp` reads every column at its declared lag. `gru` folds its window
     into its hidden state row by row, so every column it reads shares one
-    lag. `rc_network` filters one window of its Y and D and reads its
-    setpoints at the current step only, whatever they are declared at.
+    lag. `rc_network` filters one window of its Y and D, and of its heat
+    when the heat is a U, and reads its setpoints at the current step only,
+    whatever they are declared at.
     """
     y, u, d = (tuple(history[c] for c in names)
                for names in (block.y_in_names, block.u_names, block.d_names))
@@ -122,10 +124,12 @@ def block_lags(family: str, block: Block, history: dict[str, int]) -> Lags:
             {c: history[c] for c in block.y_in_names + block.u_names + block.d_names},
             "every column it reads: its window is its warm-up")
     if family == "rc_network":
+        window = [c for c in block.y_in_names + block.u_names + block.d_names
+                  if c not in block.u_names or c == block.heat]
         _check_one_lag(f"rc_network block {block.name!r}",
-                       {c: history[c] for c in block.y_in_names + block.d_names},
+                       {c: history[c] for c in window},
                        "its zone, its heat and its D: the window its filter runs over")
-        return y, (0,) * len(u), d
+        return y, tuple(history[c] if c == block.heat else 0 for c in block.u_names), d
     return y, u, d
 
 
@@ -134,7 +138,7 @@ def _check_lags_consumed(blocks: list[Block], lags: list[Lags],
     """Every column's declared lag is what some block reading it consumes.
 
     A deeper declaration would sit inert: a U column read only by
-    rc_network blocks is read at its current step, whatever its lag says. A D column
+    rc_network blocks as a setpoint is read at its current step, whatever its lag says. A D column
     no block reads (per-block D subsets that all leave it out) is listed at
     0: the control side may still use it, so it stays a model column.
     """
@@ -156,7 +160,7 @@ def _check_lags_consumed(blocks: list[Block], lags: list[Lags],
             raise ValueError(
                 f"history[{column!r}] is {history[column]}, but no block reads "
                 f"it that far back; the lag each reader consumes: {readers}. A "
-                f"rc_network block reads U at the current step only. Set it to "
+                f"rc_network block reads a setpoint at the current step only. Set it to "
                 f"{deepest}."
             )
 
@@ -504,14 +508,19 @@ def _gru_block(cfg: ModelingConfig, block: Block, lags: Lags,
 
 def _rc_network_block(cfg: ModelingConfig, block: Block, lags: Lags,
                       norm_stats: Optional[dict]) -> nn.Module:
-    """One thermal zone's declared network and thermostat. See `rc_network`."""
+    """One thermal zone's declared network, behind a thermostat when its heat
+    is a Y. See `rc_network`."""
     problems = []
     if block.heat is None or block.ambient is None:
-        problems.append("declare its `heat` (a Y column, kW) and `ambient` (a D column)")
+        problems.append("declare its `heat` (a Y or U column, kW) and `ambient` (a D column)")
     if block.reads or block.inputs:
         problems.append("`reads` and `inputs` have no meaning here: the network and the "
                         "thermostat say where every column goes")
-    if len(block.y_names) != 2:
+    if block.heat in block.u_names:
+        if len(block.y_names) != 1 or block.u_names != (block.heat,):
+            problems.append(f"with the heat a U, Y must be the zone temperature and U the "
+                            f"heat alone; got Y {list(block.y_names)}, U {list(block.u_names)}")
+    elif len(block.y_names) != 2:
         problems.append(f"Y must be the zone temperature and the heat; got {list(block.y_names)}")
     if problems:
         raise ValueError(f"rc_network block {block.name!r}: " + "; ".join(problems))
