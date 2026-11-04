@@ -57,17 +57,21 @@ history:
   "Ambient Temperature [degC]": 3
 ```
 
-The deepest lag plus the current step is `history_steps`: the window every
-block shares, the seeded history before the first prediction, the stride
-between training windows, and the rows of every column an exported model
-takes. Each learned map then reads its columns at their own lags. The
-family constrains the table. A `gru` reads one lag for every column it reads,
-because its window is its warm-up. An `rc_network` block reads its `Y`,
-`D` and a commanded heat at one lag, the window its filter places the hidden
-nodes from (a day is enough), and its setpoints at the current step only.
-The build refuses a table that misses a column, a lag no block actually reads
-(a setpoint only rc_network blocks read must be 0), and a `demand` setpoint
-lagged further back than its state. The reportcard lists the lags each block reads.
+The table lists what learned maps read: each column at its own lag. A `gru`
+reads one lag for every column it reads, because its window is its warm-up. The
+build refuses a table that misses a column, a lag no block actually reads, and a
+`demand` setpoint lagged further back than its state. The reportcard lists the
+lags each block reads.
+
+`context_steps` is the record a model that keeps state starts from, beyond what
+the table asks: an `rc_network`'s filter places its hidden nodes from it. The
+thermal blocks are not in the table, so a column only they read is listed at 0.
+
+The larger of the deepest lag plus one and `context_steps` is `history_steps`:
+the rows of every column a model is handed, the seeded history before the first
+prediction, and the rows an exported model takes. Training windows start
+`train_stride` rows apart, by default `history_steps`; a long context then means
+few windows, and with `batch_size` above their number, one update per epoch.
 
 ## Model families
 
@@ -77,45 +81,52 @@ lagged further back than its state. The reportcard lists the lags each block rea
 | `nssm` | black box | separable: `fy(y) + fu(u) + fd(d)`, each a network |
 | `lssm` | black box | the same, linear |
 | `gru` | black box | recurrent, with memory that outlives the input window |
-| `rc_network` | grey box | a thermal zone: a declared RC network driven by its heat, commanded or behind a thermostat, all physical |
+| `rc_network` | grey box | a thermal zone: a declared RC network, driven by a commanded input or another block's output, all physical |
+| `thermostat` | grey box | setpoints to heat: a tracker or latch with physical parameters, a block of its own |
 
 The black boxes often fit best and are fine for prediction you won't steer
 by. Nothing bounds their long rollouts, so read the stability and physics
 sections of the reportcard before planning against one.
 
-### rc_network: a thermal zone you can read
+### rc_network and thermostat: a thermal zone you can read
 
 ```
-    setpoints ─[thermostat]→ heat delivered (kW) ─[RC network]→ zone temperature
-                             heat commanded (kW) ─[RC network]→ zone temperature
+    setpoints ─[thermostat block]→ heat ─[rc_network block]→ zone temperature
+                    heat from a U ───────[rc_network block]→ zone temperature
 ```
 
-For a zone whose delivered heat is known (metered from supply flow and
-temperature, or estimated from the stage and the equipment's capacity), in
-kW, positive heating: the block's `heat`. Its role says which form, and
-what its rows mean (see "Timing, by role"):
+Two blocks, each one signal, neither knowing the other exists. What the zone is
+driven by is data prep: delivered heat (metered from supply flow and temperature,
+or estimated from the stage and the equipment's capacity), in kW, positive heating,
+or metered electric power through a gain that is its COP.
 
-- **A `Y`: behind a thermostat.** The controller moves setpoints. `Y` is the
-  zone temperature and the heat; `U` the setpoints.
-- **A `U`: commanded.** The controller moves the heat itself. `Y` is the
-  zone temperature alone; `U` the heat alone. No thermostat.
+- **`rc_network`.** `Y` is the zone temperature alone. Its network's inputs are a
+  `driven_by` column (the heat a thermostat block produced this step), a `U` (a
+  commanded heat) or a `D`. `ambient` is the outdoor temperature it conducts to.
+- **`thermostat`.** `Y` is the heat, `U` the setpoints it follows, `reads` the zone.
+  `D` only if its form reads the outdoor temperature (named in `ambient`).
 
-Its `D` is the outdoor temperature (`ambient`) and every other input the
-network takes (`solar`, an occupancy schedule). The heat enters with its
-gain pinned at 1, which is what makes C and R physical, so an estimated heat
-off by a fifth puts C and R off by a fifth. Everything inside is physical:
+**`scale` says what sets the units, and is required.** Scaling every C and gain up
+and every R down by the same factor leaves every prediction where it was, so
+temperature alone places only gain / C. `{"Delivered Heat": 1.0}` pins a heat's
+gain at 1, which makes C and R physical, so an estimated heat off by a fifth puts C
+and R off by a fifth. `{"C_Ti": ...}` pins a capacitance from design data instead,
+and leaves a power's gain to fit as a COP. A network that pins nothing is refused.
+Everything inside is physical:
 
 - **The network** is capacitances (kWh/K) and resistances (K/kW) between the
   zone air, hidden nodes such as the building's mass or envelope, and the
   outdoors, with each input entering one node. Stable for any positive
   values, and its time constants read in hours.
-- **The thermostat** (heat in `Y`) maps each setpoint and the zone to the heat delivered:
+- **The thermostat** maps each setpoint and the zone to the heat delivered:
   a tracker with a gain, an offset and a capacity per side, optionally
   capacity linear in outdoor temperature, a second stage, or a latch. Its
-  gain is held under the bound past which the discrete loop would ring.
-- **The hidden nodes are filtered, not guessed.** The first call of a
-  rollout runs a Kalman filter over the history window, driven by the
-  recorded heat, and leaves every node where the record puts it.
+  gain is held under its `gain_limit`, `C_zone / dt`, the bound past which the
+  discrete loop would ring.
+- **The hidden nodes are filtered, not guessed.** The first call of a rollout runs
+  a Kalman filter over the `context_steps` window, driven by the recorded inputs,
+  and leaves every node where the record puts it. After that the zone needs one
+  row: the nodes carry over.
 
 Two commands write the declarations, so they come from the data rather than
 from guesses:
@@ -125,8 +136,8 @@ from guesses:
   picks one by likelihood-ratio tests. Its card prints every rung's
   likelihood, BIC, whiteness and 24 h error on dev, and the snippet it saves
   holds each C and R as a box from its error bar. An agent's own network
-  (`--candidate file.json`) goes through the same tests. It reads the
-  thermal blocks, either form, and needs no setpoints. It does not select a node the record cannot place: an infinite error bar,
+  (`--candidate file.json`) goes through the same tests. It reads every block
+  that declares `scale`, and needs no setpoints. It does not select a node the record cannot place: an infinite error bar,
   or a time constant longer than the record. Across several zones the
   summed BIC must fall as well as the ratio test pass, since a likelihood
   summed over many zones passes it for almost any parameter. Every gain
@@ -134,18 +145,20 @@ from guesses:
 - `nt data thermostat --cooling COL --heating COL` fits the thermostat's
   forms one step at a time and rolls each out 24 h on dev through the
   declared network, with the error split by regime (satisfied, tracking,
-  saturated). Heat in `Y` only.
+  saturated).
 
 ```python
-"zone": {"Y": ["Zone Temp", "Delivered Heat [kW]"], "U": ["Cooling SP", "Heating SP"],
-         "D": ["Outdoor Temp", "Solar", "Occupied"], "model": "rc_network",
-         "heat": "Delivered Heat [kW]", "ambient": "Outdoor Temp", "solar": "Solar",
-         "params": {"network": json.load(open("ladder/zone.json")),
-                    "thermostat": json.load(open("ladder/zone.thermostat.json"))}},
-# commanded: the heat is the U, and there is no thermostat
+"hvac": {"Y": ["Delivered Heat [kW]"], "U": ["Cooling SP", "Heating SP"], "D": [],
+         "reads": ["Zone Temp"], "model": "thermostat",
+         "params": {"thermostat": json.load(open("ladder/hvac.thermostat.json"))}},
+"zone": {"Y": ["Zone Temp"], "U": [], "D": ["Outdoor Temp", "Solar", "Occupied"],
+         "driven_by": ["Delivered Heat [kW]"], "model": "rc_network",
+         "ambient": "Outdoor Temp", "solar": "Solar", "scale": {"Delivered Heat [kW]": 1.0},
+         "params": {"network": json.load(open("ladder/zone.json"))}},
+# commanded: the heat is the zone's U, and there is no thermostat block
 "zone": {"Y": ["Zone Temp"], "U": ["Heat Command [kW]"],
          "D": ["Outdoor Temp", "Solar", "Occupied"], "model": "rc_network",
-         "heat": "Heat Command [kW]", "ambient": "Outdoor Temp", "solar": "Solar",
+         "ambient": "Outdoor Temp", "solar": "Solar", "scale": {"Heat Command [kW]": 1.0},
          "params": {"network": json.load(open("ladder/zone.json"))}},
 ```
 
@@ -159,29 +172,36 @@ training moved outside three of its error bars.
 
 A block is a group of `Y` columns with its own sub-model: its own
 parameters, family and hidden state. Declaring blocks in `block_mapping` is
-how one model holds, for example, an `rc_network` zone and an `mlp` power
-meter that reads the zone's delivered heat:
+how one model holds, for example, a thermostat, an `rc_network` zone and an
+`mlp` power meter on the heat the thermostat delivers:
 
 ```python
 def block_mapping(nm_mapping, cfg):
     return {
-        "zone":  {"Y": ["Zone Temperature", "Delivered Heat"], "U": ["Cooling Setpoint"],
+        "hvac":  {"Y": ["Delivered Heat"], "U": ["Cooling Setpoint"], "D": [],
+                  "reads": ["Zone Temperature"], "model": "thermostat", ...},
+        "zone":  {"Y": ["Zone Temperature"], "U": [], "driven_by": ["Delivered Heat"],
                   "model": "rc_network", ...},
-        "power": {"Y": ["Total Power"], "U": [], "reads": ["Delivered Heat"],
-                  "model": "mlp"},
+        "power": {"Y": ["Total Power"], "U": [], "driven_by": ["Delivered Heat"],
+                  "model": "mlp", "residual": False},
     }
 ```
 
 - `Y` must partition exactly: every output in one block, none twice.
 - A `U` column no block claims is shared by all of them, as one air handler
   serving several zones is. `D` has no partition rule.
-- `reads` lets a block see other blocks' outputs from the history window,
-  never their same-step predictions, so evaluation order never matters.
-  `rc_network` refuses `reads`: its network and thermostat say where every
-  column goes.
+- `reads` lets a block see another block's output as of the row before the step.
+- `driven_by` lets it see that output as of this step: the block runs after its
+  producer, and the column's rows mean what a `U`'s do, row j held over the step
+  from j to j + 1, the last row what the producer just wrote. A heat is `driven_by`:
+  a meter or a zone reading it through `reads` is a step late. A cycle of
+  `driven_by` is refused; close a loop through `reads`, as a thermostat does.
+- `residual` lets a block say whether it predicts a change on the last row or the
+  value itself, whatever the run's `residual` says. A meter says the value: under a
+  residual it integrates its own errors.
 
 There is no conduction between blocks: they interact only through shared
-inputs and `reads`.
+inputs, `reads` and `driven_by`.
 
 ### Declaring what a column is
 
@@ -191,7 +211,7 @@ physics instead of having to learn it:
 | Declaration | Acts in | Does |
 |---|---|---|
 | `demand` | every family | replaces a setpoint with the thermostat's clamped error against the block's own state, `relu(zone − setpoint)` for cooling, computed from the model's own prediction during a rollout. A setpoint above the zone is then free in the surrogate, as it is in the plant. |
-| `ambient`, `heat`, `solar` | `rc_network` | the outdoor temperature the network conducts to, the delivered heat it is driven by, the irradiance the ladder may route into more than one node |
+| `ambient`, `scale`, `solar` | `rc_network`, `thermostat` | the outdoor temperature the network conducts to, what sets its units, the irradiance the ladder may route into more than one node |
 
 Nothing is inferred from column names. A declaration changes the
 physics but not the shapes, so a wrong one shows only in the reportcard.

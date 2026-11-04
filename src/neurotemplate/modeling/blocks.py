@@ -3,10 +3,9 @@ Splitting a multi-output model into independent per-block sub-models.
 
 A *block* is a group of Y channels that gets its own sub-model: its own
 parameters, its own architecture, and (for stateful families like
-`rc_network` and `gru`) its own hidden state. Blocks are independent by construction —
-no term in one block's update reads another block's state on the same
-step. Inter-block conduction is deliberately out of scope; see `reads`
-below for the one kind of cross-block coupling that *is* in scope.
+`rc_network` and `gru`) its own hidden state. Blocks hold their own parameters and
+hidden state. Inter-block conduction is deliberately out of scope; `reads`
+and `driven_by` below are the two kinds of coupling that are in scope.
 
 What a block owns
 ==================
@@ -22,7 +21,7 @@ What a block owns
          nature: two blocks may each claim the same column, or all of it,
          with no conflict.
   reads  other blocks' Y channels this block may also see as an ordinary
-         input — see the `Block.y_in_idx` docstring for why this is safe.
+         input, as of the row before the step (see `Block.y_in_idx`).
   model  the family this block builds under (e.g. "mlp", "rc_network"). None
          defers to `cfg.model`, so a spec that never sets `model` behaves
          like a plain split: one family for everyone, just partitioned
@@ -31,21 +30,27 @@ What a block owns
          "Declaring what a column is" below. Anything undeclared is an
          ordinary network input.
   ambient
-         the one D column that is the outdoor temperature, if any. Only
-         `rc_network` acts on it (conduction to the outdoors);
-         other families see the column as an ordinary input either way.
-  heat   the one column that is the heat delivered to the zone, in kW
-         (positive heats). It makes the block a thermal zone that `nt data
-         ladder` reads; see `ladder`. As a Y, a thermostat produces it
-         from setpoints; as a U, the controller commands it. Its rows mean
-         what its role says, like every column's: a Y over the step that
-         ends at its row, a U over the step that starts there.
+         the one D column that is the outdoor temperature, if any. Only the
+         thermal families act on it (conduction to the outdoors, a capacity
+         that follows it); others see the column as an ordinary input.
+  scale  what sets a thermal zone's units: `{input or parameter: value}`, what
+         `nt data ladder` pins, e.g. `{"Heat [kW]": 1.0}` for a heat in kW, or
+         `{"C_Ti": 2.0}`. Temperature alone places only gain / C. It makes the
+         block a thermal zone that the ladder reads; see `ladder`.
   solar  the one D column that is solar irradiance, if any: the input the
          ladder may also route into the mass or the envelope.
-  params the block's physical priors, read by its family's builder. Today
-         only `rc_network` reads any: its `network` declaration from `nt
-         data ladder` and, when the heat is a Y, its `thermostat` from `nt
-         data thermostat`.
+  driven_by
+         other blocks' Y channels this block reads *as of this step*: the
+         block runs after them, and each such column's rows mean what a U's
+         do, row j held over the step from j to j + 1, the last row the
+         producer's fresh output. See `dynamics.BlockStack`.
+  residual
+         whether this block predicts a change on the last row (True) or the
+         value itself (False). Absent means the run's `cfg.residual`. A meter
+         is a value: under a residual it integrates its own errors.
+  params the block's physical priors, read by its family's builder: an
+         `rc_network`'s `network` declaration from `nt data ladder`, a
+         `thermostat`'s `thermostat` from `nt data thermostat`.
 
 Declaring what a column is
 ==========================
@@ -60,7 +65,7 @@ the family sees it — see `prestack.Demand`. `sign` is the direction the
 state moves while the demand is active (-1 cooling, +1 heating). Pairing
 with another block's channel is refused: that is what `reads` is for. A
 block with a `demand` entry has exactly one Y channel. An `rc_network`
-block declares none: its thermostat is the setpoint's physics.
+block declares none: a `thermostat` block is the setpoint's physics.
 
 Nothing is inferred: a dataset whose actuator is metered power rather than
 a setpoint never writes a `demand` entry.
@@ -144,13 +149,17 @@ class Block:
     #: ordinary input.
     inputs: dict[str, dict] = field(default_factory=dict)
     ambient: Optional[str] = None
-    heat: Optional[str] = None
+    scale: Optional[dict[str, float]] = None
     solar: Optional[str] = None
     #: The block's physical priors, `{name: value}`, JSON-safe; validated by
     #: the family's builder, which is the one that knows the names.
     params: dict = field(default_factory=dict)
     #: The Y column names behind `reads`, in `y_in_idx` order.
     read_names: tuple[str, ...] = ()
+    #: The subset of `read_names` this block reads as of this step.
+    driven_by: tuple[str, ...] = ()
+    #: Predict a change (True) or the value (False); None means the run's.
+    residual: Optional[bool] = None
 
     @property
     def ny(self) -> int:
@@ -173,16 +182,10 @@ class Block:
         so a family that only ever looks at "its own state" keeps reading
         the same leading slice it always has.
 
-        `reads` is an ordinary input for every family except `rc_network`,
-        because all block inputs come from the shared history window,
-        never from another block's same-step output: the gather that
-        builds this block's window and the scatter that reassembles
-        nm_mapping["Y"] order are both fixed permutations computed once at
-        construction (see `dynamics.BlockStack`), with no evaluation-order
-        dependency between blocks — which is what keeps the whole stack
-        vmap-safe, and so keeps the sampled gradient penalty alive. The one
-        family that cannot accept a `reads` entry is `rc_network`, whose
-        network and thermostat say where every column goes.
+        `reads` is an ordinary input that sees the row before; a `driven_by`
+        column is the same entry read one row later, its last row what its
+        producer wrote this step (see `dynamics.BlockStack`). An `rc_network`
+        takes `driven_by` columns only: its network says where each goes.
         """
         return tuple(self.y_idx) + tuple(sorted(self.reads))
 
@@ -218,8 +221,8 @@ def _resolve(columns: list[str], names: list[str], block: str, key: str,
 #: Every key a block spec may set. Anything else is a typo: the declaration
 #: keys change what the block fits without changing its shape, so a
 #: misspelled one has no other way of announcing itself.
-BLOCK_KEYS = frozenset({"Y", "U", "D", "reads", "model", "inputs", "ambient",
-                        "heat", "solar", "params"})
+BLOCK_KEYS = frozenset({"Y", "U", "D", "reads", "driven_by", "residual", "model", "inputs",
+                        "ambient", "scale", "solar", "params"})
 
 INPUT_KINDS = ("demand",)
 
@@ -235,9 +238,14 @@ def _resolve_inputs(spec: dict, block: str, y_names: list[str],
     if ambient is not None and ambient not in d_names:
         problems.append(f"`ambient` ({ambient!r}) is not one of this block's D "
                         f"columns {d_names}.")
-    if spec.get("heat") is not None and spec["heat"] not in y_names + u_names:
-        problems.append(f"`heat` ({spec['heat']!r}) is not one of this block's Y "
-                        f"{y_names} or U {u_names} columns.")
+    scale = spec.get("scale")
+    if scale is not None and (not isinstance(scale, dict) or not scale or any(
+            isinstance(v, bool) or not isinstance(v, (int, float)) or v <= 0
+            for v in scale.values())):
+        problems.append(f"`scale` must map an input or parameter to its positive value; "
+                        f"got {scale!r}.")
+    if spec.get("residual") not in (None, True, False):
+        problems.append(f"`residual` must be true or false; got {spec['residual']!r}.")
     if spec.get("solar") is not None and spec["solar"] not in d_names:
         problems.append(f"`solar` ({spec['solar']!r}) is not one of this block's D "
                         f"columns {d_names}.")
@@ -336,7 +344,8 @@ def build_blocks(
         # — no partition requirement, D is shared by nature.
         d_idx = (list(range(len(d_cols))) if "D" not in spec
                  else _resolve(d_cols, spec["D"], name, "D"))
-        reads_idx = _resolve(y_cols, spec.get("reads", []), name, "reads", source="Y")
+        driven = spec.get("driven_by", [])
+        reads_idx = _resolve(y_cols, spec.get("reads", []) + driven, name, "reads", source="Y")
         model = spec.get("model")
 
         if not y_idx:
@@ -389,11 +398,31 @@ def build_blocks(
         blocks.append(Block(
             name, tuple(y_idx), tuple(u_idx), tuple(y_names), tuple(d_idx),
             tuple(reads_idx), model, tuple(u_names), tuple(d_names), inputs, ambient,
-            spec.get("heat"), spec.get("solar"), dict(params),
-            tuple(y_cols[i] for i in sorted(reads_idx)),
+            spec.get("scale"), spec.get("solar"), dict(params),
+            tuple(y_cols[i] for i in sorted(reads_idx)), tuple(spec.get("driven_by", [])),
+            spec.get("residual"),
         ))
     _check_one_demand_per_column(blocks)
-    return blocks
+    return run_order(blocks)
+
+
+def run_order(blocks: list[Block]) -> list[Block]:
+    """`blocks` with every block after those that drive it; a stable sort, so
+    a spec with no `driven_by` keeps its order. A cycle has no order to run in."""
+    producer = {column: block.name for block in blocks for column in block.y_names}
+    ordered: list[Block] = []
+    remaining = list(blocks)
+    while remaining:
+        done = {block.name for block in ordered}
+        ready = next((b for b in remaining
+                      if all(producer[c] in done for c in b.driven_by)), None)
+        if ready is None:
+            raise ValueError("block_mapping: `driven_by` forms a cycle among "
+                             f"{[b.name for b in remaining]}; close a loop through "
+                             "`reads`, which sees the row before.")
+        ordered.append(ready)
+        remaining.remove(ready)
+    return ordered
 
 
 def _check_one_demand_per_column(blocks: list[Block]) -> None:

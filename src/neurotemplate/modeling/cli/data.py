@@ -106,47 +106,48 @@ LADDER_HORIZON_H, LADDER_EVERY_H, LADDER_BURN_IN_H = 24.0, 6.0, 24.0
 class ThermalZone:
     block: str
     zone: str
-    heat: str
     ambient: str
     solar: Optional[str]
-    gains: tuple[str, ...]
-    heat_in_y: bool     # behind a thermostat; else a U, commanded
+    drives: tuple[str, ...]     # the scaled inputs and `driven_by` heats, first
+    gains: tuple[str, ...]      # the other inputs, entering through a fitted gain
+    scale: dict[str, float]
+    y_inputs: tuple[str, ...]   # the inputs that are Y of the model
 
     @classmethod
     def from_block(cls, block) -> "ThermalZone":
-        zones = [c for c in block.y_names if c != block.heat]
         problems = []
-        if len(zones) != 1:
-            problems.append(f"Y must be the zone temperature, and `heat` too when it is not "
-                            f"a U; got {list(block.y_names)}")
+        if len(block.y_names) != 1:
+            problems.append(f"Y must be the zone temperature alone; got {list(block.y_names)}")
         if block.ambient is None:
             problems.append("no `ambient`: the outdoor temperature every network conducts to")
         if problems:
             raise SystemExit(f"thermal block {block.name!r}: " + "; ".join(problems))
-        gains = tuple(c for c in block.d_names if c not in (block.ambient, block.solar))
-        return cls(block.name, zones[0], block.heat, block.ambient, block.solar, gains,
-                   heat_in_y=block.heat in block.y_names)
+        inputs = [c for c in block.driven_by + block.u_names + block.d_names
+                  if c not in (block.ambient, block.solar)]
+        drives = tuple(c for c in inputs if c in block.driven_by or c in block.scale)
+        return cls(block.name, block.y_names[0], block.ambient, block.solar, drives,
+                   tuple(c for c in inputs if c not in drives), dict(block.scale),
+                   tuple(block.driven_by))
 
     def network(self, rung: Rung):
-        return rung.network(self.heat, self.solar, self.gains)
+        return rung.network(self.drives, self.solar, self.gains, self.scale)
 
     def series(self, raw, network, every: int, dt_h: float) -> nw.Series:
         """One file's data for `network`, on a grid of `every` rows."""
         return ladder.zone_series(raw, self.zone, self.ambient, ladder.network_columns(network),
-                                  self.heat if self.heat_in_y else None, every, dt_h)
+                                  self.y_inputs, every, dt_h)
 
 
 def _warn_signed_gains(zones: list[ThermalZone], train_raws) -> None:
     """A gain input enters as gain · value with gain ≥ 0, so a column that
     goes negative cannot push both ways and fits at zero. Solar is left out:
     irradiance reads a little below zero at night, which is sensor noise."""
-    columns = sorted({c for z in zones for c in z.gains})
+    columns = sorted({c for z in zones for c in z.gains + z.drives if c not in z.y_inputs})
     signed = [c for c in columns if min(float(raw[c].min()) for raw in train_raws) < 0]
     if signed:
-        print(f"WARNING: gain input(s) {signed} take negative values. Every gain is fitted "
-              ">= 0, so a signed feature (sin/cos of the hour, a centred flag) enters at "
-              "zero. Use non-negative indicators or schedules, e.g. a 0/1 flag per part "
-              "of the day.")
+        print(f"WARNING: input(s) {signed} take negative values. Every gain is >= 0, so a "
+              "signed feature (sin/cos of the hour, a centred flag) enters at zero. Use "
+              "non-negative indicators or schedules, e.g. a 0/1 flag per part of the day.")
 
 
 def _parse_dt_steps(text: str, freq_s: float) -> int:
@@ -177,14 +178,14 @@ def ladder_main() -> None:
     train_raws, dev_raws, _test_raws, freq_s = get_data_splits(cfg)
     nm_mapping = resolve_nm_mapping(hooks, train_raws[0], cfg)
     blocks = build_blocks(nm_mapping, resolve_block_spec(hooks, nm_mapping, cfg))
-    zones = [ThermalZone.from_block(b) for b in blocks if b.heat is not None]
+    zones = [ThermalZone.from_block(b) for b in blocks if b.scale is not None]
     if args.zone is not None:
         zones = [z for z in zones if z.zone == args.zone]
     if not zones:
         raise SystemExit(
             "No thermal block to fit. A thermal block declares its zone temperature as Y, "
-            "`heat` (delivered heat, kW) as a Y (behind a thermostat) or a U, and "
-            "`ambient` (and `solar`, if any) among its D; see `nt guide thermal-zone`.")
+            "`ambient` (and `solar`, if any) among its D, and `scale`, what sets its units; "
+            "see `nt guide thermal-zone`.")
     _warn_signed_gains(zones, train_raws)
 
     every = _parse_dt_steps(args.dt, freq_s)
@@ -330,14 +331,15 @@ def _fit_notes(fit: Fit) -> list[str]:
 # ── nt data thermostat ──────────────────────────────────────────
 
 def _declared_network(block) -> tuple:
-    """The block's declared network, at the centre of its boxes."""
+    """The block's declared network, at the centre of its boxes, and the lowest
+    zone capacitance its box allows."""
     decl = block.params.get("network")
     if decl is None:
         raise SystemExit(
             f"thermal block {block.name!r} declares no network. Run `nt data ladder`, and "
             "put its snippet in the block's params as `network`.")
     network, boxes, noise = nw.parse_declaration(decl, block.name)
-    return network, {**nw.box_centres(boxes), **noise}
+    return network, {**nw.box_centres(boxes), **noise}, boxes[f"C_{network.zone}"][0]
 
 
 @beartype
@@ -346,9 +348,9 @@ def thermostat_main() -> None:
     flags.add_argument("--zone", type=str, default=None,
                        help="Only the thermal block whose zone is this column.")
     flags.add_argument("--cooling", type=str, default=None,
-                       help="The cooling setpoint column (a U column of the block).")
+                       help="The cooling setpoint column (a U column of the thermostat's block).")
     flags.add_argument("--heating", type=str, default=None,
-                       help="The heating setpoint column (a U column of the block).")
+                       help="The heating setpoint column (a U column of the thermostat's block).")
     cfg, args = load_config_from_cli(
         sys.argv[1:], cls=ModelingConfig, config_dir=MODEL_CONFIG_DIR,
         default_config_path=MODEL_CONFIG_DIR / "modeling.yaml",
@@ -362,8 +364,8 @@ def thermostat_main() -> None:
     hooks = load_modeling_hooks(cfg)
     train_raws, dev_raws, _test_raws, freq_s = get_data_splits(cfg)
     nm_mapping = resolve_nm_mapping(hooks, train_raws[0], cfg)
-    blocks = [b for b in build_blocks(nm_mapping, resolve_block_spec(hooks, nm_mapping, cfg))
-              if b.heat is not None]
+    every_block = build_blocks(nm_mapping, resolve_block_spec(hooks, nm_mapping, cfg))
+    blocks = [b for b in every_block if b.scale is not None]
     if args.zone is not None:
         blocks = [b for b in blocks if ThermalZone.from_block(b).zone == args.zone]
     if len(blocks) != 1:
@@ -371,24 +373,28 @@ def thermostat_main() -> None:
                          f"{[b.name for b in blocks]}.")
     block = blocks[0]
     zone = ThermalZone.from_block(block)
-    if not zone.heat_in_y:
-        raise SystemExit(f"block {block.name!r} commands its heat ({zone.heat!r} is a U), so "
-                         "it has no thermostat to fit.")
-    missing = [c for c in setpoints.values() if c not in block.u_names]
+    if len(block.driven_by) != 1:
+        raise SystemExit(f"block {block.name!r} must be `driven_by` the one heat its thermostat "
+                         f"produces; it has {list(block.driven_by)}. A zone whose heat is a U "
+                         "has no thermostat to fit.")
+    heat = block.driven_by[0]
+    producer = next(b for b in every_block if heat in b.y_names)
+    missing = [c for c in setpoints.values() if c not in producer.u_names]
     if missing:
-        raise SystemExit(f"setpoint(s) {missing} are not U columns of block {block.name!r} "
-                         f"{list(block.u_names)}.")
-    network, values = _declared_network(block)
+        raise SystemExit(f"setpoint(s) {missing} are not U columns of block {producer.name!r}, "
+                         f"which produces {heat!r}: {list(producer.u_names)}.")
+    network, values, lowest_c = _declared_network(block)
     fine_h = freq_s / 3600.0
 
     def record(raw) -> th.Record:
         col = lambda c: torch.tensor(raw[c].to_numpy(dtype=float), dtype=nw.DTYPE)
         return th.Record(col(zone.zone), {s: col(c) for s, c in setpoints.items()},
-                         col(zone.ambient), col(zone.heat))
+                         col(zone.ambient), col(heat))
 
     sides = tuple(setpoints)
     selection = th.forward_select(sides, [record(raw) for raw in train_raws])
-    scores = {name: _thermostat_scores(fit, network, values, zone, setpoints, dev_raws, fine_h)
+    scores = {name: _thermostat_scores(fit, network, values, zone, heat, setpoints, dev_raws,
+                                       fine_h)
               for name, fit in selection.fits.items()}
 
     print(f"\n{zone.zone} ← {', '.join(f'{s} {c!r}' for s, c in setpoints.items())}"
@@ -422,22 +428,23 @@ def thermostat_main() -> None:
               "you know of the equipment.")
     out_dir = Path("ladder")
     out_dir.mkdir(exist_ok=True)
-    path = out_dir / f"{zone.block}.thermostat.json"
-    path.write_text(json.dumps(th.declaration(chosen, setpoints), indent=2, ensure_ascii=False))
-    print(f"  snippet: {path}  — the block's params `thermostat`.")
+    path = out_dir / f"{producer.name}.thermostat.json"
+    path.write_text(json.dumps(th.declaration(chosen, setpoints, lowest_c / fine_h), indent=2,
+                               ensure_ascii=False))
+    print(f"  snippet: {path}  — block {producer.name!r}'s params `thermostat`.")
     print("  Regimes by the measured heat: satisfied under a tenth of the active side's "
           "capacity, saturated over nine tenths. The one-step fit predicts the heat over "
           "each step from the row that starts it.")
 
 
-def _thermostat_scores(fit, network, values, zone: ThermalZone, setpoints: dict[str, str],
-                       dev_raws, fine_h: float) -> Optional[dict]:
+def _thermostat_scores(fit, network, values, zone: ThermalZone, heat: str,
+                       setpoints: dict[str, str], dev_raws, fine_h: float) -> Optional[dict]:
     """Zone and heat RMSE of 24 h rollouts on dev, overall and by regime,
     each started from the filtered state after a day of dev; None when dev
     is too short."""
     horizon = round(LADDER_HORIZON_H / fine_h)
     burn_in, every = round(LADDER_BURN_IN_H / fine_h), round(LADDER_EVERY_H / fine_h)
-    heat_column = 1 + [c for c, _ in network.inputs].index(zone.heat)
+    heat_column = 1 + [c for c, _ in network.inputs].index(heat)
     errors_zone, errors_heat, regime = [], [], []
     for raw in dev_raws:
         series = zone.series(raw, network, 1, fine_h)
@@ -448,7 +455,7 @@ def _thermostat_scores(fit, network, values, zone: ThermalZone, setpoints: dict[
         rows = starts[None, :] + 1 + torch.arange(horizon)[:, None]
         col = lambda c: torch.tensor(raw[c].to_numpy(dtype=float), dtype=nw.DTYPE)
         outdoor = col(zone.ambient)[rows]
-        measured = col(zone.heat)[rows + 1]
+        measured = col(heat)[rows + 1]
         zone_path, heat_path = th.composed_rollout(
             fit, network, values, states[starts], {s: col(c)[rows] for s, c in setpoints.items()},
             outdoor, nw.drive_matrix(series)[rows], heat_column, fine_h)

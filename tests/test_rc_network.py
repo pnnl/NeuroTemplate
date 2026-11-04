@@ -2,6 +2,8 @@
 
 import math
 
+import pytest
+
 import torch
 
 from neurotemplate.modeling import ladder, network as nw
@@ -49,7 +51,7 @@ def _truth(network):
 
 
 def test_the_likelihood_is_the_hand_worked_one_state_filter():
-    net = Rung().network(HEAT, None, ())
+    net = Rung().network((HEAT,), None, (), {HEAT: 1.0})
     values = _truth(net)
     series = _simulate(net, values, steps=200)
     c, r_o, sigma, sigma_y = (values[k] for k in ("C_Ti", "R_Ti_ambient", "sigma_Ti", "sigma_y"))
@@ -73,7 +75,7 @@ def test_the_likelihood_is_the_hand_worked_one_state_filter():
 
 
 def test_a_fit_on_its_own_network_recovers_the_parameters_within_their_error_bars():
-    net = Rung(mass=True).network(HEAT, None, ())
+    net = Rung(mass=True).network((HEAT,), None, (), {HEAT: 1.0})
     truth = _truth(net)
     data = [_simulate(net, truth, steps=2000, seed=3)]
     fit = nw.fit(net, data)
@@ -84,12 +86,12 @@ def test_a_fit_on_its_own_network_recovers_the_parameters_within_their_error_bar
 
 
 def _select(rung: Rung, seed: int) -> ladder.Selection:
-    truth_net = rung.network(HEAT, None, ())
+    truth_net = rung.network((HEAT,), None, (), {HEAT: 1.0})
     data = [_simulate(truth_net, _truth(truth_net), steps=1500, seed=seed)]
 
     def fit_rung(r, parents):
         start = parents[0].values if parents else None
-        return [nw.fit(r.network(HEAT, None, ()), data, start)]
+        return [nw.fit(r.network((HEAT,), None, (), {HEAT: 1.0}), data, start)]
 
     return ladder.forward_select(fit_rung, solar=False)
 
@@ -119,7 +121,7 @@ def test_an_extension_whose_new_mode_the_data_cannot_place_is_not_selected():
 
 
 def test_a_declaration_round_trips_with_its_boxes_and_pins():
-    net = Rung(mass=True).network(HEAT, None, ())
+    net = Rung(mass=True).network((HEAT,), None, (), {HEAT: 1.0})
     decl = {"nodes": {"Ti": [1.0, 2.0], "Tm": 20.0},
             "edges": {"Ti-Tm": [0.2, 0.8], "Ti-ambient": [2.0, 4.0]},
             "inputs": {HEAT: {"Ti": 1.0}},
@@ -151,69 +153,129 @@ def test_the_thermostat_fit_recovers_a_trackers_capacity_and_offset():
         assert error < 3 * se, (name, value, truth, se)
 
 
-def test_the_trained_block_filters_and_steps_exactly_as_the_ladder_does():
-    from neurotemplate.modeling.rc_network import NetworkBlock
-
-    net = Rung(mass=True).network(HEAT, None, ())
-    values = _truth(net)
-    series = _simulate(net, values, steps=60, seed=2)
+def _block_and_ladder(net, values, series):
+    """A zone's declaration, and the ladder's filter over the same rows: the
+    nodes after the last measurement, and the step's matrices."""
     decl = {"nodes": {"Ti": values["C_Ti"], "Tm": values["C_Tm"]},
             "edges": {"Ti-Tm": values["R_Ti_Tm"], "Ti-ambient": values["R_Ti_ambient"]},
             "inputs": {HEAT: {"Ti": 1.0}},
             "noise": {"Ti": values["sigma_Ti"], "Tm": values["sigma_Tm"],
                       "sensor": values["sigma_y"]}}
-    thermostat = {"cooling": {"setpoint": "sp", "gain": 4.0, "capacity": 6.0}, "form": "tracker"}
-    columns = ("zone", HEAT, "sp", "out")
-    stats = {c: {"shift": 0.0, "stretch": 1.0} for c in columns}
-    block = NetworkBlock("z", ("zone", HEAT), ("sp",), ("out",), HEAT, "out",
-                         {"network": decl, "thermostat": thermostat}, window=60, dt_h=DT_H,
-                         norm_stats=stats)
-    heat_meter = torch.cat([torch.zeros(1, dtype=nw.DTYPE), series.inputs[:-1, 0]])
-    y = torch.stack([series.y, heat_meter], dim=1)          # the meter reads a step late
-    x = torch.cat([y.flatten(), torch.tensor([20.0], dtype=nw.DTYPE), series.ambient])[None]
-    with torch.no_grad():
-        increment, state = block.step(x.float(), None, block.discrete())
-
-    # The ladder's filter over the same rows, then one step of the network
-    # under the thermostat's heat.
-    ladder_series = nw.Series(series.y, series.ambient, series.inputs, DT_H)
-    nodes = nw.filtered_states(net, values, ladder_series)[-2]
-    a, b, q, r = nw.discrete_model(net, nw.as_tensors(values), DT_H)
-    nodes = nodes + nw.steady_gain(a, q, r) * (series.y[-1] - nodes[0])
-    with torch.no_grad():
-        gain = block.thermostat_values()["cooling.gain"].item()
-    heat = -min(max(gain * (float(nodes[0]) - 20.0), 0.0), 6.0)
-    expected = a @ nodes + b @ torch.tensor([float(series.ambient[-1]), heat], dtype=nw.DTYPE)
-    assert torch.allclose(state[0].double(), expected, atol=1e-4)
-    assert math.isclose(float(increment[0, 1]), heat - float(heat_meter[-1]), abs_tol=1e-4)
-
-
-def test_a_block_whose_heat_is_commanded_filters_and_steps_on_the_command():
-    """Heat as a U: no thermostat, the window's commands drive the filter,
-    and the current row's command drives the step."""
-    from neurotemplate.modeling.rc_network import NetworkBlock
-
-    net = Rung(mass=True).network(HEAT, None, ())
-    values = _truth(net)
-    series = _simulate(net, values, steps=60, seed=2)
-    decl = {"nodes": {"Ti": values["C_Ti"], "Tm": values["C_Tm"]},
-            "edges": {"Ti-Tm": values["R_Ti_Tm"], "Ti-ambient": values["R_Ti_ambient"]},
-            "inputs": {HEAT: {"Ti": 1.0}},
-            "noise": {"Ti": values["sigma_Ti"], "Tm": values["sigma_Tm"],
-                      "sensor": values["sigma_y"]}}
-    stats = {c: {"shift": 0.0, "stretch": 1.0} for c in ("zone", HEAT, "out")}
-    block = NetworkBlock("z", ("zone",), (HEAT,), ("out",), HEAT, "out", {"network": decl},
-                         window=60, dt_h=DT_H, norm_stats=stats)
-    command = series.inputs[:, 0]                           # row k: the heat over k → k+1
-    x = torch.cat([series.y, command, series.ambient])[None]
-    with torch.no_grad():
-        increment, state = block.step(x.float(), None, block.discrete())
-
     nodes = nw.filtered_states(net, values, series)[-2]
     a, b, q, r = nw.discrete_model(net, nw.as_tensors(values), DT_H)
-    nodes = nodes + nw.steady_gain(a, q, r) * (series.y[-1] - nodes[0])
-    expected = a @ nodes + b @ torch.tensor([float(series.ambient[-1]), float(command[-1])],
+    return decl, nodes + nw.steady_gain(a, q, r) * (series.y[-1] - nodes[0]), a, b
+
+
+def test_the_zone_filters_and_steps_exactly_as_the_ladder_does():
+    """The heat over the step arrives held at its row, whoever produced it."""
+    from neurotemplate.modeling.thermal import RCZone
+
+    net = Rung(mass=True).network((HEAT,), None, (), {HEAT: 1.0})
+    values = _truth(net)
+    series = _simulate(net, values, steps=60, seed=2)
+    decl, nodes, a, b = _block_and_ladder(net, values, series)
+    zone = RCZone(decl, [HEAT], window=60, dt_h=DT_H).eval()
+    command = series.inputs[:, 0].float()[None]
+    with torch.no_grad():
+        next_zone = zone(series.y.float()[None], series.ambient.float()[None], command)
+    expected = a @ nodes + b @ torch.tensor([float(series.ambient[-1]), float(command[0, -1])],
                                             dtype=nw.DTYPE)
-    assert torch.allclose(state[0].double(), expected, atol=1e-4)
-    assert increment.shape == (1, 1)
-    assert math.isclose(float(increment[0, 0]), float(expected[0] - series.y[-1]), abs_tol=1e-4)
+    assert torch.allclose(zone.rollout_state()[0].double(), expected, atol=1e-4)
+    assert math.isclose(float(next_zone[0]), float(expected[0]), abs_tol=1e-4)
+
+
+def _two_blocks(decl, thermostat_decl, history_steps=60):
+    from neurotemplate.modeling.blocks import build_blocks
+    from neurotemplate.modeling.dynamics import get_dynamics
+    from model_fixtures import model_cfg, unit_stats
+
+    mapping = {"Y": ["zone", HEAT], "U": ["sp"], "D": ["out"], "t": ["sec_elapsed"]}
+    spec = {"hvac": {"Y": [HEAT], "U": ["sp"], "D": [], "reads": ["zone"], "model": "thermostat",
+                     "params": {"thermostat": thermostat_decl}},
+            "room": {"Y": ["zone"], "U": [], "D": ["out"], "driven_by": [HEAT], "ambient": "out",
+                     "scale": {HEAT: 1.0}, "model": "rc_network", "params": {"network": decl}}}
+    cfg = model_cfg(model="rc_network", history={"zone": 0, HEAT: 0, "sp": 0, "out": 0},
+                    context_steps=history_steps, steps_per_hour=1 / DT_H)
+    assert [b.name for b in build_blocks(mapping, spec)] == ["hvac", "room"]
+    return get_dynamics(cfg, mapping, unit_stats(mapping), block_spec=spec)
+
+
+def test_a_zone_behind_a_thermostat_block_sees_the_heat_of_the_step_being_taken():
+    from neurotemplate.modeling.contract import contract_model
+
+    net = Rung(mass=True).network((HEAT,), None, (), {HEAT: 1.0})
+    values = _truth(net)
+    series = _simulate(net, values, steps=60, seed=2)
+    decl, nodes, a, b = _block_and_ladder(net, values, series)
+    system = _two_blocks(decl, {"cooling": {"setpoint": "sp", "gain": 4.0, "capacity": 6.0},
+                                "form": "tracker", "gain_limit": 40.0}).eval()
+    meter = torch.cat([torch.zeros(1, dtype=nw.DTYPE), series.inputs[:-1, 0]])
+    y = torch.stack([series.y, meter], dim=1).float()[None]
+    u = torch.full((1, 60, 1), 20.0)
+    d = series.ambient.float()[None, :, None]
+    with torch.no_grad():
+        out = contract_model(system)(y, u, d)[0]
+    # The thermostat answers the measured zone, and the network steps on that.
+    heat = -min(max(4.0 * (float(series.y[-1]) - 20.0), 0.0), 6.0)
+    expected = a @ nodes + b @ torch.tensor([float(series.ambient[-1]), heat], dtype=nw.DTYPE)
+    assert math.isclose(float(out[1]), heat, abs_tol=1e-4)
+    assert math.isclose(float(out[0]), float(expected[0]), abs_tol=1e-4)
+
+
+def test_a_cycle_of_driven_blocks_has_no_order_and_says_so():
+    from neurotemplate.modeling.blocks import build_blocks
+
+    mapping = {"Y": ["a", "b"], "U": [], "D": [], "t": ["sec_elapsed"]}
+    spec = {"one": {"Y": ["a"], "driven_by": ["b"]}, "two": {"Y": ["b"], "driven_by": ["a"]}}
+    with pytest.raises(ValueError, match="cycle"):
+        build_blocks(mapping, spec)
+
+
+def test_a_network_that_pins_nothing_is_refused():
+    """Temperature alone places only gain / C: nothing pinned, nothing physical."""
+    decl = {"nodes": {"Ti": [0.5, 2.0]}, "edges": {"Ti-ambient": [1.0, 4.0]},
+            "inputs": {HEAT: {"Ti": [0.5, 2.0]}}, "noise": {"Ti": 0.1, "sensor": 0.1}}
+    with pytest.raises(ValueError, match="pins nothing"):
+        _two_blocks(decl, {"cooling": {"setpoint": "sp", "gain": 4.0, "capacity": 6.0},
+                           "form": "tracker", "gain_limit": 40.0})
+
+
+def test_hidden_nodes_without_context_are_refused():
+    decl = {"nodes": {"Ti": 1.0, "Tm": 10.0}, "edges": {"Ti-Tm": 1.0, "Ti-ambient": 2.0},
+            "inputs": {HEAT: {"Ti": 1.0}}, "noise": {"Ti": 0.1, "Tm": 0.1, "sensor": 0.1}}
+    with pytest.raises(ValueError, match="context_steps"):
+        _two_blocks(decl, {"cooling": {"setpoint": "sp", "gain": 4.0, "capacity": 6.0},
+                           "form": "tracker", "gain_limit": 40.0}, history_steps=0)
+
+
+def test_only_the_heat_gain_is_unidentified_beside_c_and_r():
+    """The scale a declaration must state: scaling C, the gains and 1 / R together
+    leaves every prediction, and so the likelihood, where it was."""
+    net = nw.Network(("Ti", "Tm"), (("Ti", "Tm"), ("Ti", nw.AMBIENT)), ((HEAT, "Ti"),))
+    base = {"C_Ti": 1.5, "C_Tm": 12.0, "R_Ti_Tm": 2.0, "R_Ti_ambient": 4.0,
+            f"gain_{HEAT}_Ti": 1.0, "sigma_Ti": 0.1, "sigma_Tm": 0.05, "sigma_y": 0.03}
+    scaled = {k: v * 3 if k[:2] in ("C_", "ga") else v / 3 if k.startswith("R_") else v
+              for k, v in base.items()}
+    series = _simulate(Rung(mass=True).network((HEAT,), None, (), {HEAT: 1.0}), _truth(
+        Rung(mass=True).network((HEAT,), None, (), {HEAT: 1.0})), steps=60, seed=3)
+    series = nw.Series(series.y, series.ambient, series.inputs, DT_H)
+    start = torch.zeros(1, dtype=nw.DTYPE)
+    nll = [float(nw.conditioned_filter(net, nw.as_tensors(v), series, start).nll())
+           for v in (base, scaled)]
+    assert math.isclose(nll[0], nll[1], rel_tol=1e-9)
+
+
+def test_a_pinned_capacitance_lets_the_ladder_place_a_gain_as_a_cop():
+    """`scale` can pin a C instead: then an input's gain is the fit, and it comes
+    back at the truth, in the form a power's COP would."""
+    truth_net = Rung().network((HEAT,), None, (), {HEAT: 2.5})
+    values = {"C_Ti": 1.5, "R_Ti_ambient": 3.0, f"gain_{HEAT}_Ti": 2.5,
+              "sigma_Ti": 0.05, "sigma_y": 0.02}
+    series = _simulate(truth_net, values, steps=2000, seed=5)
+    net = Rung().network((), None, (HEAT,), {"C_Ti": 1.5})
+    assert net.pinned == {"C_Ti": 1.5}
+    fit = nw.fit(net, [series], max_iter=200)
+    assert abs(fit.values[f"gain_{HEAT}_Ti"] - 2.5) < 0.25
+    decl = nw.declaration(fit)
+    parsed, _, _ = nw.parse_declaration(decl)
+    assert parsed.pinned == {"C_Ti": 1.5}

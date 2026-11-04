@@ -263,6 +263,10 @@ def _block_parts(info: dict) -> list[str]:
 def _network_lines(info: dict, indent: str) -> list[str]:
     """An rc_network block's time constants against the ladder's, and the
     share of its stability bound each thermostat gain uses."""
+    if "thermostat" in info:
+        shares = ", ".join(f"{side} {share:.0%}" for side, share in info["gain_share"].items())
+        return [f"{indent}- thermostat {info['thermostat']}: gain at {shares} of "
+                "the bound past which the loop rings"]
     if "network_time_constants_h" not in info:
         return []
     taus = ", ".join(f"{t:.3g}" for t in info["network_time_constants_h"])
@@ -276,11 +280,6 @@ def _network_lines(info: dict, indent: str) -> list[str]:
         lines.append(f"{indent}- ⚠️ outside three of the ladder's error bars: "
                      f"{info['left_coarse_bar']} h — training moved a time constant "
                      "the likelihood had placed.")
-    if "thermostat" not in info:
-        return lines
-    shares = ", ".join(f"{side} {share:.0%}" for side, share in info["gain_share"].items())
-    lines.append(f"{indent}- thermostat {info['thermostat']}: gain at {shares} of "
-                 "the bound past which the loop rings")
     return lines
 
 

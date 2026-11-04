@@ -97,7 +97,9 @@ def soft_clip(u: torch.Tensor, cap: torch.Tensor, smooth: bool) -> torch.Tensor:
     soft = _smooth_clip(u, cap, cap / 20)
     if smooth:
         return soft
-    return straight_through(soft, torch.minimum(torch.relu(u), cap))
+    # min(a, cap) as a − relu(a − cap): onnx2c cannot generate a Min.
+    above = torch.relu(u)
+    return straight_through(soft, above - torch.relu(above - cap))
 
 
 def side_heat(p: dict, side: str, form: Form, error: torch.Tensor, outdoor: torch.Tensor,
@@ -306,11 +308,13 @@ def forward_select(sides: tuple[str, ...], records: list[Record], latched: bool 
     return Selection(fits, parents, current.name, twin)
 
 
-def declaration(fit: ThermostatFit, setpoints: dict[str, str], z: float = 3.0) -> dict:
+def declaration(fit: ThermostatFit, setpoints: dict[str, str], gain_limit: float,
+                z: float = 3.0) -> dict:
     """The thermostat as `block_mapping` declares it, per side: its setpoint
     column and each parameter as a box from its error bar (log space for a
-    scale, linear for an offset)."""
-    out = {}
+    scale, linear for an offset); and the gain past which the loop it closes
+    on the zone rings."""
+    out = {"gain_limit": float(f"{gain_limit:.4g}")}
     for side in fit.sides:
         entry = {"setpoint": setpoints[side]}
         for name, positive in fit.form.side_parameters():

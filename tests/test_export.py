@@ -79,20 +79,23 @@ MIXED_MAPPING = {
     "D": ["oat", "ghi"],
     "t": ["sec_elapsed"],
 }
-#: North is a declared network behind a thermostat; south an mlp zone whose
+#: North is a declared network behind a thermostat block; south an mlp zone whose
 #: setpoint reaches it as the demand prestack; power an mlp meter on north's heat.
 MIXED = {
+    "hvac": {
+        "Y": ["north Q"], "U": ["north sp"], "D": [], "reads": ["north T"], "model": "thermostat",
+        "params": {"thermostat": {"cooling": {"setpoint": "north sp", "gain": [1.0, 5.0],
+                                              "capacity": [2.0, 8.0], "offset": [-0.5, 0.5]},
+                                  "form": "tracker+offset", "gain_limit": 12.0}},
+    },
     "north": {
-        "Y": ["north T", "north Q"], "U": ["north sp"], "D": ["oat", "ghi"],
-        "model": "rc_network", "heat": "north Q", "ambient": "oat", "solar": "ghi",
+        "Y": ["north T"], "U": [], "D": ["oat", "ghi"], "driven_by": ["north Q"],
+        "model": "rc_network", "ambient": "oat", "solar": "ghi", "scale": {"north Q": 1.0},
         "params": {
             "network": {"nodes": {"Ti": [0.5, 2.0], "Tm": [5.0, 20.0]},
                         "edges": {"Ti-Tm": [0.2, 0.8], "Ti-ambient": [2.0, 8.0]},
                         "inputs": {"north Q": {"Ti": 1.0}, "ghi": {"Ti": [0.001, 0.01]}},
-                        "noise": {"Ti": 0.1, "Tm": 0.05, "sensor": 0.05}},
-            "thermostat": {"cooling": {"setpoint": "north sp", "gain": [1.0, 5.0],
-                                       "capacity": [2.0, 8.0], "offset": [-0.5, 0.5]},
-                           "form": "tracker+offset"}},
+                        "noise": {"Ti": 0.1, "Tm": 0.05, "sensor": 0.05}}},
     },
     "south": {"Y": ["south T"], "U": ["south sp"], "model": "mlp",
               "inputs": {"south sp": {"kind": "demand", "sign": -1, "state": "south T"}}},
@@ -101,8 +104,8 @@ MIXED = {
 
 
 UNIFORM = uniform_history(MAPPING, HISTORY_STEPS)
-#: The rc_network zone reads its setpoint at the current step only.
-MIXED_HISTORY = uniform_history(MIXED_MAPPING, HISTORY_STEPS, at_zero=("north sp",))
+#: The thermal blocks' reads are not in the table; the mlp blocks' are.
+MIXED_HISTORY = uniform_history(MIXED_MAPPING, HISTORY_STEPS, at_zero=("north sp", "north T"))
 
 
 def make_cfg(**over) -> Config:

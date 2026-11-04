@@ -187,45 +187,52 @@ def block_mapping(
     blocks get that for free.
 
         return {
-            "zone_a": {"Y": ["Zone A Temp [degC]", "Zone A Heat [kW]"],
-                       "U": ["Zone A Cool SP [degC]", "Zone A Heat SP [degC]"],
+            "hvac_a": {"Y": ["Zone A Heat [kW]"],
+                       "U": ["Zone A Cool SP [degC]", "Zone A Heat SP [degC]"], "D": [],
+                       "reads": ["Zone A Temp [degC]"], "model": "thermostat",
+                       "params": {"thermostat": json.load(
+                           open("ladder/hvac_a.thermostat.json"))}},
+            "zone_a": {"Y": ["Zone A Temp [degC]"], "U": [],
                        "D": ["Outdoor Temp [degC]", "Solar [W/m2]", "Occupied [-]"],
-                       "model": "rc_network", "heat": "Zone A Heat [kW]",
+                       "driven_by": ["Zone A Heat [kW]"], "model": "rc_network",
                        "ambient": "Outdoor Temp [degC]", "solar": "Solar [W/m2]",
-                       "params": {"network": json.load(open("ladder/zone_a.json")),
-                                  "thermostat": json.load(
-                                      open("ladder/zone_a.thermostat.json"))}},
-            "meter":  {"Y": ["Total Power [kW]"], "U": [],
-                       "reads": ["Zone A Heat [kW]"], "model": "mlp"},
+                       "scale": {"Zone A Heat [kW]": 1.0},
+                       "params": {"network": json.load(open("ladder/zone_a.json"))}},
+            "meter":  {"Y": ["Total Power [kW]"], "U": [], "D": ["Outdoor Temp [degC]"],
+                       "driven_by": ["Zone A Heat [kW]"], "model": "mlp",
+                       "residual": False},
         }
 
     Rules: every Y channel is in exactly one block. A block's U are its
     own; a U no block claims is shared by all. D is all of D unless a block
     names a subset, and blocks may overlap on it. `reads` lets a block see
-    other blocks' Y as an ordinary input (not allowed in `rc_network`, whose
-    network and thermostat say where every column goes). `model` omitted
-    means `cfg.model`; under `mlp`/`gru` the split then needs `per_block:
-    true`.
+    another block's Y as an ordinary input, as of the row before the step;
+    `driven_by` as of this step, the block running after its producer. A
+    block's `residual` overrides the run's: a meter says the value itself.
+    `model` omitted means `cfg.model`; under `mlp`/`gru` the split then needs
+    `per_block: true`.
 
-    `rc_network` is a thermal zone whose delivered heat is known (supply
-    flow × (supply − zone) temperature × 1.2 kJ/(m³K), or stage × capacity,
-    in kW, positive heating). As above, the heat is a Y: Y the zone and
-    that heat, U the setpoints its thermostat follows. If the controller
-    commands the heat instead, it is a U: Y the zone alone, U the heat
-    alone, and no thermostat. Its rows mean what its role says (see
-    `data_mapping`).
-    D is the outdoor temperature (`ambient`) and every input that adds heat
-    (`solar`, an occupancy schedule). `params` holds the declarations,
-    every value a scalar (pinned) or [lo, hi] (fitted inside):
-      network     nodes (kWh/K), edges (K/kW), where each input enters and
-                  its gain, and noise. `nt data ladder` fits a ladder of
-                  networks and saves the one its tests pick; edit it freely,
+    `rc_network` is a thermal zone: Y the zone temperature alone, its inputs
+    a `driven_by` column (the heat a `thermostat` block produces), a U (a
+    commanded heat) or a D, `ambient` the outdoor temperature it conducts to.
+    Heat from supply flow × (supply − zone) temperature × 1.2 kJ/(m³K), or
+    stage × capacity, in kW, positive heating; its rows mean what its role
+    says (see `data_mapping`). `scale` is required and says what sets the units,
+    since temperature alone places only gain / C: `{heat column: 1.0}` for a
+    heat in kW, or `{"C_Ti": value}` to fit a power's gain as a COP.
+    `thermostat` is Y the heat, U its setpoints, `reads` the zone.
+    `context_steps` in the config is the record the zone's filter places its
+    hidden nodes from. `params` holds the declarations, every value a scalar
+    (pinned) or [lo, hi] (fitted inside):
+      network     rc_network. Nodes (kWh/K), edges (K/kW), where each input
+                  enters and its gain, and noise. `nt data ladder` fits a ladder
+                  of networks and saves the one its tests pick; edit it freely,
                   and `--candidate` runs your own through the same tests.
-      thermostat  heat in Y only. Per side, the setpoint and its gain
-                  (kW/K), capacity (kW) and offset (K), and more by form.
-                  `nt data thermostat` saves it; a side the record never
-                  exercised comes back null where the data placed nothing:
-                  declare it.
+      thermostat  Per side, the setpoint and its gain (kW/K), capacity (kW) and
+                  offset (K), and more by form; and the `gain_limit` its zone's
+                  capacitance sets. `nt data thermostat` saves it; a side the
+                  record never exercised comes back null where the data placed
+                  nothing: declare it.
     There is no default: a prior about a building is yours to state, and
     the commands are where the data states it. The reportcard says where
     each fit landed in its box. A fit pressed against an edge is the data

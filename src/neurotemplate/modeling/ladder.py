@@ -17,8 +17,11 @@ The rungs (node names as in the paper):
     +Am/Ae  solar into the mass or envelope too, one more aperture
     +Ria    a direct zone–ambient edge beside the envelope
 
-Delivered heat enters the zone with its gain pinned at 1; every other gain
-input (solar, an occupancy schedule) enters the zone through a fitted gain.
+What the block's `scale` names is pinned at its value: a heat in kW at 1, or a
+C from design data. Temperature alone places only gain / C, so without a pin C,
+R and every gain are placed only up to a common factor. Every other input (solar,
+an occupancy schedule, a heat whose gain is the fit) enters the zone through a
+fitted gain.
 Each extension adds a node's C, R, process noise and start (four
 parameters), or one gain or resistance. A node with no capacity to speak of
 is its parent's edge again, so every extension nests its parent at a
@@ -71,7 +74,11 @@ class Rung:
             out.append(replace(self, direct=True))
         return out
 
-    def network(self, heat: str, solar: Optional[str], gains: tuple[str, ...]) -> Network:
+    def network(self, drives: tuple[str, ...], solar: Optional[str], gains: tuple[str, ...],
+                scale: dict[str, float]) -> Network:
+        """The rung over its inputs: `drives` (the heats, first) and `gains`
+        enter the zone, `solar` wherever the rung routes it; `scale` holds an
+        input's gain or a parameter at a value."""
         nodes = ("Ti",) + ("Tm",) * self.mass + ("Te",) * self.envelope
         edges = []
         if self.mass:
@@ -80,7 +87,7 @@ class Rung:
             edges += [("Ti", "Te"), ("Te", AMBIENT)]
         if not self.envelope or self.direct:
             edges.append(("Ti", AMBIENT))
-        inputs = [(heat, "Ti")]
+        inputs = [(column, "Ti") for column in drives]
         if solar is not None:
             inputs.append((solar, "Ti"))
             if self.solar_mass:
@@ -88,8 +95,11 @@ class Rung:
             if self.solar_envelope:
                 inputs.append((solar, "Te"))
         inputs += [(column, "Ti") for column in gains]
-        return Network(nodes, tuple(edges), tuple(inputs),
-                       pinned={f"gain_{heat}_Ti": 1.0}, name=self.name)
+        pinned = {name: float(value) for name, value in scale.items()
+                  if not any(column == name for column, _ in inputs)}
+        pinned.update({f"gain_{column}_{node}": float(scale[column])
+                       for column, node in inputs if column in scale})
+        return Network(nodes, tuple(edges), tuple(inputs), pinned=pinned, name=self.name)
 
 
 def chi2_sf(x: float, df: int) -> float:
@@ -219,20 +229,20 @@ def whiteness_lags(dt_h: float) -> int:
 
 # ── Data ────────────────────────────────────────────────────────
 
-def zone_series(frame, zone: str, ambient: str, columns: list[str], y_input: Optional[str],
+def zone_series(frame, zone: str, ambient: str, columns: list[str], y_inputs: tuple[str, ...],
                 every: int, dt_h: float) -> Series:
     """One file on a grid of `every` rows, the step from grid point K to
     K + 1 driven by the rows between them: the zone sampled at each point;
     ambient and every input column averaged over the step's rows (a rate's
     average keeps its energy). The timing is by role: a U or D row is held
     over the step that starts there, a Y row measured over the step that
-    ends there, so `y_input`, the one input that is a Y of the model (a
-    heat behind a thermostat), is averaged one row later. `dt_h` is the
-    grid's step in hours."""
+    ends there, so `y_inputs`, the inputs that are Y of the model (a heat
+    behind a thermostat), are averaged one row later. `dt_h` is the grid's
+    step in hours."""
     steps = (len(frame) - 1) // every
 
     def averaged(column):
-        start = 1 if column == y_input else 0
+        start = 1 if column in y_inputs else 0
         values = frame[column].to_numpy(dtype=float)[start:start + steps * every]
         return torch.tensor(values, dtype=DTYPE).reshape(steps, every).mean(dim=1)
 

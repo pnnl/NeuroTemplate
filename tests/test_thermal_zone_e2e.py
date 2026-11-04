@@ -43,17 +43,15 @@ def column_norm_config(nm_mapping):
     return {{}}
 
 def block_mapping(nm_mapping, cfg):
-    block = {{"Y": [{ZONE!r}, {HEAT!r}], "U": [{SETPOINT!r}], "D": [{OUTDOOR!r}, {SOLAR!r}],
-             "heat": {HEAT!r}, "ambient": {OUTDOOR!r}, "solar": {SOLAR!r}}}
-    params = {{name: json.load(open(f"ladder/{{file}}"))
-              for name, file in (("network", "zone.json"),
-                                 ("thermostat", "zone.thermostat.json"))
-              if os.path.exists(f"ladder/{{file}}")}}
-    if len(params) == 2:
-        block.update(model="rc_network", params=params)
-    elif params:
-        block["params"] = params
-    return {{"zone": block}}
+    zone = {{"Y": [{ZONE!r}], "U": [], "D": [{OUTDOOR!r}, {SOLAR!r}], "driven_by": [{HEAT!r}],
+            "ambient": {OUTDOOR!r}, "solar": {SOLAR!r}, "scale": {{{HEAT!r}: 1.0}}}}
+    hvac = {{"Y": [{HEAT!r}], "U": [{SETPOINT!r}], "D": [], "reads": [{ZONE!r}]}}
+    if os.path.exists("ladder/zone.json"):
+        zone["params"] = {{"network": json.load(open("ladder/zone.json"))}}
+    if os.path.exists("ladder/hvac.thermostat.json"):
+        hvac["params"] = {{"thermostat": json.load(open("ladder/hvac.thermostat.json"))}}
+        hvac["model"], zone["model"] = "thermostat", "rc_network"
+    return {{"zone": zone, "hvac": hvac}}
 
 def synth_cfg(nm_mapping, norm_stats):
     return None
@@ -65,7 +63,7 @@ def sub_plot(df_true, column_name):
 
 def _plant(days: float, seed: int, start: str) -> pd.DataFrame:
     """The network under a tracker, the setpoint stepped every two hours."""
-    network = Rung(mass=True).network(HEAT, SOLAR, ())
+    network = Rung(mass=True).network((HEAT,), SOLAR, (), {HEAT: 1.0})
     values = {"C_Ti": 1.5, "C_Tm": 20.0, "R_Ti_Tm": 0.4, "R_Ti_ambient": 3.0,
               f"gain_{HEAT}_Ti": 1.0, f"gain_{SOLAR}_Ti": 0.004,
               "sigma_Ti": 0.05, "sigma_Tm": 0.02, "sigma_y": 0.02}
@@ -109,13 +107,13 @@ def test_declare_ladder_thermostat_train(tmp_path, monkeypatch):
         _plant(days, seed, start).to_csv(tmp_path / "data" / f"{split}.csv")
     (tmp_path / "nt_model.py").write_text(HOOKS, encoding="utf-8")
     window = 24 * STEPS_PER_HOUR
-    history = {c: window for c in (ZONE, HEAT, OUTDOOR, SOLAR)} | {SETPOINT: 0}
+    history = {c: 0 for c in (ZONE, HEAT, OUTDOOR, SOLAR, SETPOINT)}
     config = tmp_path / "zone.yaml"
     config.write_text("\n".join([
         "train_data_path: data/train.csv", "dev_data_path: data/dev.csv",
         "test_data_path: data/test.csv", "model: rc_network",
         f"user_hooks_path: {tmp_path / 'nt_model.py'}",
-        "history: " + json.dumps(history, ensure_ascii=False),
+        "history: " + json.dumps(history, ensure_ascii=False), f"context_steps: {window + 1}",
         "epochs: 3", "warmup: 0", "patience: 3", f"train_pred_steps: {window}",
         f"dev_pred_steps: {window}", f"test_window: {window + 24 * STEPS_PER_HOUR}",
         f"test_stride: {6 * STEPS_PER_HOUR}", "plot: false", "seed: 0", "progress: silent",

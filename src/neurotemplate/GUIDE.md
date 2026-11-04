@@ -89,7 +89,7 @@ Decide the structure first; it matters more than any hyperparameter.
 Reading the reportcard: the physics checks first, then each parameter in physical
 units and where it sits in its box, then test error against persistence. Test error
 is measured where the data went, not where a controller will go. A wrong column
-declaration (`demand`, `heat`) shows only here. To compare two configs, set
+declaration (`demand`, `scale`) shows only here. To compare two configs, set
 `ensemble_seeds` to a few: one seed is one draw.
 
 ## check
@@ -170,46 +170,58 @@ its power metered. Syntax, not values: the column names, boxes and gains below
 belong to some other building, and every choice is one this guide says how to check
 on yours.
 
-1. **Delivered heat is data prep, yours.** From supply flow and temperature at the
-   unit or the VAV box: `1.2 · flow [m³/s] · (supply − zone) [K]` kW, positive
-   heating; or the stage times the equipment's capacity. It enters with its gain
-   pinned at 1, so its error is C's and R's. A zone without it takes a black box.
-2. **Declare what each column is**, one block per zone, `model: rc_network`: `Y` the
-   zone temperature and its `heat`; `U` the setpoints; `D` the outdoor temperature
-   (`ambient`), the irradiance (`solar`), and any schedule that adds heat. An
-   occupancy flag was worth a third of the day-ahead error on two plant buildings.
-   A heat-gain input is fitted with a gain ≥ 0, so it must be non-negative: a 0/1
-   flag per part of the day, not sin/cos of the hour, which fits at zero. If the
-   controller commands the heat rather than setpoints, `Y` is the zone alone and
-   `U` the heat alone, with no thermostat (skip step 4). The heat's rows mean what
-   its role says (setup, step 2): a metered heat that becomes a `U` is shifted back
-   one row.
+1. **What drives the zone is data prep, yours.** Delivered heat from supply flow and
+   temperature at the unit or the VAV box: `1.2 · flow [m³/s] · (supply − zone) [K]` kW,
+   positive heating; or the stage times the equipment's capacity. Metered electric power
+   works too, negated for cooling, with a COP to fit (step 2). A zone with none of these
+   takes a black box.
+2. **One block per part, each its own signal.** A `thermostat` block produces the heat:
+   `Y` the heat, `U` the setpoints, `reads` the zone. An `rc_network` block is the zone:
+   `Y` the zone temperature, `driven_by` the heat (it runs after the thermostat and sees
+   the heat of the step being taken), `D` the outdoor temperature (`ambient`), the
+   irradiance (`solar`), and any schedule that adds heat. An occupancy flag was worth a
+   third of the day-ahead error on two plant buildings. An input's gain is ≥ 0, so it must
+   be non-negative: a 0/1 flag per part of the day, not sin/cos of the hour, which fits at
+   zero. If the controller commands the heat rather than setpoints, there is no thermostat
+   block (skip step 4): the heat is the zone's `U`. Rows mean what their role says (setup,
+   step 2): a metered heat that becomes a `U` is shifted back one row.
+   **`scale` says what sets the units**, and is required: temperature alone places only
+   gain / C, so one thing has to be stated. `{"Delivered Heat": 1.0}` for a heat in kW
+   makes C and R physical, and its error theirs. For a fitted COP, pin a capacitance
+   instead, `{"C_Ti": ...}` from design data, and let the power's gain be the COP.
 3. **`nt data ladder`** fits a ladder of RC networks to the record, 30 min steps,
    by maximum likelihood, and picks one by likelihood-ratio tests. Read its card:
    the 24 h error on dev, whiteness, BIC beside the tests, a parameter at a limit or
-   barely placed. Put its snippet in the block's `params` as `network`, and edit it
+   barely placed. Put its snippet in the zone block's `params` as `network`, and edit it
    as you like: a node, an edge, an input into another node. `--candidate mine.json`
    runs your version through the same tests. The ladder needs no setpoints, only the
-   zone, its heat and the weather. It will not select a node the record cannot place (an infinite error bar, or slower than the
+   zone, its inputs and the weather. It will not select a node the record cannot place (an infinite error bar, or slower than the
    record is long); on closed-loop data, where the HVAC holds the zone, that is often
    the envelope, and the card says so.
 4. **`nt data thermostat --cooling COL --heating COL`** fits the map from setpoint
    to heat, one step at a time, and rolls each form out 24 h through your network,
    by regime. On cycling equipment the likelihood ratio rewards every extra
    parameter; the rollout error is the one to trust, and the card says when another
-   form rolls out better. Put its snippet in `params` as `thermostat`. A side the
+   form rolls out better. Put its snippet in the thermostat block's `params` as
+   `thermostat`; it carries the gain limit the zone's capacitance sets. A side the
    record never exercised comes back unplaced (a null offset, a wide box): declare it
    from what you know of the equipment, or the build refuses.
-5. **History.** A day for the zone, its heat and its `D` (288 steps at 5 min): the
-   window the filter places the hidden nodes from, whether the heat is a `Y` or a
-   `U`. Setpoints at 0. `train_pred_steps`
-   a day too: one rollout holds an action and its payoff. Training moves every
-   parameter inside its box; the reportcard prints the time constants beside the
-   ladder's and flags one that left its error bars.
-6. **Meters in their own block** (`model: mlp`), reading the zone's heat: the
-   compressor draws what the coil delivers. Claim every actuator in the block it
-   drives: a meter that sees heating learns "heating on, so cooling off", and the
-   controller runs the furnace to make the modelled cooling power fall.
+5. **Windows.** `context_steps`, in rows, is the record the zone's filter places its
+   hidden nodes from. There is no default for a network with hidden nodes: it is long
+   enough when a longer one stops changing the day-ahead error, and a slow building
+   needs more than a quick one. The thermal blocks are not in the `history` table, so
+   list what only they read at 0. `train_pred_steps` long enough for one rollout to hold an
+   action and its payoff. `train_stride` sets how far apart training windows start: left
+   unset it is the whole window depth, which with a long context is few windows, and with
+   `batch_size` above their number, one update per epoch. Training moves every parameter
+   inside its box; the reportcard prints the time constants beside the ladder's and flags
+   one that left its error bars.
+6. **Meters in their own block** (`model: mlp`), `driven_by` the heat so they see the step
+   being taken, `residual: false` so they say the value rather than integrate their errors:
+   the compressor draws what the coil delivers. `history` lists what the meter reads,
+   usually the current row. Claim every actuator in the block it drives: a meter that
+   sees heating learns "heating on, so cooling off", and the controller runs the furnace
+   to make the modelled cooling power fall.
 7. **Bounds that suit a thermostat.** The cooling setpoint inside the band with a
    margin under its ceiling; heating under the floor, which keeps the two from
    crossing; gas heating bounded when the tariff prices electricity.
@@ -219,14 +231,15 @@ on yours.
 ```python
 def block_mapping(nm_mapping, cfg):
     return {
-        "zone": {"Y": ["Zone Temp", "Delivered Heat"],
-                 "U": ["Cooling Setpoint", "Heating Setpoint"],
-                 "D": ["Outdoor Temp", "Solar", "Occupied"], "model": "rc_network",
-                 "heat": "Delivered Heat", "ambient": "Outdoor Temp", "solar": "Solar",
-                 "params": {"network": json.load(open("ladder/zone.json")),
-                            "thermostat": json.load(open("ladder/zone.thermostat.json"))}},
-        "meter": {"Y": ["Compressor Power", "Fan Power"], "U": [],
-                  "reads": ["Delivered Heat"], "model": "mlp"},
+        "hvac": {"Y": ["Delivered Heat"], "U": ["Cooling Setpoint", "Heating Setpoint"],
+                 "D": [], "reads": ["Zone Temp"], "model": "thermostat",
+                 "params": {"thermostat": json.load(open("ladder/hvac.thermostat.json"))}},
+        "zone": {"Y": ["Zone Temp"], "U": [], "D": ["Outdoor Temp", "Solar", "Occupied"],
+                 "driven_by": ["Delivered Heat"], "model": "rc_network",
+                 "ambient": "Outdoor Temp", "solar": "Solar", "scale": {"Delivered Heat": 1.0},
+                 "params": {"network": json.load(open("ladder/zone.json"))}},
+        "meter": {"Y": ["Compressor Power", "Fan Power"], "U": [], "D": ["Outdoor Temp"],
+                  "driven_by": ["Delivered Heat"], "model": "mlp", "residual": False},
     }
 
 def data_head_config(nm_mapping, norm_stats):     # meters cannot read below zero
@@ -284,7 +297,7 @@ is in `nt docs modeling` ("Your own model"). The decisions:
    values live in it, not beside it.
 2. **State** past the window (a filtered mass, a latch): `rollout_state()` and
    `set_rollout_state(state)`, one `[batch, width]` tensor, `None` when cold. Cold, the
-   model seeds it from its window, so `history` sets how much record seeds it. Seed in
+   model seeds it from its window, so `context_steps` sets how much record seeds it. Seed in
    closed form (an exponential filter is a weighted sum over the window) rather than a
    loop over rows: it traces to a small graph.
 3. **Signs and boxes**: `neurotemplate.modeling.bounded.BoundedParameter` holds a

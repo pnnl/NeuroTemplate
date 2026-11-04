@@ -33,18 +33,17 @@ model reads. The Node hands every key one rectangular window,
 `cfg.history_steps = max(lag) + 1` rows deep; each learned map then gathers
 the cells it reads out of it, each column at the lag its family consumes (see
 `block_lags`): any lag for `mlp`, `nssm` and `lssm`, one lag for every column
-a `gru` reads (its window is its warm-up), and for `rc_network` one window of
-its Y, D and a commanded heat, and the current step of a setpoint. A uniform
-table gathers nothing. A stateful
+a `gru` reads (its window is its warm-up). A thermal block's window is not in
+the table: an `rc_network` reads the whole window, `cfg.context_steps` deep,
+for its filter, and a `thermostat` the current row. A uniform table gathers
+nothing. A stateful
 block (GRU) additionally keeps a hidden state so its memory can run past its
 window during a rollout, but it still takes the same window — it just skips
 the steps already folded into that state (see gru.GRUBlock). The only thing
 statefulness costs the caller is a reset at each sequence boundary, which
 make_reset_init() wires into the System.
 
-Because cfg.history_steps is also the sliding-window stride
-(data_utils.get_sw_dict), two models with the same deepest lag see the same
-training set.
+Training windows start `cfg.train_stride` rows apart.
 """
 
 import warnings
@@ -70,7 +69,7 @@ from neurotemplate.modeling.bounded import bounded_parameters
 from neurotemplate.modeling.gru import GRUBlock
 from neurotemplate.modeling.rollout import WindowedSystem
 from neurotemplate.modeling.blocks import Block, build_blocks
-from neurotemplate.modeling.rc_network import NetworkBlock
+from neurotemplate.modeling.rc_network import ThermostatBlock, ZoneBlock
 
 
 # ── Per-column lags ──────────────────────────────────────────────
@@ -106,62 +105,58 @@ def _check_one_lag(what: str, lags: dict[str, int], reason: str) -> None:
 
 
 @beartype
-def block_lags(family: str, block: Block, history: dict[str, int]) -> Lags:
+def block_lags(family: str, block: Block, history: dict[str, int], history_steps: int) -> Lags:
     """The lags `block` consumes, per column of its window: `y_in_names`,
     `u_names`, `d_names`.
 
     `mlp` reads every column at its declared lag. `gru` folds its window
     into its hidden state row by row, so every column it reads shares one
-    lag. `rc_network` filters one window of its Y and D, and of its heat
-    when the heat is a U, and reads its setpoints at the current step only,
-    whatever they are declared at.
+    lag. `rc_network` filters the whole window and `thermostat` reads the
+    current row, whatever the table says.
     """
-    y, u, d = (tuple(history[c] for c in names)
-               for names in (block.y_in_names, block.u_names, block.d_names))
+    names = (block.y_in_names, block.u_names, block.d_names)
+    if family == "rc_network":
+        return tuple(tuple(history_steps - 1 for _ in key) for key in names)
+    if family == "thermostat":
+        return tuple(tuple(0 for _ in key) for key in names)
     if family == "gru":
         _check_one_lag(
             f"gru block {block.name!r}",
             {c: history[c] for c in block.y_in_names + block.u_names + block.d_names},
             "every column it reads: its window is its warm-up")
-    if family == "rc_network":
-        window = [c for c in block.y_in_names + block.u_names + block.d_names
-                  if c not in block.u_names or c == block.heat]
-        _check_one_lag(f"rc_network block {block.name!r}",
-                       {c: history[c] for c in window},
-                       "its zone, its heat and its D: the window its filter runs over")
-        return y, tuple(history[c] if c == block.heat else 0 for c in block.u_names), d
-    return y, u, d
+    return tuple(tuple(history[c] for c in key) for key in names)
 
 
-def _check_lags_consumed(blocks: list[Block], lags: list[Lags],
+def _check_lags_consumed(blocks: list[Block], families: list[str], lags: list[Lags],
                          history: dict[str, int]) -> None:
-    """Every column's declared lag is what some block reading it consumes.
-
-    A deeper declaration would sit inert: a U column read only by
-    rc_network blocks as a setpoint is read at its current step, whatever its lag says. A D column
-    no block reads (per-block D subsets that all leave it out) is listed at
-    0: the control side may still use it, so it stays a model column.
+    """Every column's declared lag is what some learned block reading it
+    consumes: a deeper declaration would sit inert. A thermal block's reads are
+    not in the table, so a column only they read is listed at 0. A D column no
+    block reads (per-block D subsets that all leave it out) is listed at 0 too:
+    the control side may still use it, so it stays a model column.
     """
     consumed: dict[str, dict[str, int]] = {c: {} for c in history}
-    for block, (y, u, d) in zip(blocks, lags):
+    for block, family, (y, u, d) in zip(blocks, families, lags):
+        if family in THERMAL_FAMILIES:
+            continue
         names = block.y_in_names + block.u_names + block.d_names
         for column, lag in zip(names, y + u + d):
             consumed[column][block.name] = lag
     for column, readers in consumed.items():
         if not readers and history[column] != 0:
             raise ValueError(
-                f"history[{column!r}] is {history[column]}, but no block reads "
-                "it. If nothing on the control side needs it either (the "
-                "policy, a loss weight, power_metric, the plots), drop it with "
-                "exclude_columns; otherwise list it at 0."
+                f"history[{column!r}] is {history[column]}, but no learned block reads "
+                "it. A thermal block's window is `context_steps`, not this table. If "
+                "nothing on the control side needs it either (the policy, a loss weight, "
+                "power_metric, the plots), drop it with exclude_columns; otherwise list "
+                "it at 0."
             )
         deepest = max(readers.values(), default=0)
         if deepest != history[column]:
             raise ValueError(
                 f"history[{column!r}] is {history[column]}, but no block reads "
-                f"it that far back; the lag each reader consumes: {readers}. A "
-                f"rc_network block reads a setpoint at the current step only. Set it to "
-                f"{deepest}."
+                f"it that far back; the lag each reader consumes: {readers}. Set it "
+                f"to {deepest}."
             )
 
 
@@ -208,27 +203,40 @@ def _window_size(lags: tuple[int, ...]) -> int:
     return sum(lag + 1 for lag in lags)
 
 
+def _hold_driven(indices: list[int], block: Block, ny: int, history_steps: int,
+                 window_cells: int) -> list[int]:
+    """`indices` into the flat window with each `driven_by` column read one row
+    later, so row j means the step from j to j + 1: the last row, past the
+    window, is the producer's fresh output, appended by `BlockStack.forward`."""
+    if not block.driven_by:
+        return indices
+    channels = {block.y_in_idx[block.y_in_names.index(c)]: k
+                for k, c in enumerate(block.driven_by)}
+    out = []
+    for index in indices:
+        row, column = divmod(index, ny) if index < history_steps * ny else (None, None)
+        if column in channels:
+            index = ((row + 1) * ny + column if row + 1 < history_steps
+                     else window_cells + channels[column])
+        out.append(index)
+    return out
+
+
 class BlockStack(nn.Module):
     """
     One independent sub-block per block, over the one window they all share.
 
     Each sub-block sees its own Y and U columns, its own D subset (all of D
-    by default), and anything it `reads` from another block (see `blocks`
-    for what a block owns), predicts only its own Y channels, and never
-    reads another block's state on the same step. The wrapper does two
-    things and nothing else: gather each block's slice out of the shared
-    flattened window, and put the per-block outputs back in Y order.
-
-    Both are fixed permutations of positions, so both are `index_select`
-    against a buffer computed at construction — which keeps the whole thing
-    vmap-safe, and so keeps the sampled gradient penalty working. This holds
-    even with `reads`: every input, including a read one, comes from the
-    shared history window rather than another block's same-step output, so
-    there is no evaluation-order dependency between blocks to break it.
+    by default), anything it `reads` from another block as of the row before,
+    and anything it is `driven_by` as of this step (see `blocks` for what a
+    block owns), and predicts only its own Y channels. Blocks run in the order
+    `blocks.run_order` gives them. The wrapper gathers each block's slice out
+    of the shared flattened window, appends what its drivers just wrote, and
+    puts the per-block outputs back in Y order. Each gather is a fixed
+    `index_select` against a buffer computed at construction.
 
     Each block's gather also narrows in time: a column arrives at the lag the
-    block's family consumes (see `block_lags`), so an rc_network block gets
-    one step of U.
+    block's family consumes (see `block_lags`).
 
     Args:
         blocks: the partition, from `blocks.build_blocks`.
@@ -243,9 +251,15 @@ class BlockStack(nn.Module):
 
     def __init__(self, blocks: list[Block], widths: tuple[int, int, int],
                  history_steps: int, lags: list["Lags"],
-                 make_block: Callable[[Block, "Lags"], nn.Module]):
+                 make_block: Callable[[Block, "Lags"], nn.Module], residual: bool = True):
         super().__init__()
         ny = widths[0]
+        self.residual = residual
+        self._newest_y = slice((history_steps - 1) * ny, history_steps * ny)
+        self._y_position = {c: i for block in blocks for i, c in zip(block.y_idx, block.y_names)}
+        producers = {c: (i, block.y_names.index(c)) for i, block in enumerate(blocks)
+                     for c in block.y_names}
+        self._driven = [tuple(producers[c] for c in block.driven_by) for block in blocks]
         self.block_specs = list(blocks)
         self.block_lags = list(lags)
         self.in_features = history_steps * sum(widths)
@@ -262,6 +276,7 @@ class BlockStack(nn.Module):
                 widths, (history_steps,) * 3,
                 tuple(_window_keep(idx, key_lags, history_steps) for idx, key_lags
                       in zip((block.y_in_idx, block.u_idx, block.d_idx), consumed)))
+            indices = _hold_driven(indices, block, ny, history_steps, self.in_features)
             gathers += indices
             self._spans.append(slice(cursor, cursor + len(indices)))
             cursor += len(indices)
@@ -282,9 +297,31 @@ class BlockStack(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         dim = x.ndim - 1                    # the feature axis, batched or not
-        outs = [block(x.index_select(dim, self._gather[span]))
-                for block, span in zip(self.blocks, self._spans)]
+        newest = x[..., self._newest_y]
+        outs: list[torch.Tensor] = []
+        for block, span, driven, spec in zip(self.blocks, self._spans, self._driven,
+                                             self.block_specs):
+            window = x
+            if driven:
+                # What the producers just wrote, as next rows: the gather finds
+                # them past the end of the window (see `_hold_driven`). Heads
+                # apply outside the stack, so a reader sees this before any head.
+                fresh = [self._next_row(newest, outs[i][..., channel], column)
+                         for (i, channel), column in zip(driven, spec.driven_by)]
+                window = torch.cat([x, torch.stack(fresh, dim=-1)], dim=-1)
+            out = block(window.index_select(dim, self._gather[span]))
+            if spec.residual is not None and spec.residual != self.residual:
+                # The run's residual applies outside the stack: hand back what
+                # lands on this block's own choice.
+                last = torch.stack([newest[..., i] for i in spec.y_idx], dim=-1)
+                out = out + last if spec.residual else out - last
+            outs.append(out)
         return torch.cat(outs, dim=-1).index_select(dim, self._to_y_order)
+
+    def _next_row(self, newest: torch.Tensor, output: torch.Tensor, column: str) -> torch.Tensor:
+        """A producer's output as a value: an increment on the newest row when
+        the run is residual."""
+        return newest[..., self._y_position[column]] + output if self.residual else output
 
 
 
@@ -508,26 +545,14 @@ def _gru_block(cfg: ModelingConfig, block: Block, lags: Lags,
 
 def _rc_network_block(cfg: ModelingConfig, block: Block, lags: Lags,
                       norm_stats: Optional[dict]) -> nn.Module:
-    """One thermal zone's declared network, behind a thermostat when its heat
-    is a Y. See `rc_network`."""
-    problems = []
-    if block.heat is None or block.ambient is None:
-        problems.append("declare its `heat` (a Y or U column, kW) and `ambient` (a D column)")
-    if block.reads or block.inputs:
-        problems.append("`reads` and `inputs` have no meaning here: the network and the "
-                        "thermostat say where every column goes")
-    if block.heat in block.u_names:
-        if len(block.y_names) != 1 or block.u_names != (block.heat,):
-            problems.append(f"with the heat a U, Y must be the zone temperature and U the "
-                            f"heat alone; got Y {list(block.y_names)}, U {list(block.u_names)}")
-    elif len(block.y_names) != 2:
-        problems.append(f"Y must be the zone temperature and the heat; got {list(block.y_names)}")
-    if problems:
-        raise ValueError(f"rc_network block {block.name!r}: " + "; ".join(problems))
-    return NetworkBlock(
-        block.name, block.y_names, block.u_names, block.d_names, block.heat, block.ambient,
-        block.params, window=lags[0][0] + 1, dt_h=1.0 / cfg.steps_per_hour,
-        norm_stats=norm_stats)
+    """One thermal zone's declared network. See `rc_network`."""
+    return ZoneBlock(block, cfg.history_steps, 1.0 / cfg.steps_per_hour, norm_stats)
+
+
+def _thermostat_block(cfg: ModelingConfig, block: Block, lags: Lags,
+                      norm_stats: Optional[dict]) -> nn.Module:
+    """Setpoints and a read zone to a heat. See `rc_network`."""
+    return ThermostatBlock(block, norm_stats)
 
 
 BLOCK_BUILDERS: dict[str, Callable[[ModelingConfig, Block, Lags, Optional[dict]],
@@ -535,13 +560,18 @@ BLOCK_BUILDERS: dict[str, Callable[[ModelingConfig, Block, Lags, Optional[dict]]
     "mlp": _mlp_block,
     "gru": _gru_block,
     "rc_network": _rc_network_block,
+    "thermostat": _thermostat_block,
 }
 
+#: The physical families: they read declared `params`, predict increments, and
+#: describe one part of a zone, so they have no monolithic form.
+THERMAL_FAMILIES = ("rc_network", "thermostat")
+
 #: Families that need `per_block: true` to opt into the per-block split.
-#: `rc_network` is excluded even though BLOCK_BUILDERS has a builder for it:
-#: it describes one thermal zone and is per-block unconditionally, so it
-#: needs no flag (and ModelingConfig.validate() refuses the combination).
-PER_BLOCK_FAMILIES = tuple(name for name in BLOCK_BUILDERS if name != "rc_network")
+#: The thermal families are excluded: each describes one part of a zone and is
+#: per-block unconditionally, so it needs no flag (and
+#: ModelingConfig.validate() refuses the combination).
+PER_BLOCK_FAMILIES = tuple(name for name in BLOCK_BUILDERS if name not in THERMAL_FAMILIES)
 
 #: Every valid `cfg.model` name: the union of model_catalog (monolithic
 #: factories) and BLOCK_BUILDERS (per-block-only factories — today just
@@ -595,6 +625,12 @@ def _build_block(cfg: ModelingConfig, block: Block, lags: Lags,
     return builder(cfg, block, lags, norm_stats)
 
 
+def build_network_nodes(blocks: list[Block], families: list[str]) -> list[str]:
+    """The `rc_network` blocks whose declared network has a hidden node."""
+    return [b.name for b, family in zip(blocks, families)
+            if family == "rc_network" and len(b.params.get("network", {}).get("nodes", {})) > 1]
+
+
 def _build_per_block_model(
     cfg: ModelingConfig, nm_mapping: dict[str, list[str]],
     blocks: list[Block], families: list[str], lags: list[Lags],
@@ -613,10 +649,17 @@ def _build_per_block_model(
     """
     ny, nu, nd = _widths(nm_mapping)
 
-    if "rc_network" in families:
+    if "rc_network" in families and len(build_network_nodes(blocks, families)) > 0 \
+            and cfg.history_steps < 2:
+        raise ValueError(
+            f"rc_network block(s) {build_network_nodes(blocks, families)} have hidden nodes, "
+            "and context_steps is what places them: the rows of history their filter runs "
+            "over. There is no default; set context_steps to a span the building's slow "
+            "response has shown itself in.")
+    if set(THERMAL_FAMILIES) & set(families):
         if not cfg.residual:
             raise ValueError(
-                "rc_network requires residual=True: the block predicts the "
+                "the thermal families require residual=True: a block predicts the "
                 "*increment*, which SSMGrad adds to the current state. With "
                 "residual=False the increment would be read as an absolute value."
             )
@@ -630,8 +673,8 @@ def _build_per_block_model(
 
     fy = BlockStack(
         blocks, (ny, nu, nd), cfg.history_steps, lags,
-        make_block=lambda block, consumed: _build_block(cfg, block, consumed,
-                                                        norm_stats))
+        make_block=lambda block, consumed: _build_block(cfg, block, consumed, norm_stats),
+        residual=cfg.residual)
     return SSMGrad(
         fy, None, None, ny, nu, nd,
         cfg.history_steps, cfg.residual, separable=False,
@@ -676,12 +719,12 @@ def _describe_block(block: Optional[nn.Module], cfg: ModelingConfig) -> Optional
             # The family is the interesting fact once blocks can mix —
             # spec.model is None for a block that just inherits cfg.model.
             sub_info["model"] = _resolve_family(cfg, spec)
-            # What it reads, which for rc_network is not what history declares.
+            # What it reads, which for a thermal block is not what history declares.
             sub_info["lags"] = dict(zip(
                 spec.y_in_names + spec.u_names + spec.d_names, y + u + d))
             info["blocks"][spec.name] = sub_info
     # A block that can say something about itself in its own vocabulary —
-    # NetworkBlock reports the time constants it learned — says it here.
+    # a zone reports the time constants it learned — says it here.
     if hasattr(block, "describe"):
         info.update(block.describe())
     # Every bounded parameter it owns, generically: its box and where the
@@ -804,12 +847,14 @@ def stateful_blocks(model: nn.Module) -> list[nn.Module]:
     """Every submodule carrying rollout state, in `modules()` order.
 
     A block is stateful exactly when it implements the protocol
-    `rollout_state()` / `set_rollout_state(state)` (NetworkBlock, GRUBlock): the
+    `rollout_state()` / `set_rollout_state(state)` (RCZone, GRUBlock): the
     state as one [batch, width] tensor, None when cold. A new stateful family
     implements those two methods and gets both the per-batch reset and ONNX
     export (see `neurotemplate.export.state`) for free.
     """
-    return [m for m in model.modules() if hasattr(m, "set_rollout_state")]
+    # On the class: a wrapper forwarding unknown attributes to the module inside
+    # it is not a second stateful block.
+    return [m for m in model.modules() if hasattr(type(m), "set_rollout_state")]
 
 
 def _uses_per_block(cfg: ModelingConfig, blocks: list[Block], families: list[str]) -> bool:
@@ -823,19 +868,19 @@ def _uses_per_block(cfg: ModelingConfig, blocks: list[Block], families: list[str
     monolithic one to fall back to.
     """
     return (any(b.model is not None for b in blocks)
-            or cfg.per_block or "rc_network" in families)
+            or cfg.per_block or bool(set(THERMAL_FAMILIES) & set(families)))
 
 
 def _check_increment_heads(blocks: list[Block], families: list[str],
                            head_stack: HeadStack) -> None:
-    """rc_network predicts increments; only a residual-compatible head
+    """A thermal block predicts increments; only a residual-compatible head
     restores the value. Scoped to the channels such a block produces, so a
     mixed-family run's other channels are free to use any head — see
     _build_per_block_model for the analogous residual/steps_per_hour checks,
     which are model-wide because SSMGrad's residual flag is not per-channel.
     """
     rc_channels = {
-        name for block, family in zip(blocks, families) if family == "rc_network"
+        name for block, family in zip(blocks, families) if family in THERMAL_FAMILIES
         for name in block.y_names
     }
     if not rc_channels:
@@ -844,7 +889,7 @@ def _check_increment_heads(blocks: list[Block], families: list[str],
              if name in rc_channels and not head.residual_compatible]
     if blind:
         raise ValueError(
-            f"rc_network predicts increments, so every Y channel it produces needs "
+            f"a thermal block predicts increments, so every Y channel it produces needs "
             f"a residual-compatible head; {blind} are not."
         )
 
@@ -877,18 +922,18 @@ def _build_pre_stack(
 
 
 def _warn_ignored_declarations(blocks: list[Block], families: list[str]) -> None:
-    """`ambient`, `heat` and `solar` only mean something to `rc_network`;
-    every other family already sees those columns as ordinary inputs. Say
-    so rather than let the declaration sit inert."""
+    """`ambient`, `scale` and `solar` only mean something to the thermal
+    families; every other family already sees those columns as ordinary inputs.
+    Say so rather than let the declaration sit inert."""
     for block, family in zip(blocks, families):
-        if family == "rc_network":
+        if family in THERMAL_FAMILIES:
             continue
-        ignored = [c for c in (block.ambient, block.heat, block.solar) if c]
+        ignored = [c for c in (block.ambient, block.solar) if c] + list(block.scale or ())
         if ignored:
             warnings.warn(
                 f"block {block.name!r} builds under {family!r}, which ignores "
-                f"the `ambient`/`heat`/`solar` declaration of {ignored}: only "
-                "rc_network gives those columns a place in its physics.",
+                f"the `ambient`/`scale`/`solar` declaration of {ignored}: only "
+                "the thermal families give those columns a place in their physics.",
                 stacklevel=3,
             )
 
@@ -932,18 +977,18 @@ def get_dynamics(
 
     _warn_ignored_declarations(blocks, families)
     unread = [b.name for b, family in zip(blocks, families)
-              if b.params and family != "rc_network"]
+              if b.params and family not in THERMAL_FAMILIES]
     if unread:
         raise ValueError(
-            f"block(s) {unread} declare `params`, but only an rc_network block "
+            f"block(s) {unread} declare `params`, but only a thermal block "
             "reads any; the declaration would sit inert."
         )
     lags = column_lags(cfg, nm_mapping)
     _check_demand_lags(blocks, cfg.history)
     if _uses_per_block(cfg, blocks, families):
-        per_block_lags = [block_lags(family, block, cfg.history)
+        per_block_lags = [block_lags(family, block, cfg.history, cfg.history_steps)
                           for block, family in zip(blocks, families)]
-        _check_lags_consumed(blocks, per_block_lags, cfg.history)
+        _check_lags_consumed(blocks, families, per_block_lags, cfg.history)
         model = _build_per_block_model(cfg, nm_mapping, blocks, families,
                                        per_block_lags, norm_stats)
     else:

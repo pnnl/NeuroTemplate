@@ -85,6 +85,10 @@ class ModelingConfig:
     # is `history_steps = max(lag) + 1` deep; each learned map then reads
     # only its columns' own lags (see dynamics.column_lags).
     history: dict[str, int] = field(default_factory=dict)
+    # Rows of history every model is handed, beyond what `history` asks: what a
+    # model that keeps state starts from. An `rc_network`'s filter runs over this
+    # window to place its hidden nodes. 0 asks for nothing beyond `history`.
+    context_steps: int = 0
     log2_hidden_size: int = 6
     num_layers: int = 3
     residual: bool = True
@@ -117,6 +121,10 @@ class ModelingConfig:
     warmup: int = 5
     patience: int = 25
     train_pred_steps: int = 48
+    # Rows between the starts of training and dev windows. None means one window
+    # every `history_steps` rows; with a long `context_steps` that is few windows,
+    # and with `batch_size` at or above their number, one update per epoch.
+    train_stride: Optional[int] = None
     curriculum_steps: int = 0
     curriculum_ratio: float = 4.0
     lr: float = 0.001
@@ -225,10 +233,13 @@ class ModelingConfig:
         check_one_of(self, "save_config", ["last_step", "all", "None", None])
 
         check_lag_table("history", self.history)
-        # An rc_network's window is its filter's history, a day of it by
-        # design, not context a learned map reads.
-        if self.model != "rc_network":
-            warn_deep_window("history_steps", self.history_steps)
+        # Only what a learned map reads: `context_steps` is what a model starts
+        # from, not inputs to a network.
+        warn_deep_window("history", max(self.history.values(), default=-1) + 1)
+        if self.context_steps < 0:
+            raise ValueError(f"context_steps must be >= 0; got {self.context_steps}.")
+        if self.train_stride is not None:
+            check_positive(self, "train_stride")
 
         if self.per_block and self.model not in PER_BLOCK_FAMILIES:
             extra = (" rc_network is already per-block and needs no flag."
@@ -256,10 +267,10 @@ class ModelingConfig:
 
     @property
     def history_steps(self) -> int:
-        """Rows of every column the model is handed: the deepest lag, plus
-        the current step. Data windows, the seeded history, the stride and
-        the model export all run at this depth."""
-        return max(self.history.values(), default=-1) + 1
+        """Rows of every column the model is handed: the deepest lag plus the
+        current step, or `context_steps` if that is more. Data windows, the
+        seeded history and the model export all run at this depth."""
+        return max(max(self.history.values(), default=-1) + 1, self.context_steps)
 
     def asdict(self) -> dict:
         return asdict(self)

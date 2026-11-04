@@ -24,43 +24,43 @@ test_data_path: data/test.csv
 # rarely where a controller will drive the plant; it does not pick a
 # surrogate for control. The reportcard's rollout and physics sections
 # are the readouts for that.
-# Family: mlp | nssm | lssm | gru | rc_network.
-#   rc_network   grey-box thermal zone: a declared RC network behind a
-#          thermostat, every parameter physical and boxed, for a zone whose
-#          delivered heat is measured. `nt data ladder` and `nt data
-#          thermostat` write its declarations (`nt guide thermal-zone`).
+# Family: mlp | nssm | lssm | gru | rc_network | thermostat.
+#   rc_network, thermostat   grey-box thermal parts, each a block: a declared RC
+#          network driven by its inputs, and a thermostat producing a heat, every
+#          parameter physical and boxed. `nt data ladder` and `nt data thermostat`
+#          write their declarations (`nt guide thermal-zone`).
 #   mlp, nssm, lssm, gru   black boxes. Often the best fit, but nothing
 #          bounds a long rollout; read the reportcard's rollout and
 #          physics sections before steering with one.
 # Families can be mixed, one per block of Y channels — see `block_mapping`
-# in nt_model.py (e.g. one rc_network block per zone, an mlp for a meter).
+# in nt_model.py (e.g. a thermostat and an rc_network per zone, an mlp for a meter).
 # Or the name of a model of your own, from `custom_models` there.
 # model: nssm
-# Required: steps before the current one the model reads, per column. List
+# Required: steps before the current one a learned map reads, per column. List
 # every Y, U and D column; there is no default. The names and numbers below
-# are syntax, not values. The deepest lag sets the window every block shares
-# (history_steps = deepest + 1), the seeded history before the first
-# prediction, and the stride between training windows. Each learned map
-# reads a column at its own lag, except that a gru reads one lag for every
-# column it reads (its window is its warm-up), and an rc_network block reads
-# its Y and D at one lag (the window its filter places the hidden nodes from;
-# a day is enough) and its setpoints at the current step only, so a U column
-# only rc_network blocks read is listed at 0. gru and rc_network also carry
-# state through a rollout. A lag is worth its inputs when the column still tells
-# the model something, that far back, that its other inputs do not; the
+# are syntax, not values. A gru reads one lag for every column it reads (its
+# window is its warm-up). The thermal blocks are not in this table, so a column
+# only they read is listed at 0. A lag is worth its inputs when the column still
+# tells the model something, that far back, that its other inputs do not; the
 # reportcard lists what each block reads.
 history: {}   # replace with your columns, e.g.
 #  "Tank Temperature [degC]": 11
 #  "Heater Command [-]": 0
 #  "Ambient Temperature [degC]": 3
-# Network width is 2**log2_hidden_size; rc_network has no net. Larger nets tend to buy fit with physics: start small, and grow one when
+# Rows of history every model is handed, beyond what `history` asks: what a model
+# that keeps state starts from. An rc_network's filter places its hidden nodes
+# from this window, and one with hidden nodes refuses to build without it: long
+# enough is when a longer one stops changing the day-ahead error.
+# context_steps: 0
+# Network width is 2**log2_hidden_size; the thermal blocks have no net. Larger nets tend to buy fit with physics: start small, and grow one when
 # the reportcard says the model underfits, not because dev loss went down.
 # log2_hidden_size: 6
 # num_layers: 3
-# Predict the change from the current state rather than the state.
+# Predict the change from the current state rather than the state. A block
+# may say otherwise for itself (`residual` in block_mapping): a meter is a value.
 # residual: true
 # Split every block under one mlp or gru family. Not needed when a block
-# names its own `model`; rc_network is always per-block.
+# names its own `model`; the thermal families are always per-block.
 # per_block: false
 
 # ── PHYSICAL PARAMETERS ──────────────────────────────────────────
@@ -78,6 +78,10 @@ history: {}   # replace with your columns, e.g.
 # plant's slow dynamics lets a model re-read its inputs instead of learning
 # to integrate them.
 # train_pred_steps: 48
+# Rows between the starts of training and dev windows. Unset, one window per
+# window depth (history_steps): with a long context_steps that is few windows,
+# and with batch_size above their number, one update per epoch.
+# train_stride: 288
 # Stages that each multiply train_pred_steps by curriculum_ratio. 0 = off.
 # curriculum_steps: 0
 # curriculum_ratio: 4.0
