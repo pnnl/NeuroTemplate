@@ -83,10 +83,12 @@ preview reads past the rollout's end, so a file needs those rows too. A `D` or r
 cannot take it. A `U` column's window ends at the previous step, the last
 command applied. `past: 0` there means the policy does not read its own
 commands; with `past: 1` it sees the move a `first_difference` row is pricing.
-The deepest `past`, plus the current step, is the policy's history; it sets
-how far apart training windows start and, with the surrogate's
-`history_steps`, how many recorded steps seed each rollout. The reportcard
-lists the table and the input width it gives.
+The deepest `past`, plus the current step, is the policy's history; with the
+surrogate's `history_steps` it sets how many recorded steps seed each rollout,
+and it is how far apart dev windows start, and training windows unless
+`train_stride` says otherwise. A short history means many near-identical
+windows: a `train_stride` of a few hours makes an epoch that much cheaper. The
+reportcard lists the table and the input width it gives.
 
 ## Grid response: energy, cost and peak
 

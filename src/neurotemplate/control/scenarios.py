@@ -248,7 +248,8 @@ def build_loaders(
     train_dfs: list[DataFrame],
     dev_dfs: list[DataFrame],
 ):
-    """(train_loader, dev_loader). Stride = H_ctrl for unique starts.
+    """(train_loader, dev_loader). Dev windows start H_ctrl rows apart, for unique
+    starts; training windows `cfg.train_stride` apart, or H_ctrl when unset.
 
     `train_dfs` / `dev_dfs` are always lists (length >= 1). With multiple
     files per split, windows are pooled but no window spans two files.
@@ -257,9 +258,9 @@ def build_loaders(
     gen = torch.Generator(device=sysid_cfg.device)
     gen.manual_seed(cfg.seed)
 
-    def loader(dfs, name, shuffle):
+    def loader(dfs, name, shuffle, stride):
         data = build_window_dict_multi(
-            dfs, cfg, sysid_cfg, nm_mapping, P=cfg.train_pred_steps, stride=h_ctrl,
+            dfs, cfg, sysid_cfg, nm_mapping, P=cfg.train_pred_steps, stride=stride,
         )
         ds = DictDataset(data, name=name)
         return torch.utils.data.DataLoader(
@@ -267,4 +268,5 @@ def build_loaders(
             shuffle=shuffle, generator=gen, drop_last=False,
         )
 
-    return loader(train_dfs, "train", True), loader(dev_dfs, "dev", False)
+    return (loader(train_dfs, "train", True, cfg.train_stride or h_ctrl),
+            loader(dev_dfs, "dev", False, h_ctrl))

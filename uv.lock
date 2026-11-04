@@ -2580,7 +2580,6 @@ dependencies = [
     { name = "pandas" },
     { name = "pyyaml" },
     { name = "torch" },
-    { name = "torch-harmonics" },
 ]
 
 [package.optional-dependencies]
@@ -2598,7 +2597,7 @@ requires-dist = [
     { name = "ipython" },
     { name = "matplotlib", specifier = ">=3.10.7" },
     { name = "mlflow", specifier = ">=3.9.0" },
-    { name = "neuraloperator", specifier = "<2" },
+    { name = "neuraloperator", specifier = ">=1,<2" },
     { name = "neuromancer", git = "https://github.com/pnnl/neuromancer.git?rev=1f7b4f1c15210d7db92b9b98e8aa97014a867768" },
     { name = "neurotemplate", extras = ["prep"], marker = "extra == 'dev'" },
     { name = "numpy", specifier = ">=2.2.6" },
@@ -2612,7 +2611,6 @@ requires-dist = [
     { name = "pyyaml", specifier = ">=6.0" },
     { name = "statsmodels", marker = "extra == 'prep'", specifier = ">=0.14" },
     { name = "torch", specifier = ">=2.9.0" },
-    { name = "torch-harmonics", specifier = "<0.8" },
 ]
 provides-extras = ["prep", "dev"]
 

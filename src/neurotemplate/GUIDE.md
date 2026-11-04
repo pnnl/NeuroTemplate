@@ -217,9 +217,10 @@ on yours.
    list what only they read at 0. `train_pred_steps` long enough for one rollout to hold an
    action and its payoff. `train_stride` sets how far apart training windows start: left
    unset it is the whole window depth, which with a long context is few windows, and with
-   `batch_size` above their number, one update per epoch. Training moves every parameter
-   inside its box; the reportcard prints the time constants beside the ladder's and flags
-   one that left its error bars.
+   `batch_size` above their number, one update per epoch. `test_window` counts the context,
+   in the model's config and the controller's, so raise it past `context_steps` in both.
+   Training moves every parameter inside its box; the reportcard prints the time constants
+   beside the ladder's and flags one that left its error bars.
 6. **Meters in their own block** (`model: mlp`), `driven_by` the heat so they see the step
    being taken, `residual: false` so they say the value rather than integrate their errors:
    the compressor draws what the coil delivers. `history` lists what the meter reads,
@@ -230,7 +231,9 @@ on yours.
    margin under its ceiling; heating under the floor, which keeps the two from
    crossing; gas heating bounded when the tariff prices electricity.
 
-`nt_model.py`:
+`nt_model.py`, once steps 3 and 4 have written both files. `nt data` reads your blocks to
+find the zone and its inputs, so until then leave out the line loading a file that does not
+exist yet:
 
 ```python
 def block_mapping(nm_mapping, cfg):

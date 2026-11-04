@@ -66,6 +66,10 @@ class ControlConfig:
     # ── Control horizon / policy window ──────────────────────────
     # Closed-loop training rollout length (pure prediction; window = hmax + train_pred_steps).
     train_pred_steps: int = 48
+    # Rows between the starts of training windows. Unset, one window per policy
+    # history depth, which is every few rows: many near-identical windows, and
+    # the epoch's cost with them.
+    train_stride: Optional[int] = None
     # What the policy reads, per Y, U, D and reference column:
     # `{column: {past: n, future: m}}`, steps before and after the current
     # one. Every column is listed. A Y or U column takes no `future` (not
@@ -234,6 +238,8 @@ class ControlConfig:
             check_positive(self, name)
         if self.threads is not None:
             check_positive(self, "threads")
+        if self.train_stride is not None:
+            check_positive(self, "train_stride")
 
         for name in ["warmup", "patience", "plan_starts", "plan_rtol", "mpc_rtol"]:
             check_non_negative(self, name)

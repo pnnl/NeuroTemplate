@@ -15,6 +15,21 @@ def _restore_tracking_uri():
     mlflow.set_tracking_uri(previous)
 
 
+def test_a_finished_batch_lets_go_of_its_graph():
+    """Neuromancer's Trainer holds each batch's loss until the epoch's mean. Held
+    with its graph, an epoch of thermal rollouts passed 2.5 GB and was killed."""
+    import torch
+    from types import SimpleNamespace
+
+    from neurotemplate.common.progress import Progress
+
+    loss = (torch.ones(1, requires_grad=True) * 2).sum()
+    held_by_trainer = [loss]
+    Progress("silent", 1).end_batch(SimpleNamespace(train_metric="train_loss"),
+                                    {"train_loss": loss})
+    assert held_by_trainer[0].grad_fn is None
+
+
 def test_a_finished_run_carries_its_state_dict_and_no_pickled_model(
         tmp_path, monkeypatch):
     """Neuromancer's Trainer pickles the whole model as `best_model.pth`

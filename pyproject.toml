@@ -13,12 +13,11 @@ dependencies = [
     # A commit on pnnl/neuromancer develop with the linear-memory rollout
     # method this library depends on.
     "neuromancer @ git+https://github.com/pnnl/neuromancer.git@1f7b4f1c15210d7db92b9b98e8aa97014a867768",
-    # neuromancer imports neuralop's SFNO without pinning either package:
-    # neuraloperator 2.x lacks SFNO, and torch-harmonics 0.9.x has no macOS
-    # wheel. Pinned as dependencies because uv reads [tool.uv] constraints only
-    # from the project being synced.
-    "neuraloperator<2",
-    "torch-harmonics<0.8",
+    # neuromancer imports neuralop's SFNO and GINO without pinning it: 2.x lacks
+    # SFNO and 0.x lacks GINO. Without the floor a resolver preferring a newer
+    # torch-harmonics walks back to 0.3.0, and `nt` cannot import. 1.0.2 itself
+    # pins torch-harmonics to 0.7.3.
+    "neuraloperator>=1,<2",
     "numpy>=2.2.6",
     # ONNX export (neurotemplate.export). onnxruntime 1.24 ships no cp310
     # wheels, and this project still supports 3.10.

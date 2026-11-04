@@ -49,6 +49,9 @@ test_reference_path: data/test_reference.csv
 # the payoff it buys — a pre-conditioning and the period it pays off in —
 # or the gradient never connects them. Memory and time grow with it.
 # train_pred_steps: 48
+# Rows between the starts of training windows. Unset, the policy's history
+# depth, usually a few rows: many near-identical windows at the epoch's cost.
+# train_stride: 72
 
 # ── POLICY WINDOW ────────────────────────────────────────────────
 # Required: what the policy reads, per column — `past`, the steps before the
@@ -187,7 +190,8 @@ gains: {}   # one per term, e.g. {comfort_lower: 1.0, comfort_upper: 1.0, du: 1.
 
 # ── EVAL ─────────────────────────────────────────────────────────
 # Closed-loop test window (warmup included) and stride. The defaults are one
-# day of 5-minute data.
+# day of 5-minute data; the warmup is the longer of the policy's history and the
+# surrogate's, so with a long context_steps raise test_window past it.
 # test_window: 287
 # test_stride: 288
 # The best open-loop plan over the same windows, the policy's bar on the

@@ -90,7 +90,7 @@ history: {}   # replace with your columns, e.g.
 # Fixed validation horizon, so dev loss compares across curriculum stages.
 # dev_pred_steps: 48
 # Test window length (history_steps included) and stride. The defaults are one
-# day of 5-minute data.
+# day of 5-minute data; with a long context_steps, raise test_window past it.
 # test_window: 287
 # test_stride: 288
 

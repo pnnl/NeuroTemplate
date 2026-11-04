@@ -22,7 +22,8 @@ def _duration(seconds: float) -> str:
 
 
 class Progress(Callback):
-    """A Neuromancer `Callback` printing one training call's progress."""
+    """A Neuromancer `Callback` printing one training call's progress, and letting
+    go of each batch's graph once it has been used."""
 
     def __init__(self, level: str, update_every: int):
         super().__init__()
@@ -34,6 +35,12 @@ class Progress(Callback):
         self.epochs_run = 0
         self.best_epoch = None
         self.best_dev = float("inf")
+
+    def end_batch(self, trainer, output) -> None:
+        # Neuromancer's Trainer keeps every batch's loss until the epoch's mean, and
+        # with it the batch's whole graph: an epoch of thermal rollouts passed 2.5 GB
+        # at any batch size. In place, so the tensor in its list lets go too.
+        output[trainer.train_metric].detach_()
 
     def end_epoch(self, trainer, output) -> None:
         self.epochs_run += 1
