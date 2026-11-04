@@ -194,7 +194,10 @@ class Thermostat(nn.Module):
             for key, positive in self.form.side_parameters():
                 value = declaration[side].get(key)
                 if value is None:
-                    raise ValueError(f"thermostat {name!r}: {side}.{key} is not declared")
+                    raise ValueError(
+                        f"thermostat {name!r}: {side}.{key} is not declared (null where the "
+                        "record did not place it): give it a box from what you know of the "
+                        "equipment.")
                 box = (parse_box(f"{side}.{key}", value) if positive
                        else _linear_box(f"{side}.{key}", value))
                 self.names.append(f"{side}.{key}")

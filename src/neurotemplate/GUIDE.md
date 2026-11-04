@@ -179,7 +179,8 @@ on yours.
    works too, negated for cooling, with a COP to fit (step 2). A zone with none of these
    takes a black box.
 2. **One block per part, each its own signal.** A `thermostat` block produces the heat:
-   `Y` the heat, `U` the setpoints, `reads` the zone. An `rc_network` block is the zone:
+   `Y` the heat, `U` the setpoints, `reads` the zone, `D` and `ambient` the outdoor
+   temperature, which some of its forms read. An `rc_network` block is the zone:
    `Y` the zone temperature, `driven_by` the heat (it runs after the thermostat and sees
    the heat of the step being taken), `D` the outdoor temperature (`ambient`), the
    irradiance (`solar`), and any schedule that adds heat. An occupancy flag was worth a
@@ -235,7 +236,8 @@ on yours.
 def block_mapping(nm_mapping, cfg):
     return {
         "hvac": {"Y": ["Delivered Heat"], "U": ["Cooling Setpoint", "Heating Setpoint"],
-                 "D": [], "reads": ["Zone Temp"], "model": "thermostat",
+                 "D": ["Outdoor Temp"], "ambient": "Outdoor Temp", "reads": ["Zone Temp"],
+                 "model": "thermostat",
                  "params": {"thermostat": json.load(open("ladder/hvac.thermostat.json"))}},
         "zone": {"Y": ["Zone Temp"], "U": [], "D": ["Outdoor Temp", "Solar", "Occupied"],
                  "driven_by": ["Delivered Heat"], "model": "rc_network",

@@ -124,8 +124,8 @@ class ZoneBlock(_Physical):
 
 
 class ThermostatBlock(_Physical):
-    """Y the heat; `reads` the zone it closes on; U its setpoints, D its outdoor
-    temperature if its form reads one."""
+    """Y the heat; `reads` the zone it closes on; U its setpoints; `ambient` the
+    outdoor temperature, which only some forms read."""
 
     def __init__(self, block: Block, norm_stats: dict):
         super().__init__(block, norm_stats)
@@ -149,10 +149,10 @@ class ThermostatBlock(_Physical):
         if self.hvac.form.outdoor and block.ambient is None:
             problems.append(f"form {self.hvac.form.name!r} reads an outdoor temperature: "
                             "declare `ambient`")
-        stray = [c for c in block.d_names if c != self.outdoor]
+        stray = [c for c in block.d_names if c != block.ambient]
         if stray:
-            problems.append(f"D columns {stray} enter nothing: its form "
-                            f"{self.hvac.form.name!r} reads no other input. Name the block's D")
+            problems.append(f"D columns {stray} enter nothing: a thermostat reads at most its "
+                            "`ambient`. Name the block's D")
         if problems:
             raise ValueError(f"thermostat block {block.name!r}: " + "; ".join(problems))
 

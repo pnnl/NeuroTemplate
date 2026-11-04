@@ -188,7 +188,8 @@ def block_mapping(
 
         return {
             "hvac_a": {"Y": ["Zone A Heat [kW]"],
-                       "U": ["Zone A Cool SP [degC]", "Zone A Heat SP [degC]"], "D": [],
+                       "U": ["Zone A Cool SP [degC]", "Zone A Heat SP [degC]"],
+                       "D": ["Outdoor Temp [degC]"], "ambient": "Outdoor Temp [degC]",
                        "reads": ["Zone A Temp [degC]"], "model": "thermostat",
                        "params": {"thermostat": json.load(
                            open("ladder/hvac_a.thermostat.json"))}},
@@ -220,7 +221,8 @@ def block_mapping(
     says (see `data_mapping`). `scale` is required and says what sets the units,
     since temperature alone places only gain / C: `{heat column: 1.0}` for a
     heat in kW, or `{"C_Ti": value}` to fit a power's gain as a COP.
-    `thermostat` is Y the heat, U its setpoints, `reads` the zone.
+    `thermostat` is Y the heat, U its setpoints, `reads` the zone, `ambient` the
+    outdoor temperature (in its D), which some of its forms read.
     `context_steps` in the config is the record the zone's filter places its
     hidden nodes from. `params` maps a family to its declaration, every value a
     scalar (pinned) or [lo, hi] (fitted inside); only the family the block takes

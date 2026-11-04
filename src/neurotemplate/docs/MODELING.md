@@ -103,8 +103,8 @@ or metered electric power through a gain that is its COP.
 - **`rc_network`.** `Y` is the zone temperature alone. Its network's inputs are a
   `driven_by` column (the heat a thermostat block produced this step), a `U` (a
   commanded heat) or a `D`. `ambient` is the outdoor temperature it conducts to.
-- **`thermostat`.** `Y` is the heat, `U` the setpoints it follows, `reads` the zone.
-  `D` only if its form reads the outdoor temperature (named in `ambient`).
+- **`thermostat`.** `Y` is the heat, `U` the setpoints it follows, `reads` the zone,
+  `D` and `ambient` the outdoor temperature, which some of its forms read.
 
 **`scale` says what sets the units, and is required.** Scaling every C and gain up
 and every R down by the same factor leaves every prediction where it was, so
@@ -148,8 +148,9 @@ from guesses:
   saturated).
 
 ```python
-"hvac": {"Y": ["Delivered Heat [kW]"], "U": ["Cooling SP", "Heating SP"], "D": [],
-         "reads": ["Zone Temp"], "model": "thermostat",
+"hvac": {"Y": ["Delivered Heat [kW]"], "U": ["Cooling SP", "Heating SP"],
+         "D": ["Outdoor Temp"], "ambient": "Outdoor Temp", "reads": ["Zone Temp"],
+         "model": "thermostat",
          "params": {"thermostat": json.load(open("ladder/hvac.thermostat.json"))}},
 "zone": {"Y": ["Zone Temp"], "U": [], "D": ["Outdoor Temp", "Solar", "Occupied"],
          "driven_by": ["Delivered Heat [kW]"], "model": "rc_network",
@@ -178,8 +179,8 @@ how one model holds, for example, a thermostat, an `rc_network` zone and an
 ```python
 def block_mapping(nm_mapping, cfg):
     return {
-        "hvac":  {"Y": ["Delivered Heat"], "U": ["Cooling Setpoint"], "D": [],
-                  "reads": ["Zone Temperature"], "model": "thermostat", ...},
+        "hvac":  {"Y": ["Delivered Heat"], "U": ["Cooling Setpoint"], "reads": ["Zone Temperature"],
+                  "model": "thermostat", ...},
         "zone":  {"Y": ["Zone Temperature"], "U": [], "driven_by": ["Delivered Heat"],
                   "model": "rc_network", ...},
         "power": {"Y": ["Total Power"], "U": [], "driven_by": ["Delivered Heat"],
