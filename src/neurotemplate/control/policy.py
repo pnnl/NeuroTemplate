@@ -21,7 +21,7 @@ that is the building's job, and the controller commands through it.
 Windowing uses the same input_map convention as modeling/dynamics.get_dynamics
 so the policy composes with the frozen dynamics Node.
 
-`policy_catalog` selects the network family the same way `model_catalog`
+`policy_catalog` selects the network family the same way `dynamics.FAMILIES`
 selects a dynamics family on the sys-id side:
 
   - "mlp"    — bounded MLP, `policy_layers` hidden layers of width

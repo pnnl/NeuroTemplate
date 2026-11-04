@@ -280,7 +280,7 @@ def _print_ladder_card(zone: ThermalZone, selection, candidate_fits: dict, dev_r
               "non-negative D column (an occupancy or schedule indicator) and rerun.")
     path = out_dir / f"{zone.block}.json"
     path.write_text(json.dumps(nw.declaration(chosen), indent=2, ensure_ascii=False))
-    print(f"  snippet: {path}  — the block's params `network`; edit it as you like.")
+    print(f"  snippet: {path}  — the block's params `rc_network`; edit it as you like.")
     print("  p vs parent: the likelihood-ratio test against the rung it extends. "
           "Whiteness: Ljung–Box on the innovations over "
           f"{ladder.WHITENESS_HOURS:g} h; small means time structure the network "
@@ -333,11 +333,11 @@ def _fit_notes(fit: Fit) -> list[str]:
 def _declared_network(block) -> tuple:
     """The block's declared network, at the centre of its boxes, and the lowest
     zone capacitance its box allows."""
-    decl = block.params.get("network")
+    decl = block.params.get("rc_network")
     if decl is None:
         raise SystemExit(
             f"thermal block {block.name!r} declares no network. Run `nt data ladder`, and "
-            "put its snippet in the block's params as `network`.")
+            "put its snippet in the block's params as `rc_network`.")
     network, boxes, noise = nw.parse_declaration(decl, block.name)
     return network, {**nw.box_centres(boxes), **noise}, boxes[f"C_{network.zone}"][0]
 

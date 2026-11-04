@@ -55,7 +55,7 @@ from neurotemplate._typing import beartype
 from neurotemplate.common.data_utils import get_sw_dict_multi, pool_dfs
 from neurotemplate.common.metrics import level_metrics
 from neurotemplate.modeling.config import ModelingConfig
-from neurotemplate.modeling.contract import contract_model, normalized_core
+from neurotemplate.modeling.contract import contract_model
 from neurotemplate.modeling.heads import HeadStack, OrdinalHead, inverse_sqrt_frequency_weights
 
 
@@ -133,8 +133,8 @@ def collect_rollout_z(dyn_sys, data: dict, history_steps: int) -> tuple[torch.Te
     at every scored step, [batch, steps, raw_width], with the matching truth
     [batch, steps, ny] in the same (normalised) units as the heads. Read
     through a forward hook on the head stack, so the System's output contract
-    is untouched. Only a built-in family has heads."""
-    head_stack = normalized_core(dyn_sys).head_stack
+    is untouched."""
+    head_stack = contract_model(dyn_sys).head_stack
     seen: list[torch.Tensor] = []
     handle = head_stack.register_forward_hook(lambda _m, inp, _out: seen.append(inp[0].detach()))
     try:
@@ -199,8 +199,7 @@ def calibrate_decision_thresholds(
     never visits, or with `use_ste=False` (its snap never runs), is
     skipped with a warning. Empty without ordinal heads. Thresholds are in
     the model's normalised units, where its heads compute."""
-    core = normalized_core(dyn_sys)
-    head_stack = None if core is None else core.head_stack
+    head_stack = getattr(contract_model(dyn_sys), "head_stack", None)
     if head_stack is None or not any(isinstance(h, OrdinalHead) for h in head_stack.heads):
         return {}
 

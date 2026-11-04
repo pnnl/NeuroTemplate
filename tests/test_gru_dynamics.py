@@ -17,7 +17,7 @@ from neurotemplate.modeling.config import ModelingConfig as Config
 from neurotemplate.modeling.dynamics import get_dynamics
 from neurotemplate.modeling.gru import GRUBlock
 from model_fixtures import model_cfg, uniform_history, unit_stats
-from neurotemplate.modeling.contract import normalized_core
+from neurotemplate.modeling.contract import contract_model
 
 NY, NU, ND = 2, 1, 1
 P = 5  # rollout steps past the history
@@ -68,16 +68,9 @@ def build_system(model: str, history_steps: int, nm_mapping):
     return get_dynamics(make_cfg(model, history_steps), nm_mapping, unit_stats(nm_mapping))
 
 
-def flat_window(data: dict, lo: int, hi: int) -> tuple:
-    """The (y, u, d) window SSMGrad receives for a rollout step ending at hi-1.
-
-    Each key is flattened time-major on its own, which is what the Node's
-    input_map produces.
-    """
-    return tuple(
-        data[key][:, lo:hi, :].reshape(data[key].shape[0], -1)
-        for key in ("yn", "U", "D")
-    )
+def window(data: dict, lo: int, hi: int) -> tuple:
+    """The (y, u, d) windows a rollout step ending at hi-1 hands the model."""
+    return tuple(data[key][:, lo:hi, :] for key in ("yn", "U", "D"))
 
 
 # ── The core invariant ──────────────────────────────────────────
@@ -91,38 +84,21 @@ def test_warm_consumption_equals_a_cold_pass_over_the_whole_history():
     history_steps, extra = 4, 3
     data = make_batch(history_steps + extra + P)
 
-    stepped = GRUBlock(NY, NU, ND, history_steps, outsize=NY, hidden_size=8, num_layers=2)
+    stepped = GRUBlock(NY + NU + ND, history_steps, outsize=NY, hidden_size=8, num_layers=2)
     stepped.set_rollout_state(None)
     with torch.no_grad():
         for lo in range(extra + 1):
-            warm = stepped(torch.cat(flat_window(data, lo, lo + history_steps), dim=-1))
+            warm = stepped(*window(data, lo, lo + history_steps))
 
     # Same weights, but a window wide enough to swallow the whole span cold.
-    cold = GRUBlock(NY, NU, ND, history_steps + extra, outsize=NY,
+    cold = GRUBlock(NY + NU + ND, history_steps + extra, outsize=NY,
                     hidden_size=8, num_layers=2)
     cold.load_state_dict(stepped.state_dict())
     cold.set_rollout_state(None)
     with torch.no_grad():
-        once = cold(torch.cat(flat_window(data, 0, history_steps + extra), dim=-1))
+        once = cold(*window(data, 0, history_steps + extra))
 
     assert torch.allclose(warm, once, atol=1e-6)
-
-
-def test_manual_vmap_path_matches_the_fused_kernel():
-    """jacrev/vmap uses hand-rolled GRU math; it must compute the same function
-    as nn.GRU, including across layers."""
-    torch.manual_seed(0)
-    history_steps = 4
-    block = GRUBlock(NY, NU, ND, history_steps, outsize=NY, hidden_size=8, num_layers=3)
-    x = torch.randn(history_steps * (NY + NU + ND))
-
-    with torch.no_grad():
-        block.set_rollout_state(None)
-        manual = block(x)                  # 1D -> _manual_gru
-        block.set_rollout_state(None)
-        fused = block(x.unsqueeze(0))      # 2D -> nn.GRU
-
-    assert torch.allclose(manual, fused[0], atol=1e-6)
 
 
 # ── System wiring ───────────────────────────────────────────────
@@ -136,10 +112,10 @@ def test_rollout_enters_warmed_from_its_own_window(nm_mapping):
     system = build_system("gru", history_steps, nm_mapping)
     out = system(dict(data))
 
-    model = normalized_core(system)
-    model.fy.set_rollout_state(None)
+    model = contract_model(system)
+    model.core.cores[0].set_rollout_state(None)
     with torch.no_grad():
-        expected = model(*flat_window(data, 0, history_steps))
+        expected = model(*window(data, 0, history_steps))
 
     assert torch.allclose(out["yn"][:, history_steps, :], expected, atol=1e-6)
 

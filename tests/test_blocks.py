@@ -94,3 +94,45 @@ def test_a_misspelled_block_key_is_refused_rather_than_ignored():
     spec = {"all": {"Y": MAPPING["Y"], "Ambient": "oat", "input": {}}}
     with pytest.raises(ValueError, match=r"unrecognized key\(s\) \['Ambient', 'input'\]"):
         build_blocks(MAPPING, spec)
+
+
+# ── One line of config picks a family ───────────────────────────
+
+import torch  # noqa: E402
+
+def _swap_system(**over):
+    from model_fixtures import model_cfg, unit_stats
+    from neurotemplate.modeling.dynamics import get_dynamics
+    mapping = {"Y": ["a", "b"], "U": ["u"], "D": ["d"], "t": ["sec_elapsed"]}
+    spec = over.pop("spec", {"one": {"Y": ["a"], "U": ["u"]}, "two": {"Y": ["b"], "U": []}})
+    cfg = model_cfg(history={c: 2 for c in ("a", "b", "u", "d")}, **over)
+    return cfg, mapping, get_dynamics(cfg, mapping, unit_stats(mapping), block_spec=spec)
+
+
+@pytest.mark.parametrize("family", ["mlp", "nssm", "lssm", "gru"])
+def test_the_config_alone_swaps_every_block_to_any_family(family):
+    from neurotemplate.modeling.dynamics import describe_dynamics
+    cfg, mapping, system = _swap_system(model=family)
+    arch = describe_dynamics(system, cfg)
+    assert list(arch["blocks"]) == ["one", "two"]
+    assert {info["model"] for info in arch["blocks"].values()} == {family}
+    data = {"Y": torch.randn(2, 6, 2), "U": torch.randn(2, 6, 1), "D": torch.randn(2, 6, 1)}
+    data["yn"] = data["Y"][:, :3]
+    assert system(data)["yn"].shape == (2, 7, 2)
+
+
+def test_a_family_is_settled_by_block_models_then_the_hook_then_model():
+    from neurotemplate.modeling.dynamics import describe_dynamics, family_lines
+    spec = {"one": {"Y": ["a"], "U": ["u"], "model": "gru"}, "two": {"Y": ["b"], "U": []}}
+    cfg, mapping, system = _swap_system(model="mlp", spec=spec, block_models={"two": "lssm"})
+    blocks = describe_dynamics(system, cfg)["blocks"]
+    assert (blocks["one"]["model"], blocks["two"]["model"]) == ("gru", "lssm")
+    assert family_lines(cfg, mapping, spec) == ["  block 'one': gru (from block_mapping)",
+                                                "  block 'two': lssm (from block_models)"]
+    cfg, mapping, system = _swap_system(model="nssm", spec=spec)
+    assert describe_dynamics(system, cfg)["blocks"]["two"]["model"] == "nssm"
+
+
+def test_block_models_naming_no_block_is_refused():
+    with pytest.raises(ValueError, match="block_models names"):
+        _swap_system(model="mlp", block_models={"nope": "gru"})

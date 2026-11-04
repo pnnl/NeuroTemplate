@@ -73,7 +73,10 @@ Decide the structure first; it matters more than any hyperparameter.
 2. **What reaches each output.** `block_mapping` splits the outputs into blocks, each
    seeing its own inputs (`nt docs modeling`, "Blocks"). Give an output only the inputs
    that drive it: a block that sees an input it does not depend on learns the data's
-   correlations through it, and a controller exploits them.
+   correlations through it, and a controller exploits them. To compare families, change
+   `model` in the config, or one block's with `block_models`; a block that names its own
+   `model` keeps it unless `block_models` says otherwise, and each run prints what each
+   block took.
 3. **Heads**, in `data_head_config`, in physical units: a meter cannot read below
    zero (`BoundedHead(0.0, float("inf"))`), a staged output has levels
    (`OrdinalHead(n_levels=K, level_values=[...])`). `nt data heads` reads each output's
@@ -192,7 +195,7 @@ on yours.
 3. **`nt data ladder`** fits a ladder of RC networks to the record, 30 min steps,
    by maximum likelihood, and picks one by likelihood-ratio tests. Read its card:
    the 24 h error on dev, whiteness, BIC beside the tests, a parameter at a limit or
-   barely placed. Put its snippet in the zone block's `params` as `network`, and edit it
+   barely placed. Put its snippet in the zone block's `params` as `rc_network`, and edit it
    as you like: a node, an edge, an input into another node. `--candidate mine.json`
    runs your version through the same tests. The ladder needs no setpoints, only the
    zone, its inputs and the weather. It will not select a node the record cannot place (an infinite error bar, or slower than the
@@ -237,7 +240,7 @@ def block_mapping(nm_mapping, cfg):
         "zone": {"Y": ["Zone Temp"], "U": [], "D": ["Outdoor Temp", "Solar", "Occupied"],
                  "driven_by": ["Delivered Heat"], "model": "rc_network",
                  "ambient": "Outdoor Temp", "solar": "Solar", "scale": {"Delivered Heat": 1.0},
-                 "params": {"network": json.load(open("ladder/zone.json"))}},
+                 "params": {"rc_network": json.load(open("ladder/zone.json"))}},
         "meter": {"Y": ["Compressor Power", "Fan Power"], "U": [], "D": ["Outdoor Temp"],
                   "driven_by": ["Delivered Heat"], "model": "mlp", "residual": False},
     }
@@ -293,8 +296,11 @@ is in `nt docs modeling` ("Your own model"). The decisions:
 
 1. **Register it** in `nt_model.py`, `custom_models()` returning
    `{name: build(cfg, nm_mapping, norm_stats) -> nn.Module}`, and set `model` to the
-   name. The run keeps a copy of that file, so the model's code and its starting
-   values live in it, not beside it.
+   name, the same one line that picks a built-in family. The run keeps a copy of that
+   file, so the model's code and its starting values live in it, not beside it. The
+   library's own parts are there to wire: `modeling.thermal` (`RCZone`, `Thermostat`),
+   `modeling.families`, `modeling.stepper.Stepper` for the usual normalise, residual and
+   heads recipe, `modeling.contract.named_columns` to read columns by name.
 2. **State** past the window (a filtered mass, a latch): `rollout_state()` and
    `set_rollout_state(state)`, one `[batch, width]` tensor, `None` when cold. Cold, the
    model seeds it from its window, so `context_steps` sets how much record seeds it. Seed in

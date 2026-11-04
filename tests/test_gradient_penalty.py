@@ -20,8 +20,8 @@ class _Linear:
         self.history_steps, self.ny, self.nu = weights.shape
         self.nd, self.pre_stack = 1, None
 
-    def pre_activation(self, y, u, d):
-        return torch.einsum("kij,kj->i", self.w, u.reshape(self.history_steps, self.nu))
+    def sign_step(self, y, u, d):
+        return torch.einsum("kij,bkj->bi", self.w, u)
 
 
 def _penalty(weights: torch.Tensor, mask: torch.Tensor) -> float:

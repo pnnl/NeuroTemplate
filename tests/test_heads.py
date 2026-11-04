@@ -10,7 +10,7 @@ config can be malformed — all of which must raise rather than construct
 something quietly wrong.
 
 Plus the two HeadStack invariants: an all-regression stack reproduces blanket
-MSE to floating-point precision, and `apply_residual` touches only the
+MSE to floating-point precision, and `residual_mask` names only the
 channels that declared themselves residual-compatible.
 
 The pre-stack section pins the input-side counterpart: the clamp is exact
@@ -117,11 +117,7 @@ def test_a_stack_activates_each_channel_with_its_own_head():
 def test_residual_reaches_only_the_channels_that_accept_one():
     stack = HeadStack([RegressionHead(), BinaryHead(), RegressionHead()],
                       ["a", "b", "c"])
-    y_prev = torch.tensor([[1.0, 99.0, 2.0], [3.0, 99.0, 4.0]])
-    out = stack.apply_residual(torch.zeros(2, 3), y_prev)
-    assert torch.equal(out[:, 0], y_prev[:, 0])
-    assert torch.equal(out[:, 1], torch.zeros(2))     # binary is left alone
-    assert torch.equal(out[:, 2], y_prev[:, 2])
+    assert stack.residual_mask().tolist() == [True, False, True]     # binary is left alone
 
 
 # ── Serialization: a reloaded run rebuilds what it trained ───────
@@ -186,13 +182,10 @@ def test_each_output_step_reads_its_own_step_of_u_and_y():
     identity = {"shift": 0.0, "stretch": 1.0, "min": 0.0, "max": 1.0}
     history_steps, ny, nu = 3, 2, 2
     stack = PreStack([Demand(-1, identity, identity)], [("u1", "y1")],
-                     ["y0", "y1"], ["u0", "u1"], history_steps)
-    y = torch.tensor([[100.0 * t + i for t in range(history_steps) for i in range(ny)]])
-    u = torch.tensor([[-(100.0 * t + j) for t in range(history_steps) for j in range(nu)]])
-    out = stack(y, u).reshape(history_steps, nu)
+                     ["y0", "y1"], ["u0", "u1"])
+    y = torch.tensor([[[100.0 * t + i for i in range(ny)] for t in range(history_steps)]])
+    u = torch.tensor([[[-(100.0 * t + j) for j in range(nu)] for t in range(history_steps)]])
+    out = stack(y, u)[0]
     for t in range(history_steps):
         assert out[t, 0] == -(100 * t)                     # untouched column
         assert out[t, 1] == (100 * t + 1) + (100 * t + 1)  # relu(y1_t - u1_t) / 1
-    # Under vmap the window is 1-D and the layout must still hold.
-    single = torch.vmap(stack)(y, u)
-    assert torch.equal(single, stack(y, u))

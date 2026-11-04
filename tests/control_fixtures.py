@@ -193,7 +193,7 @@ class TrackingZone(torch.nn.Module):
 def make_tracking_plant(sysid_cfg: Config, nm_mapping: dict):
     """`TrackingZone` as a frozen surrogate: (dyn_sys, dyn_node)."""
     plant = TrackingZone()
-    dyn_sys = _rollout_system(plant, plant, sysid_cfg, nm_mapping)
+    dyn_sys = _rollout_system(plant, sysid_cfg, nm_mapping)
     return dyn_sys.eval(), dyn_sys.nodes[0]
 
 

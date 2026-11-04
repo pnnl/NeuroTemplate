@@ -6,7 +6,7 @@ attributes that `forward` mutates. A trace that does not lift them bakes
 whatever value happened to be there into the graph as a constant, and the
 exported step then ignores the state it is handed — a silent error, measured
 at ~3e-2 on a GRU. So state lifting is keyed off the stateful-block protocol
-(`rollout_state` / `set_rollout_state`, see `dynamics.stateful_blocks`), never
+(`rollout_state` / `set_rollout_state`, see `contract.stateful_blocks`), never
 off an attribute name: every block that implements it is lifted, and a block
 that does not is stateless by definition.
 
@@ -23,7 +23,7 @@ from dataclasses import dataclass
 import torch
 import torch.nn as nn
 
-from neurotemplate.modeling.dynamics import stateful_blocks
+from neurotemplate.modeling.contract import stateful_blocks
 
 
 @dataclass(frozen=True)

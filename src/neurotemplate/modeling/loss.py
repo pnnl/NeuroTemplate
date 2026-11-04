@@ -20,7 +20,8 @@ from neuromancer.constraint import Loss
 from neuromancer.loss import PenaltyLoss
 
 from neurotemplate.modeling.config import ModelingConfig
-from neurotemplate.modeling.gradient_sampling import SampledGradientPenalty
+from neurotemplate.modeling.contract import contract_model
+from neurotemplate.modeling.gradient_sampling import SampledGradientPenalty, signed_model
 from neurotemplate.modeling.heads import HeadStack
 
 from neurotemplate._typing import beartype
@@ -29,7 +30,6 @@ from neurotemplate._typing import beartype
 @beartype
 def build_loss(
     cfg: ModelingConfig,
-    raw_model: Optional[torch.nn.Module],
     system: torch.nn.Module,
     grad_masks: dict[str, torch.Tensor],
     nm_mapping: dict[str, list[str]],
@@ -41,8 +41,6 @@ def build_loss(
 
     Args:
         cfg:          ModelingConfig with loss gains and physics parameters
-        raw_model:    the normalised SSMGrad inside the System, None for a
-                      model from custom_models()
         system:       Neuromancer SystemPreview wrapping the dynamics model
         grad_masks:   {key: Tensor[1,1,ny,nx]} with sign constraints, or empty dict
         nm_mapping, norm_stats: the run's; the tracking loss is scored with
@@ -95,14 +93,9 @@ def build_loss(
     # read from the data dict — it generates its own synthetic inputs.
 
     if grad_masks and cfg.grad_gain > 0:
-        if raw_model is None:
-            raise ValueError(
-                f"grad_gain > 0, but model {cfg.model!r} is a custom model: the "
-                "sampled gradient penalty differentiates a built-in family's "
-                "normalised core. Give the model its signs structurally, or set "
-                "grad_gain: 0.")
         penalty = SampledGradientPenalty(
-            model=raw_model,
+            model=signed_model(contract_model(system), nm_mapping, norm_stats,
+                               cfg.history_steps),
             grad_mapping=grad_masks,
             n_samples=cfg.grad_n_samples,
             device=cfg.device,

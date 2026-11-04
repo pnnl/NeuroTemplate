@@ -14,7 +14,8 @@ from torch import nn
 
 from neuromancer.system import Node, SystemPreview
 
-from neurotemplate.modeling.contract import Normalized, Windowed, normalized_core
+from neurotemplate.modeling.contract import Windowed, contract_model
+from neurotemplate.modeling.stepper import Stepper
 from neurotemplate.modeling.prestack import PreStack
 from neurotemplate.modeling.scenarios import (
     SynthSpec,
@@ -52,8 +53,7 @@ def _spec(**overrides) -> SynthSpec:
 
 
 class _Plant(nn.Module):
-    """A hand-written plant, as a built-in family's normalised core behind
-    `Normalized`. `step` returns the next [zone, power] row from the current
+    """A hand-written plant, as a core behind a `Stepper`. `step` returns the next [zone, power] row from the current
     y, u and d rows (one-step windows; the stats are the identity, so these
     are physical units).
     """
@@ -61,19 +61,18 @@ class _Plant(nn.Module):
     def __init__(self, step):
         super().__init__()
         self.step = step
-        self.pre_stack = None
-        self.history_steps = HISTORY_STEPS
         # A zero parameter added to the output, so the training penalty has a
         # gradient path to check — a real dynamics block has parameters here.
         self.zero = nn.Parameter(torch.zeros(1))
 
     def forward(self, y, u, d):
-        return self.step(y, u, d) + self.zero
+        return self.step(y[:, -1], u[:, -1], d[:, -1]) + self.zero
 
 
 def _system(step, nm=NM, stats=NORM_STATS) -> SystemPreview:
     widths = tuple(len(nm[key]) for key in ("Y", "U", "D"))
-    node = Node(Windowed(Normalized(_Plant(step), nm, stats), widths, HISTORY_STEPS),
+    model = Stepper(_Plant(step), nm, stats, HISTORY_STEPS, residual=False)
+    node = Node(Windowed(model, widths, HISTORY_STEPS),
                 ["yn", "U", "D"], ["yn"], name="plant")
     return SystemPreview([node], name="plant system", nstep_key="Y",
                          start_iter=HISTORY_STEPS - 1)
@@ -193,12 +192,18 @@ def test_a_demand_target_inactive_everywhere_is_skipped_not_failed():
         return torch.stack([zone + 0.25 * (d[:, 0] - zone) + heat,
                             torch.zeros_like(zone)], dim=1)
 
+    def on_demand(y, u, d):
+        """The same plant, handed the demand a declaration derives from the setpoint."""
+        zone = y[:, 0]
+        return torch.stack([zone + 0.25 * (d[:, 0] - zone) + (u[:, 0] > 0).float(),
+                            torch.zeros_like(zone)], dim=1)
+
     def step_results(declared: bool):
-        system = _system(thermostat, nm, stats)
+        system = _system(on_demand if declared else thermostat, nm, stats)
         if declared:
-            normalized_core(system).pre_stack = PreStack.from_config(
+            contract_model(system).pre_stack = PreStack.from_config(
                 {HEAT: {"kind": "demand", "state": ZONE, "sign": +1}},
-                nm["Y"], nm["U"], stats, HISTORY_STEPS)
+                nm["Y"], nm["U"], stats)
         return build_scenarios(
             system=system, nm_mapping=nm, norm_stats=stats, synth_cfg=spec,
             history_steps=HISTORY_STEPS, n_scenarios=16, n_steps=N_STEPS, device="cpu",

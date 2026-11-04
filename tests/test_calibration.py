@@ -32,7 +32,7 @@ from control_fixtures import (
     STAGE, make_nm_mapping, make_norm_stats, make_raw_df, make_sysid_cfg,
 )
 from fake_logger import FakeLogger
-from neurotemplate.modeling.contract import normalized_core
+from neurotemplate.modeling.contract import contract_model
 
 
 # ── share_match_thresholds: a quantile, not a search ──────────────
@@ -81,7 +81,7 @@ def test_the_system_owns_its_own_copy_of_the_stack():
     nm = make_nm_mapping()
     norm_stats = make_norm_stats(make_raw_df(n_rows=60))
     dyn_sys, stack = _staged_system(make_sysid_cfg(), nm, norm_stats)
-    owned = normalized_core(dyn_sys).head_stack
+    owned = contract_model(dyn_sys).head_stack
     assert owned is not stack
     owned.heads[nm["Y"].index(STAGE)].decision_thresholds.fill_(0.0)
     assert not torch.equal(
@@ -102,7 +102,7 @@ def test_collected_z_lines_up_with_the_scored_truth():
     data.pop("source_idx")
     z, y_true = collect_rollout_z(dyn_sys, data, cfg.history_steps)
     assert z.shape[:2] == y_true.shape[:2] == (data["Y"].shape[0], cfg.dev_pred_steps)
-    assert z.shape[-1] == normalized_core(dyn_sys).head_stack.raw_width
+    assert z.shape[-1] == contract_model(dyn_sys).head_stack.raw_width
     assert torch.equal(y_true, data["Y"][:, cfg.history_steps:])
 
 
@@ -142,7 +142,7 @@ def _staged_run(tmp_path, **over):
 
 def test_a_run_persists_the_calibrated_rule_and_reports_its_search(tmp_path):
     result, stack, logger = _staged_run(tmp_path)
-    trained = normalized_core(result.dyn_sys).head_stack.heads[0]
+    trained = contract_model(result.dyn_sys).head_stack.heads[0]
     midpoint = stack.heads[0].decision_thresholds
     # head_config.json is what `nt model load` rebuilds from, so it has to
     # carry the rule the run was evaluated with, not the constructor default.

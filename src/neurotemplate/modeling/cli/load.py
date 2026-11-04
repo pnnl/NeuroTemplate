@@ -12,19 +12,19 @@ from pathlib import Path
 from neurotemplate.common.data_utils import get_grad_masks
 from neurotemplate.common.metrics import skill
 from neurotemplate.modeling.experiment import set_seeds
-from neurotemplate.modeling.gradient_sampling import SampledGradientPenalty
+from neurotemplate.modeling.gradient_sampling import SampledGradientPenalty, signed_model
 from neurotemplate.modeling.load import evaluate_trained, load_trained_dynamics
-from neurotemplate.modeling.contract import normalized_core
+from neurotemplate.modeling.contract import contract_model
 from neurotemplate.modeling.pipeline import render_reportcard, trained_heads, write_reportcard
 from neurotemplate.hooks import load_modeling_hooks
 
 from neurotemplate._typing import beartype
 
 
-def _eval_grad_penalty(dyn_sys, cfg, grad_masks):
+def _eval_grad_penalty(dyn_sys, cfg, grad_masks, nm_mapping, norm_stats):
     """Compute the raw (gain=1) gradient sign penalty."""
     penalty = SampledGradientPenalty(
-        model=normalized_core(dyn_sys),
+        model=signed_model(contract_model(dyn_sys), nm_mapping, norm_stats, cfg.history_steps),
         grad_mapping=grad_masks,
         n_samples=cfg.grad_n_samples,
         device=cfg.device,
@@ -125,8 +125,8 @@ def main() -> None:
             print(f"  {lm.name}: {lm.balanced_accuracy:.3f} vs "
                   f"{persistence[lm.name].balanced_accuracy:.3f}")
 
-    if grad_masks and normalized_core(dyn_sys) is not None:
-        grad_penalty = _eval_grad_penalty(dyn_sys, cfg, grad_masks)
+    if grad_masks:
+        grad_penalty = _eval_grad_penalty(dyn_sys, cfg, grad_masks, nm_mapping, norm_stats)
         print(f"\nGrad Penalty (raw): {grad_penalty:.6f}")
     else:
         grad_penalty = None

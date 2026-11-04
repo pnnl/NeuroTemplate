@@ -31,12 +31,15 @@ import torch
 from neurotemplate.export.runtime import Model
 from neurotemplate.export.state import read_state
 from neurotemplate.modeling.contract import contract_model
-from neurotemplate.modeling.dynamics import stateful_blocks
+from neurotemplate.modeling.contract import stateful_blocks
 
 #: Export time, same machine, the package's runtime vs the trained torch
-#: model. Measured at or near float32 round-off for every family; the export
-#: refuses to write above it.
-AGREEMENT_TOL = 1e-4
+#: model; the export refuses to write above it. At or near float32 round-off for
+#: every family, except that a thermostat closes a loop on its zone: round-off of
+#: a few 1e-5 K in the temperature comes back through a gain of order 10 kW/K, so
+#: a heat's rollout has been measured at 1.3e-4 of its stretch over a few hundred
+#: steps. Three times that margin would be a model, not rounding.
+AGREEMENT_TOL = 3e-4
 #: A consumer's machine, its runtime vs the shipped torch reference. This
 #: absorbs runtime *and* platform float differences, and cross-platform
 #: reproducibility has not been measured, so it keeps 10x headroom.

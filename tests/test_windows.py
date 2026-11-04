@@ -9,7 +9,7 @@ import torch
 from neurotemplate.modeling.dynamics import get_dynamics
 from neurotemplate.modeling.windows import window_gather
 from model_fixtures import model_cfg, unit_stats
-from neurotemplate.modeling.contract import normalized_core
+from neurotemplate.modeling.contract import contract_model
 
 NM = {"Y": ["y0", "y1"], "U": ["u0"], "D": ["d0", "d1"], "t": ["sec_elapsed"]}
 
@@ -22,14 +22,17 @@ def test_two_keys_are_gathered_key_major_from_their_own_offsets():
 
 def test_a_ragged_table_feeds_each_column_at_its_lag_and_a_uniform_one_gathers_nothing():
     history = {"y0": 2, "y1": 0, "u0": 1, "d0": 0, "d1": 2}
-    model = normalized_core(get_dynamics(model_cfg(model="lssm", history=history), NM, unit_stats(NM)))
+    model = contract_model(get_dynamics(model_cfg(model="lssm", history=history), NM,
+                                        unit_stats(NM)))
+    core = model.core.cores[0]
     # Window 3 deep. Y rows: [y0 y1] x 3; y0 keeps all three, y1 the newest.
-    y = torch.arange(6.0).unsqueeze(0)
-    assert model._narrow("Y", y).tolist() == [[0.0, 2.0, 4.0, 5.0]]
-    assert model.fy.linear.in_features == 4       # (2+1) + (0+1)
-    assert model.fu.linear.in_features == 2
-    assert model.fd.linear.in_features == 4
+    y = torch.arange(6.0).reshape(1, 3, 2)
+    assert core.windows[0](y).tolist() == [[0.0, 2.0, 4.0, 5.0]]
+    assert core.maps[0].linear.in_features == 4       # (2+1) + (0+1)
+    assert core.maps[1].linear.in_features == 2
+    assert core.maps[2].linear.in_features == 4
 
     uniform = {c: 2 for c in history}
-    model = normalized_core(get_dynamics(model_cfg(model="lssm", history=uniform), NM, unit_stats(NM)))
-    assert model._gathered == []
+    model = contract_model(get_dynamics(model_cfg(model="lssm", history=uniform), NM,
+                                        unit_stats(NM)))
+    assert not any(w.gathers for w in model.core.cores[0].windows)

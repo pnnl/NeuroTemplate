@@ -2,7 +2,7 @@
 Export trained models as standalone packages: ONNX graphs, torch programs, or C.
 
 The trained graph is serialised, not reimplemented: `graphs` wraps a trained
-`SSMGrad` so that normalisation, window layout and the hidden state are all
+model so that normalisation, window layout and the hidden state are all
 inside the traced graph, `state` lifts hidden state into explicit tensors via
 the stateful-block protocol, `trace` exports and audits, `ccode` turns the
 ONNX into C, `verify` proves the result reproduces the trained system, and

@@ -92,13 +92,10 @@ class ModelingConfig:
     log2_hidden_size: int = 6
     num_layers: int = 3
     residual: bool = True
-    # Give each block its own sub-model, with its own parameters and hidden
-    # state and no term reading another block's state on the same step.
-    # Which channels form a block comes from the optional `block_mapping`
-    # hook; without one there is one block holding everything, and this
-    # flag only costs a wrapper. `rc_network` is per-block by construction
-    # and rejects this flag.
-    per_block: bool = False
+    # One block's family, from here: `{block name: family}`. It wins over the
+    # block's own `model` in block_mapping, which wins over `model` above; every
+    # run prints which family each block took and from where.
+    block_models: dict[str, str] = field(default_factory=dict)
     # Timesteps per hour, resolved from the data's sampling frequency by the
     # CLI (like `device` and `seed`) rather than set in YAML. Only
     # `rc_network` reads it, to discretise its network in real hours.
@@ -222,12 +219,8 @@ class ModelingConfig:
 
         check_positive(self, "physical_lr")
 
-        # Imported here rather than at module scope: dynamics imports this
-        # config module, so a top-level import would be circular.
         # `model` is checked where it is built (`get_dynamics`): a name that
         # is no built-in family may be one of the hooks file's own.
-        from neurotemplate.modeling.dynamics import PER_BLOCK_FAMILIES
-
         check_one_of(self, "progress", list(PROGRESS_LEVELS))
         check_one_of(self, "norm_type", ["min_max", "abs_max", "z_score", None])
         check_one_of(self, "save_config", ["last_step", "all", "None", None])
@@ -240,14 +233,6 @@ class ModelingConfig:
             raise ValueError(f"context_steps must be >= 0; got {self.context_steps}.")
         if self.train_stride is not None:
             check_positive(self, "train_stride")
-
-        if self.per_block and self.model not in PER_BLOCK_FAMILIES:
-            extra = (" rc_network is already per-block and needs no flag."
-                     if self.model == "rc_network" else "")
-            raise ValueError(
-                f"per_block is not supported for model '{self.model}'; "
-                f"available: {list(PER_BLOCK_FAMILIES)}.{extra}"
-            )
 
         # The first history_steps of a test window are the seeded history,
         # not predictions; a window no longer than that scores nothing and

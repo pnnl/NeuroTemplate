@@ -24,7 +24,7 @@ from neurotemplate.common.data_utils import NormStats, get_loader
 from neurotemplate.common.progress import Progress
 from neurotemplate.common.tracking import RunLog, RunLogger, save_checkpoint
 from neurotemplate.modeling.heads import HeadStack
-from neurotemplate.modeling.contract import normalized_core
+from neurotemplate.modeling.contract import contract_model
 from neurotemplate.modeling.dynamics import get_dynamics
 from neurotemplate.modeling.loss import build_loss
 from neurotemplate.modeling.bounded import physical_parameters
@@ -110,20 +110,16 @@ def build_trainer(
         cfg, nm_mapping, norm_stats, head_stack=head_stack, block_spec=block_spec,
     ).to(cfg.device)
 
-    # The normalised family inside the contract, None for a custom model.
-    # The gradient penalty differentiates it directly, and the
-    # loss reads the head stack it owns (get_dynamics rescales its own copy),
-    # not the caller's — one stack, so nothing calibrated on it can go stale
-    # in the loss.
-    raw_model = normalized_core(system)
-    head_stack = None if raw_model is None else raw_model.head_stack
+    # The loss reads the head stack the model owns (a Stepper rescales its own
+    # copy), not the caller's — one stack, so nothing calibrated on it can go
+    # stale in the loss.
+    head_stack = getattr(contract_model(system), "head_stack", None)
 
     # Single PenaltyLoss with all objectives:
     #   - Tracking: ref_loss
     #   - Physics:  grad_penalty (Loss object, train-only)
     loss = build_loss(
         cfg=cfg,
-        raw_model=raw_model,
         system=system,
         grad_masks=grad_masks,
         nm_mapping=nm_mapping,

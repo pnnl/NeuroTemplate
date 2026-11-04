@@ -347,8 +347,6 @@ def _stack_lines(info: dict) -> list[str]:
     groups: dict[tuple, list[str]] = {}
     lines = []
     for name, sub in info["blocks"].items():
-        if sub is None:
-            continue
         own = _own_lines(sub, "  ")
         if own:
             lines.append(f"- block `{name}` ({sub.get('model')}): " + ", ".join(_block_parts(sub)))
@@ -369,23 +367,13 @@ def _stack_lines(info: dict) -> list[str]:
 
 
 def _architecture_section(arch: dict) -> str:
-    flags = [f for f, on in (("separable", arch["separable"]),
-                             ("residual", arch["residual"])) if on]
     lines = [
-        f"- `{arch['factory']}`" + (f" ({', '.join(flags)})" if flags else "")
+        f"- `{arch['factory']}`" + (" (residual)" if arch["residual"] else "")
         + f", {arch['param_count']:,} trainable params, history {arch['history_steps']} steps; "
         f"ny={arch['ny']}, nu={arch['nu']}, nd={arch['nd']}",
         f"- History: {_lags_by_value(arch['history'])}",
     ]
-    for key in ("fy", "fu", "fd"):
-        info = arch.get("blocks", {}).get(key)
-        if info is None:
-            continue
-        if info.get("blocks"):
-            lines += _stack_lines(info)
-        else:
-            lines.append(f"- {key}: " + ", ".join(_block_parts(info)))
-            lines += _own_lines(info, "  ")
+    lines += _stack_lines(arch)
     for column, entry in (arch.get("pre_stack") or {}).items():
         lines.append(f"- derived input {column}: {entry['kind']} of {entry['state']}, "
                      f"sign {entry['sign']:+d}, scale {entry['scale']:.3g}")

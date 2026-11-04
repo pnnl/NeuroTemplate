@@ -723,34 +723,23 @@ class HeadStack(nn.Module):
         """
         if self._all_identity:
             return z_raw
-        outs = []
-        for i in range(self.n_channels):
-            z = self.z_for(z_raw, i)
-            head = self.heads[i]
-            y_soft = head.activate(z)
-            # A head that keeps `Head.decode` snaps to nothing, so its
-            # straight-through combine would only add ops.
-            if head.use_ste and type(head).decode is not Head.decode:
-                outs.append(straight_through(y_soft, head.decode(z)))
-            else:
-                outs.append(y_soft)
-        return torch.stack(outs, dim=-1)
+        return torch.stack([self.activate_channel(self.z_for(z_raw, i), i)
+                            for i in range(self.n_channels)], dim=-1)
 
-    def apply_residual(self, z_raw: torch.Tensor, y_prev: torch.Tensor) -> torch.Tensor:
-        """
-        Add y_prev to the pre-activation z for residual-compatible channels.
+    def activate_channel(self, z: torch.Tensor, i: int) -> torch.Tensor:
+        """Channel i's `z` [..., width] activated, [...]: `activate` per channel,
+        and what a block driven by that channel reads."""
+        head = self.heads[i]
+        y_soft = head.activate(z)
+        # A head that keeps `Head.decode` snaps to nothing, so its
+        # straight-through combine would only add ops.
+        if head.use_ste and type(head).decode is not Head.decode:
+            return straight_through(y_soft, head.decode(z))
+        return y_soft
 
-        For width-1 heads this is just z[..., i] += y_prev[..., i] guarded by
-        residual_compatible. The non-residual channels are left untouched.
-
-        Args:
-            z_raw:  [..., raw_width] pre-activation model output
-            y_prev: [..., n_channels] last step's activated state
-
-        Returns:
-            z_raw with residual added on the residual-compatible channels.
-        """
-        return torch.where(self._residual, z_raw + y_prev, z_raw)
+    def residual_mask(self) -> torch.Tensor:
+        """Which outputs read their `z` as the value, so may take a residual."""
+        return self._residual
 
     def loss(self, y_state: torch.Tensor, y_true: torch.Tensor) -> torch.Tensor:
         """

@@ -22,10 +22,10 @@ What a block owns
          with no conflict.
   reads  other blocks' Y channels this block may also see as an ordinary
          input, as of the row before the step (see `Block.y_in_idx`).
-  model  the family this block builds under (e.g. "mlp", "rc_network"). None
-         defers to `cfg.model`, so a spec that never sets `model` behaves
-         like a plain split: one family for everyone, just partitioned
-         by block.
+  model  the family this block builds under (e.g. "mlp", "rc_network"). The
+         config's `block_models` wins over it, and without either the block
+         takes `cfg.model`: a spec that never sets `model` swaps every block's
+         family from the config, by one line.
   inputs what each of its U and D columns *is*, per column — see
          "Declaring what a column is" below. Anything undeclared is an
          ordinary network input.
@@ -48,9 +48,11 @@ What a block owns
          whether this block predicts a change on the last row (True) or the
          value itself (False). Absent means the run's `cfg.residual`. A meter
          is a value: under a residual it integrates its own errors.
-  params the block's physical priors, read by its family's builder: an
-         `rc_network`'s `network` declaration from `nt data ladder`, a
-         `thermostat`'s `thermostat` from `nt data thermostat`.
+  params the block's physical priors, keyed by the family that reads them:
+         `{"rc_network": <nt data ladder's declaration>}`,
+         `{"thermostat": <nt data thermostat's>}`. Only the family the block
+         takes reads its entry, so a block can keep priors for a family it is
+         swapped out of, and a family's missing entry is a loud error.
 
 Declaring what a column is
 ==========================
@@ -87,11 +89,9 @@ An optional `block_mapping` hook in the application's modeling hooks file:
         }
 
 With no hook, `build_blocks` returns a single block holding every channel
-and reading every D column — which for `rc_network` means one independent
-RC network per Y channel, since that family is per-channel internally. The
-hook is what restricts *which setpoint drives which block* (and, now,
-which block reads which other block's state); you only need it when that
-restriction matters.
+and reading every D column: one model over everything. The hook is what
+restricts *which setpoint drives which block* (and which block reads which
+other block's state); you only need it when that restriction matters.
 
 What this module does NOT do
 =============================
@@ -126,7 +126,8 @@ class Block:
     `nm_mapping["Y"]`, naming OTHER blocks' channels this block may see.
 
     `model` is a family name (e.g. "mlp", "rc_network") or None, meaning "use
-    cfg.model" — see the module docstring for why there is no per-block
+    cfg.model" — see `dynamics.resolve_family` for how a block's family is
+    settled, and the module docstring for why there is no per-block
     hyperparameter override.
     """
 

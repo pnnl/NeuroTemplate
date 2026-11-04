@@ -92,10 +92,10 @@ MIXED = {
         "Y": ["north T"], "U": [], "D": ["oat", "ghi"], "driven_by": ["north Q"],
         "model": "rc_network", "ambient": "oat", "solar": "ghi", "scale": {"north Q": 1.0},
         "params": {
-            "network": {"nodes": {"Ti": [0.5, 2.0], "Tm": [5.0, 20.0]},
-                        "edges": {"Ti-Tm": [0.2, 0.8], "Ti-ambient": [2.0, 8.0]},
-                        "inputs": {"north Q": {"Ti": 1.0}, "ghi": {"Ti": [0.001, 0.01]}},
-                        "noise": {"Ti": 0.1, "Tm": 0.05, "sensor": 0.05}}},
+            "rc_network": {"nodes": {"Ti": [0.5, 2.0], "Tm": [5.0, 20.0]},
+                           "edges": {"Ti-Tm": [0.2, 0.8], "Ti-ambient": [2.0, 8.0]},
+                           "inputs": {"north Q": {"Ti": 1.0}, "ghi": {"Ti": [0.001, 0.01]}},
+                           "noise": {"Ti": 0.1, "Tm": 0.05, "sensor": 0.05}}},
     },
     "south": {"Y": ["south T"], "U": ["south sp"], "model": "mlp",
               "inputs": {"south sp": {"kind": "demand", "sign": -1, "state": "south T"}}},
@@ -152,7 +152,7 @@ def make(package):
 CASES = {
     "nssm": (make_cfg(model="nssm", history=UNIFORM), MAPPING, None, None),
     "gru, 2 layers": (make_cfg(model="gru", num_layers=2, history=UNIFORM), MAPPING, None, None),
-    "mlp per block": (make_cfg(model="mlp", per_block=True, history=UNIFORM), MAPPING, SPLIT, None),
+    "mlp per block": (make_cfg(model="mlp", history=UNIFORM), MAPPING, SPLIT, None),
     "binary + bounded heads": (make_cfg(model="nssm", history=UNIFORM), MAPPING, None,
                                lambda: [BinaryHead(), BoundedHead(lo=-1.0, hi=1.0)]),
 }

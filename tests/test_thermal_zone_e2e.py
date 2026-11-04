@@ -47,7 +47,7 @@ def block_mapping(nm_mapping, cfg):
             "ambient": {OUTDOOR!r}, "solar": {SOLAR!r}, "scale": {{{HEAT!r}: 1.0}}}}
     hvac = {{"Y": [{HEAT!r}], "U": [{SETPOINT!r}], "D": [], "reads": [{ZONE!r}]}}
     if os.path.exists("ladder/zone.json"):
-        zone["params"] = {{"network": json.load(open("ladder/zone.json"))}}
+        zone["params"] = {{"rc_network": json.load(open("ladder/zone.json"))}}
     if os.path.exists("ladder/hvac.thermostat.json"):
         hvac["params"] = {{"thermostat": json.load(open("ladder/hvac.thermostat.json"))}}
         hvac["model"], zone["model"] = "thermostat", "rc_network"

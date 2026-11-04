@@ -193,7 +193,7 @@ def _two_blocks(decl, thermostat_decl, history_steps=60):
     spec = {"hvac": {"Y": [HEAT], "U": ["sp"], "D": [], "reads": ["zone"], "model": "thermostat",
                      "params": {"thermostat": thermostat_decl}},
             "room": {"Y": ["zone"], "U": [], "D": ["out"], "driven_by": [HEAT], "ambient": "out",
-                     "scale": {HEAT: 1.0}, "model": "rc_network", "params": {"network": decl}}}
+                     "scale": {HEAT: 1.0}, "model": "rc_network", "params": {"rc_network": decl}}}
     cfg = model_cfg(model="rc_network", history={"zone": 0, HEAT: 0, "sp": 0, "out": 0},
                     context_steps=history_steps, steps_per_hour=1 / DT_H)
     assert [b.name for b in build_blocks(mapping, spec)] == ["hvac", "room"]
@@ -279,3 +279,75 @@ def test_a_pinned_capacitance_lets_the_ladder_place_a_gain_as_a_cop():
     decl = nw.declaration(fit)
     parsed, _, _ = nw.parse_declaration(decl)
     assert parsed.pinned == {"C_Ti": 1.5}
+
+
+def test_a_plain_forward_is_a_model_with_the_penalty_and_named_columns():
+    """The same parts, wired in a module of your own: its contract call is all the
+    library needs, the sign penalty included, and the state survives the penalty."""
+    from neurotemplate.modeling.contract import named_columns
+    from neurotemplate.modeling.config import ModelingConfig
+    from neurotemplate.modeling.gradient_sampling import SampledGradientPenalty, signed_model
+    from neurotemplate.modeling.thermal import RCZone, thermostat
+    from model_fixtures import unit_stats
+
+    mapping = {"Y": ["zone", HEAT], "U": ["sp"], "D": ["out"], "t": ["sec_elapsed"]}
+    net = Rung(mass=True).network((HEAT,), None, (), {HEAT: 1.0})
+    decl = _block_and_ladder(net, _truth(net), _simulate(net, _truth(net), steps=12, seed=2))[0]
+    hvac_decl = {"cooling": {"setpoint": "sp", "gain": 4.0, "capacity": 6.0}, "form": "tracker",
+                 "gain_limit": 40.0}
+
+    class Building(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.hvac = thermostat(hvac_decl)
+            self.zone = RCZone(decl, [HEAT], window=12, dt_h=DT_H)
+
+        def forward(self, y, u, d):
+            c = named_columns(mapping, y, u, d)
+            heat = self.hvac(u[:, -1], c["zone"][:, -1])
+            held = torch.cat([c[HEAT][:, 1:], heat[:, None]], dim=1)
+            return torch.stack([self.zone(c["zone"], c["out"], held), heat], dim=-1)
+
+    model = Building()
+    stats = unit_stats(mapping)
+    masks = {"U": torch.zeros(1, 1, 2, 1)}
+    masks["U"][0, 0, 1, 0] = 1            # a higher cooling setpoint cools less: heat rises
+    cfg = ModelingConfig(train_data_path="x", dev_data_path="x", test_data_path="x")
+    penalty = SampledGradientPenalty(signed_model(model, mapping, stats, 12), masks, 8, "cpu", cfg)
+    window = [torch.randn(2, 12, n) for n in (2, 1, 1)]
+    model(*window)
+    held = model.zone.rollout_state()
+    assert float(penalty.compute()) == 0.0
+    assert model.zone.rollout_state() is held
+
+    masks["U"][0, 0, 1, 0] = -1           # the wrong sign is scored, and reaches the gain
+    penalty = SampledGradientPenalty(signed_model(model, mapping, stats, 12), masks, 8, "cpu", cfg)
+    torch.manual_seed(0)
+    value = penalty.compute()
+    assert float(value) > 0.0
+    assert torch.autograd.grad(value, next(model.hvac.parameters()), allow_unused=True)[0] is not None
+
+
+def test_a_family_finds_only_its_own_params():
+    """Priors for a family a block is swapped out of stay put; a missing entry is loud."""
+    decl = {"nodes": {"Ti": 1.0}, "edges": {"Ti-ambient": 2.0}, "inputs": {HEAT: {"Ti": 1.0}},
+            "noise": {"Ti": 0.1, "sensor": 0.1}}
+    from neurotemplate.modeling.dynamics import get_dynamics
+    from model_fixtures import model_cfg, unit_stats
+    mapping = {"Y": ["zone"], "U": [HEAT], "D": ["out"], "t": ["sec_elapsed"]}
+    spec = {"room": {"Y": ["zone"], "U": [HEAT], "D": ["out"], "ambient": "out",
+                     "scale": {HEAT: 1.0}, "params": {"rc_network": decl}}}
+
+    def build(**over):
+        cfg = model_cfg(history={c: 0 for c in ("zone", HEAT, "out")}, steps_per_hour=1 / DT_H,
+                        **over)
+        return get_dynamics(cfg, mapping, unit_stats(mapping), block_spec=spec)
+
+    build(model="rc_network")
+    build(model="mlp")
+    spec["room"]["params"] = {}
+    with pytest.raises(ValueError, match="rc_network. entry"):
+        build(model="rc_network")
+    spec["room"]["params"] = {"rc_netwrok": decl}
+    with pytest.raises(ValueError, match="rc_netwrok"):
+        build(model="mlp")

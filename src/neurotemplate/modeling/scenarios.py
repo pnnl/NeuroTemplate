@@ -62,7 +62,7 @@ from typing import Optional
 import torch
 
 from neurotemplate._typing import beartype
-from neurotemplate.modeling.contract import Normalized, contract_model
+from neurotemplate.modeling.contract import contract_model
 
 
 # Pass thresholds, all expressed as a share of a state channel's own recorded
@@ -372,10 +372,8 @@ def _declared_demands(system) -> dict[str, dict]:
 
     Read off the model's own `PreStack` rather than the block spec, so the
     checks and the trained run cannot disagree about what is a thermostat.
-    Only a built-in family declares demands.
     """
-    model = contract_model(system)
-    pre_stack = model.core.pre_stack if isinstance(model, Normalized) else None
+    pre_stack = getattr(contract_model(system), "pre_stack", None)
     if pre_stack is None:
         return {}
     return {col: entry for col, entry in pre_stack.to_config().items()

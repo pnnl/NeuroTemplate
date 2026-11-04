@@ -197,7 +197,7 @@ def block_mapping(
                        "driven_by": ["Zone A Heat [kW]"], "model": "rc_network",
                        "ambient": "Outdoor Temp [degC]", "solar": "Solar [W/m2]",
                        "scale": {"Zone A Heat [kW]": 1.0},
-                       "params": {"network": json.load(open("ladder/zone_a.json"))}},
+                       "params": {"rc_network": json.load(open("ladder/zone_a.json"))}},
             "meter":  {"Y": ["Total Power [kW]"], "U": [], "D": ["Outdoor Temp [degC]"],
                        "driven_by": ["Zone A Heat [kW]"], "model": "mlp",
                        "residual": False},
@@ -209,8 +209,8 @@ def block_mapping(
     another block's Y as an ordinary input, as of the row before the step;
     `driven_by` as of this step, the block running after its producer. A
     block's `residual` overrides the run's: a meter says the value itself.
-    `model` omitted means `cfg.model`; under `mlp`/`gru` the split then needs
-    `per_block: true`.
+    `model` omitted means `cfg.model`, so a hook naming no family swaps every
+    block from the config; `block_models` there overrides any one block.
 
     `rc_network` is a thermal zone: Y the zone temperature alone, its inputs
     a `driven_by` column (the heat a `thermostat` block produces), a U (a
@@ -222,12 +222,13 @@ def block_mapping(
     heat in kW, or `{"C_Ti": value}` to fit a power's gain as a COP.
     `thermostat` is Y the heat, U its setpoints, `reads` the zone.
     `context_steps` in the config is the record the zone's filter places its
-    hidden nodes from. `params` holds the declarations, every value a scalar
-    (pinned) or [lo, hi] (fitted inside):
-      network     rc_network. Nodes (kWh/K), edges (K/kW), where each input
-                  enters and its gain, and noise. `nt data ladder` fits a ladder
-                  of networks and saves the one its tests pick; edit it freely,
-                  and `--candidate` runs your own through the same tests.
+    hidden nodes from. `params` maps a family to its declaration, every value a
+    scalar (pinned) or [lo, hi] (fitted inside); only the family the block takes
+    reads its entry:
+      rc_network  Nodes (kWh/K), edges (K/kW), where each input enters and its
+                  gain, and noise. `nt data ladder` fits a ladder of networks
+                  and saves the one its tests pick; edit it freely, and
+                  `--candidate` runs your own through the same tests.
       thermostat  Per side, the setpoint and its gain (kW/K), capacity (kW) and
                   offset (K), and more by form; and the `gain_limit` its zone's
                   capacitance sets. `nt data thermostat` saves it; a side the
@@ -277,11 +278,12 @@ def block_mapping(
 #
 # Return {name: build(cfg, nm_mapping, norm_stats) -> nn.Module} and set
 # `model: <name>` in the YAML. It is one module over every column, so
-# block_mapping returns None and every head is a RegressionHead; bound or
-# level an output inside the model. State that outlives the window goes
-# through `rollout_state()` / `set_rollout_state(state)`, one [batch, width]
-# tensor, None when cold (seed it from the window then). Keep the model's
-# code, and any starting values, in this file: the run keeps a copy of it.
+# block_mapping returns None; bound or level an output inside the model, or give
+# it a `head_stack`. State that outlives the window goes through
+# `rollout_state()` / `set_rollout_state(state)`, one [batch, width] tensor, None
+# when cold (seed it from the window then). Keep the model's code, and any
+# starting values, in this file: the run keeps a copy of it. The library's parts
+# are yours to wire: `modeling.thermal`, `modeling.families`, `modeling.stepper`.
 # `nt guide own-model` has the decisions; `nt docs modeling` the full contract.
 #
 # def custom_models():

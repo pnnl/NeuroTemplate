@@ -29,7 +29,7 @@ import torch
 
 from neurotemplate._typing import beartype
 from neurotemplate.modeling.contract import contract_model
-from neurotemplate.modeling.dynamics import stateful_blocks
+from neurotemplate.modeling.contract import stateful_blocks
 
 
 @dataclass(frozen=True)

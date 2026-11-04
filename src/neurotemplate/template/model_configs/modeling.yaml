@@ -32,9 +32,9 @@ test_data_path: data/test.csv
 #   mlp, nssm, lssm, gru   black boxes. Often the best fit, but nothing
 #          bounds a long rollout; read the reportcard's rollout and
 #          physics sections before steering with one.
-# Families can be mixed, one per block of Y channels — see `block_mapping`
-# in nt_model.py (e.g. a thermostat and an rc_network per zone, an mlp for a meter).
-# Or the name of a model of your own, from `custom_models` there.
+# Every block without its own `model` takes this one, so one line swaps them. See
+# `block_mapping` in nt_model.py (e.g. a thermostat and an rc_network per zone, an
+# mlp for a meter). Or the name of a model of your own, from `custom_models` there.
 # model: nssm
 # Required: steps before the current one a learned map reads, per column. List
 # every Y, U and D column; there is no default. The names and numbers below
@@ -59,9 +59,10 @@ history: {}   # replace with your columns, e.g.
 # Predict the change from the current state rather than the state. A block
 # may say otherwise for itself (`residual` in block_mapping): a meter is a value.
 # residual: true
-# Split every block under one mlp or gru family. Not needed when a block
-# names its own `model`; the thermal families are always per-block.
-# per_block: false
+# One block's family, from here: {block name: family}. It wins over a block's
+# own `model` in block_mapping, which wins over `model` above. Each run prints
+# which family each block took and from where.
+# block_models: {}
 
 # ── PHYSICAL PARAMETERS ──────────────────────────────────────────
 # A grey box's parameters are declared as boxes in block_mapping's `params`

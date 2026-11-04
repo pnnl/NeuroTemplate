@@ -4,6 +4,7 @@ the command line:
 
     from neurotemplate.common.config import load_config
     from neurotemplate.modeling.config import ModelingConfig
+from neurotemplate.modeling.dynamics import family_lines
     from neurotemplate.modeling.train import train_model
 
     cfg = load_config("model_configs/modeling.yaml", ModelingConfig,
@@ -25,6 +26,7 @@ from neurotemplate.common.run_summary import write_run_summary
 from neurotemplate.common.tracking import tracked_run
 from neurotemplate.hooks import MODELING_SNAPSHOT, load_modeling_hooks, snapshot_hooks
 from neurotemplate.modeling.config import ModelingConfig
+from neurotemplate.modeling.dynamics import family_lines
 from neurotemplate.modeling.experiment import resolve_device, set_seeds, set_threads
 from neurotemplate.modeling.pipeline import (
     TrainedModel, prepare_data, run_summary_metrics, train_and_evaluate,
@@ -56,6 +58,8 @@ def train_model(cfg: ModelingConfig,
     hooks = load_modeling_hooks(cfg)
 
     data = prepare_data(cfg, hooks)
+    if data.block_spec and cfg.progress != "silent":
+        print("Blocks:\n" + "\n".join(family_lines(cfg, data.nm_mapping, data.block_spec)))
 
     # With a curriculum, each step is a nested child run under this parent.
     cfg.run = cfg.model.upper() + " " + cfg.run

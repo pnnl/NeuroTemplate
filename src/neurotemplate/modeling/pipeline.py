@@ -68,7 +68,7 @@ from neurotemplate.common.metrics import (
     stability_to_dict,
 )
 from neurotemplate.common.reportcard import RESULTS_DIR, write_reportcard as _write_reportcard
-from neurotemplate.modeling.contract import normalized_core
+from neurotemplate.modeling.contract import contract_model
 from neurotemplate.modeling.dynamics import describe_dynamics
 from neurotemplate.modeling.plotting import plot_predictions, plot_synthetic
 from neurotemplate.modeling.reportcard import (
@@ -409,10 +409,8 @@ def one_step_residuals(cfg, dyn_sys, test_dfs: list[DataFrame],
 def trained_heads(dyn_sys, norm_stats: dict) -> Optional[HeadStack]:
     """The trained model's head stack in physical units, calibrated decision
     thresholds included, or None without heads."""
-    core = normalized_core(dyn_sys)
-    if core is None or core.head_stack is None:
-        return None
-    return core.head_stack.physical(norm_stats)
+    head_stack = getattr(contract_model(dyn_sys), "head_stack", None)
+    return None if head_stack is None else head_stack.physical(norm_stats)
 
 
 def _level_metrics(
@@ -681,24 +679,11 @@ def _tau_slow_by_channel(arch: dict) -> dict[str, float]:
     """Flatten describe_dynamics's nested block info to {zone: slowest time
     constant}.
 
-    Walks the same `blocks` nesting dynamics._describe_block builds (a
-    BlockStack's per-block descriptors, each optionally nested again). Only
-    rc_network blocks carry time constants, so every other family is simply
+    Only rc_network blocks carry time constants, so every other family is simply
     absent from the result.
     """
-    out: dict[str, float] = {}
-
-    def walk(info: Optional[dict]) -> None:
-        if info is None:
-            return
-        if "network_time_constants_h" in info:
-            out[info["zone"]] = max(info["network_time_constants_h"])
-        for sub in info.get("blocks", {}).values():
-            walk(sub)
-
-    for key in ("fy", "fu", "fd"):
-        walk(arch.get("blocks", {}).get(key))
-    return out
+    return {info["zone"]: max(info["network_time_constants_h"])
+            for info in arch["blocks"].values() if "network_time_constants_h" in info}
 
 
 def _build_ensemble_spread(

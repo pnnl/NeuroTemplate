@@ -13,7 +13,6 @@ from neurotemplate.modeling.config import ModelingConfig as Config
 from neurotemplate.modeling.dynamics import get_dynamics
 from neurotemplate.modeling.loss import build_loss
 from model_fixtures import model_cfg, uniform_history, unit_stats
-from neurotemplate.modeling.contract import normalized_core
 
 NY, NU, ND = 2, 1, 1
 P = 6
@@ -33,7 +32,7 @@ def build(history_steps: int):
     cfg = make_cfg(history_steps)
     system = get_dynamics(cfg, nm_mapping(), unit_stats(nm_mapping()))
     loss = build_loss(
-        cfg=cfg, raw_model=normalized_core(system), system=system,
+        cfg=cfg, system=system,
         grad_masks={}, nm_mapping=nm_mapping(), norm_stats=unit_stats(nm_mapping()),
     )
     return cfg, loss

@@ -7,10 +7,8 @@ window, each of them time-ordered oldest-first.
 
     [ y_0 .. y_{a-1} | u_0 .. u_{b-1} | d_0 .. d_{c-1} ]      steps = (a, b, c)
 
-Every block that wants a *part* of that — the newest timestep, one key's
-block, one zone's columns, each column at its own lag — is asking the same
-question about the same layout, so the arithmetic lives here once rather
-than in each block.
+Reading each column at its own lag out of that layout is one question, asked by
+the learned families and the policy, so the arithmetic lives here once.
 
 These are pure position calculations: they depend only on (widths, steps),
 never on the data, so blocks compute them once at construction.
@@ -26,34 +24,6 @@ def key_blocks(widths: tuple[int, ...], steps: tuple[int, ...]) -> list[slice]:
         slices.append(slice(offset, offset + rows * width))
         offset += rows * width
     return slices
-
-
-def last_step(widths: tuple[int, ...], steps: tuple[int, ...]) -> list[slice]:
-    """One slice per key, covering just the newest timestep of that key.
-
-    The newest step is a contiguous chunk at the end of each key's block,
-    so this needs no gather — just a slice.
-    """
-    return [
-        slice(block.stop - width, block.stop)
-        for block, width in zip(key_blocks(widths, steps), widths)
-    ]
-
-
-def time_major(widths: tuple[int, ...], steps: int) -> list[int]:
-    """Permutation that reorders a key-major window, every key `steps` rows
-    deep, to time-major.
-
-    Result is the index list for `[y_0,u_0,d_0, y_1,u_1,d_1, ...]` — the
-    layout a sequence model (an RNN) reads.
-    """
-    blocks = key_blocks(widths, (steps,) * len(widths))
-    return [
-        block.start + t * width + j
-        for t in range(steps)
-        for block, width in zip(blocks, widths)
-        for j in range(width)
-    ]
 
 
 def per_step(block: slice, width: int, steps: int) -> list[slice]:

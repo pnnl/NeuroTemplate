@@ -154,12 +154,12 @@ from guesses:
 "zone": {"Y": ["Zone Temp"], "U": [], "D": ["Outdoor Temp", "Solar", "Occupied"],
          "driven_by": ["Delivered Heat [kW]"], "model": "rc_network",
          "ambient": "Outdoor Temp", "solar": "Solar", "scale": {"Delivered Heat [kW]": 1.0},
-         "params": {"network": json.load(open("ladder/zone.json"))}},
+         "params": {"rc_network": json.load(open("ladder/zone.json"))}},
 # commanded: the heat is the zone's U, and there is no thermostat block
 "zone": {"Y": ["Zone Temp"], "U": ["Heat Command [kW]"],
          "D": ["Outdoor Temp", "Solar", "Occupied"], "model": "rc_network",
          "ambient": "Outdoor Temp", "solar": "Solar", "scale": {"Heat Command [kW]": 1.0},
-         "params": {"network": json.load(open("ladder/zone.json"))}},
+         "params": {"rc_network": json.load(open("ladder/zone.json"))}},
 ```
 
 Training then fits every parameter inside its box by the rollout loss. That
@@ -203,6 +203,21 @@ def block_mapping(nm_mapping, cfg):
 There is no conduction between blocks: they interact only through shared
 inputs, `reads` and `driven_by`.
 
+**Picking a family takes one line.** Without a hook, the model is one block over
+every column. With one, a block takes its family from the first of these that
+names one, and every run prints which it took and from where:
+
+1. `block_models: {zone: nssm}` in the config;
+2. the block's own `model` in `block_mapping`;
+3. `model` in the config.
+
+So a hook that names no families swaps every block by changing `model`, and any
+one block by a line of `block_models`. Any family can sit in any block. `params`
+is keyed by the family that reads it, `{"rc_network": ...}` or `{"thermostat": ...}`,
+so a block keeps its priors while it is swapped out of that family. The columns a
+family needs still have to be declared: a block swapped into `gru` needs one lag
+for every column it reads, and the build says so.
+
 ### Declaring what a column is
 
 A block can also say what its input columns are. The model then gets that
@@ -237,9 +252,36 @@ def custom_models():
     return {"my_zone": lambda cfg, nm_mapping, norm_stats: MyZone(...)}
 ```
 
-- It is one `torch.nn.Module` over every column: `block_mapping` returns
-  `None` and every head is a `RegressionHead`. A bound or a level belongs
-  inside the model; `neurotemplate.modeling.heads` has the activations.
+It is the same contract the built-in families are behind: each is a
+`stepper.Stepper` (normalise, derive inputs, core, residual, heads, physical
+units) around a core, and the pieces are yours to use. A short `forward` over
+them is the natural way to write what blocks cannot say, such as a signal no
+column records:
+
+```python
+from neurotemplate.modeling.contract import named_columns
+from neurotemplate.modeling.thermal import RCZone, thermostat
+
+class Building(nn.Module):
+    def __init__(self, nm_mapping, window, dt_h):
+        super().__init__()
+        self.columns = nm_mapping
+        self.hvac = thermostat(json.load(open("ladder/hvac.thermostat.json")))
+        self.zone = RCZone(json.load(open("ladder/zone.json")), ["Heat"], window, dt_h)
+
+    def forward(self, y, u, d):
+        c = named_columns(self.columns, y, u, d)
+        heat = self.hvac(u[:, -1], c["Zone"][:, -1])
+        # A meter reports a step late; `heat` is the step being taken.
+        held = torch.cat([c["Heat"][:, 1:], heat[:, None]], dim=1)
+        return torch.stack([self.zone(c["Zone"], c["Outdoor"], held), heat], dim=-1)
+```
+
+- It is one `torch.nn.Module` over every column, so `block_mapping` returns
+  `None`: blocks are the built-in families' structure. A bound or a level goes
+  inside the model. If it owns a `head_stack`, as a `Stepper` does when handed one,
+  the library's level metrics and calibration use it; a head declared in
+  `data_head_config` that the model does not own is refused.
 - State that outlives the window (a filtered mass, a latch) goes through two
   methods, `rollout_state()` and `set_rollout_state(state)`, the state one
   `[batch, width]` tensor. When the state is `None` the model is cold and
@@ -252,9 +294,9 @@ def custom_models():
   model with no gradient path to U. For a fixed model, set `lr: 0`:
   nothing trains, the run is the model as built, and the reportcard says
   so. The training loss scores each output scaled by its
-  `norm_stats` stretch. `contract.Normalized` puts a model that computes in
+  `norm_stats` stretch. `stepper.Stepper` puts a core that computes in
   normalised units behind the contract, as the built-in families are.
-- The sampled gradient penalty is a built-in family's (`grad_gain: 0`).
+- The sampled gradient penalty differentiates its contract call, from cold.
   Export to ONNX or C needs the operators in `export.trace.ALLOWED_OPS`;
   `--format torch` takes any.
 - The run keeps a copy of the hooks file, so the model's code travels with
