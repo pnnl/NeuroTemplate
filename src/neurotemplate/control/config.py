@@ -158,9 +158,9 @@ class ControlConfig:
     # ── Runtime ──────────────────────────────────────────────────
     seed: int = -1
     device: Optional[str] = None
-    # Torch CPU threads for this run (`torch.set_num_threads`); None keeps
-    # torch's own choice, one per core. These models are small enough that
-    # one thread was fastest for every family and batch size measured.
+    # Torch CPU threads for this run; None means one per core. These models are
+    # small enough that one thread was fastest for every family and batch size
+    # measured.
     threads: Optional[int] = 1
 
     # ── Logging ──────────────────────────────────────────────────

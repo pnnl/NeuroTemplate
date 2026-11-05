@@ -74,11 +74,11 @@ def resolve_device(requested: Optional[Union[str, torch.device]] = None) -> torc
 
 
 def set_threads(threads: Optional[int]) -> None:
-    """Torch's CPU thread count for the rest of the process, or torch's own
-    choice when None. Process-wide, which is why each run sets it from its
-    own config rather than any library code deciding it."""
-    if threads is not None:
-        torch.set_num_threads(threads)
+    """Torch's CPU thread count for the rest of the process; None means one per
+    core. Process-wide, which is why each run sets it from its own config rather
+    than any library code deciding it. Importing this package starts OpenMP at
+    one thread (see `neurotemplate/__init__.py`), so None has to ask for the rest."""
+    torch.set_num_threads(os.cpu_count() if threads is None else threads)
 
 
 # ── Build Trainer ────────────────────────────────────────────────

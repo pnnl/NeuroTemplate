@@ -155,9 +155,9 @@ class ModelingConfig:
     # ---- RUNTIME -------------------------------------------------------------
     seed: int = -1
     device: Optional[str] = None
-    # Torch CPU threads for this run (`torch.set_num_threads`); None keeps
-    # torch's own choice, one per core. These models are small enough that
-    # one thread was fastest for every family and batch size measured.
+    # Torch CPU threads for this run; None means one per core. These models are
+    # small enough that one thread was fastest for every family and batch size
+    # measured.
     threads: Optional[int] = 1
     # How many independently-seeded models train_and_evaluate trains (each at
     # cfg.seed + i) and evaluates, reporting the min/median/max spread across
