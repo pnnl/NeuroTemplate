@@ -17,7 +17,7 @@ from neurotemplate.control.closed_loop import (
 )
 from neurotemplate.control.losses import resolve_objective
 from neurotemplate.control.policy import build_policy
-from neurotemplate.control.scenarios import build_window_dict, horizons, scored_steps
+from neurotemplate.control.windows import build_window_dict, horizons, scored_steps
 from control_fixtures import (
     BAND_GAINS, BAND_LOSSES, POWER_LOSSES, TARIFF, TARIFF_SCALE, full_setup,
 )

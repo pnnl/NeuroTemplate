@@ -13,7 +13,7 @@ import torch.nn as nn
 from neuromancer.trainer import Trainer
 
 from neurotemplate.common.data_utils import compute_norm_stats
-from neurotemplate.control.sensitivity import command_sensitivity
+from neurotemplate.metrics.sensitivity import command_sensitivity
 from neurotemplate.modeling import experiment
 from neurotemplate.modeling.contract import Windowed
 from neurotemplate.modeling.pipeline import train_and_evaluate

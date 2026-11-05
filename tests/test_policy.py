@@ -1,7 +1,7 @@
 import pytest
 import torch
 
-from neurotemplate.control.scenarios import build_window_dict, horizons, scored_steps
+from neurotemplate.control.windows import build_window_dict, horizons, scored_steps
 from neurotemplate.control.policy import (
     _NormalizedNet,
     _key_gather,

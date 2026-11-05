@@ -5,7 +5,7 @@ import math
 import pytest
 import torch
 
-from neurotemplate.common.metrics import skill
+from neurotemplate.metrics.rollout import skill
 
 
 def test_skill_is_measured_against_persistence():

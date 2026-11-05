@@ -158,7 +158,7 @@ are the readout most likely to tell you a surrogate is wrong for control when te
 Without this hook they do not run, and the run says so.
 
 ```python
-from neurotemplate.modeling.scenarios import SynthSpec
+from neurotemplate.metrics.physics import SynthSpec
 
 def synth_cfg(nm_mapping, norm_stats):
     cool_sp, zone = "Zone Cooling Setpoint [degC]", "Zone Air Temperature [degC]"

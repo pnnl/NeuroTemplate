@@ -10,7 +10,7 @@ from neurotemplate.control.losses import resolve_objective
 from neurotemplate.control.pipeline import evaluate_closed_loop, evaluation_windows
 from neurotemplate.control.plan import plan_on_surrogate
 from neurotemplate.control.policy import build_policy
-from neurotemplate.control.scenarios import horizons, scored_steps
+from neurotemplate.control.windows import horizons, scored_steps
 from control_fixtures import HIGH, LOW, SETPT, full_setup, make_nm_mapping, make_tracking_plant
 from model_fixtures import steps
 

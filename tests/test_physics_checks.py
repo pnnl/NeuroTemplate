@@ -17,7 +17,7 @@ from neuromancer.system import Node, SystemPreview
 from neurotemplate.modeling.contract import Windowed, contract_model
 from neurotemplate.modeling.stepper import Stepper
 from neurotemplate.modeling.hinge import Hinges
-from neurotemplate.modeling.scenarios import (
+from neurotemplate.metrics.physics import (
     SynthSpec,
     build_scenarios,
 )

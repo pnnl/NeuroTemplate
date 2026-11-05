@@ -7,7 +7,7 @@ the summary are the params MLflow logged.
 """
 
 
-from neurotemplate.common.run_summary import (
+from neurotemplate.metrics.run_summary import (
     build_run_summary,
 )
 from neurotemplate.modeling.config import ModelingConfig

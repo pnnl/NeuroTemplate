@@ -8,7 +8,7 @@ U/D/yn window ending at i, so it applies that fresh command, and writes
 yn[i+1] (fed back). With start_iter = Hmax-1 and explicit nsteps = P,
 predicted yn occupies indices [Hmax : Hmax+P], aligned with the reference
 columns' slice [Hmax : Hmax+P], and the commands that produced it occupy
-[Hmax-1 : Hmax-1+P]. `scenarios.scored_steps` is that alignment, in one place.
+[Hmax-1 : Hmax-1+P]. `windows.scored_steps` is that alignment, in one place.
 
 A stateful surrogate needs its hidden state cleared between batches, which is
 all init_func does here — it warms itself from the same H_sys-wide window a
@@ -29,7 +29,7 @@ from neuromancer.loss import PenaltyLoss
 from neurotemplate.control.losses import (
     POWER, LossTerm, apply_map, resolve_objective, window_power_mean,
 )
-from neurotemplate.control.scenarios import horizons, scored_series, scored_steps
+from neurotemplate.control.windows import horizons, scored_series, scored_steps
 from neurotemplate.modeling.dynamics import make_reset_init
 from neurotemplate.modeling.rollout import WindowedSystem
 from neurotemplate.hooks import load_control_hooks
@@ -41,7 +41,7 @@ class ForecastSystem(WindowedSystem):
     """A WindowedSystem whose forecast keys are trimmed to the rollout after it runs.
 
     D, t and R arrive `forecast_tail` rows longer than the rollout so the policy's
-    preview reads real rows to the end (see `scenarios`). Every loss, metric and plot
+    preview reads real rows to the end (see `windows`). Every loss, metric and plot
     slices them with `scored_steps`, which runs to the end of the key, so they are cut
     back to yn's length here, once.
     """
@@ -78,7 +78,7 @@ def power_term(cfg, nm_mapping: dict[str, list[str]]):
     is: `power_metric`, or else the sum of the `power_channels` the surrogate predicts.
 
     Signature is `(yn, U, D) -> [batch, time]` over the *scored horizon*
-    slices, physical units. Shared with `control.objective` so the shape check
+    slices, physical units. Shared with `metrics.objective` so the shape check
     sweeps exactly the quantity the loss minimizes, not a re-derivation of it.
     """
     hooks = load_control_hooks(cfg)
@@ -106,7 +106,7 @@ def build_control_loss(
     batch mean of `build_window_objective`'s terms.
 
     Each term reads the scored horizon of the rollout — the P steps after the
-    warm-up, with U read one index earlier (see `scenarios.scored_steps`) —
+    warm-up, with U read one index earlier (see `windows.scored_steps`) —
     and is reduced by `losses.window_power_mean`, so a gain tuned at P=48 means the
     same thing at P=288. Every series is in physical units.
 
@@ -116,7 +116,7 @@ def build_control_loss(
     here rather than substituting a proxy.
 
     Nothing here checks that a gain suits the magnitude of what it multiplies
-    — that is `control.objective`, run once on a real batch before training,
+    — that is `metrics.objective`, run once on a real batch before training,
     because it takes a forward pass to know.
     """
     objective, keys, term_value = _term_values(cfg, sysid_cfg, nm_mapping)

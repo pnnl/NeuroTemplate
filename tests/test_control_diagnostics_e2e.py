@@ -16,7 +16,7 @@ from neurotemplate.control.closed_loop import (
     build_closed_loop, build_control_loss, build_problem, power_term,
 )
 from neurotemplate.control.losses import resolve_objective
-from neurotemplate.control.objective import (
+from neurotemplate.metrics.objective import (
     power_diagnostics,
     objective_balance,
     objective_notes,
@@ -26,8 +26,8 @@ from neurotemplate.control.pipeline import (
     evaluate_closed_loop,
 )
 from neurotemplate.control.policy import build_policy, describe_policy
-from neurotemplate.control.reportcard import render_control_reportcard
-from neurotemplate.control.scenarios import build_loaders, horizons
+from neurotemplate.metrics.control_card import render_control_reportcard
+from neurotemplate.control.windows import build_loaders, horizons
 from control_fixtures import (
     BAND_GAINS, BAND_LOSSES, POWER_LOSSES, TARIFF, TARIFF_SCALE, full_setup,
 )

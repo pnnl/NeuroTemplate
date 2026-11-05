@@ -21,7 +21,7 @@ channels out of eight on a real run.
 import pytest
 import torch
 
-from neurotemplate.common.metrics import rollout_stability
+from neurotemplate.metrics.rollout import rollout_stability
 
 
 def _cycle(n: int = 100, amp: float = 2.0) -> torch.Tensor:

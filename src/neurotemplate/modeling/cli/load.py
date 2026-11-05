@@ -10,7 +10,7 @@ from datetime import datetime
 from pathlib import Path
 
 from neurotemplate.common.data_utils import get_grad_masks
-from neurotemplate.common.metrics import skill
+from neurotemplate.metrics.rollout import skill
 from neurotemplate.modeling.experiment import set_seeds
 from neurotemplate.modeling.gradient_sampling import SampledGradientPenalty, signed_model
 from neurotemplate.modeling.load import evaluate_trained, load_trained_dynamics

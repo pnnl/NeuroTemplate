@@ -23,7 +23,7 @@ from neurotemplate.modeling.heads import (
     HeadStack,
     RegressionHead,
 )
-from neurotemplate.modeling.scenarios import SynthSpec
+from neurotemplate.metrics.physics import SynthSpec
 
 if os.environ.get("RUNTIME_TYPING", 0):
     from beartype import beartype

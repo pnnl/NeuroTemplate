@@ -4,7 +4,7 @@ import torch
 from neurotemplate.control.closed_loop import build_closed_loop
 from neurotemplate.control.losses import resolve_objective
 from neurotemplate.control.policy import _NormalizedNet, build_policy
-from neurotemplate.control.scenarios import (
+from neurotemplate.control.windows import (
     build_window_dict,
     horizons,
     load_control_splits,

@@ -5,7 +5,7 @@ import torch
 from neurotemplate.control.closed_loop import build_closed_loop
 from neurotemplate.control.losses import resolve_objective
 from neurotemplate.control.policy import _per_step_bounds, build_policy, control_box
-from neurotemplate.control.scenarios import build_window_dict, horizons
+from neurotemplate.control.windows import build_window_dict, horizons
 from control_fixtures import SETPT, full_setup
 
 LOW, HIGH = "Comfort Low [°C]", "Comfort High [°C]"
@@ -33,7 +33,7 @@ def test_a_bounded_setpoint_stays_inside_the_band_at_every_step():
     u = out["U"][:, hmax - 1:, nm["U"].index(SETPT)]
     r_columns = resolve_objective(s["cfg"], nm).r_columns
     # The command at U[i] was chosen from the signals at step i, the band's
-    # included (see scenarios.scored_steps), so both are read from hmax - 1.
+    # included (see windows.scored_steps), so both are read from hmax - 1.
     low = out["R"][:, hmax - 1:, r_columns.index(LOW)]
     high = out["R"][:, hmax - 1:, r_columns.index(HIGH)]
     steps = min(u.shape[1], low.shape[1])

@@ -8,7 +8,7 @@ one band, one trajectory through it, and the numbers that should fall out.
 import pytest
 import torch
 
-from neurotemplate.control.metrics import (
+from neurotemplate.metrics.control import (
     comfort_metrics,
     energy_metrics,
     hours_per_step,

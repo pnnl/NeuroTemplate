@@ -14,9 +14,9 @@ import sys
 from neurotemplate.control.load import load_trained_policy
 from neurotemplate.control.pipeline import evaluate_closed_loop
 from neurotemplate.control.plan import plan_on_surrogate
-from neurotemplate.control.reportcard import render_gap_report
-from neurotemplate.control.scenarios import load_control_splits
-from neurotemplate.common.reportcard import RESULTS_DIR
+from neurotemplate.metrics.control_card import render_gap_report
+from neurotemplate.control.windows import load_control_splits
+from neurotemplate.metrics.card import RESULTS_DIR
 from neurotemplate.modeling.experiment import set_seeds, set_threads
 from neurotemplate.modeling.load import resolve_artifacts_dir
 

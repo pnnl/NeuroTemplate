@@ -345,7 +345,7 @@ def describe_dynamics(dyn_sys: SystemPreview, cfg: ModelingConfig) -> dict:
       - blocks: per-block descriptors, `{name: info}`; a custom model is one
       - hinges: the setpoint hinges, or None
 
-    Used by reportcard.render_reportcard.
+    Used by model_card.render_reportcard.
     """
     model = contract_model(dyn_sys)
     ny, nu, nd = dyn_sys.nodes[0].callable.widths

@@ -25,7 +25,7 @@ from pathlib import Path
 
 from neurotemplate.common.data_utils import get_data
 from neurotemplate.control.load import load_trained_policy
-from neurotemplate.control.scenarios import load_control_splits
+from neurotemplate.control.windows import load_control_splits
 from neurotemplate.export.dynamics import export_model
 from neurotemplate.export.package import GRAPH_SUFFIX
 from neurotemplate.export.policy import export_policy

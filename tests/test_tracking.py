@@ -42,7 +42,7 @@ def test_a_finished_run_carries_its_state_dict_and_no_pickled_model(
     )
     from neurotemplate.control.pipeline import train_policy
     from neurotemplate.control.policy import build_policy
-    from neurotemplate.control.scenarios import build_loaders
+    from neurotemplate.control.windows import build_loaders
 
     monkeypatch.chdir(tmp_path)   # MLflow's default artifact root is ./mlruns
     s = full_setup(location=f"sqlite:///{tmp_path / 'mlflow.db'}",

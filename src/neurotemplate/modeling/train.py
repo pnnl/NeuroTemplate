@@ -22,7 +22,7 @@ from typing import Optional
 from neurotemplate._typing import beartype
 
 from neurotemplate.common.config import fields_set, settings_report
-from neurotemplate.common.run_summary import write_run_summary
+from neurotemplate.metrics.run_summary import write_run_summary
 from neurotemplate.common.tracking import tracked_run
 from neurotemplate.hooks import MODELING_SNAPSHOT, load_modeling_hooks, snapshot_hooks
 from neurotemplate.modeling.config import ModelingConfig

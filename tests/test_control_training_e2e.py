@@ -18,7 +18,7 @@ from neurotemplate.control.pipeline import (
     evaluate_closed_loop, train_policy,
 )
 from neurotemplate.control.policy import build_policy
-from neurotemplate.control.scenarios import (
+from neurotemplate.control.windows import (
     build_loaders, horizons, load_control_splits, scored_steps,
 )
 from control_fixtures import (

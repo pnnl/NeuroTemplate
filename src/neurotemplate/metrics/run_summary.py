@@ -18,7 +18,7 @@ reportcards.
 from typing import Any, Optional
 
 from neurotemplate._typing import beartype
-from neurotemplate.common.reportcard import RESULTS_DIR
+from neurotemplate.metrics.card import RESULTS_DIR
 
 
 SCHEMA_VERSION = 1

@@ -22,7 +22,7 @@ from typing import Optional
 import torch
 
 from neurotemplate.control.losses import POWER, Objective
-from neurotemplate.control.scenarios import scored_steps
+from neurotemplate.control.windows import scored_steps
 from neurotemplate._typing import beartype
 
 

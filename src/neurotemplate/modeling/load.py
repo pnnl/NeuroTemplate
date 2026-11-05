@@ -24,7 +24,7 @@ from neurotemplate.modeling.experiment import resolve_device, set_seeds
 from neurotemplate.modeling.heads import HeadStack
 from neurotemplate.modeling.dynamics import get_dynamics
 from neurotemplate.modeling.pipeline import TestResults, evaluate_and_plot
-from neurotemplate.modeling.scenarios import SynthSpec
+from neurotemplate.metrics.physics import SynthSpec
 from neurotemplate.hooks import MODELING_SNAPSHOT, load_modeling_hooks, run_hooks_path
 
 from neurotemplate._typing import beartype

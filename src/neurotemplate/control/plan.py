@@ -39,7 +39,7 @@ from neurotemplate.common.data_utils import NormStats
 from neurotemplate.control.closed_loop import (
     build_closed_loop, build_control_loss, build_window_objective,
 )
-from neurotemplate.control.objective import ObjectiveBalance, objective_balance
+from neurotemplate.metrics.objective import ObjectiveBalance, objective_balance
 from neurotemplate.control.pipeline import (
     ControlResults, evaluation_windows, score_rollout,
 )

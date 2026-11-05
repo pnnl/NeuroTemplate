@@ -1,7 +1,7 @@
 """
 Per-run control reportcard: the verdicts on one controller, short enough to read.
 
-The control-side counterpart of modeling/reportcard.py, on the same rules:
+The control-side counterpart of metrics/model_card.py, on the same rules:
 exceptions rather than inventories, each check explained once, the full
 output of every instrument in the run's `results/` folder.
 
@@ -34,13 +34,13 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Optional
 
-from neurotemplate.common.reportcard import RESULTS_DIR, _names, _section
+from neurotemplate.metrics.card import RESULTS_DIR, _names, _section
 from neurotemplate.control.losses import Objective, resolve_objective
-from neurotemplate.control.metrics import SATURATION_TOL
-from neurotemplate.control.objective import ObjectiveBalance, PowerDiagnostics
-from neurotemplate.control.scenarios import horizons
-from neurotemplate.control.sensitivity import CommandSensitivity
-from neurotemplate.modeling.reportcard import MAX_ROWS, WORST_ROWS
+from neurotemplate.metrics.control import SATURATION_TOL
+from neurotemplate.metrics.objective import ObjectiveBalance, PowerDiagnostics
+from neurotemplate.control.windows import horizons
+from neurotemplate.metrics.sensitivity import CommandSensitivity
+from neurotemplate.metrics.model_card import MAX_ROWS, WORST_ROWS
 
 from neurotemplate._typing import beartype
 
@@ -361,7 +361,7 @@ def render_control_reportcard(
                      forward pass; `trained_balance` the same batch after.
         power:       Optional objective.power_diagnostics(...).
         objective_notes: Optional objective.objective_notes(...) prose.
-        sensitivity: Optional sensitivity.command_sensitivity(...): per
+        sensitivity: Optional metrics.sensitivity.command_sensitivity(...): per
                      command, how often the surrogate does not move with it.
 
     Returns:

@@ -10,7 +10,7 @@ and a band jump the controller ignores.
 import pytest
 import torch
 
-from neurotemplate.control.metrics import (
+from neurotemplate.metrics.control import (
     response_audit,
 )
 

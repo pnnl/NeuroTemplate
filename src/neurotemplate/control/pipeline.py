@@ -19,10 +19,10 @@ from neuromancer.trainer import Trainer
 
 from neurotemplate.common.data_utils import NormStats, axis_label
 from neurotemplate.common.progress import Progress
-from neurotemplate.common.metrics import metric_key
-from neurotemplate.common.reportcard import RESULTS_DIR, write_reportcard as _write_reportcard
+from neurotemplate.metrics.rollout import metric_key
+from neurotemplate.metrics.card import RESULTS_DIR, write_reportcard as _write_reportcard
 from neurotemplate.common.tracking import save_checkpoint
-from neurotemplate.control.metrics import (
+from neurotemplate.metrics.control import (
     ActuationMetrics,
     ComfortMetrics,
     EnergyMetrics,
@@ -39,7 +39,7 @@ from neurotemplate.control.metrics import (
 from neurotemplate.control.losses import POWER, Objective, resolve_objective
 from neurotemplate.control.closed_loop import power_channels, power_term
 from neurotemplate.control.policy import control_box
-from neurotemplate.control.scenarios import (
+from neurotemplate.control.windows import (
     build_window_dict_multi,
     horizons,
     scored_series,

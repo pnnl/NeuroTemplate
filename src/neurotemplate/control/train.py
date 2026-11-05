@@ -28,8 +28,8 @@ from neurotemplate._typing import beartype
 import mlflow
 
 from neurotemplate.common.config import fields_set, settings_report
-from neurotemplate.common.reportcard import RESULTS_DIR
-from neurotemplate.common.run_summary import write_run_summary
+from neurotemplate.metrics.card import RESULTS_DIR
+from neurotemplate.metrics.run_summary import write_run_summary
 from neurotemplate.common.tracking import save_checkpoint, tracked_run
 from neurotemplate.modeling.experiment import resolve_device, set_seeds, set_threads
 
@@ -39,16 +39,16 @@ from neurotemplate.control.load import latest_model_run
 from neurotemplate.control.losses import (
     extend_norm_stats, fill_reference_scale, resolve_objective,
 )
-from neurotemplate.control.scenarios import (
+from neurotemplate.control.windows import (
     build_loaders, horizons, load_control_splits, shortest_test_rollout,
 )
 from neurotemplate.control.controller import build_controller, describe_controller
 from neurotemplate.control.policy import unread_columns
-from neurotemplate.control.sensitivity import command_sensitivity
+from neurotemplate.metrics.sensitivity import command_sensitivity
 from neurotemplate.control.closed_loop import (
     build_closed_loop, build_control_loss, build_problem, power_term,
 )
-from neurotemplate.control.objective import (
+from neurotemplate.metrics.objective import (
     format_objective_report,
     objective_balance,
     objective_notes,
@@ -57,7 +57,7 @@ from neurotemplate.control.objective import (
     power_diagnostics,
     run_objective_pass,
 )
-from neurotemplate.control.reportcard import render_control_reportcard
+from neurotemplate.metrics.control_card import render_control_reportcard
 from neurotemplate.control.pipeline import (
     ControlResults,
     train_policy,

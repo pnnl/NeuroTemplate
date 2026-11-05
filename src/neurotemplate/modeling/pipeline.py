@@ -20,7 +20,7 @@ sees it: the scenarios are assertions on the trained surrogate, not a loss.
 every number this module produces is otherwise a single seed's draw, and this
 is the one place that both trains a final model and produces the reportcard,
 so it is the DRY home for turning several draws into a reported spread. See
-ModelingConfig.ensemble_seeds and reportcard.EnsembleSpread.
+ModelingConfig.ensemble_seeds and model_card.EnsembleSpread.
 """
 
 import math
@@ -49,7 +49,7 @@ from neurotemplate.common.data_utils import (
 )
 from neurotemplate.modeling.experiment import fit_dynamics, set_seeds
 from neurotemplate.modeling.heads import HeadStack, RegressionHead
-from neurotemplate.common.metrics import (
+from neurotemplate.metrics.rollout import (
     ChannelMetrics,
     RolloutStability,
     metric_key,
@@ -59,17 +59,17 @@ from neurotemplate.common.metrics import (
     skill,
     stability_to_dict,
 )
-from neurotemplate.common.reportcard import RESULTS_DIR, write_reportcard as _write_reportcard
+from neurotemplate.metrics.card import RESULTS_DIR, write_reportcard as _write_reportcard
 from neurotemplate.modeling.contract import contract_model
 from neurotemplate.modeling.dynamics import describe_dynamics, fill_context
 from neurotemplate.modeling.plotting import plot_predictions, plot_synthetic
-from neurotemplate.modeling.reportcard import (
+from neurotemplate.metrics.model_card import (
     EnsembleSpread,
     render_reportcard as _render_reportcard,
     spread_stats,
 )
-from neurotemplate.modeling.whiteness import Whiteness, whiteness, whiteness_to_dict
-from neurotemplate.modeling.scenarios import (
+from neurotemplate.metrics.whiteness import Whiteness, whiteness, whiteness_to_dict
+from neurotemplate.metrics.physics import (
     ReadoutSummary,
     ScenarioOutcome,
     ScenarioResult,
@@ -188,7 +188,7 @@ class TestResults:
     # Rollout length the scenarios ran for, so the reportcard can state it.
     physics_steps: Optional[int] = None
     # Order statistics for the Y channels that are not thermal states. These
-    # carry no verdict — see scenarios.ReadoutSummary.
+    # carry no verdict — see physics.ReadoutSummary.
     readouts: Optional[list[ReadoutSummary]] = None
     # The same metrics for persistence — hold the last seeded state for the
     # whole window — as the bar a surrogate has to clear.

@@ -38,7 +38,7 @@ from neurotemplate.common.data_utils import NormStats
 from neurotemplate.control.closed_loop import build_closed_loop, build_window_objective
 from neurotemplate.control.losses import resolve_objective
 from neurotemplate.control.policy import control_box, with_control_bounds
-from neurotemplate.control.scenarios import horizons
+from neurotemplate.control.windows import horizons
 from neurotemplate.control.solver import SharePlan, share_of, solve
 
 

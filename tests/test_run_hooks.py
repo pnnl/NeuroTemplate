@@ -20,7 +20,7 @@ from neurotemplate.control.closed_loop import (
 )
 from neurotemplate.control.pipeline import train_policy
 from neurotemplate.control.policy import build_policy
-from neurotemplate.control.scenarios import build_loaders, build_window_dict
+from neurotemplate.control.windows import build_loaders, build_window_dict
 from neurotemplate.hooks import CONTROL_SNAPSHOT, load_control_hooks, snapshot_hooks
 from control_fixtures import full_setup, make_norm_stats
 

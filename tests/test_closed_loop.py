@@ -5,7 +5,7 @@ shapes, and gradients reach ONLY the policy (dynamics stays frozen).
 
 import torch
 
-from neurotemplate.control.scenarios import (
+from neurotemplate.control.windows import (
     build_window_dict, build_loaders, horizons, scored_steps,
 )
 from neurotemplate.control.policy import build_policy

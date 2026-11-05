@@ -264,7 +264,7 @@ for example the same week with the price peak moved, point its `data_file` at a
 
 ```python
 from neurotemplate.control.pipeline import evaluate_closed_loop
-from neurotemplate.control.scenarios import load_control_splits
+from neurotemplate.control.windows import load_control_splits
 
 _, cl_system, cfg, sysid_cfg, nm_mapping, norm_stats = load_trained_policy(run_id)
 cfg.data_file = "data_shifted.yaml"

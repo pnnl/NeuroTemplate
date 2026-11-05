@@ -9,14 +9,14 @@ import torch
 from neurotemplate.control.closed_loop import (
     build_closed_loop, build_control_loss, build_problem,
 )
-from neurotemplate.control.objective import (
+from neurotemplate.metrics.objective import (
     DOMINANCE_FACTOR,
     objective_balance,
     power_diagnostics,
     run_objective_pass,
 )
 from neurotemplate.control.policy import build_policy
-from neurotemplate.control.scenarios import build_loaders
+from neurotemplate.control.windows import build_loaders
 from control_fixtures import BAND_LOSSES, POWER_LOSSES, full_setup
 
 

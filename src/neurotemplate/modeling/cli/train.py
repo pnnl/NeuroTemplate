@@ -18,7 +18,7 @@ from neurotemplate.common.config import load_config_from_cli, MODEL_CONFIG_DIR
 from neurotemplate.common.tracking import artifact_file
 from neurotemplate.modeling.config import ModelingConfig
 from neurotemplate.modeling.pipeline import TestResults
-from neurotemplate.modeling.reportcard import MAX_ROWS, WORST_ROWS, ranked_skills
+from neurotemplate.metrics.model_card import MAX_ROWS, WORST_ROWS, ranked_skills
 from neurotemplate.modeling.train import train_model
 
 

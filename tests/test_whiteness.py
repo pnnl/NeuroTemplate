@@ -3,7 +3,7 @@ and a missing daily driver do not, and the daily one is named as daily."""
 
 import numpy as np
 
-from neurotemplate.modeling.whiteness import whiteness
+from neurotemplate.metrics.whiteness import whiteness
 
 STEP_S = 300.0  # 5-minute data
 N = 288 * 14    # two weeks

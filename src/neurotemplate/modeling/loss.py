@@ -115,7 +115,7 @@ def build_loss(
         )
         objectives.append(grad_loss)
 
-    # The physics scenarios (modeling/scenarios.py) deliberately contribute
+    # The physics scenarios (metrics/physics.py) deliberately contribute
     # nothing here. They are assertions run against the trained surrogate, not
     # a training signal — see that module's header. Physicality *is* enforced
     # during training, by the gradient sign penalty above.
