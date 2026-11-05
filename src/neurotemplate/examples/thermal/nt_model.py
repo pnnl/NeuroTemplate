@@ -16,11 +16,11 @@ def block_mapping(nm_mapping, cfg):
                  "model": "rc_network", "ambient": OUTDOOR, "solar": SOLAR, "scale": {HEAT: 1.0},
                  "params": {"rc_network": json.load(open("ladder/zone.json"))}},
         "meter": {"Y": [POWER], "U": [], "D": [OUTDOOR], "driven_by": [HEAT], "model": "mlp",
-                  "residual": False},
+                  "predicts": "value"},
     }
 
 
-def data_head_config(nm_mapping, norm_stats):
+def output_heads(nm_mapping, norm_stats):
     return HeadStack([BoundedHead(0.0, float("inf")) if c == POWER else RegressionHead()
                       for c in nm_mapping["Y"]], nm_mapping["Y"])
 

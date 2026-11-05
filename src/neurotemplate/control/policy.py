@@ -216,8 +216,9 @@ def _window_table(cfg, nm_mapping: dict[str, list[str]],
     if not any(c in cfg.policy_window for c in nm_mapping["Y"]):
         raise ValueError("policy_window lists no Y column, so the policy could not see the "
                          f"plant at all. Y: {nm_mapping['Y']}.")
-    return {key: [(cfg.policy_window[c]["past"], cfg.policy_window[c].get("future", 0))
-                  if c in cfg.policy_window else None for c in cols]
+    window = cfg.window_steps
+    return {key: [(window[c]["past"], window[c].get("future", 0))
+                  if c in window else None for c in cols]
             for key, cols in columns.items()}
 
 

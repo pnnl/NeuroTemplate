@@ -40,7 +40,6 @@ from neurotemplate.control.losses import POWER, Objective, resolve_objective
 from neurotemplate.control.policy import control_box
 from neurotemplate.control.scenarios import (
     build_window_dict_multi,
-    eval_pred_steps,
     horizons,
     scored_series,
     scored_steps,
@@ -158,7 +157,7 @@ def evaluate_closed_loop(
     controller is not rolled out a second time.
     """
     data, source_idx = evaluation_windows(cfg, sysid_cfg, test_dfs, nm_mapping)
-    cl_system.nsteps = eval_pred_steps(cfg, horizons(cfg, sysid_cfg)[2])
+    cl_system.nsteps = cfg.test_horizon_steps
     t0 = tic()
     out, issued = rollout_with_commands(cl_system, data)
     eval_time_s = tic() - t0
@@ -189,12 +188,11 @@ def evaluation_windows(cfg, sysid_cfg, test_dfs: list,
 
     The test split's reference columns are fixed data, so every run — and
     every controller scored on it — is scored against the same references.
-    A closed loop rolls them out over `eval_pred_steps`.
+    A closed loop rolls them out over `test_horizon`.
     """
-    _, _, hmax = horizons(cfg, sysid_cfg)
     data = build_window_dict_multi(
-        test_dfs, cfg, sysid_cfg, nm_mapping, P=eval_pred_steps(cfg, hmax),
-        stride=cfg.test_stride,
+        test_dfs, cfg, sysid_cfg, nm_mapping, P=cfg.test_horizon_steps,
+        stride=cfg.test_stride_steps,
     )
     # source_idx is bookkeeping for plotting only; the closed-loop System
     # doesn't expect it among its inputs.

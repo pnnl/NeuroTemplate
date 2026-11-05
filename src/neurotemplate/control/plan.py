@@ -44,7 +44,6 @@ from neurotemplate.control.pipeline import (
     ControlResults, evaluation_windows, score_rollout,
 )
 from neurotemplate.control.policy import control_box, with_control_bounds
-from neurotemplate.control.scenarios import eval_pred_steps, horizons
 from neurotemplate.control.solver import SharePlan, share_of, solve
 
 
@@ -56,7 +55,7 @@ class PlanResult:
     policy: ObjectiveBalance       # the run's objective, per term
     plan: ObjectiveBalance
     steps: int                     # Adam steps the solve took
-    converged: bool                # every window stopped before plan_max_iters
+    converged: bool                # every window stopped before solver's max_iters
     starts: int
     own_start_best: float          # share of windows the controller's start won
     start_spread: float            # median over windows of (worst − best) / |best| start
@@ -93,7 +92,7 @@ def plan_on_surrogate(cfg, sysid_cfg, cl_system, policy_node: Node, test_dfs: li
     `evaluate_closed_loop`, with the commands it issued."""
     t0 = tic()
     data, source_idx = evaluation_windows(cfg, sysid_cfg, test_dfs, nm_mapping)
-    steps = eval_pred_steps(cfg, horizons(cfg, sysid_cfg)[2])
+    steps = cfg.test_horizon_steps
     loss = build_control_loss(cfg, sysid_cfg, nm_mapping)
     window_objective = build_window_objective(cfg, sysid_cfg, nm_mapping)
     with torch.no_grad():
@@ -120,8 +119,8 @@ def plan_on_surrogate(cfg, sysid_cfg, cl_system, policy_node: Node, test_dfs: li
     loop, _ = _plan_loop(plan, cfg, sysid_cfg, nm_mapping, policy_node, plant,
                          umin, umax, steps)
     batch = {key: x.repeat(starts, *[1] * (x.dim() - 1)) for key, x in data.items()}
-    result = solve(plan, lambda: window_objective(loop(dict(batch))), cfg.plan_lr,
-                   cfg.plan_rtol, cfg.plan_patience, cfg.plan_max_iters)
+    result = solve(plan, lambda: window_objective(loop(dict(batch))), cfg.solver["lr"],
+                   cfg.solver["rtol"], cfg.solver["patience"], cfg.solver["max_iters"])
 
     by_start = result.best.reshape(starts, windows)
     winner = by_start.argmin(dim=0)

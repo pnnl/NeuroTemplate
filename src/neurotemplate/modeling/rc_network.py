@@ -8,7 +8,7 @@ Two blocks that know nothing of each other. An `rc_network` block's Y is the
 zone temperature and nothing else, and its network's inputs are whatever
 columns the declaration names: a `driven_by` column (the heat a thermostat
 block produced this step), a U (a commanded heat) or a D (solar, a schedule).
-Its window is the run's `context_steps`, the history its filter places the
+Its window is the run's `context`, the history its filter places the
 hidden nodes from. `ambient` is the outdoor temperature the network conducts
 to, and at least one of its parameters is pinned: `scale` says which.
 
@@ -106,7 +106,7 @@ class ZoneBlock(_Physical):
         problems = _refuse_scale_mismatch(block, self.zone.network)
         if len(self.zone.network.nodes) > 1 and window < 2:
             problems.append(
-                "it has hidden nodes, and context_steps is what places them: the rows of "
+                "it has hidden nodes, and `context` is what places them: the history "
                 "history its filter runs over. There is no default; it is long enough when a "
                 "longer one stops changing the day-ahead error")
         if problems:

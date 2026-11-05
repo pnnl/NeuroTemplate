@@ -184,7 +184,7 @@ def _verdict_section(
     white: list[Whiteness],
     physics: Optional[list[ScenarioResult]],
     flagged: list[RolloutStability],
-    test_window: int,
+    test_horizon,
     warnings: list[str],
 ) -> str:
     lines = []
@@ -208,10 +208,10 @@ def _verdict_section(
         lines.append(f"- **Physics:** {passed} of {len(physics)} checks pass ({counts}).")
     lines.append(
         f"- **Rollout:** {len(flagged)} channel(s) ramp or drift past "
-        f"{DRIFT_RATIO_WARN:g}× the truth over {test_window} steps (Rollout)."
+        f"{DRIFT_RATIO_WARN:g}× the truth over {test_horizon} (Rollout)."
         if flagged else
         f"- **Rollout:** no channel ramps or drifts past {DRIFT_RATIO_WARN:g}× "
-        f"the truth over {test_window} steps.")
+        f"the truth over {test_horizon}.")
     lines += [f"- ⚠️ {w}" for w in warnings]
     lines.append(f"\nEvery instrument's full output is in `{RESULTS_DIR}/` beside this card.")
     return _section("Verdict", "\n".join(lines))
@@ -327,7 +327,7 @@ def _stack_lines(info: dict) -> list[str]:
 
 def _architecture_section(arch: dict) -> str:
     lines = [
-        f"- `{arch['factory']}`" + (" (residual)" if arch["residual"] else "")
+        f"- `{arch['factory']}`" + (" (predicts increments)" if arch["residual"] else "")
         + f", {arch['param_count']:,} trainable params, history {arch['history_steps']} steps; "
         f"ny={arch['ny']}, nu={arch['nu']}, nd={arch['nd']}",
         f"- History: {_lags_by_value(arch['history'])}",
@@ -405,9 +405,9 @@ def _data_section(nm_mapping: dict, split_sizes: Optional[dict[str, dict[str, in
 
 
 def _accuracy_section(rows: list[tuple[ChannelMetrics, float, float]],
-                      test_window: int) -> str:
+                      test_horizon) -> str:
     shown = rows if len(rows) <= MAX_ROWS else rows[:WORST_ROWS]
-    body = [f"RMSE of {test_window}-step rollouts, in each channel's units, against "
+    body = [f"RMSE of {test_horizon} rollouts, in each channel's units, against "
             "persistence (hold the last seeded value). Skill = 1 − RMSE / "
             "persistence; at or below 0 the model adds nothing to a copy-forward.\n"]
     if len(shown) < len(rows):
@@ -498,14 +498,14 @@ def _flagged(stability: list[RolloutStability]) -> list[RolloutStability]:
             if s.looks_like_ramp() or s.drift_ratio > DRIFT_RATIO_WARN]
 
 
-def _rollout_section(flagged: list[RolloutStability], test_window: int) -> Optional[str]:
+def _rollout_section(flagged: list[RolloutStability], test_horizon) -> Optional[str]:
     """Shape, not error: a model that stopped responding to its inputs emits
     a ramp a short window's RMSE can hide."""
     if not flagged:
         return None
     ramps = [s.name for s in flagged if s.looks_like_ramp()]
     drifts = [s for s in flagged if not s.looks_like_ramp()]
-    body = [f"Over {test_window}-step rollouts; closed loop runs far longer, so free-run "
+    body = [f"Over {test_horizon} rollouts; closed loop runs far longer, so free-run "
             "a flagged channel over a long horizon before training a controller on it.\n"]
     if ramps:
         body.append(f"- Ramping (monotone, unlike the truth): {_names(ramps, limit=WORST_ROWS)}")
@@ -523,9 +523,9 @@ def _hyperparameters_line(cfg: ModelingConfig) -> str:
     gains = ", ".join(f"{name} {gain}" for name, gain in
                       (("ref", cfg.ref_gain), ("grad", cfg.grad_gain)) if gain != 0)
     return _section("Hyperparameters", (
-        f"lr {cfg.lr} · batch {cfg.batch_size} · epochs {cfg.epochs} · pred steps "
-        f"{cfg.train_pred_steps}/{cfg.dev_pred_steps} (train/dev) · test window "
-        f"{cfg.test_window} · seed {cfg.seed} · loss gains {gains or 'none'}"))
+        f"lr {cfg.lr} · batch {cfg.batch_size} · epochs {cfg.epochs} · horizon "
+        f"{cfg.horizon} · test horizon {cfg.test_horizon} · seed {cfg.seed} · "
+        f"loss gains {gains or 'none'}"))
 
 
 @beartype
@@ -590,15 +590,15 @@ def render_reportcard(
 
     parts = [
         _header(name, ts, cfg.lr > 0, best_dev_loss, train_time_s, test_time_s),
-        _verdict_section(rows, white, physics, flagged, cfg.test_window, warnings),
+        _verdict_section(rows, white, physics, flagged, cfg.test_horizon, warnings),
         _architecture_section(arch),
         _data_section(nm_mapping, split_sizes, head_stack, norm_stats),
-        _accuracy_section(rows, cfg.test_window),
+        _accuracy_section(rows, cfg.test_horizon),
     ]
     optional = [
         _whiteness_section(white),
         None if physics is None else _physics_section(physics, cfg.synth_hours, physics_steps),
-        _rollout_section(flagged, cfg.test_window),
+        _rollout_section(flagged, cfg.test_horizon),
         _ensemble_section(ensemble),
     ]
     parts += [p for p in optional if p is not None]

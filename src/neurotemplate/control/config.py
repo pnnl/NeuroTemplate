@@ -7,19 +7,28 @@ from typing import Optional
 
 from neurotemplate.common.config import (
     PROGRESS_LEVELS,
+    Time,
+    TimedWindows,
     check_non_negative,
     check_one_of,
     check_positive,
     default_savedir,
+    time_microseconds,
+    time_steps,
 )
 from neurotemplate.modeling.config import warn_deep_window
 
 #: The keys a `policy_window` entry may set.
 WINDOW_KEYS = ("past", "future")
 
+#: One solve, for `policy: mpc` and `nt control gap` alike (`control.solver`): Adam at
+#: `lr`, a share of each command's range per step, stopped once `patience` steps pass
+#: without the objective improving by more than `rtol` of it, capped at `max_iters`.
+SOLVER_DEFAULTS = {"lr": 0.02, "rtol": 1e-3, "patience": 10, "max_iters": 200}
+
 
 @dataclass
-class ControlConfig:
+class ControlConfig(TimedWindows):
     """Knobs for loading a frozen surrogate and training a DPC policy."""
 
     # ── Sys-id model to control against ──────────────────────────
@@ -52,19 +61,20 @@ class ControlConfig:
     user_hooks_path: Optional[str] = None
 
     # ── Control horizon / policy window ──────────────────────────
-    # Closed-loop training rollout length (pure prediction; window = hmax + train_pred_steps).
-    train_pred_steps: int = 48
-    # Rows between the starts of training windows. Unset, one window per policy
+    # How far a training rollout predicts, past its history; for `policy: mpc`, how far
+    # each step plans ahead (every D and reference column's `future` must reach it).
+    horizon: Time = "4h"
+    # Time between the starts of training windows. Unset, one window per policy
     # history depth, which is every few rows: many near-identical windows, and
     # the epoch's cost with them.
-    train_stride: Optional[int] = None
+    train_stride: Optional[Time] = None
     # What the policy reads, any column of the record, listed only if it is read:
     # `{column: {past: n, future: m}}`, steps before and after the current one. A
     # Y or U column takes no `future` (not yet measured, or the policy's own output);
     # any other column requires one. A U column's window ends at the previous step, the
     # last command applied, so `past: 0` means the policy does not read it. See
     # control.policy.build_policy. A trained policy's package takes only what is listed.
-    policy_window: dict[str, dict[str, int]] = field(default_factory=dict)
+    policy_window: dict[str, dict[str, Time]] = field(default_factory=dict)
 
     # ── Objective ────────────────────────────────────────────────
     # A table of loss terms over named columns, and one gain per term — see
@@ -86,16 +96,9 @@ class ControlConfig:
     policy_bound_method: str = "sigmoid_scale"
     log2_policy_hidden: int = 3
     policy_layers: int = 1
-    # `policy: mpc`: steps planned ahead (every D and reference column's
-    # `future` must reach them), and each step's solve (`control.solver`):
-    # Adam at `mpc_lr` (a share of each command's range per step), stopped
-    # once `mpc_patience` steps pass without the objective improving by more
-    # than `mpc_rtol` of it, capped at `mpc_max_iters`.
-    mpc_horizon: int = 72
-    mpc_lr: float = 0.02
-    mpc_rtol: float = 1e-3
-    mpc_patience: int = 10
-    mpc_max_iters: int = 200
+    # Each solve of `policy: mpc` and of `nt control gap`; see SOLVER_DEFAULTS. Name
+    # only what you change.
+    solver: dict = field(default_factory=dict)
 
     # What a U column may command, `{column: [low, high]}`: each side a number in
     # the column's units, the name of a column (a reference the policy reads, or
@@ -117,17 +120,13 @@ class ControlConfig:
     lr: float = 0.001
 
     # ── Evaluation (long closed-loop rollout) ────────────────────
-    # Total window length for eval (hmax warmup IS counted in this; actual
-    # rollout on plots is test_window - hmax). Matches sys-id semantics.
-    test_window: int = 287
-    test_stride: int = 288
-    # `nt control gap`'s solve (`control.plan`): as MPC's is.
-    plan_lr: float = 0.02
-    plan_rtol: float = 1e-3
-    plan_patience: int = 10
-    plan_max_iters: int = 200
+    # How far a test rollout runs, past its history, and how far apart they start.
+    test_horizon: Time = "24h"
+    test_stride: Time = "24h"
 
     # ── Runtime ──────────────────────────────────────────────────
+    # Timesteps per hour: the surrogate's, set when it loads.
+    steps_per_hour: Optional[float] = None
     seed: int = -1
     device: Optional[str] = None
     # Torch CPU threads for this run; None means one per core. These models are
@@ -142,6 +141,15 @@ class ControlConfig:
     run: str = ""
     plots_dir: str = "plots"
     plot: bool = True
+
+    def __post_init__(self) -> None:
+        unknown = sorted(set(self.solver) - set(SOLVER_DEFAULTS))
+        if unknown:
+            raise ValueError(f"solver has unknown key(s) {unknown}; it takes "
+                             f"{list(SOLVER_DEFAULTS)}.")
+        solver = {**SOLVER_DEFAULTS, **self.solver}
+        self.solver = {"lr": float(solver["lr"]), "rtol": float(solver["rtol"]),
+                       "patience": int(solver["patience"]), "max_iters": int(solver["max_iters"])}
 
     def validate(self) -> None:
         # Deferred import: policy.py pulls in Neuromancer, and config is
@@ -163,14 +171,10 @@ class ControlConfig:
         # Which columns, and which may look ahead, is checked at policy
         # build, against the surrogate's columns and the objective's.
         check_policy_window(self.policy_window)
-        deepest = max(e.get("future", 0) for e in self.policy_window.values())
-        if deepest > self.train_pred_steps:
-            raise ValueError(
-                f"policy_window previews {deepest} steps but train_pred_steps is "
-                f"{self.train_pred_steps}: nothing past a training rollout is scored, so "
-                "the policy would read a preview it is never rewarded for using. Make "
-                "train_pred_steps at least the deepest `future`.")
-        warn_deep_window("the policy's history_steps", self.history_steps)
+        for name in ("horizon", "test_horizon", "test_stride"):
+            time_microseconds(getattr(self, name), name)
+        if self.train_stride is not None:
+            time_microseconds(self.train_stride, "train_stride")
 
         for name, scale in self.reference_scale.items():
             if not isinstance(scale, (int, float)) or scale <= 0:
@@ -182,21 +186,21 @@ class ControlConfig:
         parse_losses(self.losses, self.gains)
 
         for name in [
-            "batch_size", "train_pred_steps",
+            "batch_size",
             "log2_policy_hidden", "policy_layers",
             "epochs", "update_every", "lr",
-            "test_window", "test_stride",
-            "plan_lr", "plan_patience", "plan_max_iters",
-            "mpc_horizon", "mpc_lr", "mpc_patience", "mpc_max_iters",
         ]:
             check_positive(self, name)
         if self.threads is not None:
             check_positive(self, "threads")
-        if self.train_stride is not None:
-            check_positive(self, "train_stride")
 
-        for name in ["warmup", "patience", "plan_rtol", "mpc_rtol"]:
+        for name in ["warmup", "patience"]:
             check_non_negative(self, name)
+        for name in ("lr", "patience", "max_iters"):
+            if self.solver[name] <= 0:
+                raise ValueError(f"solver[{name!r}] must be positive, got {self.solver[name]}")
+        if self.solver["rtol"] < 0:
+            raise ValueError(f"solver['rtol'] must be >= 0, got {self.solver['rtol']}")
 
         # Column names are resolved against the surrogate's U at policy build.
         def side_ok(side) -> bool:
@@ -212,21 +216,40 @@ class ControlConfig:
                     "number in the column's units, a column name, or "
                     f"[column, offset] in the column's units, got {pair!r}.")
 
+    def check_windows(self) -> None:
+        """Every window a whole number of steps, and nothing previewed past a rollout: run
+        once the surrogate has set the timestep."""
+        self._check_common_windows()
+        deepest = max((e.get("future", 0) for e in self.window_steps.values()), default=0)
+        if deepest > self.horizon_steps:
+            raise ValueError(
+                f"policy_window previews {deepest} steps but `horizon` ({self.horizon}) is "
+                f"{self.horizon_steps}: nothing past a training rollout is scored, so "
+                "the policy would read a preview it is never rewarded for using. Make "
+                "`horizon` at least the deepest `future`.")
+        warn_deep_window("the policy's history_steps", self.history_steps)
+
+    @property
+    def window_steps(self) -> dict[str, dict[str, int]]:
+        """`policy_window` in steps."""
+        return {column: {key: time_steps(value, self.steps_per_hour,
+                                         f"policy_window[{column!r}][{key!r}]")
+                         for key, value in entry.items()}
+                for column, entry in self.policy_window.items()}
+
     @property
     def history_steps(self) -> int:
         """The policy's window depth: its deepest `past`, plus the current
         step. The closed loop seeds at least this many steps, and training
         windows start this far apart."""
-        return max((entry["past"] for entry in self.policy_window.values()),
-                   default=-1) + 1
+        return max((entry["past"] for entry in self.window_steps.values()), default=-1) + 1
 
     def asdict(self) -> dict:
         return asdict(self)
 
 
 def check_policy_window(table: dict) -> None:
-    """Each entry is `{past: int >= 0[, future: int >= 0]}`, and there is at
-    least one."""
+    """Each entry is `{past: time[, future: time]}`, and there is at least one."""
     if not table:
         raise ValueError(
             "policy_window is empty. List what the policy reads, each column with its "
@@ -236,9 +259,6 @@ def check_policy_window(table: dict) -> None:
             raise ValueError(
                 f"policy_window[{column!r}] must be a mapping with `past` and "
                 f"optionally `future`, got {entry!r}")
-        for key, steps in entry.items():
-            if isinstance(steps, bool) or not isinstance(steps, int) or steps < 0:
-                raise ValueError(
-                    f"policy_window[{column!r}][{key!r}] must be an int >= 0, "
-                    f"got {steps!r}")
+        for key, value in entry.items():
+            time_microseconds(value, f"policy_window[{column!r}][{key!r}]")
 

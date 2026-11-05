@@ -1,11 +1,10 @@
 model: rc_network
-history: {"Zone [°C]": 0, "Heat [kW]": 0, "Power [kW]": 0, "Cooling SP [°C]": 0,
+past: {"Zone [°C]": 0, "Heat [kW]": 0, "Power [kW]": 0, "Cooling SP [°C]": 0,
           "Outdoor [°C]": 0, "Solar [W/m²]": 0}
-context_steps: 145
+context: 725m
 epochs: 30
-train_pred_steps: 144
-dev_pred_steps: 144
-train_stride: 24
+horizon: 12h
+train_stride: 2h
 batch_size: 32
-test_window: 433
-test_stride: 144
+test_horizon: 24h
+test_stride: 12h

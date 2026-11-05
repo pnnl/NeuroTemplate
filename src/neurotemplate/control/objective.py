@@ -181,13 +181,13 @@ def objective_notes(objective: Objective, cfg) -> list[str]:
     for term in objective.terms:
         if (term.gain > 0 and term.weight is not None
                 and objective.roles[term.weight] == "R"
-                and cfg.policy_window.get(term.weight, {}).get("future", 0) == 0):
+                and cfg.window_steps.get(term.weight, {}).get("future", 0) == 0):
             notes.append(
                 f"`{term.name}` is weighted by `{term.weight}`, but the policy "
                 "previews 0 future steps of it, so it can react to the current "
                 "value and cannot act ahead of it — shifting load into a "
                 "cheaper hour needs its `future` in `policy_window` to cover the cycle "
-                "(48 steps = 4 h on 5-minute data)."
+                "(`future: 4h` to see four hours ahead)."
             )
     power_terms = [t for t in objective.terms
                    if t.gain > 0 and t.column == POWER and t.target is None]

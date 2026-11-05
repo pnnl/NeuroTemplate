@@ -2,12 +2,12 @@ sysid_run_id: ""
 policy: mlp
 log2_policy_hidden: 5
 policy_window:
-  "Zone [°C]": {past: 3}
-  "Outdoor [°C]": {past: 0, future: 72}
-  "Solar [W/m²]": {past: 0, future: 72}
-  "Band Low [°C]": {past: 0, future: 144}
-  "Band High [°C]": {past: 0, future: 144}
-  "Tariff [$/kWh]": {past: 0, future: 144}
+  "Zone [°C]": {past: 15m}
+  "Outdoor [°C]": {past: 0, future: 6h}
+  "Solar [W/m²]": {past: 0, future: 6h}
+  "Band Low [°C]": {past: 0, future: 12h}
+  "Band High [°C]": {past: 0, future: 12h}
+  "Tariff [$/kWh]": {past: 0, future: 12h}
 losses:
   comfort_lower: {column: "Band Low [°C]", target: "Zone [°C]", map: relu, norm: 1}
   comfort_upper: {column: "Band High [°C]", target: "Zone [°C]", map: nrelu, norm: 1}
@@ -16,8 +16,8 @@ losses:
 gains: {comfort_lower: 100.0, comfort_upper: 100.0, cost: 10.0, du: 0.5}
 reference_scale: {"Tariff [$/kWh]": 0.48}
 epochs: 30
-train_pred_steps: 144
-train_stride: 24
+horizon: 12h
+train_stride: 2h
 batch_size: 32
-test_window: 433
-test_stride: 144
+test_horizon: 24h
+test_stride: 12h

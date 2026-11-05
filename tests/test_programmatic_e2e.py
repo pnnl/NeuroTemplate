@@ -29,7 +29,7 @@ from control_fixtures import (
     make_control_cfg, make_nm_mapping, make_raw_df, make_reference_df, write_data_file,
     write_splits,
 )
-from model_fixtures import uniform_history
+from model_fixtures import uniform_past
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -83,7 +83,7 @@ def custom_models():
     return {"ewma_zone": lambda cfg, nm, stats: EwmaZone(len(nm["Y"]), len(nm["U"]), len(nm["D"]))}
 
 
-def data_head_config(nm_mapping, norm_stats):
+def output_heads(nm_mapping, norm_stats):
     return HeadStack([RegressionHead() for _ in nm_mapping["Y"]], nm_mapping["Y"])
 """
 
@@ -97,21 +97,20 @@ def _surrogate_then_policy(tmp_path, model: str, hooks_path: Path):
     plant.drop(columns="sec_elapsed").rename_axis("timestamp").to_csv(plant_path)
 
     # A JSON object is a YAML flow mapping.
-    history = json.dumps(uniform_history(make_nm_mapping(), 4), ensure_ascii=False)
+    past = json.dumps(uniform_past(make_nm_mapping(), 4), ensure_ascii=False)
     config_path = tmp_path / "modeling.yaml"
     config_path.write_text(f"""
 data_file: {write_data_file(tmp_path, plant_path)}
 user_hooks_path: {hooks_path}
 model: {model}
-history: {history}
+past: {past}
 log2_hidden_size: 2
 num_layers: 1
 epochs: 50
 warmup: 0
-train_pred_steps: 4
-dev_pred_steps: 4
-test_window: 24
-test_stride: 24
+horizon: 20m
+test_horizon: 100m
+test_stride: 2h
 batch_size: 8
 norm_type: z_score
 plot: false

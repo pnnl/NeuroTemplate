@@ -32,7 +32,7 @@ def _evaluate(tmp_path, synth: bool = True):
     raw = make_raw_df(n_rows=120)
     norm_stats = make_norm_stats(raw)
     cfg = make_sysid_cfg()
-    cfg.test_window, cfg.test_stride = 24, 24
+    cfg.test_horizon, cfg.test_stride = "100m", "2h"
     cfg.synth_n_scenarios, cfg.synth_hours = 4, 0.5
     cfg.plot, cfg.progress = False, "silent"
     dyn_sys, _ = make_frozen_dynamics(cfg, nm, norm_stats)
@@ -69,7 +69,7 @@ def test_the_checks_do_not_disturb_the_surrogate(tmp_path):
     raw = make_raw_df(n_rows=120)
     norm_stats = make_norm_stats(raw)
     cfg = make_sysid_cfg()
-    cfg.test_window, cfg.test_stride = 24, 24
+    cfg.test_horizon, cfg.test_stride = "100m", "2h"
     cfg.synth_n_scenarios, cfg.synth_hours = 4, 0.5
     cfg.plot, cfg.progress = False, "silent"
     dyn_sys, _ = make_frozen_dynamics(cfg, nm, norm_stats)

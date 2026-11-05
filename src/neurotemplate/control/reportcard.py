@@ -112,7 +112,7 @@ def _verdict_section(results, balance: Optional[ObjectiveBalance],
         capped = sum(n >= arch["max_iters"] for n in arch["solves"]) / len(arch["solves"])
         if capped > 0:
             lines.append(f"- ⚠️ {capped * 100:.0f}% of MPC solves stopped at "
-                         f"`mpc_max_iters` ({arch['max_iters']}) rather than converging.")
+                         f"the solver's `max_iters` ({arch['max_iters']}) rather than converging.")
     lines.append(f"\nEvery instrument's full output is in `{RESULTS_DIR}/` beside this card.")
     return _section("Verdict", "\n".join(lines))
 
@@ -179,8 +179,8 @@ def _objective_section(cfg, sysid_cfg, objective: Objective,
     after = {} if trained is None else {t.name.removesuffix("_loss"): t for t in trained.terms}
     when = "before training" if trains else "through the controller"
     body = [
-        f"Horizons H_sys={h_sys}, H_ctrl={h_ctrl}; train_pred_steps {cfg.train_pred_steps}, "
-        f"test window {cfg.test_window}. Regulated: {_names(objective.regulated)}. "
+        f"History H_sys={h_sys}, H_ctrl={h_ctrl} steps; horizon {cfg.horizon}, "
+        f"test horizon {cfg.test_horizon}. Regulated: {_names(objective.regulated)}. "
         "Each term is `gain · power-mean(map(operand))` per window, in physical units; "
         f"its share of the objective is measured on one batch {when}"
         + (" and after." if trained is not None else ".") + "\n",
@@ -256,7 +256,7 @@ def render_gap_report(plan, results, run_id: str) -> str:
                        f"{scored.comfort_mean_exceedance:.4g}"]
                     + [f"{weighted[w]:.4g}" for w in cost])
     converged = ("every window stopped on patience" if plan.converged else
-                 f"**some windows were still improving at `plan_max_iters` "
+                 f"**some windows were still improving at the solver's `max_iters` "
                  f"({plan.steps})**, so the bar and the gap are understated")
     body = [
         f"The best plan is a free command per step through the same surrogate, bounds "

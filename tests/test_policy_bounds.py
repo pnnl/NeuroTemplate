@@ -21,7 +21,7 @@ def _rollout(**overrides):
     with torch.no_grad():
         net.linear[-1].bias.normal_(0, 5)          # push the commands around the box
     windows = build_window_dict(s["frame"], cfg, sysid_cfg, s["nm"],
-                                P=cfg.train_pred_steps, stride=cfg.history_steps)
+                                P=cfg.horizon_steps, stride=cfg.history_steps)
     out = build_closed_loop(s["dyn_node"], policy, cfg, sysid_cfg)(windows)
     return s, out
 
@@ -44,7 +44,7 @@ def test_a_bounded_setpoint_stays_inside_the_band_at_every_step():
 def test_a_bound_reads_a_column_the_policy_is_handed():
     s = full_setup(control_bounds={SETPT: ["Elsewhere [°C]", HIGH]},
                    reference_scale={"Elsewhere [°C]": 1.0},
-                   policy_window={"Zone Air Temperature [°C]": {"past": 1},
+                   policy_window={"Zone Air Temperature [°C]": {"past": "5m"},
                                   HIGH: {"past": 0, "future": 0}})
     with pytest.raises(ValueError, match="list them in policy_window"):
         build_policy(s["cfg"], s["sysid_cfg"], s["nm"], s["norm_stats"])

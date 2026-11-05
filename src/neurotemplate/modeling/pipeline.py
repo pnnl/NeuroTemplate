@@ -128,6 +128,7 @@ def prepare_data(cfg: ModelingConfig, hooks) -> PreparedData:
     """
     train_raws, dev_raws, test_raws, freq_s = get_data_splits(cfg)
     cfg.steps_per_hour = 3600.0 / freq_s
+    cfg.check_windows()
     # Column roles only need the schema, and get_data_splits has already
     # checked every file carries the same columns.
     nm_mapping = resolve_nm_mapping(cfg, train_raws[0])
@@ -158,7 +159,7 @@ def prepare_data(cfg: ModelingConfig, hooks) -> PreparedData:
         norm_stats=norm_stats,
         grad_masks=get_grad_masks(grad_path=cfg.grad_path, nm_mapping=nm_mapping),
         synth_cfg=synth_cfg,
-        head_stack=hooks.data_head_config(nm_mapping, norm_stats),
+        head_stack=hooks.output_heads(nm_mapping, norm_stats),
     )
 
 
@@ -234,7 +235,7 @@ def evaluate_and_plot(
         raise ValueError("cfg.plot is on but no plot_run_dir was given.")
     test_data = get_sw_dict_multi(
         dfs=test_dfs, cfg=cfg, nm_mapping=nm_mapping,
-        steps=cfg.test_window, stride=cfg.test_stride,
+        steps=cfg.history_steps + cfg.test_horizon_steps, stride=cfg.test_stride_steps,
     )
     # source_idx is bookkeeping for the per-batch plot router only — the
     # surrogate Node doesn't expect it among its inputs.

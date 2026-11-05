@@ -5,9 +5,15 @@ import torch
 from neurotemplate.modeling.config import ModelingConfig
 
 
+def steps(n: int):
+    """`n` steps of the fixtures' 5-minute data, as a config writes a window."""
+    return f"{5 * n}m" if n else 0
+
+
 def model_cfg(**over) -> ModelingConfig:
-    """A small model on the CPU, quiet; `over` sets any field."""
+    """A small model on the CPU at 5-minute steps, quiet; `over` sets any field."""
     cfg = ModelingConfig()
+    cfg.steps_per_hour = 12.0
     cfg.log2_hidden_size = 3
     cfg.num_layers = 1
     cfg.device = torch.device("cpu")
@@ -17,21 +23,20 @@ def model_cfg(**over) -> ModelingConfig:
     return cfg
 
 
-def uniform_history(nm_mapping: dict[str, list[str]], steps: int,
+def uniform_past(nm_mapping: dict[str, list[str]], rows: int,
                     at_zero: tuple[str, ...] = ()) -> dict[str, int]:
-    """A `history` table reading every Y, U and D column `steps` rows deep,
-    except the columns in `at_zero`, read at the current step only."""
-    return {c: 0 if c in at_zero else steps - 1
+    """A `past` table reading every Y, U and D column `rows` rows deep, except the
+    columns in `at_zero`, read at the current step only."""
+    return {c: 0 if c in at_zero else steps(rows - 1)
             for key in ("Y", "U", "D") for c in nm_mapping[key]}
 
 
 def trainable_cfg(savedir, nm_mapping: dict[str, list[str]], **over) -> ModelingConfig:
     """A config small and fast enough to actually train, end to end, in a test."""
     return model_cfg(**{
-        "model": "mlp", "history": uniform_history(nm_mapping, 4), "log2_hidden_size": 2,
+        "model": "mlp", "past": uniform_past(nm_mapping, 4), "log2_hidden_size": 2,
         "epochs": 2, "warmup": 0, "patience": 5,
-        "train_pred_steps": 4, "dev_pred_steps": 4,
-        "test_window": 10, "test_stride": 10, "batch_size": 8,
+        "horizon": steps(4), "test_horizon": steps(6), "test_stride": steps(10), "batch_size": 8,
         "norm_type": "min_max", "plot": False, "seed": 7,
         "savedir": str(savedir), **over,
     })

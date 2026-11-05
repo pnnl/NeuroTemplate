@@ -3,8 +3,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import uuid
 from dataclasses import MISSING, fields, is_dataclass
+from fractions import Fraction
 from pathlib import Path
 from typing import Any, Optional, Type, TypeVar, get_args, get_origin, get_type_hints, Union
 
@@ -123,6 +125,77 @@ def dict_to_dataclass(data: dict, cls: Type[T], path: str = "") -> T:
                 raise ConfigError(f"Missing required config key: {path}{key}")
 
     return cls(**kwargs)
+
+
+#: A window, written as a time: `5h`, `20m`, `6s`, `100ms`, `10us`. Zero needs no unit.
+_TIME = re.compile(r"(\d+(?:\.\d+)?)(h|m|s|ms|us)")
+_MICROSECONDS = {"h": 3_600_000_000, "m": 60_000_000, "s": 1_000_000, "ms": 1_000, "us": 1}
+#: A value for any window field, in `Union` so the loader leaves it alone.
+Time = Union[str, int]
+
+
+def time_microseconds(value: Time, name: str) -> Fraction:
+    """`value` in microseconds, exactly; a bare number other than zero is refused,
+    because a count of steps means nothing until you know the timestep."""
+    if value in (0, "0"):
+        return Fraction(0)
+    match = _TIME.fullmatch(value) if isinstance(value, str) else None
+    if match is None:
+        raise ConfigError(f"{name} is a time, like 5h, 20m, 6s, 100ms or 10us; got {value!r}.")
+    return Fraction(match.group(1)) * _MICROSECONDS[match.group(2)]
+
+
+def time_steps(value: Time, steps_per_hour: Optional[float], name: str) -> int:
+    """`value` in steps of the data, or a refusal when it is not a whole number of them."""
+    if steps_per_hour is None:
+        raise ConfigError(f"{name} ({value}) can only be read as steps once the data has "
+                          "set the timestep (`steps_per_hour`).")
+    timestep = Fraction(3_600_000_000) / Fraction(steps_per_hour).limit_denominator(10**9)
+    steps = time_microseconds(value, name) / timestep
+    if steps.denominator != 1:
+        raise ConfigError(f"{name} ({value}) is not a whole number of the data's "
+                          f"{float(timestep) / 1e6:g} s steps.")
+    return int(steps)
+
+
+class TimedWindows:
+    """What both configs share: their windows are times, read as steps once the data has
+    set `steps_per_hour`."""
+
+    steps_per_hour: Optional[float]
+    context: Time
+    horizon: Time
+    test_horizon: Time
+    train_stride: Optional[Time]
+    test_stride: Time
+
+    def _steps(self, name: str) -> int:
+        return time_steps(getattr(self, name), self.steps_per_hour, name)
+
+    @property
+    def horizon_steps(self) -> int:
+        return self._steps("horizon")
+
+    @property
+    def test_horizon_steps(self) -> int:
+        return self._steps("test_horizon")
+
+    @property
+    def train_stride_steps(self) -> Optional[int]:
+        return None if self.train_stride is None else self._steps("train_stride")
+
+    @property
+    def test_stride_steps(self) -> int:
+        return self._steps("test_stride")
+
+    def _check_common_windows(self) -> None:
+        """Every window readable and the ones that must be, positive: run once the data
+        has set the timestep."""
+        for name in ("horizon", "test_horizon", "test_stride"):
+            if self._steps(name) <= 0:
+                raise ValueError(f"{name} must be positive, got {getattr(self, name)}")
+        if self.train_stride_steps is not None and self.train_stride_steps <= 0:
+            raise ValueError(f"train_stride must be positive, got {self.train_stride}")
 
 
 def default_savedir(prefix: str = "temp") -> str:

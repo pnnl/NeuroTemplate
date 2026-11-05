@@ -36,7 +36,7 @@ else:
 # Optional: per-Y-channel output head configuration
 # ---------------------------------------------------------------------
 @beartype
-def data_head_config(
+def output_heads(
     nm_mapping: dict[str, list[str]],
     norm_stats: NormStats,
 ) -> HeadStack:

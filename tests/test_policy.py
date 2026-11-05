@@ -18,7 +18,7 @@ N_REF = 2
 def _windows(s):
     cfg = s["cfg"]
     return build_window_dict(s["frame"], cfg, s["sysid_cfg"], s["nm"],
-                             P=cfg.train_pred_steps, stride=cfg.history_steps)
+                             P=cfg.horizon_steps, stride=cfg.history_steps)
 
 
 # ── Per-column windows ───────────────────────────────────────────
@@ -43,7 +43,7 @@ def test_a_uniform_window_builds_no_gather():
 def test_the_table_must_say_what_each_role_may_read():
     s = full_setup()
     cfg = s["cfg"]
-    cfg.policy_window[ZONE]["future"] = 1
+    cfg.policy_window[ZONE]["future"] = "5m"
     del cfg.policy_window[s["nm"]["D"][0]]["future"]
     with pytest.raises(ValueError, match=r"Zone Air.*takes no `future`.*needs a `future`"):
         build_policy(cfg, s["sysid_cfg"], s["nm"], s["norm_stats"])

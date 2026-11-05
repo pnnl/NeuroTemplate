@@ -12,15 +12,15 @@ import torch
 from neurotemplate.modeling.config import ModelingConfig as Config
 from neurotemplate.modeling.dynamics import get_dynamics
 from neurotemplate.modeling.loss import build_loss
-from model_fixtures import model_cfg, uniform_history, unit_stats
+from model_fixtures import model_cfg, steps, uniform_past, unit_stats
 
 NY, NU, ND = 2, 1, 1
 P = 6
 
 
 def make_cfg(history_steps: int) -> Config:
-    return model_cfg(model="mlp", history=uniform_history(nm_mapping(), history_steps),
-                     train_pred_steps=P,
+    return model_cfg(model="mlp", past=uniform_past(nm_mapping(), history_steps),
+                     horizon=steps(P),
                      ref_gain=1.0, grad_gain=0.0)
 
 

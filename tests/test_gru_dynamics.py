@@ -16,7 +16,7 @@ import torch
 from neurotemplate.modeling.config import ModelingConfig as Config
 from neurotemplate.modeling.dynamics import get_dynamics
 from neurotemplate.modeling.gru import GRUBlock
-from model_fixtures import model_cfg, uniform_history, unit_stats
+from model_fixtures import model_cfg, steps, uniform_past, unit_stats
 from neurotemplate.modeling.contract import contract_model
 
 NY, NU, ND = 2, 1, 1
@@ -45,8 +45,8 @@ NM_MAPPING = {"Y": ["y0", "y1"], "U": ["u0"], "D": ["d0"], "t": ["sec_elapsed"]}
 
 
 def make_cfg(model: str, history_steps: int) -> Config:
-    return model_cfg(model=model, history=uniform_history(NM_MAPPING, history_steps),
-                     train_pred_steps=P, num_layers=2)
+    return model_cfg(model=model, past=uniform_past(NM_MAPPING, history_steps),
+                     horizon=steps(P), num_layers=2)
 
 
 def make_batch(history_steps: int, batch: int = 3) -> dict:

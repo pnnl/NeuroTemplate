@@ -26,16 +26,16 @@ over all of Y and a split are the same code, and any family can sit in any block
   - 'Y' (ground truth) is only used by the loss for comparison and
     by the System to determine rollout length (nstep_key='Y').
 
-`cfg.history` sets each column's lag, the steps before the current one a learned
+`cfg.past` sets each column's lag, the steps before the current one a learned
 map reads: any lag for `mlp`, `nssm` and `lssm`, one lag for every column a `gru`
 reads (its window is its warm-up). A thermal block's window is not in the table:
-an `rc_network` reads the whole window, `cfg.context_steps` deep, for its filter,
+an `rc_network` reads the whole window, `cfg.context` deep, for its filter,
 and a `thermostat` the current row. A stateful block additionally keeps state so
 its memory can run past its window during a rollout, but it still takes the same
 window. The only thing statefulness costs the caller is a reset at each sequence
 boundary, which make_reset_init() wires into the System.
 
-Training windows start `cfg.train_stride` rows apart.
+Training windows start `cfg.train_stride` apart.
 """
 
 import warnings
@@ -76,25 +76,26 @@ THERMAL_FAMILIES = ("rc_network", "thermostat")
 
 @beartype
 def column_lags(cfg: ModelingConfig, nm_mapping: dict[str, list[str]]) -> Lags:
-    """`cfg.history` as one lag per column, in nm_mapping order.
+    """`cfg.past` as one lag per column, in steps, in nm_mapping order.
 
     The table must name exactly the model's columns: a missing one has no
     lag, and an extra one is a declaration nothing reads.
     """
     columns = [c for key in _KEYS for c in nm_mapping[key]]
-    missing = [c for c in columns if c not in cfg.history]
-    extra = sorted(set(cfg.history) - set(columns))
+    missing = [c for c in columns if c not in cfg.past]
+    extra = sorted(set(cfg.past) - set(columns))
     if missing or extra:
         raise ValueError(
-            "history must list every Y, U and D column of the model and "
+            "past must list every Y, U and D column of the model and "
             f"nothing else. Missing: {missing}. Not a model column: {extra}."
         )
-    return tuple(tuple(cfg.history[c] for c in nm_mapping[key]) for key in _KEYS)
+    lags = cfg.lags
+    return tuple(tuple(lags[c] for c in nm_mapping[key]) for key in _KEYS)
 
 
 def _check_one_lag(what: str, lags: dict[str, int], reason: str) -> None:
     if len(set(lags.values())) > 1:
-        raise ValueError(f"{what} needs one lag for {reason}; history gives {lags}.")
+        raise ValueError(f"{what} needs one lag for {reason}; `past` gives {lags}.")
 
 
 @beartype
@@ -138,8 +139,8 @@ def _check_lags_consumed(blocks: list[Block], families: list[str], lags: list[La
     for column, readers in consumed.items():
         if not readers and history[column] != 0:
             raise ValueError(
-                f"history[{column!r}] is {history[column]}, but no learned block reads "
-                "it. A thermal block's window is `context_steps`, not this table. If "
+                f"past[{column!r}] is {history[column]} steps, but no learned block reads "
+                "it. A thermal block's window is `context`, not this table. If "
                 "nothing on the control side needs it either (the policy, a loss weight, "
                 "power_metric, the plots), take it out of `columns` in data.yaml; otherwise "
                 "list it at 0."
@@ -147,9 +148,9 @@ def _check_lags_consumed(blocks: list[Block], families: list[str], lags: list[La
         deepest = max(readers.values(), default=0)
         if deepest != history[column]:
             raise ValueError(
-                f"history[{column!r}] is {history[column]}, but no block reads "
-                f"it that far back; the lag each reader consumes: {readers}. Set it "
-                f"to {deepest}."
+                f"past[{column!r}] is {history[column]} steps, but no block reads "
+                f"it that far back; the lag each reader consumes, in steps: {readers}. Set "
+                f"it to {deepest} steps."
             )
 
 
@@ -164,10 +165,10 @@ def _check_hinge_lags(blocks: list[Block], history: dict[str, int]) -> None:
             target = entry["target"]
             if history[column] > history[target]:
                 raise ValueError(
-                    f"history[{column!r}] is {history[column]}, deeper than its hinge's "
-                    f"target history[{target!r}] = {history[target]}. The hinge reads the "
+                    f"past[{column!r}] is {history[column]} steps, deeper than its hinge's "
+                    f"target past[{target!r}], {history[target]} steps. The hinge reads the "
                     f"target at every step it covers; give {column!r} a lag of at most "
-                    f"{history[target]}."
+                    f"{history[target]} steps."
                 )
 
 
@@ -332,8 +333,8 @@ def describe_dynamics(dyn_sys: SystemPreview, cfg: ModelingConfig) -> dict:
     Returns a dict with:
       - factory: the model family, or `mixed (a, b)` when the blocks use different
         families (each block names its own), or a custom model's name
-      - residual: the run's `cfg.residual`
-      - history: each column's lag, and history_steps, the window depth
+      - residual: whether the run's `cfg.predicts` is an increment
+      - history: each column's lag in steps, and history_steps, the window depth
       - ny / nu / nd: shape parameters
       - param_count: total trainable parameters
       - blocks: per-block descriptors, `{name: info}`; a custom model is one
@@ -349,7 +350,7 @@ def describe_dynamics(dyn_sys: SystemPreview, cfg: ModelingConfig) -> dict:
         for spec, family, lags, part in zip(core.specs, core.families, core.lags, core.cores):
             info = _describe_part(part)
             info["model"] = family
-            # What it reads, which for a thermal block is not what history declares.
+            # What it reads, which for a thermal block is not what `past` declares.
             info["lags"] = dict(zip(spec.y_in_names + spec.u_names + spec.d_names,
                                     lags[0] + lags[1] + lags[2]))
             blocks[spec.name] = info
@@ -361,8 +362,8 @@ def describe_dynamics(dyn_sys: SystemPreview, cfg: ModelingConfig) -> dict:
     hinges = getattr(model, "hinges", None)
     return {
         "factory": factory,
-        "residual": bool(cfg.residual),
-        "history": dict(cfg.history),
+        "residual": cfg.predicts == "increment",
+        "history": dict(cfg.lags),
         "history_steps": int(cfg.history_steps),
         "ny": int(ny),
         "nu": int(nu),
@@ -445,8 +446,8 @@ def _warn_ignored_declarations(blocks: list[Block], families: list[str]) -> None
 
 
 def _refuse_declarations(cfg: ModelingConfig, blocks: list[Block], families: list[str]) -> None:
-    """A family, block or `params` key that names nothing, and a residual a thermal
-    block cannot have: loud, since each would otherwise change what is built."""
+    """A family, block or `params` key that names nothing, and an increment a thermal
+    block cannot predict: loud, since each would otherwise change what is built."""
     problems = []
     names = {block.name for block in blocks}
     unknown = sorted(set(cfg.block_models) - names)
@@ -456,9 +457,9 @@ def _refuse_declarations(cfg: ModelingConfig, blocks: list[Block], families: lis
         if family not in FAMILIES:
             problems.append(f"block {block.name!r} asks for model {family!r}; built-in "
                             f"families: {sorted(FAMILIES)}.")
-        if block.residual is True and family in THERMAL_FAMILIES:
+        if block.predicts == "increment" and family in THERMAL_FAMILIES:
             problems.append(f"block {block.name!r}: {family} outputs the value itself, so "
-                            "`residual: true` has no meaning there.")
+                            "`predicts: increment` has no meaning there.")
         stray = sorted(set(block.params) - set(THERMAL_FAMILIES))
         if stray:
             problems.append(f"block {block.name!r} declares `params` for {stray}; `params` "
@@ -503,21 +504,22 @@ def get_dynamics(
     _refuse_declarations(cfg, blocks, families)
     _warn_ignored_declarations(blocks, families)
     column_lags(cfg, nm_mapping)   # the history table names exactly the columns
-    _check_hinge_lags(blocks, cfg.history)
-    lags = [block_lags(family, block, cfg.history, cfg.history_steps)
+    declared = cfg.lags
+    _check_hinge_lags(blocks, declared)
+    lags = [block_lags(family, block, declared, cfg.history_steps)
             for block, family in zip(blocks, families)]
-    _check_lags_consumed(blocks, families, lags, cfg.history)
+    _check_lags_consumed(blocks, families, lags, declared)
     if head_stack is not None:
         _check_value_heads(blocks, families, head_stack)
 
     core = Blocks(blocks, families, lags,
                   [FAMILIES[family](cfg, block, block_lag, norm_stats)
                    for block, family, block_lag in zip(blocks, families, lags)])
-    flags = [cfg.residual] * len(nm_mapping["Y"])
+    flags = [False] * len(nm_mapping["Y"])
     for block, family in zip(blocks, families):
         for channel in block.y_idx:
-            flags[channel] = (False if family in THERMAL_FAMILIES
-                              else cfg.residual if block.residual is None else block.residual)
+            flags[channel] = (family not in THERMAL_FAMILIES
+                              and (block.predicts or cfg.predicts) == "increment")
     model = Stepper(core, nm_mapping, norm_stats, cfg.history_steps, residual=flags,
                     head_stack=head_stack,
                     hinges=_build_hinges(blocks, nm_mapping, norm_stats))
@@ -567,7 +569,7 @@ def _custom_model(cfg: ModelingConfig, nm_mapping: dict[str, list[str]],
 
     Blocks are built-in families' structure, so a spec is refused. A model that
     bounds an output says so by owning a `head_stack`; a head declared
-    in `data_head_config` that it does not own would be silently ignored, so that
+    in `output_heads` that it does not own would be silently ignored, so that
     is refused too.
     """
     custom = getattr(load_modeling_hooks(cfg), "custom_models", lambda: {})()
@@ -590,7 +592,7 @@ def _custom_model(cfg: ModelingConfig, nm_mapping: dict[str, list[str]],
                                               for h in head_stack.heads)
     if declared and getattr(model, "head_stack", None) is None:
         raise ValueError(
-            f"data_head_config declares heads, but model {cfg.model!r} owns none. Give it a "
+            f"output_heads declares heads, but model {cfg.model!r} owns none. Give it a "
             "`head_stack` (a `stepper.Stepper` takes one), or make every head a "
             "RegressionHead.")
     return model

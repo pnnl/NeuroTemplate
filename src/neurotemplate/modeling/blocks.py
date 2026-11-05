@@ -43,10 +43,10 @@ What a block owns
          block runs after them, and each such column's rows mean what a U's
          do, row j held over the step from j to j + 1, the last row the
          producer's fresh output. See `dynamics.BlockStack`.
-  residual
-         whether this block predicts a change on the last row (True) or the
-         value itself (False). Absent means the run's `cfg.residual`. A meter
-         is a value: under a residual it integrates its own errors.
+  predicts
+         whether this block's output is a change on the last row (`increment`) or
+         the `value` itself. Absent means the run's `cfg.predicts`. A meter
+         is a value: as an increment it integrates its own errors.
   params the block's physical priors, keyed by the family that reads them:
          `{"rc_network": <nt data ladder's declaration>}`,
          `{"thermostat": <nt data thermostat's>}`. Only the family the block
@@ -156,8 +156,8 @@ class Block:
     read_names: tuple[str, ...] = ()
     #: The subset of `read_names` this block reads as of this step.
     driven_by: tuple[str, ...] = ()
-    #: Predict a change (True) or the value (False); None means the run's.
-    residual: Optional[bool] = None
+    #: "increment" or "value"; None means the run's.
+    predicts: Optional[str] = None
 
     @property
     def ny(self) -> int:
@@ -219,7 +219,7 @@ def _resolve(columns: list[str], names: list[str], block: str, key: str,
 #: Every key a block spec may set. Anything else is a typo: the declaration
 #: keys change what the block fits without changing its shape, so a
 #: misspelled one has no other way of announcing itself.
-BLOCK_KEYS = frozenset({"Y", "U", "D", "reads", "driven_by", "residual", "model", "inputs",
+BLOCK_KEYS = frozenset({"Y", "U", "D", "reads", "driven_by", "predicts", "model", "inputs",
                         "ambient", "scale", "solar", "params"})
 
 
@@ -240,8 +240,8 @@ def _resolve_inputs(spec: dict, block: str, y_names: list[str],
             for v in scale.values())):
         problems.append(f"`scale` must map an input or parameter to its positive value; "
                         f"got {scale!r}.")
-    if spec.get("residual") not in (None, True, False):
-        problems.append(f"`residual` must be true or false; got {spec['residual']!r}.")
+    if spec.get("predicts") not in (None, "increment", "value"):
+        problems.append(f"`predicts` must be `increment` or `value`; got {spec['predicts']!r}.")
     if spec.get("solar") is not None and spec["solar"] not in d_names:
         problems.append(f"`solar` ({spec['solar']!r}) is not one of this block's D "
                         f"columns {d_names}.")
@@ -384,7 +384,7 @@ def build_blocks(
             tuple(reads_idx), model, tuple(u_names), tuple(d_names), inputs, ambient,
             spec.get("scale"), spec.get("solar"), dict(params),
             tuple(y_cols[i] for i in sorted(reads_idx)), tuple(spec.get("driven_by", [])),
-            spec.get("residual"),
+            spec.get("predicts"),
         ))
     _check_one_hinge_per_column(blocks)
     return run_order(blocks)

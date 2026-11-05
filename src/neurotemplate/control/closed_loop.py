@@ -57,14 +57,14 @@ class ForecastSystem(WindowedSystem):
 
 @beartype
 def build_closed_loop(dyn_node, policy_node, cfg, sysid_cfg) -> SystemPreview:
-    """Policy + frozen dynamics, rolled out for cfg.train_pred_steps steps."""
+    """Policy + frozen dynamics, rolled out over `cfg.horizon`."""
     _, _, hmax = horizons(cfg, sysid_cfg)
 
     return ForecastSystem(
         [policy_node, dyn_node],
         name="closed_loop",
         nstep_key="D",
-        nsteps=cfg.train_pred_steps,
+        nsteps=cfg.horizon_steps,
         start_iter=hmax - 1,
         # Stateful surrogates and controllers (MPC's last plan) only: clear
         # the state so it cannot leak between batches. None for stateless ones.

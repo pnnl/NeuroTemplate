@@ -194,8 +194,9 @@ def _two_blocks(decl, thermostat_decl, history_steps=60):
                      "params": {"thermostat": thermostat_decl}},
             "room": {"Y": ["zone"], "U": [], "D": ["out"], "driven_by": [HEAT], "ambient": "out",
                      "scale": {HEAT: 1.0}, "model": "rc_network", "params": {"rc_network": decl}}}
-    cfg = model_cfg(model="rc_network", history={"zone": 0, HEAT: 0, "sp": 0, "out": 0},
-                    context_steps=history_steps, steps_per_hour=1 / DT_H)
+    cfg = model_cfg(model="rc_network", past={"zone": 0, HEAT: 0, "sp": 0, "out": 0},
+                    context=f"{history_steps * 30}m" if history_steps else 0,
+                    steps_per_hour=1 / DT_H)
     assert [b.name for b in build_blocks(mapping, spec)] == ["hvac", "room"]
     return get_dynamics(cfg, mapping, unit_stats(mapping), block_spec=spec)
 
@@ -243,7 +244,7 @@ def test_a_network_that_pins_nothing_is_refused():
 def test_hidden_nodes_without_context_are_refused():
     decl = {"nodes": {"Ti": 1.0, "Tm": 10.0}, "edges": {"Ti-Tm": 1.0, "Ti-ambient": 2.0},
             "inputs": {HEAT: {"Ti": 1.0}}, "noise": {"Ti": 0.1, "Tm": 0.1, "sensor": 0.1}}
-    with pytest.raises(ValueError, match="context_steps"):
+    with pytest.raises(ValueError, match="context"):
         _two_blocks(decl, {"cooling": {"setpoint": "sp", "gain": 4.0, "capacity": 6.0},
                            "form": "tracker", "gain_limit": 40.0}, history_steps=0)
 
@@ -339,7 +340,7 @@ def test_a_family_finds_only_its_own_params():
                      "scale": {HEAT: 1.0}, "params": {"rc_network": decl}}}
 
     def build(**over):
-        cfg = model_cfg(history={c: 0 for c in ("zone", HEAT, "out")}, steps_per_hour=1 / DT_H,
+        cfg = model_cfg(past={c: 0 for c in ("zone", HEAT, "out")}, steps_per_hour=1 / DT_H,
                         **over)
         return get_dynamics(cfg, mapping, unit_stats(mapping), block_spec=spec)
 

@@ -10,14 +10,15 @@ from neurotemplate.control.losses import resolve_objective
 from neurotemplate.control.pipeline import evaluate_closed_loop, evaluation_windows
 from neurotemplate.control.plan import plan_on_surrogate
 from neurotemplate.control.policy import build_policy
-from neurotemplate.control.scenarios import eval_pred_steps, horizons, scored_steps
+from neurotemplate.control.scenarios import horizons, scored_steps
 from control_fixtures import HIGH, LOW, SETPT, full_setup, make_nm_mapping, make_tracking_plant
+from model_fixtures import steps
 
 
 def test_the_plan_improves_on_the_policy_inside_its_bounds():
     torch.manual_seed(0)   # the fixture surrogate's weights
-    s = full_setup(control_bounds={SETPT: [LOW, [HIGH, -0.5]]}, plan_max_iters=100,
-                   test_window=30, test_stride=30)
+    s = full_setup(control_bounds={SETPT: [LOW, [HIGH, -0.5]]}, solver={"max_iters": 100},
+                   test_horizon=steps(26), test_stride=steps(30))
     cfg, sysid_cfg, nm, ns = s["cfg"], s["sysid_cfg"], s["nm"], s["norm_stats"]
     policy = build_policy(cfg, sysid_cfg, nm, ns)
     cl = build_closed_loop(s["dyn_node"], policy, cfg, sysid_cfg)
@@ -39,7 +40,8 @@ def test_the_plan_improves_on_the_policy_inside_its_bounds():
 
 def test_mpc_beats_an_untrained_policy_inside_its_bounds_and_starts_each_rollout_cold():
     future = {c: 4 for c in (LOW, HIGH, *make_nm_mapping()["D"])}
-    s = full_setup(control_bounds={SETPT: [LOW, [HIGH, -0.5]]}, future=future)
+    s = full_setup(control_bounds={SETPT: [LOW, [HIGH, -0.5]]}, future=future,
+                   solver={"max_iters": 200})
     cfg, sysid_cfg, nm, ns = s["cfg"], s["sysid_cfg"], s["nm"], s["norm_stats"]
     _, plant = make_tracking_plant(sysid_cfg, nm)   # a zone that follows its setpoint
     data, _ = evaluation_windows(cfg, sysid_cfg, [s["frame"]], nm)
@@ -47,19 +49,19 @@ def test_mpc_beats_an_untrained_policy_inside_its_bounds_and_starts_each_rollout
 
     def objective(policy):
         cl = build_closed_loop(plant, policy, cfg, sysid_cfg)
-        cl.nsteps = eval_pred_steps(cfg, horizons(cfg, sysid_cfg)[2])
+        cl.nsteps = cfg.test_horizon_steps
         with torch.no_grad():
             out = cl(dict(data))
         return float(loss(out)["loss"]), out, cl
 
     torch.manual_seed(0)
     untrained, _, _ = objective(build_policy(cfg, sysid_cfg, nm, ns))
-    cfg.policy, cfg.mpc_horizon = "mpc", 4
+    cfg.policy, cfg.horizon = "mpc", steps(4)
     mpc = build_controller(cfg, sysid_cfg, nm, ns, plant)
     planned, out, cl = objective(mpc)
     assert planned < untrained
     # Every solve stopped on patience, before the cap.
-    assert max(mpc.callable.solves) < cfg.mpc_max_iters
+    assert max(mpc.callable.solves) < cfg.solver["max_iters"]
 
     _, _, hmax = horizons(cfg, sysid_cfg)
     r = resolve_objective(cfg, nm).r_columns

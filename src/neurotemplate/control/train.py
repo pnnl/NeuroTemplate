@@ -35,9 +35,7 @@ from neurotemplate.modeling.experiment import resolve_device, set_seeds, set_thr
 from neurotemplate.control.config import ControlConfig
 from neurotemplate.control.load import load_frozen_dynamics
 from neurotemplate.control.losses import extend_norm_stats, resolve_objective
-from neurotemplate.control.scenarios import (
-    build_loaders, eval_pred_steps, horizons, load_control_splits,
-)
+from neurotemplate.control.scenarios import build_loaders, horizons, load_control_splits
 from neurotemplate.control.controller import build_controller, describe_controller
 from neurotemplate.control.policy import unread_columns
 from neurotemplate.control.sensitivity import command_sensitivity
@@ -99,13 +97,14 @@ def train_control(cfg: ControlConfig,
         load_frozen_dynamics(cfg.sysid_run_id, cfg.run_dir, cfg.weights,
                              device=cfg.device)
     )
+    cfg.steps_per_hour = sysid_cfg.steps_per_hour
+    cfg.check_windows()   # the windows mean nothing before the surrogate says the timestep
     # The objective's names resolve against the surrogate's columns, so this
     # is the first point a misnamed column can fail — before any data loads.
     objective = resolve_objective(cfg, nm_mapping)
     norm_stats = extend_norm_stats(objective, cfg, sysid_stats)
 
     _, _, hmax = horizons(cfg, sysid_cfg)
-    eval_pred_steps(cfg, hmax)   # fail now, not after the policy has trained
     # One list per split (length >= 1), each plant file joined with its
     # reference file; the loaders window each file in isolation — no rollout
     # spans two files.

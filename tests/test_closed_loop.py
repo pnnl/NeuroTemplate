@@ -21,7 +21,7 @@ def _windows(s, cfg=None, sysid_cfg=None):
     cfg = cfg or s["cfg"]
     return build_window_dict(
         s["frame"], cfg, sysid_cfg or s["sysid_cfg"], s["nm"],
-        P=cfg.train_pred_steps, stride=cfg.history_steps,
+        P=cfg.horizon_steps, stride=cfg.history_steps,
     )
 
 
@@ -86,7 +86,7 @@ def test_gru_surrogate_rolls_out_and_warms_up():
     s, sysid_cfg, dyn_node = _gru_setup()
     cfg, nm = s["cfg"], s["nm"]
     h_sys, _, hmax = horizons(cfg, sysid_cfg)
-    P = cfg.train_pred_steps
+    P = cfg.horizon_steps
 
     policy = build_policy(cfg, sysid_cfg, nm, s["norm_stats"])
     cl = build_closed_loop(dyn_node, policy, cfg, sysid_cfg)
@@ -178,7 +178,7 @@ def test_the_last_steps_preview_reads_real_forecast_rows():
     cfg, sysid_cfg = s["cfg"], s["sysid_cfg"]
     _, _, hmax = horizons(cfg, sysid_cfg)
     windows = _windows(s)
-    rollout = hmax + cfg.train_pred_steps
+    rollout = hmax + cfg.horizon_steps
 
     assert windows["D"].shape[1] == rollout + future
     tail = windows["D"][:, rollout - 1:, :]

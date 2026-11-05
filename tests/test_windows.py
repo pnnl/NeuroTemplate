@@ -21,8 +21,8 @@ def test_two_keys_are_gathered_key_major_from_their_own_offsets():
 
 
 def test_a_ragged_table_feeds_each_column_at_its_lag_and_a_uniform_one_gathers_nothing():
-    history = {"y0": 2, "y1": 0, "u0": 1, "d0": 0, "d1": 2}
-    model = contract_model(get_dynamics(model_cfg(model="lssm", history=history), NM,
+    past = {"y0": "10m", "y1": 0, "u0": "5m", "d0": 0, "d1": "10m"}
+    model = contract_model(get_dynamics(model_cfg(model="lssm", past=past), NM,
                                         unit_stats(NM)))
     core = model.core.cores[0]
     # Window 3 deep. Y rows: [y0 y1] x 3; y0 keeps all three, y1 the newest.
@@ -32,7 +32,7 @@ def test_a_ragged_table_feeds_each_column_at_its_lag_and_a_uniform_one_gathers_n
     assert core.maps[1].linear.in_features == 2
     assert core.maps[2].linear.in_features == 4
 
-    uniform = {c: 2 for c in history}
-    model = contract_model(get_dynamics(model_cfg(model="lssm", history=uniform), NM,
+    uniform = {c: "10m" for c in past}
+    model = contract_model(get_dynamics(model_cfg(model="lssm", past=uniform), NM,
                                         unit_stats(NM)))
     assert not any(w.gathers for w in model.core.cores[0].windows)

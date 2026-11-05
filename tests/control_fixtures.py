@@ -18,7 +18,7 @@ from neurotemplate.common.data_utils import compute_norm_stats
 from neurotemplate.modeling.dynamics import _rollout_system, get_dynamics
 from neurotemplate.control.config import ControlConfig
 from neurotemplate.control.losses import extend_norm_stats, resolve_objective
-from model_fixtures import model_cfg, uniform_history
+from model_fixtures import model_cfg, steps, uniform_past
 
 # Single-zone Modelica RTU strip-mall dataset. Y is one zone temp plus the
 # RTU thermal/flow state plus the two metered RTU power channels; U is a
@@ -78,8 +78,7 @@ def make_norm_stats(raw_df: pd.DataFrame) -> dict:
 
 
 def make_sysid_cfg(history_steps: int = 4, model: str = "mlp") -> Config:
-    return model_cfg(model=model, residual=True,
-                     history=uniform_history(make_nm_mapping(), history_steps))
+    return model_cfg(model=model, past=uniform_past(make_nm_mapping(), history_steps))
 
 
 # The reference columns: a comfort band on the zone, and a tariff.
@@ -127,13 +126,13 @@ def make_policy_window(cfg: ControlConfig, past: int = 2, u_past: int = 0,
                        future: dict[str, int] | None = None) -> dict:
     """A `policy_window` over the fixture's columns and `cfg`'s reference
     columns: every Y and D column `past` steps back, every U column `u_past`,
-    and each D and reference column `future[column]` ahead (0 if unlisted)."""
+    and each D and reference column `future[column]` steps ahead (0 if unlisted)."""
     nm = make_nm_mapping()
     future = future or {}
-    table = {c: {"past": past} for c in nm["Y"]}
-    table.update({c: {"past": u_past} for c in nm["U"]})
-    table.update({c: {"past": past, "future": future.get(c, 0)} for c in nm["D"]})
-    table.update({c: {"past": 0, "future": future.get(c, 0)}
+    table = {c: {"past": steps(past)} for c in nm["Y"]}
+    table.update({c: {"past": steps(u_past)} for c in nm["U"]})
+    table.update({c: {"past": steps(past), "future": steps(future.get(c, 0))} for c in nm["D"]})
+    table.update({c: {"past": 0, "future": steps(future.get(c, 0))}
                   for c in resolve_objective(cfg, nm).r_columns})
     return table
 
@@ -147,18 +146,22 @@ def make_control_cfg(future: dict[str, int] | None = None, u_past: int = 0,
     cfg.sysid_run_id = "test-run"
     cfg.losses = {k: dict(v) for k, v in BAND_LOSSES.items()}
     cfg.gains = dict(BAND_GAINS)
-    cfg.train_pred_steps = 6
-    # hmax = max(sysid_cfg.history_steps=4, cfg.history_steps=3) = 4; test_window includes warmup.
-    cfg.test_window = 12
-    cfg.test_stride = 5
+    cfg.steps_per_hour = 12.0
+    cfg.horizon = steps(6)
+    # hmax = max(sysid_cfg.history_steps=4, cfg.history_steps=3) = 4, so a 12-row window.
+    cfg.test_horizon = steps(8)
+    cfg.test_stride = steps(5)
     cfg.batch_size = 4
     cfg.epochs = 1
-    cfg.plan_max_iters = 2  # the plan runs; its convergence is test_plan's
+    cfg.solver["max_iters"] = 2  # the plan runs; its convergence is test_plan's
     cfg.policy = "mlp"      # the family with more to get wrong; linear is tested on its own
     cfg.seed = 0
     cfg.device = torch.device("cpu")
     for k, v in overrides.items():
-        setattr(cfg, k, v)
+        if k == "solver":
+            cfg.solver.update(v)
+        else:
+            setattr(cfg, k, v)
     if "policy_window" not in overrides:
         cfg.policy_window = make_policy_window(cfg, u_past=u_past, future=future)
     return cfg

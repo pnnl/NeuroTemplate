@@ -6,16 +6,20 @@ from typing import Optional
 
 from neurotemplate.common.config import (
     PROGRESS_LEVELS,
+    Time,
+    TimedWindows,
     check_non_negative,
     check_one_of,
     check_positive,
     default_savedir,
+    time_microseconds,
+    time_steps,
 )
 
 # History-window warning threshold for a window's depth in steps (the
 # surrogate's `history_steps`, the policy's deepest `past + 1`). Past this
 # many steps, a longer context window costs more memory per batch, and once
-# it exceeds train_pred_steps it hands the model, at rollout time, context
+# it exceeds `horizon` it hands the model, at rollout time, context
 # it never saw during training. Advisory only — the right window length is
 # dataset-specific, so validate() warns rather than rejects. Twelve is a
 # reasonable ceiling for buildings on 5-minute data, not a limit the library
@@ -24,16 +28,14 @@ HISTORY_WARN_THRESHOLD = 12
 
 
 def check_lag_table(name: str, table: dict) -> None:
-    """A per-column table of steps, every value an int >= 0.
+    """A per-column table of times.
 
     Which columns it must name is checked where the model is built
     (`dynamics.column_lags`), so commands that build no model, `nt data`'s,
     run without one.
     """
-    for column, steps in table.items():
-        if isinstance(steps, bool) or not isinstance(steps, int) or steps < 0:
-            raise ValueError(
-                f"{name}[{column!r}] must be an int >= 0, got {steps!r}")
+    for column, value in table.items():
+        time_microseconds(value, f"{name}[{column!r}]")
 
 
 def warn_deep_window(name: str, steps: int) -> None:
@@ -41,7 +43,7 @@ def warn_deep_window(name: str, steps: int) -> None:
         warnings.warn(
             f"{name}={steps} is above the usual ceiling of "
             f"{HISTORY_WARN_THRESHOLD}. A longer context window costs "
-            "more memory per batch, and once it exceeds train_pred_steps "
+            "more memory per batch, and once it exceeds `horizon` "
             "it hands the model, at rollout time, history it never saw "
             "during training. Not rejected outright — the right window "
             "length is dataset-specific.",
@@ -50,7 +52,7 @@ def warn_deep_window(name: str, steps: int) -> None:
 
 
 @dataclass
-class ModelingConfig:
+class ModelingConfig(TimedWindows):
     """Top-level config object for system-identification training and loading."""
 
     # ---- DATA ----------------------------------------------------------------
@@ -71,18 +73,19 @@ class ModelingConfig:
     # A built-in family (mlp, nssm, lssm, gru, rc_network), or a name in the hooks
     # file's custom_models() (see modeling.contract).
     model: str = "nssm"
-    # Steps before the current one the model reads, per Y, U and D column:
-    # `{column: lag}`. Every column is listed. The window every block shares
-    # is `history_steps = max(lag) + 1` deep; each learned map then reads
-    # only its columns' own lags (see dynamics.column_lags).
-    history: dict[str, int] = field(default_factory=dict)
-    # Rows of history every model is handed, beyond what `history` asks: what a
-    # model that keeps state starts from. An `rc_network`'s filter runs over this
-    # window to place its hidden nodes. 0 asks for nothing beyond `history`.
-    context_steps: int = 0
+    # How far before the current step the model reads, per Y, U and D column:
+    # `{column: time}`. Every column is listed. Each learned map reads only its
+    # columns' own lags (see dynamics.column_lags).
+    past: dict[str, Time] = field(default_factory=dict)
+    # History every model is handed, beyond what `past` asks: what a model that keeps
+    # state starts from. An `rc_network`'s filter runs over this window to place its
+    # hidden nodes. 0 asks for nothing beyond `past`.
+    context: Time = 0
     log2_hidden_size: int = 6
     num_layers: int = 3
-    residual: bool = True
+    # A model's output is the change from the last row (`increment`) or the next
+    # `value`. A block may say otherwise for itself.
+    predicts: str = "increment"
     # One block's family, from here: `{block name: family}`. It wins over the
     # block's own `model` in block_mapping, which wins over `model` above; every
     # run prints which family each block took and from where.
@@ -108,19 +111,18 @@ class ModelingConfig:
     update_every: int = 10
     warmup: int = 5
     patience: int = 25
-    train_pred_steps: int = 48
-    # Rows between the starts of training and dev windows. None means one window
-    # every `history_steps` rows; with a long `context_steps` that is few windows,
-    # and with `batch_size` at or above their number, one update per epoch.
-    train_stride: Optional[int] = None
+    # How far a training or dev rollout predicts, past its history.
+    horizon: Time = "4h"
+    # Time between the starts of training and dev windows. None means one window per
+    # history depth; with a long `context` that is few windows, and with `batch_size`
+    # at or above their number, one update per epoch.
+    train_stride: Optional[Time] = None
     lr: float = 0.001
 
-    # ---- DEV -----------------------------------------------------------------
-    dev_pred_steps: int = 48
-
     # ---- TEST ----------------------------------------------------------------
-    test_window: int = 287
-    test_stride: int = 288
+    # How far a test rollout predicts, past its history, and how far apart they start.
+    test_horizon: Time = "24h"
+    test_stride: Time = "24h"
 
     # ---- LOSS ----------------------------------------------------------------
     ref_gain: float = 1.0
@@ -163,8 +165,7 @@ class ModelingConfig:
     def validate(self) -> None:
         for name in [
             "batch_size", "log2_hidden_size", "num_layers",
-            "epochs", "update_every", "train_pred_steps",
-            "dev_pred_steps", "test_window", "test_stride", "ensemble_seeds",
+            "epochs", "update_every", "ensemble_seeds",
         ]:
             check_positive(self, name)
         if self.threads is not None:
@@ -187,34 +188,39 @@ class ModelingConfig:
         check_one_of(self, "progress", list(PROGRESS_LEVELS))
         check_one_of(self, "norm_type", ["min_max", "abs_max", "z_score", None])
 
-        check_lag_table("history", self.history)
-        # Only what a learned map reads: `context_steps` is what a model starts
-        # from, not inputs to a network.
-        warn_deep_window("history", max(self.history.values(), default=-1) + 1)
-        if self.context_steps < 0:
-            raise ValueError(f"context_steps must be >= 0; got {self.context_steps}.")
+        check_one_of(self, "predicts", ["increment", "value"])
+        check_lag_table("past", self.past)
+        for name in ("context", "horizon", "test_horizon", "test_stride"):
+            time_microseconds(getattr(self, name), name)
         if self.train_stride is not None:
-            check_positive(self, "train_stride")
-
-        # The first history_steps of a test window are the seeded history,
-        # not predictions; a window no longer than that scores nothing and
-        # the run would fail only after training, in the test metrics.
-        if self.test_window <= self.history_steps:
-            raise ValueError(
-                f"test_window ({self.test_window}) must be > history_steps "
-                f"({self.history_steps}); the first history_steps of each test "
-                "window are seeded history, so nothing would be scored."
-            )
+            time_microseconds(self.train_stride, "train_stride")
 
         if (self.grad_gain > 0) and (self.grad_path is None):
             raise ValueError("grad_gain set but not grad_path")
 
+    def check_windows(self) -> None:
+        """Every window a whole number of steps: run once the data has set the timestep."""
+        self._check_common_windows()
+        # Only what a learned map reads: `context` is what a model starts from, not
+        # inputs to a network.
+        warn_deep_window("past", max(self.lags.values(), default=-1) + 1)
+
+    @property
+    def lags(self) -> dict[str, int]:
+        """`past` in steps."""
+        return {column: time_steps(value, self.steps_per_hour, f"past[{column!r}]")
+                for column, value in self.past.items()}
+
+    @property
+    def context_steps(self) -> int:
+        return self._steps("context")
+
     @property
     def history_steps(self) -> int:
         """Rows of every column the model is handed: the deepest lag plus the
-        current step, or `context_steps` if that is more. Data windows, the
+        current step, or `context` if that is more. Data windows, the
         seeded history and the model export all run at this depth."""
-        return max(max(self.history.values(), default=-1) + 1, self.context_steps)
+        return max(max(self.lags.values(), default=-1) + 1, self.context_steps)
 
     def asdict(self) -> dict:
         return asdict(self)

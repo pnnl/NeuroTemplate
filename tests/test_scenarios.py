@@ -21,7 +21,7 @@ def _windows(s, df=None):
     cfg = s["cfg"]
     return build_window_dict(
         s["frame"] if df is None else df, cfg, s["sysid_cfg"], s["nm"],
-        P=cfg.train_pred_steps, stride=cfg.history_steps,
+        P=cfg.horizon_steps, stride=cfg.history_steps,
     )
 
 
@@ -29,7 +29,7 @@ def test_window_dict_shapes():
     s = full_setup()
     cfg, sysid_cfg, nm = s["cfg"], s["sysid_cfg"], s["nm"]
     _, _, hmax = horizons(cfg, sysid_cfg)
-    W = hmax + cfg.train_pred_steps
+    W = hmax + cfg.horizon_steps
 
     d = _windows(s)
     n = d["yn"].shape[0]
@@ -109,7 +109,7 @@ def test_a_policy_reads_what_its_window_lists_and_names_the_rest():
     inputs, and neither is a key none of whose columns it reads. The tariff's whole
     window is unread here, so R is the band's alone."""
     from control_fixtures import DIST, FAN_P, SETPT, ZONE
-    window = {ZONE: {"past": 2}, DIST[0]: {"past": 0, "future": 1},
+    window = {ZONE: {"past": "10m"}, DIST[0]: {"past": 0, "future": "5m"},
               LOW: {"past": 0, "future": 0}, HIGH: {"past": 0, "future": 0}}
     s = full_setup(policy_window=window)
     cfg, sysid_cfg, nm, ns = s["cfg"], s["sysid_cfg"], s["nm"], s["norm_stats"]

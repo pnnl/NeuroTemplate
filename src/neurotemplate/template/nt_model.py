@@ -44,7 +44,7 @@ from neurotemplate.modeling.scenarios import (  # noqa: F401  — cited in synth
 # Required: one output head per Y channel
 # ---------------------------------------------------------------------
 @beartype
-def data_head_config(
+def output_heads(
     nm_mapping: dict[str, list[str]],
     norm_stats: NormStats,
 ) -> HeadStack:
@@ -130,7 +130,7 @@ def block_mapping(
                        "params": {"rc_network": json.load(open("ladder/zone_a.json"))}},
             "meter":  {"Y": ["Total Power [kW]"], "U": [], "D": ["Outdoor Temp [degC]"],
                        "driven_by": ["Zone A Heat [kW]"], "model": "mlp",
-                       "residual": False},
+                       "predicts": "value"},
         }
 
     Rules: every Y channel is in exactly one block. A block's U are its

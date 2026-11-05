@@ -37,8 +37,9 @@ def nm_mapping():
 @pytest.fixture
 def cfg():
     c = dict_to_dataclass({
-        "history": {"y0": 3, "y1": 3, "u0": 3, "d0": 3},
-        "train_pred_steps": 6,
+        "past": {"y0": "15m", "y1": "15m", "u0": "15m", "d0": "15m"},
+        "horizon": "30m",
+        "steps_per_hour": 12.0,
         "device": "cpu",
         "progress": "silent",
     }, Config)
@@ -71,10 +72,10 @@ def test_sec_elapsed_always_identity_regardless_of_override(synthetic_df):
 
 
 def test_sliding_window_shapes(synthetic_df, nm_mapping, cfg):
-    """Default windowing: steps=history_steps+train_pred_steps=10, stride=history_steps=4."""
+    """Default windowing: history_steps + horizon = 10 rows, stride history_steps = 4."""
     data = get_sw_dict(synthetic_df, cfg, nm_mapping)
     n_rows = len(synthetic_df)
-    steps = cfg.history_steps + cfg.train_pred_steps
+    steps = cfg.history_steps + cfg.horizon_steps
     expected_windows = (n_rows - steps) // cfg.history_steps + 1
 
     assert data["Y"].shape == (expected_windows, steps, 2)

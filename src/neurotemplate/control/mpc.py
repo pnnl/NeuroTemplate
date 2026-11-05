@@ -1,21 +1,21 @@
 """
 Receding-horizon MPC through the frozen surrogate (`policy: mpc`).
 
-At every step the controller solves a plan over the next `mpc_horizon`
+At every step the controller solves a plan over the next `horizon`
 steps (`control.solver`): a free command per step through its own copy of
 the surrogate, inside `control_bounds`, against the
 run's objective over the horizon. It starts from the previous step's plan,
 shifted by one, and commands the first step. Nothing is trained: the
 surrogate is the controller.
 
-A window's solve stops once `mpc_patience` Adam steps pass without its
-objective improving by more than `mpc_rtol` of it; `mpc_max_iters` caps it,
+A window's solve stops once the `solver`'s `patience` Adam steps pass without its
+objective improving by more than its `rtol` of it; its `max_iters` caps it,
 so every solve ends, and ends the same on any machine. Every solve's step
 count is kept (`solves`) for the reportcard. A deadline is the
 deployment's: the exported runtime takes one per call.
 
 It reads what a policy reads, the windows of `yn`, `U`, `D` and `R`, `hmax`
-steps back and `mpc_horizon` ahead for `D` and `R`: those previews are its
+steps back and `horizon` ahead for `D` and `R`: those previews are its
 forecast, so every D and reference column's `future` in `policy_window` must
 cover the horizon. Every solve seeds the surrogate's state from the window,
 as the closed loop does at its first step.
@@ -64,8 +64,9 @@ class MPC(nn.Module):
         self.r_columns = resolve_objective(cfg, nm_mapping).r_columns
         self.keys = ["yn", "U", "D"] + (["R"] if self.r_columns else [])
         self.hmax = horizons(cfg, sysid_cfg)[2]
-        self.horizon, self.lr, self.rtol = cfg.mpc_horizon, cfg.mpc_lr, cfg.mpc_rtol
-        self.patience, self.max_iters = cfg.mpc_patience, cfg.mpc_max_iters
+        self.horizon = cfg.horizon_steps
+        self.lr, self.rtol = cfg.solver["lr"], cfg.solver["rtol"]
+        self.patience, self.max_iters = cfg.solver["patience"], cfg.solver["max_iters"]
         self.objective = build_window_objective(cfg, sysid_cfg, nm_mapping)
         self.widths = {"yn": len(nm_mapping["Y"]), "U": len(nm_mapping["U"]),
                        "D": len(nm_mapping["D"]), "R": len(self.r_columns)}
@@ -124,11 +125,11 @@ class MPC(nn.Module):
 def build_mpc(cfg, sysid_cfg, nm_mapping: dict[str, list[str]], norm_stats: NormStats,
               dyn_node: Node) -> Node:
     """The MPC controller as the closed loop's policy node."""
-    short = [column for column, entry in cfg.policy_window.items()
-             if "future" in entry and entry["future"] < cfg.mpc_horizon]
+    short = [column for column, entry in cfg.window_steps.items()
+             if "future" in entry and entry["future"] < cfg.horizon_steps]
     if short:
         raise ValueError(
-            f"policy: mpc plans {cfg.mpc_horizon} steps ahead (mpc_horizon), so every D "
+            f"policy: mpc plans {cfg.horizon} ahead (`horizon`), so every D "
             f"and reference column's `future` in policy_window must reach that far: "
             f"{short} do not. The previews are the controller's forecast.")
     device = sysid_cfg.device

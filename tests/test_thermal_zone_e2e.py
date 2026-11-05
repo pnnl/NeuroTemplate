@@ -33,7 +33,7 @@ HOOKS = f'''
 import json, os
 from neurotemplate.modeling.heads import HeadStack, RegressionHead
 
-def data_head_config(nm_mapping, norm_stats):
+def output_heads(nm_mapping, norm_stats):
     return HeadStack([RegressionHead() for _ in nm_mapping["Y"]], nm_mapping["Y"])
 
 def column_norm_config(nm_mapping):
@@ -103,8 +103,7 @@ def test_declare_ladder_thermostat_train(tmp_path, monkeypatch):
                                      ("test", 3, 2, "2025-07-12")):
         _plant(days, seed, start).to_csv(tmp_path / "data" / f"{split}.csv")
     (tmp_path / "nt_model.py").write_text(HOOKS, encoding="utf-8")
-    window = 24 * STEPS_PER_HOUR
-    history = {c: 0 for c in (ZONE, HEAT, OUTDOOR, SOLAR, SETPOINT)}
+    past = {c: 0 for c in (ZONE, HEAT, OUTDOOR, SOLAR, SETPOINT)}
     config = tmp_path / "zone.yaml"
     (tmp_path / "data.yaml").write_text(yaml.safe_dump({
         "train": "data/train.csv", "dev": "data/dev.csv", "test": "data/test.csv",
@@ -113,10 +112,9 @@ def test_declare_ladder_thermostat_train(tmp_path, monkeypatch):
     config.write_text("\n".join([
         "model: rc_network",
         f"user_hooks_path: {tmp_path / 'nt_model.py'}",
-        "history: " + json.dumps(history, ensure_ascii=False), f"context_steps: {window + 1}",
-        "epochs: 3", "warmup: 0", "patience: 3", f"train_pred_steps: {window}",
-        f"dev_pred_steps: {window}", f"test_window: {window + 24 * STEPS_PER_HOUR}",
-        f"test_stride: {6 * STEPS_PER_HOUR}", "plot: false", "seed: 0", "progress: silent",
+        "past: " + json.dumps(past, ensure_ascii=False), "context: 1445m",
+        "epochs: 3", "warmup: 0", "patience: 3", "horizon: 24h",
+        "test_horizon: 1435m", "test_stride: 6h", "plot: false", "seed: 0", "progress: silent",
         f"savedir: {tmp_path / 'run'}", f"location: sqlite:///{tmp_path / 'mlflow.db'}",
     ]), encoding="utf-8")
 

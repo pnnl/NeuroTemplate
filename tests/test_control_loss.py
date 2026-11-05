@@ -19,7 +19,7 @@ def _data(s, zone, low=24.0, high=25.0, u=None):
     value per scored step) against the band [low, high]."""
     cfg, nm = s["cfg"], s["nm"]
     _, _, hmax = horizons(cfg, s["sysid_cfg"])
-    P, b = cfg.train_pred_steps, 2
+    P, b = cfg.horizon_steps, 2
     W = hmax + P
 
     yn = torch.zeros(b, W, len(nm["Y"]))
@@ -38,7 +38,7 @@ def test_the_bound_is_the_rms_violation_in_physical_units():
     """norm 2 is sqrt(mean(h²)) per window, not mean(h²): a 1 °C overshoot on
     one step of P costs 1/sqrt(P) °C, whatever the zone's stretch."""
     s = full_setup(gains=_gains(comfort_upper=3.0))
-    P = s["cfg"].train_pred_steps
+    P = s["cfg"].horizon_steps
     zone = torch.full((P,), 24.5)
     zone[2] = 26.0                                  # 1 °C above the 25 °C ceiling
     out = build_control_loss(s["cfg"], s["sysid_cfg"], s["nm"])(_data(s, zone))
@@ -62,7 +62,7 @@ def test_a_first_difference_is_scored_per_unit_of_movement():
     s = full_setup(gains=_gains(du=1.0))
     cfg, nm = s["cfg"], s["nm"]
     _, _, hmax = horizons(cfg, s["sysid_cfg"])
-    u = torch.randn(2, hmax - 1 + cfg.train_pred_steps, 1)
+    u = torch.randn(2, hmax - 1 + cfg.horizon_steps, 1)
     got = float(build_control_loss(cfg, s["sysid_cfg"], nm)(
         _data(s, 24.5, u=u))["du_loss"])
 

@@ -6,8 +6,9 @@ A lean control-specific windower. Per window:
     H_sys  = sysid_cfg.history_steps  (frozen thermal model's history window)
     H_ctrl = cfg.history_steps        (policy's deepest `past`, plus the current step)
     Hmax   = max(H_sys, H_ctrl)
-    P      = pure prediction length (train_pred_steps for train, test_window-Hmax for eval)
-    F      = the policy's deepest `future` in policy_window (`forecast_tail`)
+    P      = pure prediction length (`horizon` for train, `test_horizon` for eval)
+    F      = the deepest `future` in policy_window (`forecast_tail`): every step's
+             preview reads real rows of the record, to the rollout's last step
     W      = Hmax + P + F
 
     yn   : seed = first Hmax real Y steps   [n, Hmax,   ny]  (grows in rollout)
@@ -67,20 +68,6 @@ def horizons(cfg, sysid_cfg) -> tuple[int, int, int]:
     h_sys = sysid_cfg.history_steps
     h_ctrl = cfg.history_steps
     return h_sys, h_ctrl, max(h_sys, h_ctrl)
-
-
-@beartype
-def eval_pred_steps(cfg, hmax: int) -> int:
-    """P for the evaluation rollout. `test_window` counts the hmax warmup, as
-    on the sys-id side, so a window no longer than hmax scores nothing."""
-    steps = cfg.test_window - hmax
-    if steps <= 0:
-        raise ValueError(
-            f"test_window ({cfg.test_window}) must be > hmax ({hmax}), the "
-            "longer of the surrogate's and the policy's history_steps; otherwise "
-            "there is no rollout after the warmup."
-        )
-    return steps
 
 
 @beartype
@@ -153,8 +140,8 @@ def load_control_splits(
 def forecast_tail(cfg) -> int:
     """F: how far past the rollout's last step the controller reads a forecast. MPC
     previews every D and reference column over its whole horizon."""
-    tail = max((entry.get("future", 0) for entry in cfg.policy_window.values()), default=0)
-    return max(tail, cfg.mpc_horizon) if cfg.policy == "mpc" else tail
+    tail = max((entry.get("future", 0) for entry in cfg.window_steps.values()), default=0)
+    return max(tail, cfg.horizon_steps) if cfg.policy == "mpc" else tail
 
 
 @beartype
@@ -237,7 +224,7 @@ def build_loaders(
 
     def loader(dfs, name, shuffle, stride):
         data = build_window_dict_multi(
-            dfs, cfg, sysid_cfg, nm_mapping, P=cfg.train_pred_steps, stride=stride,
+            dfs, cfg, sysid_cfg, nm_mapping, P=cfg.horizon_steps, stride=stride,
         )
         ds = DictDataset(data, name=name)
         return torch.utils.data.DataLoader(
@@ -245,5 +232,5 @@ def build_loaders(
             shuffle=shuffle, generator=gen, drop_last=False,
         )
 
-    return (loader(train_dfs, "train", True, cfg.train_stride or h_ctrl),
+    return (loader(train_dfs, "train", True, cfg.train_stride_steps or h_ctrl),
             loader(dev_dfs, "dev", False, h_ctrl))

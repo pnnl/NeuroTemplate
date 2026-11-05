@@ -102,7 +102,7 @@ def _swap_system(**over):
     from neurotemplate.modeling.dynamics import get_dynamics
     mapping = {"Y": ["a", "b"], "U": ["u"], "D": ["d"], "t": ["sec_elapsed"]}
     spec = over.pop("spec", {"one": {"Y": ["a"], "U": ["u"]}, "two": {"Y": ["b"], "U": []}})
-    cfg = model_cfg(history={c: 2 for c in ("a", "b", "u", "d")}, **over)
+    cfg = model_cfg(past={c: "10m" for c in ("a", "b", "u", "d")}, **over)
     return cfg, mapping, get_dynamics(cfg, mapping, unit_stats(mapping), block_spec=spec)
 
 

@@ -54,7 +54,7 @@ from neurotemplate.modeling.dynamics import get_dynamics
 from neurotemplate.modeling.heads import (
     BoundedHead, HeadStack, RegressionHead,
 )
-from model_fixtures import model_cfg, uniform_history
+from model_fixtures import model_cfg, uniform_past
 
 needs_c = pytest.mark.skipif(
     shutil.which("onnx2c") is None or shutil.which("make") is None,
@@ -103,13 +103,13 @@ MIXED = {
 }
 
 
-UNIFORM = uniform_history(MAPPING, HISTORY_STEPS)
+UNIFORM = uniform_past(MAPPING, HISTORY_STEPS)
 #: The thermal blocks' reads are not in the table; the mlp blocks' are.
-MIXED_HISTORY = uniform_history(MIXED_MAPPING, HISTORY_STEPS, at_zero=("north sp", "north T"))
+MIXED_HISTORY = uniform_past(MIXED_MAPPING, HISTORY_STEPS, at_zero=("north sp", "north T"))
 
 
 def make_cfg(**over) -> Config:
-    return model_cfg(**{"model": "nssm", "history": UNIFORM, "steps_per_hour": 12.0,
+    return model_cfg(**{"model": "nssm", "past": UNIFORM, "steps_per_hour": 12.0,
                         **over})
 
 
@@ -147,10 +147,10 @@ def make(package):
 
 
 CASES = {
-    "nssm": (make_cfg(model="nssm", history=UNIFORM), MAPPING, None, None),
-    "gru, 2 layers": (make_cfg(model="gru", num_layers=2, history=UNIFORM), MAPPING, None, None),
-    "mlp per block": (make_cfg(model="mlp", history=UNIFORM), MAPPING, SPLIT, None),
-    "bounded heads": (make_cfg(model="nssm", history=UNIFORM), MAPPING, None,
+    "nssm": (make_cfg(model="nssm", past=UNIFORM), MAPPING, None, None),
+    "gru, 2 layers": (make_cfg(model="gru", num_layers=2, past=UNIFORM), MAPPING, None, None),
+    "mlp per block": (make_cfg(model="mlp", past=UNIFORM), MAPPING, SPLIT, None),
+    "bounded heads": (make_cfg(model="nssm", past=UNIFORM), MAPPING, None,
                       lambda: [BoundedHead(lo=0.0, hi=float("inf")),
                                BoundedHead(lo=-1.0, hi=100.0)]),
 }
@@ -168,7 +168,7 @@ def test_every_family_and_head_exports_as_the_trained_model(tmp_path, name):
     "onnx", "torch", pytest.param("c", marks=needs_c)])
 def test_heterogeneous_model_with_a_hinge_and_heads_exports(tmp_path, graph_format):
     """The exit criterion: rc_network + mlp, a hinge, a bounded head."""
-    result = export(tmp_path, make_cfg(history=MIXED_HISTORY), MIXED_MAPPING, MIXED,
+    result = export(tmp_path, make_cfg(past=MIXED_HISTORY), MIXED_MAPPING, MIXED,
                     [RegressionHead()] * 3 + [BoundedHead(0.0, float("inf"))], exporter="dynamo",
                     graph_format=graph_format)
     assert result.state_width == 2                  # the network's two nodes
@@ -196,7 +196,7 @@ def test_step_graph_follows_the_state_it_is_handed(tmp_path):
     """A trace that does not lift the GRU's hidden state bakes it in as a
     constant: the graph then answers the same whatever state it is given.
     The exported step must track torch for two different states."""
-    cfg = make_cfg(model="gru", history=UNIFORM)
+    cfg = make_cfg(model="gru", past=UNIFORM)
     frame, stats = split(MAPPING)
     torch.manual_seed(0)
     model = contract_model(get_dynamics(cfg, MAPPING, stats)).eval()
@@ -328,10 +328,10 @@ def test_a_package_takes_only_what_the_policy_reads(tmp_path, graph_format, read
     from neurotemplate.control.policy import build_policy
     from neurotemplate.export.policy import export_policy
 
-    window = {ZONE: {"past": 2}, SETPT: {"past": 1}, LOW: {"past": 0, "future": 0},
-              HIGH: {"past": 0, "future": 1}}
+    window = {ZONE: {"past": "10m"}, SETPT: {"past": "5m"}, LOW: {"past": 0, "future": 0},
+              HIGH: {"past": 0, "future": "5m"}}
     if reads_d:
-        window[DIST[1]] = {"past": 0, "future": 1}
+        window[DIST[1]] = {"past": 0, "future": "5m"}
     s = full_setup(policy_window=window)
     cfg, sysid_cfg, nm, ns = s["cfg"], s["sysid_cfg"], s["nm"], s["norm_stats"]
     policy = build_policy(cfg, sysid_cfg, nm, ns)
@@ -410,8 +410,8 @@ def test_an_mpc_run_exports_a_planner_beside_its_surrogate(tmp_path):
     from neurotemplate.export.policy import export_policy
 
     future = {c: 4 for c in (TARIFF, LOW, HIGH, *make_nm_mapping()["D"])}
-    s = full_setup(**{**_priced(0), "future": future}, policy="mpc", mpc_horizon=4,
-                   mpc_max_iters=5)
+    s = full_setup(**{**_priced(0), "future": future}, policy="mpc", horizon="20m",
+                   solver={"max_iters": 5})
     cfg, sysid_cfg, nm, ns = s["cfg"], s["sysid_cfg"], s["nm"], s["norm_stats"]
     dyn_sys, plant = make_tracking_plant(sysid_cfg, nm)
     with pytest.raises(FileNotFoundError, match="torch format first"):

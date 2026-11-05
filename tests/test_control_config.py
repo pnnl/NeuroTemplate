@@ -10,7 +10,7 @@ regardless and are not tabulated.
 """
 import pytest
 
-from neurotemplate.common.config import CONTROL_CONFIG_DIR
+from neurotemplate.common.config import CONTROL_CONFIG_DIR, ConfigError, time_steps
 from neurotemplate.common.config import load_config_from_cli
 from neurotemplate.control.config import ControlConfig
 from neurotemplate.control.losses import resolve_objective
@@ -20,16 +20,17 @@ from control_fixtures import (
 
 _YAML = """
 sysid_run_id: abc123
-train_pred_steps: 24
+horizon: 2h
+steps_per_hour: 12
 run_dir: none
 losses:
   comfort_lower: {column: lo, target: zone, map: relu, norm: 2}
   du:            {column: setpoint, map: first_difference, norm: 1}
 gains: {comfort_lower: 5.0, du: 1.0e3}
 policy_window:
-  zone:     {past: 3}
-  setpoint: {past: 1}
-  oat:      {past: 0, future: 12}
+  zone:     {past: 15m}
+  setpoint: {past: 5m}
+  oat:      {past: 0, future: 1h}
   lo:       {past: 0, future: 0}
 """
 
@@ -52,15 +53,30 @@ def _load(tmp_path, text, *overrides):
 def test_yaml_fills_what_it_names_and_defaults_the_rest(tmp_path):
     cfg = _load(tmp_path, _YAML)
     assert cfg.sysid_run_id == "abc123"
-    assert cfg.train_pred_steps == 24
+    assert cfg.horizon == "2h" and cfg.horizon_steps == 24
     assert cfg.run_dir is None                      # "none" -> None on Optional
     assert cfg.losses["comfort_lower"]["map"] == "relu"
     assert cfg.gains["du"] == 1000.0
 
 
 def test_a_preview_past_the_training_rollout_is_refused(tmp_path):
+    cfg = _load(tmp_path, _YAML, "horizon=30m")   # `oat` previews an hour
     with pytest.raises(ValueError, match="never rewarded"):
-        _load(tmp_path, _YAML, "train_pred_steps=6")   # `oat` previews 12
+        cfg.check_windows()      # once the surrogate has said the timestep
+
+
+@pytest.mark.parametrize("value,steps", [("5h", 60), ("20m", 4), ("300s", 1), (0, 0), ("0", 0),
+                                         ("1.5h", 18)])
+def test_a_window_is_a_time(value, steps):
+    assert time_steps(value, 12.0, "horizon") == steps
+
+
+@pytest.mark.parametrize("value,message", [
+    ("7m", "not a whole number"), (3, "is a time"), ("3 h", "is a time"), ("3d", "is a time"),
+])
+def test_a_window_off_the_timestep_or_without_a_unit_is_refused(value, message):
+    with pytest.raises(ConfigError, match=message):
+        time_steps(value, 12.0, "horizon")
 
 
 def test_the_table_survives_the_mlflow_param_round_trip():
@@ -68,7 +84,7 @@ def test_the_table_survives_the_mlflow_param_round_trip():
     — on reload, so the table must parse back to itself."""
     from neurotemplate.common.config import _parse_value, dict_to_dataclass
     cfg = make_control_cfg(reference_scale={TARIFF: 0.3},
-                           policy_window={ZONE: {"past": 2}, LOW: {"past": 0, "future": 2}})
+                           policy_window={ZONE: {"past": "10m"}, LOW: {"past": 0, "future": "10m"}})
     logged = {k: _parse_value(str(v)) for k, v in cfg.asdict().items()
               if k != "device"}
     rebuilt = dict_to_dataclass(logged, ControlConfig)
