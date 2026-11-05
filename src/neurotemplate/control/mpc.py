@@ -3,7 +3,7 @@ Receding-horizon MPC through the frozen surrogate (`policy: mpc`).
 
 At every step the controller solves a plan over the next `mpc_horizon`
 steps (`control.solver`): a free command per step through its own copy of
-the surrogate, inside the actuation bounds and `command_bounds`, against the
+the surrogate, inside `control_bounds`, against the
 run's objective over the horizon. It starts from the previous step's plan,
 shifted by one, and commands the first step. Nothing is trained: the
 surrogate is the controller.
@@ -37,15 +37,14 @@ from neurotemplate._typing import beartype
 from neurotemplate.common.data_utils import NormStats
 from neurotemplate.control.closed_loop import build_closed_loop, build_window_objective
 from neurotemplate.control.losses import resolve_objective
-from neurotemplate.control.policy import with_command_bounds
+from neurotemplate.control.policy import control_box, with_control_bounds
 from neurotemplate.control.scenarios import horizons
 from neurotemplate.control.solver import SharePlan, share_of, solve
-from neurotemplate.hooks import load_control_hooks
 
 
 def _inner_keys(r_columns: list[str]) -> tuple[list[str], dict]:
     """The plan's inputs inside a solve: the current step of each key, which
-    is all `command_bounds` reads."""
+    is all `control_bounds` reads."""
     keys = ["yn", "D"] + (["R"] if r_columns else [])
     return keys, {key: {"past": 0, "future": 0, "pad_mode": "nearest"} for key in keys}
 
@@ -105,7 +104,7 @@ class MPC(nn.Module):
             start = torch.cat([self.previous[:, 1:], self.previous[:, -1:]], dim=1)
         plan = SharePlan(self.umin, self.umax, start)
         keys, input_map = _inner_keys(self.r_columns)
-        node = Node(with_command_bounds(plan, self.cfg, self.nm_mapping, keys, input_map,
+        node = Node(with_control_bounds(plan, self.cfg, self.nm_mapping, keys, input_map,
                                         self.umin, self.umax),
                     keys, ["U"], name="mpc plan", input_map=input_map)
         loop = build_closed_loop(self.plant, node, self.cfg, self.sysid_cfg)
@@ -133,7 +132,6 @@ def build_mpc(cfg, sysid_cfg, nm_mapping: dict[str, list[str]], norm_stats: Norm
             f"and reference column's `future` in policy_window must reach that far: "
             f"{short} do not. The previews are the controller's forecast.")
     device = sysid_cfg.device
-    umin, umax = (b.to(device=device, dtype=torch.float32)
-                  for b in load_control_hooks(cfg).actuation_bounds(nm_mapping, norm_stats))
+    umin, umax = control_box(cfg, nm_mapping, norm_stats, device)
     mpc = MPC(dyn_node, cfg, sysid_cfg, nm_mapping, umin, umax)
     return Node(mpc, mpc.keys, ["U"], name="MPC", input_map=mpc.input_map())

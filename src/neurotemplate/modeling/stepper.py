@@ -1,7 +1,7 @@
 """
 `Stepper`: the usual recipe, behind the contract.
 
-    normalise → derive inputs → core → residual → heads → physical units
+    normalise → setpoint hinges → core → residual → heads → physical units
 
 A family is its core: a module taking normalised `[batch, rows, n]` windows and
 returning one value per output, `z [batch, ny]` (see `families`, `gru`). The
@@ -20,7 +20,7 @@ import torch
 import torch.nn as nn
 
 from neurotemplate.modeling.heads import HeadStack
-from neurotemplate.modeling.prestack import PreStack
+from neurotemplate.modeling.hinge import Hinges
 
 _KEYS = ("Y", "U", "D")
 
@@ -56,19 +56,18 @@ class Stepper(nn.Module):
                  norm_stats: dict[str, dict], history_steps: int,
                  residual: Union[bool, Sequence[bool]] = True,
                  head_stack: Optional[HeadStack] = None,
-                 pre_stack: Optional[PreStack] = None):
+                 hinges: Optional[Hinges] = None):
         super().__init__()
         self.core = core
         self.scale = Scaler(nm_mapping, norm_stats)
         self.history_steps = history_steps
         self.ny, self.nu, self.nd = (len(nm_mapping[key]) for key in _KEYS)
-        if head_stack is not None and head_stack.raw_width != self.ny:
-            raise ValueError(f"head_stack.raw_width={head_stack.raw_width} does not match "
-                             f"ny={self.ny}; a model's heads are width 1.")
-        # A new stack, in the core's units; post-training calibration writes
-        # its decision thresholds into this one, never the caller's.
+        if head_stack is not None and head_stack.n_channels != self.ny:
+            raise ValueError(f"head_stack has {head_stack.n_channels} channels; the model "
+                             f"has ny={self.ny}.")
+        # A new stack, in the core's units.
         self.head_stack = None if head_stack is None else head_stack.normalized(norm_stats)
-        self.pre_stack = pre_stack
+        self.hinges = hinges
         flags = [residual] * self.ny if isinstance(residual, bool) else list(residual)
         mask = torch.tensor(flags, dtype=torch.bool)
         if self.head_stack is not None:
@@ -87,8 +86,8 @@ class Stepper(nn.Module):
         return self.scale.y_shift
 
     def sign_step(self, y: torch.Tensor, u: torch.Tensor, d: torch.Tensor) -> torch.Tensor:
-        """The core plus the residual, before any head and after any derived
-        input, normalised: what the gradient sign penalty differentiates. Every
+        """The core plus the residual, before any head and after any hinge,
+        normalised: what the gradient sign penalty differentiates. Every
         head's activation is monotone increasing, so the signs it checks are the
         activated output's too."""
         z = self.core(y, u, d)
@@ -98,8 +97,8 @@ class Stepper(nn.Module):
         y = self.scale.normalize("Y", y)
         u = self.scale.normalize("U", u)
         d = self.scale.normalize("D", d)
-        if self.pre_stack is not None:
-            u = self.pre_stack(y, u)
+        if self.hinges is not None:
+            u = self.hinges(y, u)
         z = self.sign_step(y, u, d)
         if self.head_stack is not None:
             z = self.head_stack(z)

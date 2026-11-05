@@ -53,7 +53,7 @@ from neurotemplate.hooks import load_modeling_hooks
 from neurotemplate.modeling.contract import Windowed, contract_model, stateful_blocks
 from neurotemplate.modeling.families import Mlp, Separable
 from neurotemplate.modeling.heads import HeadStack, RegressionHead
-from neurotemplate.modeling.prestack import PreStack
+from neurotemplate.modeling.hinge import Hinges
 from neurotemplate.modeling.bounded import bounded_parameters
 from neurotemplate.modeling.gru import GRUBlock
 from neurotemplate.modeling.rollout import WindowedSystem
@@ -153,22 +153,21 @@ def _check_lags_consumed(blocks: list[Block], families: list[str], lags: list[La
             )
 
 
-def _check_demand_lags(blocks: list[Block], history: dict[str, int]) -> None:
-    """A demand setpoint's lag is at most its state's.
+def _check_hinge_lags(blocks: list[Block], history: dict[str, int]) -> None:
+    """A hinged setpoint's lag is at most its zone's.
 
-    The pre-stack computes the demand on the full window, so a setpoint read
-    further back than its zone would carry zone history older than the
-    zone's own declared lag into the block.
+    The hinge is computed on the full window, so a setpoint read further back than its
+    zone would carry zone history older than the zone's own declared lag into the block.
     """
     for block in blocks:
         for column, entry in block.inputs.items():
-            state = entry.get("state")
-            if entry["kind"] == "demand" and history[column] > history[state]:
+            target = entry["target"]
+            if history[column] > history[target]:
                 raise ValueError(
-                    f"history[{column!r}] is {history[column]}, deeper than its "
-                    f"demand state history[{state!r}] = {history[state]}. The "
-                    "demand feature reads the state at every step it covers; "
-                    f"give {column!r} a lag of at most {history[state]}."
+                    f"history[{column!r}] is {history[column]}, deeper than its hinge's "
+                    f"target history[{target!r}] = {history[target]}. The hinge reads the "
+                    f"target at every step it covers; give {column!r} a lag of at most "
+                    f"{history[target]}."
                 )
 
 
@@ -230,26 +229,6 @@ def resolve_family(cfg: ModelingConfig, block: Block) -> tuple[str, str]:
 
 
 @beartype
-def family_by_channel(
-    cfg: ModelingConfig,
-    nm_mapping: dict[str, list[str]],
-    block_spec: Optional[dict[str, dict]] = None,
-) -> dict[str, str]:
-    """Which model family produces each Y channel: `{column: family}`.
-
-    Resolved exactly as `get_dynamics` resolves it, so a caller asking "what
-    builds this channel?" can never disagree with what actually gets built.
-    That matters for `nt data heads`, which warns about head/family conflicts
-    per channel.
-    """
-    return {
-        name: resolve_family(cfg, block)[0]
-        for block in build_blocks(nm_mapping, block_spec)
-        for name in block.y_names
-    }
-
-
-@beartype
 def family_lines(cfg: ModelingConfig, nm_mapping: dict[str, list[str]],
                  block_spec: Optional[dict[str, dict]]) -> list[str]:
     """One line per block: the family it takes, and which declaration said so,
@@ -306,7 +285,7 @@ class Blocks(nn.Module):
         value = z + newest if residual[channel] else z
         if head_stack is None:
             return value
-        return head_stack.activate_channel(value[..., None], channel)
+        return head_stack.activate_channel(value, channel)
 
     def forward(self, y: torch.Tensor, u: torch.Tensor, d: torch.Tensor) -> torch.Tensor:
         written: dict[int, torch.Tensor] = {}
@@ -358,7 +337,7 @@ def describe_dynamics(dyn_sys: SystemPreview, cfg: ModelingConfig) -> dict:
       - ny / nu / nd: shape parameters
       - param_count: total trainable parameters
       - blocks: per-block descriptors, `{name: info}`; a custom model is one
-      - pre_stack: the derived-input declarations, or None
+      - hinges: the setpoint hinges, or None
 
     Used by reportcard.render_reportcard.
     """
@@ -379,7 +358,7 @@ def describe_dynamics(dyn_sys: SystemPreview, cfg: ModelingConfig) -> dict:
     else:
         factory = cfg.model
         blocks = {cfg.model: {**_describe_part(model), "model": cfg.model}}
-    pre_stack = getattr(model, "pre_stack", None)
+    hinges = getattr(model, "hinges", None)
     return {
         "factory": factory,
         "residual": bool(cfg.residual),
@@ -390,9 +369,7 @@ def describe_dynamics(dyn_sys: SystemPreview, cfg: ModelingConfig) -> dict:
         "nd": int(nd),
         "param_count": _count_params(model),
         "blocks": blocks,
-        # Derived inputs, `{u_column: {kind, state, ...}}`; None when no
-        # column is rewritten.
-        "pre_stack": pre_stack.describe() if pre_stack is not None else None,
+        "hinges": hinges.describe() if hinges is not None else None,
     }
 
 
@@ -439,25 +416,15 @@ def _check_value_heads(blocks: list[Block], families: list[str], head_stack: Hea
              if name in thermal and not head.residual_compatible]
     if blind:
         raise ValueError(f"a thermal block's output is the value in its column's units, so "
-                         f"every Y channel it produces needs a head that reads it as one "
-                         f"(regression or bounded); {blind} are not.")
+                         f"every Y channel it produces needs a head that reads it as one; "
+                         f"{blind} are not.")
 
 
-def _build_pre_stack(blocks: list[Block], nm_mapping: dict[str, list[str]],
-                     norm_stats: dict) -> Optional[PreStack]:
-    """One `PreStack` over every block's `demand` declarations, or None.
-
-    The stack is block-agnostic — each entry is resolved to a global
-    `(U column, Y channel)` pair.
-    """
-    demands = {
-        column: {k: entry[k] for k in ("kind", "state", "sign")}
-        for block in blocks
-        for column, entry in block.inputs.items() if entry["kind"] == "demand"
-    }
-    if not demands:
-        return None
-    return PreStack.from_config(demands, nm_mapping["Y"], nm_mapping["U"], norm_stats)
+def _build_hinges(blocks: list[Block], nm_mapping: dict[str, list[str]],
+                  norm_stats: dict) -> Optional[Hinges]:
+    """One `Hinges` over every block's declarations, or None."""
+    declared = {column: entry for block in blocks for column, entry in block.inputs.items()}
+    return Hinges(declared, nm_mapping, norm_stats) if declared else None
 
 
 def _warn_ignored_declarations(blocks: list[Block], families: list[str]) -> None:
@@ -536,7 +503,7 @@ def get_dynamics(
     _refuse_declarations(cfg, blocks, families)
     _warn_ignored_declarations(blocks, families)
     column_lags(cfg, nm_mapping)   # the history table names exactly the columns
-    _check_demand_lags(blocks, cfg.history)
+    _check_hinge_lags(blocks, cfg.history)
     lags = [block_lags(family, block, cfg.history, cfg.history_steps)
             for block, family in zip(blocks, families)]
     _check_lags_consumed(blocks, families, lags, cfg.history)
@@ -553,7 +520,7 @@ def get_dynamics(
                               else cfg.residual if block.residual is None else block.residual)
     model = Stepper(core, nm_mapping, norm_stats, cfg.history_steps, residual=flags,
                     head_stack=head_stack,
-                    pre_stack=_build_pre_stack(blocks, nm_mapping, norm_stats))
+                    hinges=_build_hinges(blocks, nm_mapping, norm_stats))
     core.reads_outputs_through(model.residual_mask, model.head_stack)
     return _rollout_system(model, cfg, nm_mapping)
 
@@ -599,7 +566,7 @@ def _custom_model(cfg: ModelingConfig, nm_mapping: dict[str, list[str]],
     every column, behind the contract as it is (see `contract`).
 
     Blocks are built-in families' structure, so a spec is refused. A model that
-    bounds or levels an output says so by owning a `head_stack`; a head declared
+    bounds an output says so by owning a `head_stack`; a head declared
     in `data_head_config` that it does not own would be silently ignored, so that
     is refused too.
     """

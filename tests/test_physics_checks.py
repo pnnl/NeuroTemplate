@@ -16,7 +16,7 @@ from neuromancer.system import Node, SystemPreview
 
 from neurotemplate.modeling.contract import Windowed, contract_model
 from neurotemplate.modeling.stepper import Stepper
-from neurotemplate.modeling.prestack import PreStack
+from neurotemplate.modeling.hinge import Hinges
 from neurotemplate.modeling.scenarios import (
     SynthSpec,
     build_scenarios,
@@ -176,9 +176,9 @@ def test_the_step_is_measured_net_of_the_drift_at_rest():
 HEAT = "heating setpoint [°C]"
 
 
-def test_a_demand_target_inactive_everywhere_is_skipped_not_failed():
+def test_a_hinge_target_inactive_everywhere_is_skipped_not_failed():
     """A heating setpoint swept to its recorded minimum (16 °C) calls for no
-    heat in an 18-30 °C zone: a declared `demand` makes that zero by
+    heat in an 18-30 °C zone: a declared hinge makes that zero by
     construction, so the sweep asserts nothing. Its other end still does."""
     nm = {"Y": [ZONE, POWER], "U": [HEAT], "D": [AMBIENT], "t": ["sec_elapsed"]}
     stats = dict(NORM_STATS, **{HEAT: {"shift": 0.0, "stretch": 1.0,
@@ -192,18 +192,17 @@ def test_a_demand_target_inactive_everywhere_is_skipped_not_failed():
         return torch.stack([zone + 0.25 * (d[:, 0] - zone) + heat,
                             torch.zeros_like(zone)], dim=1)
 
-    def on_demand(y, u, d):
-        """The same plant, handed the demand a declaration derives from the setpoint."""
+    def on_hinge(y, u, d):
+        """The same plant, handed the hinge a declaration derives from the setpoint."""
         zone = y[:, 0]
         return torch.stack([zone + 0.25 * (d[:, 0] - zone) + (u[:, 0] > 0).float(),
                             torch.zeros_like(zone)], dim=1)
 
     def step_results(declared: bool):
-        system = _system(on_demand if declared else thermostat, nm, stats)
+        system = _system(on_hinge if declared else thermostat, nm, stats)
         if declared:
-            contract_model(system).pre_stack = PreStack.from_config(
-                {HEAT: {"kind": "demand", "state": ZONE, "sign": +1}},
-                nm["Y"], nm["U"], stats)
+            contract_model(system).hinges = Hinges(
+                {HEAT: {"target": ZONE, "map": "relu"}}, nm, stats)
         return build_scenarios(
             system=system, nm_mapping=nm, norm_stats=stats, synth_cfg=spec,
             history_steps=HISTORY_STEPS, n_scenarios=16, n_steps=N_STEPS, device="cpu",

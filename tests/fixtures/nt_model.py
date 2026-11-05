@@ -14,14 +14,13 @@ import os
 import json
 from typing import Optional, Tuple
 
-from optuna import Trial
 from neurotemplate.modeling.config import ModelingConfig as Config
 import torch
 
 from neurotemplate.common.data_utils import NormStats
 from neurotemplate.modeling.heads import (
+    BoundedHead,
     HeadStack,
-    OrdinalHead,
     RegressionHead,
 )
 from neurotemplate.modeling.scenarios import SynthSpec
@@ -142,35 +141,16 @@ def data_head_config(
 
     Available head types:
       - RegressionHead  : continuous target, MSE loss.
-      - BinaryHead      : 0/1 target, sigmoid activation, BCE loss.
-      - BoundedHead     : continuous target with soft bounds during training,
-                          clamped to [lo, hi] in the STE forward path.
+      - BoundedHead     : continuous target inside [lo, hi].
                             Fully bounded   (both finite)  : sigmoid-band.
                             Lower-bounded   (hi=+inf)      : lo + softplus(z).
                             Upper-bounded   (lo=-inf)      : hi - softplus(-z).
-                          Pass `use_ste=False` to skip the snap and feed back
-                          the smooth activation directly.
-      - OrdinalHead     : K-level ordered output. Specify `level_values`
-                          (in physical units) and let the
-                          head place thresholds at the midpoints. Activation
-                          interpolates smoothly between levels; decode snaps
-                          to one of the level_values via the STE combine.
     """
-    def _ordinal_with_levels(levels, use_ste=True):
-        return OrdinalHead(n_levels=len(levels), level_values=levels,
-                           beta=20, use_ste=use_ste)
-
     heads = []
     for col in nm_mapping["Y"]:
         col_lower = col.lower()
-        if "supply air flow" in col_lower:
-            heads.append(_ordinal_with_levels([0.0, 0.82, 1.25]))
-        elif "fan power" in col_lower:
-            heads.append(_ordinal_with_levels([0.0, 483.0, 1680.7]))
-        elif "dx power" in col_lower:
-            heads.append(_ordinal_with_levels([0.0, 4300.0, 8800.0], use_ste=False))
-        elif "cooling stage" in col_lower:
-            heads.append(OrdinalHead(n_levels=3))
+        if any(p in col_lower for p in ("supply air flow", "fan power", "dx power")):
+            heads.append(BoundedHead(0.0, float("inf")))
         else:
             heads.append(RegressionHead())
     return HeadStack(heads, nm_mapping["Y"])
@@ -232,18 +212,6 @@ def synth_cfg(
         # down to its minimum and expects the zone to fall.
         responds={c: {setpoint: +1} for c in states},
     )
-
-
-# ---------------------------------------------------------------------
-# Required: Optuna hyperparameter suggestion
-# ---------------------------------------------------------------------
-@beartype
-def hyper_args(
-    trial: Trial,
-    cfg: Config,
-) -> Config:
-    """Suggest high-impact hyperparameters for Optuna trial."""
-    return cfg
 
 
 # ---------------------------------------------------------------------

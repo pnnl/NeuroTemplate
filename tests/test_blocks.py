@@ -6,7 +6,7 @@ Tests for the Y/U/D partition behind per-block models.
 U may be left unclaimed (and is then shared), D has no partition
 requirement at all, `reads` may name another block's Y channel but not the
 block's own, a per-column declaration names only the block's own columns
-and pairs a `demand` only with the block's own state, and anything else is
+and pairs a hinge only with the block's own zone, and anything else is
 an error the user sees before a single epoch runs.
 """
 import pytest
@@ -72,17 +72,14 @@ def test_y_in_idx_puts_own_channels_first_then_reads_sorted():
 
 # ── Declarations: what a column is ───────────────────────────────
 
-def test_a_shared_setpoint_is_a_demand_in_one_block_only():
-    """Two blocks each pairing the shared column with their own state would
-    collapse to one entry in the pre-stack, and the other block would get a
-    demand computed against the wrong zone."""
+def test_a_shared_setpoint_is_a_hinge_in_one_block_only():
+    """Two blocks each pairing the shared column with their own zone would collapse
+    to one hinge, and the other block would read it against the wrong zone."""
     spec = {
         "north": {"Y": ["north T"], "U": ["north sp"],
-                  "inputs": {"ahu fan": {"kind": "demand", "sign": -1,
-                                         "state": "north T"}}},
+                  "inputs": {"ahu fan": {"target": "north T", "map": "nrelu"}}},
         "south": {"Y": ["south T"], "U": ["south sp"],
-                  "inputs": {"ahu fan": {"kind": "demand", "sign": -1,
-                                         "state": "south T"}}},
+                  "inputs": {"ahu fan": {"target": "south T", "map": "nrelu"}}},
     }
     with pytest.raises(ValueError, match=r"'ahu fan': \['north', 'south'\]"):
         build_blocks(MAPPING, spec)

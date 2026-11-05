@@ -44,7 +44,7 @@ from neurotemplate.control.losses import resolve_objective
 from neurotemplate.control.pipeline import evaluate_closed_loop
 from neurotemplate.control.controller import describe_controller
 from neurotemplate.control.mpc import MPC, _inner_keys
-from neurotemplate.control.policy import _bound_side, _ReferenceBounds, with_command_bounds
+from neurotemplate.control.policy import _bound_side, _PerStepBounds, with_control_bounds
 from neurotemplate.hooks import load_control_hooks
 from neurotemplate.export import ccode
 from neurotemplate.export.package import (
@@ -319,10 +319,10 @@ def _mpc_block(mpc: MPC, cfg, nm_mapping: dict[str, list[str]]) -> dict:
     """What the runtime's planner needs: `policy.json`'s `mpc`."""
     objective = resolve_objective(cfg, nm_mapping)
     keys, input_map = _inner_keys(objective.r_columns)
-    bounds = with_command_bounds(torch.nn.Identity(), cfg, nm_mapping, keys, input_map,
+    bounds = with_control_bounds(torch.nn.Identity(), cfg, nm_mapping, keys, input_map,
                                  mpc.umin, mpc.umax)
     order = ([nm_mapping["U"][j] for j in bounds.columns]
-             if isinstance(bounds, _ReferenceBounds) else [])
+             if isinstance(bounds, _PerStepBounds) else [])
 
     def side(raw) -> dict:
         name, offset = _bound_side(raw)
@@ -332,8 +332,8 @@ def _mpc_block(mpc: MPC, cfg, nm_mapping: dict[str, list[str]]) -> dict:
         "horizon": mpc.horizon, "lr": mpc.lr, "rtol": mpc.rtol, "patience": mpc.patience,
         "max_iters": mpc.max_iters, "hmax": mpc.hmax,
         "umin": mpc.umin.tolist(), "umax": mpc.umax.tolist(),
-        "command_bounds": [{"column": c, "low": side(cfg.command_bounds[c][0]),
-                            "high": side(cfg.command_bounds[c][1])} for c in order],
+        "control_bounds": [{"column": c, "low": side(cfg.control_bounds[c][0]),
+                            "high": side(cfg.control_bounds[c][1])} for c in order],
         "terms": [{"name": t.name, "column": t.column, "target": t.target, "map": t.map,
                    "norm": t.norm, "weight": t.weight, "gain": t.gain}
                   for t in objective.terms],

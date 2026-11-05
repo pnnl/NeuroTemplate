@@ -41,7 +41,7 @@ import torch.nn.functional as F
 
 from neurotemplate.modeling.network import (
     COLLAPSE_MARGIN, DTYPE, LOG_LIMIT, affine_scan, standard_errors, suggested_box)
-from neurotemplate.modeling.heads import straight_through
+from neurotemplate.modeling.hinge import straight_through
 
 SIDES = {"cooling": -1, "heating": +1}
 

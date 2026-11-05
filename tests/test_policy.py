@@ -8,7 +8,7 @@ from neurotemplate.control.policy import (
     build_policy,
 )
 from neurotemplate.control.closed_loop import build_closed_loop
-from nt_control import actuation_bounds
+from neurotemplate.control.policy import control_box
 from control_fixtures import ZONE, full_setup
 
 #: The fixture objective's reference columns: the band's two edges.
@@ -138,7 +138,7 @@ def test_bounds_respected_for_every_family_and_method(family, method):
     cl = build_closed_loop(s["dyn_node"], policy, cfg, sysid_cfg)
     U = cl(_windows(s))["U"][:, scored_steps("U", hmax), :]
 
-    umin, umax = actuation_bounds(nm, s["norm_stats"])
+    umin, umax = control_box(cfg, nm, s["norm_stats"], "cpu")
     tol = 1e-4
     assert torch.all(U >= umin - tol)
     assert torch.all(U <= umax + tol)

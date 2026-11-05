@@ -5,7 +5,7 @@ through the surrogate (`control.mpc`).
 Either is a node of the closed loop that reads the policy's windows of `yn`,
 `U`, `D` and `R`, physical units, and writes `U`, physical units. Anything
 honouring that can stand in the loop, be scored, and be read against the best
-plan (`control.plan`).
+plan (`control.plan`, `nt control gap`).
 """
 
 from __future__ import annotations
@@ -43,5 +43,5 @@ def describe_controller(node: Node, cfg, sysid_cfg, nm_mapping: dict[str, list[s
         "u_cols": list(nm_mapping["U"]),
         "umin_phys": mpc.umin.tolist(),
         "umax_phys": mpc.umax.tolist(),
-        "command_bounds": dict(cfg.command_bounds) or None,
+        "control_bounds": dict(cfg.control_bounds) or None,
     }

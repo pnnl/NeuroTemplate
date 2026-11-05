@@ -4,7 +4,6 @@ the command line:
 
     from neurotemplate.common.config import load_config
     from neurotemplate.modeling.config import ModelingConfig
-from neurotemplate.modeling.dynamics import family_lines
     from neurotemplate.modeling.train import train_model
 
     cfg = load_config("model_configs/modeling.yaml", ModelingConfig,
@@ -33,7 +32,7 @@ from neurotemplate.modeling.pipeline import (
 )
 
 #: Loss terms echoed to stdout each epoch, and the substrings of the metric
-#: keys logged to MLflow. Shared with `nt model optuna`'s final retrain.
+#: keys logged to MLflow.
 STDOUT_METRICS = ["train_loss", "train_ref_loss", "train_grad_penalty", "dev_loss"]
 LOGGED_METRICS = ["train_loss", "dev_loss", "ref_loss", "grad_penalty", "time",
                   "rmse"]
@@ -61,12 +60,9 @@ def train_model(cfg: ModelingConfig,
     if data.block_spec and cfg.progress != "silent":
         print("Blocks:\n" + "\n".join(family_lines(cfg, data.nm_mapping, data.block_spec)))
 
-    # With a curriculum, each step is a nested child run under this parent.
     cfg.run = cfg.model.upper() + " " + cfg.run
-    run_name = cfg.run + " Parent" if cfg.curriculum_steps else cfg.run
 
-    with tracked_run(cfg, stdout=STDOUT_METRICS, logout=LOGGED_METRICS,
-                     run_name=run_name) as logger:
+    with tracked_run(cfg, stdout=STDOUT_METRICS, logout=LOGGED_METRICS) as logger:
         snapshot_hooks(hooks, MODELING_SNAPSHOT, logger)
         result = train_and_evaluate(cfg, logger=logger, **vars(data))
         write_run_summary(

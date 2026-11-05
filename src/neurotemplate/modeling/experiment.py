@@ -10,7 +10,6 @@ terms are train-only.
 
 import os
 import random
-from dataclasses import replace
 from datetime import datetime
 from typing import Optional, Union
 
@@ -22,7 +21,7 @@ from neurotemplate._typing import beartype
 
 from neurotemplate.common.data_utils import NormStats, get_loader
 from neurotemplate.common.progress import Progress
-from neurotemplate.common.tracking import RunLog, RunLogger, save_checkpoint
+from neurotemplate.common.tracking import RunLog, save_checkpoint
 from neurotemplate.modeling.heads import HeadStack
 from neurotemplate.modeling.contract import contract_model
 from neurotemplate.modeling.dynamics import get_dynamics
@@ -110,9 +109,7 @@ def build_trainer(
         cfg, nm_mapping, norm_stats, head_stack=head_stack, block_spec=block_spec,
     ).to(cfg.device)
 
-    # The loss reads the head stack the model owns (a Stepper rescales its own
-    # copy), not the caller's — one stack, so nothing calibrated on it can go
-    # stale in the loss.
+    # The loss reads the head stack the model owns: a Stepper rescales its own copy.
     head_stack = getattr(contract_model(system), "head_stack", None)
 
     # Single PenaltyLoss with all objectives:
@@ -177,43 +174,6 @@ def _parameter_groups(problem: Problem, cfg: ModelingConfig) -> list[dict]:
     return groups
 
 
-# ── Child Logger ─────────────────────────────────────────────────
-
-@beartype
-def create_child_logger(
-    cfg: ModelingConfig,
-    global_logger: RunLogger,
-    pred_steps: int,
-    curriculum_step: int,
-) -> RunLogger:
-    """Create a nested MLflow child run for a curriculum stage.
-
-    The child logs the stage's own config — its rollout length and run name —
-    built as a copy, so the caller's `cfg` is never touched.
-    """
-    child_savedir = f"{cfg.savedir}/pred_steps_{pred_steps}"
-    # The logger's clean_up() unconditionally rmtree's savedir, but never
-    # creates it; for a curriculum stage that writes no local artifact the
-    # dir is absent and clean_up() raises FileNotFoundError. Create it up
-    # front so the stage tears down cleanly.
-    os.makedirs(child_savedir, exist_ok=True)
-
-    stage_cfg = replace(cfg, train_pred_steps=pred_steps,
-                        run=f"Curriculum Step {curriculum_step}")
-    child_logger = RunLogger(
-        stage_cfg,
-        savedir=child_savedir,
-        stdout=global_logger.stdout,
-        verbosity=0,
-        logout=global_logger.logout,
-        nested=True,
-        save_weights=False,
-    )
-
-    child_logger.log_param("curriculum_step", curriculum_step)
-    return child_logger
-
-
 @beartype
 def check_parameters_reach_loss(problem: Problem, batch: dict) -> None:
     """Raise if a trainable parameter has no gradient path to the training
@@ -236,10 +196,10 @@ def check_parameters_reach_loss(problem: Problem, batch: dict) -> None:
             "requires_grad_(False), or set lr: 0 to keep the model as built.")
 
 
-# ── Train with Curriculum ────────────────────────────────────────
+# ── Train ────────────────────────────────────────────────────────
 
 @beartype
-def train_with_curriculum(
+def fit_dynamics(
     cfg: ModelingConfig,
     train_dfs: list[DataFrame],
     dev_dfs: list[DataFrame],
@@ -248,13 +208,12 @@ def train_with_curriculum(
     norm_stats: NormStats,
     head_stack: Optional[HeadStack] = None,
     block_spec: Optional[dict[str, dict]] = None,
-    global_logger: Optional[RunLog] = None,
+    logger: Optional[RunLog] = None,
 ) -> tuple[System, Optional[float]]:
-    """
-    Train with curriculum learning: progressively increase train_pred_steps.
+    """Train one model, leaving its best weights loaded, and log its checkpoint.
 
-    At `lr: 0` there is nothing to train: the model is kept as built, and
-    there is no dev loss to report (None).
+    At `lr: 0` there is nothing to train: the model is kept as built, and there
+    is no dev loss to report (None).
 
     Returns (trained_system, best_dev_loss).
     """
@@ -267,80 +226,14 @@ def train_with_curriculum(
         norm_stats=norm_stats,
         head_stack=head_stack,
         block_spec=block_spec,
-        logger=global_logger,
+        logger=logger,
     )
-
     if cfg.lr == 0:
         if cfg.progress != "silent":
             print("lr: 0: nothing to train; the model is kept as built.")
     else:
-        _run_curriculum(trainer, cfg, train_dfs, nm_mapping, global_logger)
-
-    # Extract the trained System (first node of the Problem)
-    dyn_sys = trainer.model.nodes[0]
-
-    # The run's own checkpoint, which every reload reads; "all" has also
-    # written each curriculum stage's to that stage's child run. At lr: 0,
-    # best_model is the model as built.
-    if (global_logger is not None) and (cfg.save_config in ("last_step", "all")):
-        save_checkpoint(global_logger, trainer.best_model)
-
-    return dyn_sys, None if cfg.lr == 0 else trainer.get_devloss()
-
-
-def _run_curriculum(trainer: Trainer, cfg: ModelingConfig, train_dfs: list[DataFrame],
-                    nm_mapping: dict[str, list[str]],
-                    global_logger: Optional[RunLog]) -> None:
-    """Every curriculum stage, each leaving its best weights loaded."""
-    pred_steps = cfg.train_pred_steps
-    for i in range(1 + cfg.curriculum_steps):
-        if cfg.curriculum_steps and cfg.progress != "silent":
-            print(f"Training with {pred_steps} prediction steps "
-                  f"(curriculum step {i}/{cfg.curriculum_steps})")
-
-        child_logger = None
-        if (global_logger is not None) and (cfg.curriculum_steps > 0):
-            child_logger = create_child_logger(
-                cfg=cfg,
-                global_logger=global_logger,
-                pred_steps=pred_steps,
-                curriculum_step=i,
-            )
-            trainer.logger = child_logger
-
-        trainer.train()  # leaves the best weights loaded
-
-        if child_logger is not None:
-            if cfg.save_config == "all":
-                save_checkpoint(child_logger, trainer.best_model)
-            child_logger.clean_up()
-            trainer.logger = None
-
-        if i < cfg.curriculum_steps:
-            pred_steps = int(cfg.curriculum_ratio * pred_steps)
-
-            trainer.train_data = get_loader(
-                dfs=train_dfs, cfg=cfg, nm_mapping=nm_mapping,
-                name="train",
-                steps=cfg.history_steps + pred_steps,
-            )
-            _reset_early_stopping(trainer)
-
-
-def _reset_early_stopping(trainer: Trainer) -> None:
-    """Give the next curriculum step its own full patience window.
-
-    Neuromancer's Trainer has no public reset, so this writes its
-    bookkeeping fields directly — and checks they exist first, because
-    setting a renamed field would silently create a new attribute and stop
-    resetting anything.
-    """
-    fields = {"badcount": 0, "best_devloss": torch.inf, "current_epoch": 0}
-    missing = [name for name in fields if not hasattr(trainer, name)]
-    if missing:
-        raise AttributeError(
-            f"neuromancer's Trainer no longer has {missing}; curriculum "
-            "training cannot reset early stopping between steps."
-        )
-    for name, value in fields.items():
-        setattr(trainer, name, value)
+        trainer.train()
+    # At lr: 0, best_model is the model as built.
+    if logger is not None:
+        save_checkpoint(logger, trainer.best_model)
+    return trainer.model.nodes[0], None if cfg.lr == 0 else trainer.get_devloss()

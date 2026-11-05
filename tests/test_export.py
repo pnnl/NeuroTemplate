@@ -11,7 +11,7 @@ channel-major window layout agrees with the real (time-major) one only when
 a key has a single column.
 
 Cases: each family, the per-block split, each head type, and the
-heterogeneous rc_network + mlp composition with a prestack and a mixed head stack
+heterogeneous rc_network + mlp composition with a hinge and a mixed head stack
 — the case the old hand-written deliveries could not express. That one runs
 under the default (dynamo) exporter in every format (ONNX, torch programs,
 C); the rest use the faster legacy tracer, which traces the same forward
@@ -52,7 +52,7 @@ from neurotemplate.modeling.config import ModelingConfig as Config
 from neurotemplate.modeling.contract import contract_model
 from neurotemplate.modeling.dynamics import get_dynamics
 from neurotemplate.modeling.heads import (
-    BinaryHead, BoundedHead, HeadStack, OrdinalHead, RegressionHead,
+    BoundedHead, HeadStack, RegressionHead,
 )
 from model_fixtures import model_cfg, uniform_history
 
@@ -80,7 +80,7 @@ MIXED_MAPPING = {
     "t": ["sec_elapsed"],
 }
 #: North is a declared network behind a thermostat block; south an mlp zone whose
-#: setpoint reaches it as the demand prestack; power an mlp meter on north's heat.
+#: setpoint reaches it through a hinge; power an mlp meter on north's heat.
 MIXED = {
     "hvac": {
         "Y": ["north Q"], "U": ["north sp"], "D": [], "reads": ["north T"], "model": "thermostat",
@@ -98,7 +98,7 @@ MIXED = {
                            "noise": {"Ti": 0.1, "Tm": 0.05, "sensor": 0.05}}},
     },
     "south": {"Y": ["south T"], "U": ["south sp"], "model": "mlp",
-              "inputs": {"south sp": {"kind": "demand", "sign": -1, "state": "south T"}}},
+              "inputs": {"south sp": {"target": "south T", "map": "nrelu"}}},
     "power": {"Y": ["power"], "U": [], "reads": ["north Q"], "model": "mlp"},
 }
 
@@ -130,9 +130,6 @@ def split(mapping) -> tuple[pd.DataFrame, dict]:
 def export(tmp_path, cfg, mapping, block_spec=None, heads=None, exporter="legacy",
            **options):
     frame, stats = split(mapping)
-    for column, head in zip(mapping["Y"], heads or []):
-        if isinstance(head, BinaryHead):   # a 0/1 target is never normalised
-            stats[column].update(shift=0.0, stretch=1.0)
     torch.manual_seed(0)
     head_stack = HeadStack(heads, mapping["Y"]) if heads else None
     dyn_sys = get_dynamics(cfg, mapping, stats, head_stack=head_stack,
@@ -153,8 +150,9 @@ CASES = {
     "nssm": (make_cfg(model="nssm", history=UNIFORM), MAPPING, None, None),
     "gru, 2 layers": (make_cfg(model="gru", num_layers=2, history=UNIFORM), MAPPING, None, None),
     "mlp per block": (make_cfg(model="mlp", history=UNIFORM), MAPPING, SPLIT, None),
-    "binary + bounded heads": (make_cfg(model="nssm", history=UNIFORM), MAPPING, None,
-                               lambda: [BinaryHead(), BoundedHead(lo=-1.0, hi=1.0)]),
+    "bounded heads": (make_cfg(model="nssm", history=UNIFORM), MAPPING, None,
+                      lambda: [BoundedHead(lo=0.0, hi=float("inf")),
+                               BoundedHead(lo=-1.0, hi=100.0)]),
 }
 
 
@@ -168,10 +166,10 @@ def test_every_family_and_head_exports_as_the_trained_model(tmp_path, name):
 
 @pytest.mark.parametrize("graph_format", [
     "onnx", "torch", pytest.param("c", marks=needs_c)])
-def test_heterogeneous_model_with_prestack_and_heads_exports(tmp_path, graph_format):
-    """The exit criterion: rc_network + mlp, a demand prestack, an ordinal head."""
+def test_heterogeneous_model_with_a_hinge_and_heads_exports(tmp_path, graph_format):
+    """The exit criterion: rc_network + mlp, a hinge, a bounded head."""
     result = export(tmp_path, make_cfg(history=MIXED_HISTORY), MIXED_MAPPING, MIXED,
-                    [RegressionHead()] * 3 + [OrdinalHead(n_levels=3)], exporter="dynamo",
+                    [RegressionHead()] * 3 + [BoundedHead(0.0, float("inf"))], exporter="dynamo",
                     graph_format=graph_format)
     assert result.state_width == 2                  # the network's two nodes
     if graph_format == "c":
@@ -274,11 +272,11 @@ def _priced(d_future: int, **overrides):
     # the last two commands, and every key has several columns, so a wrong
     # window layout shows up.
     ({"future": _d_future(2), "u_past": 2}, "torch"),
-    # Everything a policy can wrap around its net: the residual anchored to
-    # the reference rule, and a tariff it previews.
-    (_priced(1, residual_delta={"Zone Cooling Setpoint [°C]": [0.0, 1.0]}),
-     "onnx"),
-], ids=["plain, torch", "residual, priced, onnx"])
+    # Everything a policy can wrap around its net: a range read per step, and a
+    # tariff it previews.
+    (_priced(1, control_bounds={"Zone Cooling Setpoint [°C]": ["Comfort Low [°C]",
+                                                               "Comfort High [°C]"]}), "onnx"),
+], ids=["plain, torch", "per-step bounds, priced, onnx"])
 def test_trained_policy_exports_as_the_trained_policy(tmp_path, overrides, graph_format):
     from control_fixtures import full_setup
     from neurotemplate.control.closed_loop import build_closed_loop

@@ -113,32 +113,6 @@ class ActuationMetrics:
 
 
 @dataclass
-class ResidualMetrics:
-    """How far one anchored U column's commands sat from its reference rule.
-
-    The pinned fractions are the lines that earn their place: if one edge of
-    the box is binding most of the time, either the reference is wrong for
-    this plant or the optimizer is riding a surrogate artifact into the wall.
-    Both are things to know before reading the comfort number. Each edge is
-    reported on its own — an asymmetric box pooled into one figure would say
-    nothing about which edge binds.
-
-    An edge at 0 has no fraction (None): the deviation cannot pass it, so
-    sitting on it is sitting on the rule, and the share means nothing. A box
-    of [0, 0] is how the rule itself is scored, so this is a case worth
-    stating rather than a corner. `mean_abs_delta` still earns its place
-    there — it is the assertion that the residual path really is inert.
-    """
-    name: str               # the anchored U column
-    below_cap: float        # the box is [-below_cap, +above_cap], physical units
-    above_cap: float
-    mean_abs_delta: float   # mean |commanded − reference|
-    max_abs_delta: float
-    frac_at_below: Optional[float]  # share pinned at -below_cap; None when it is 0
-    frac_at_above: Optional[float]  # share pinned at +above_cap; None when it is 0
-
-
-@dataclass
 class JumpResponse:
     """The loop's answer to reference-band step changes, one demand direction.
 
@@ -340,49 +314,6 @@ def actuation_metrics(
             u_max=float(u_max[j]),
         ))
     return results
-
-
-@beartype
-def residual_metrics(
-    name: str,
-    u: torch.Tensor,
-    u_ref: torch.Tensor,
-    box: tuple[float, float],
-) -> ResidualMetrics:
-    """
-    Args:
-        name:  the anchored U column.
-        u:     [batch, time] its commands, physical units.
-        u_ref: [batch, time] the reference rule's commands, same units.
-        box:   (below, above), the configured box, in physical units.
-
-    This is the *realized* residual — measured after the actuator clamp — so
-    it is the deviation that was actually deployed, not the network's
-    pre-bound output. A deviation within `SATURATION_TOL` of the box's larger
-    side of an edge counts as pinned there: the net's squash never reaches
-    an edge exactly.
-    """
-    if u.shape != u_ref.shape:
-        raise ValueError(
-            f"u {tuple(u.shape)} and u_ref {tuple(u_ref.shape)} must match"
-        )
-    below, above = box
-    if below < 0 or above < 0:
-        raise ValueError(f"box edges must be >= 0, got {box}")
-
-    tol = SATURATION_TOL * max(below, above)
-    delta = (u - u_ref).detach().cpu()
-    return ResidualMetrics(
-        name=name,
-        below_cap=below,
-        above_cap=above,
-        mean_abs_delta=float(delta.abs().mean()),
-        max_abs_delta=float(delta.abs().max()),
-        frac_at_below=(None if below == 0 else
-                       float((delta <= -below + tol).float().mean())),
-        frac_at_above=(None if above == 0 else
-                       float((delta >= above - tol).float().mean())),
-    )
 
 
 def _band_jumps(lo: torch.Tensor, hi: torch.Tensor) -> list[int]:

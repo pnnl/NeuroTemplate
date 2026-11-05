@@ -2,9 +2,8 @@
 Domain bridge for the DPC controller.
 
 These are the user-owned hooks that connect the generic control machinery to
-*this* building: what the actuator limits are, how electrical power is
-computed, and the rule a residual policy is anchored to. The band itself
-is data — reference columns the objective names (see control_fixtures).
+*this* building: how electrical power is computed, and what the plots show. The band
+itself is data — reference columns the objective names (see control_fixtures).
 
 Every hook works in physical units.
 
@@ -29,31 +28,6 @@ else:
     def beartype(fn): return fn
 
 
-# The comfort band's reference columns, as control_fixtures writes them.
-LOW = "Comfort Low [°C]"
-HIGH = "Comfort High [°C]"
-
-
-# ---------------------------------------------------------------------
-# Required: actuator limits for the policy output
-# ---------------------------------------------------------------------
-@beartype
-def actuation_bounds(
-    nm_mapping: dict[str, list[str]],
-    norm_stats: NormStats,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """
-    Per-U-channel (umin, umax): each control column's observed min/max in
-    the training data.
-    """
-    u_cols = nm_mapping["U"]
-    if not u_cols:
-        raise ValueError("No control (U) columns in nm_mapping.")
-    umin = torch.tensor([norm_stats[c]["min"] for c in u_cols])
-    umax = torch.tensor([norm_stats[c]["max"] for c in u_cols])
-    return umin, umax
-
-
 # ---------------------------------------------------------------------
 # REQUIRED user hook: cooling power for the energy/cost/peak objectives
 # ---------------------------------------------------------------------
@@ -65,30 +39,6 @@ def actuation_bounds(
 #
 # Minimising this minimises HVAC electrical energy use.
 POWER_METRIC_IMPLEMENTED = True
-
-
-# ---------------------------------------------------------------------
-# Optional: the reference rule — the residual's anchor
-# ---------------------------------------------------------------------
-@beartype
-def reference_control(
-    y_now: torch.Tensor,
-    r_now: dict[str, torch.Tensor],
-    d_now: torch.Tensor,
-    nm_mapping: dict[str, list[str]],
-) -> dict[str, torch.Tensor]:
-    """Park the setpoint at the middle of the comfort band.
-
-    The simplest rule that is actually trying: it ignores the disturbances and
-    the zone state entirely and just aims at the centre of whatever band it is
-    handed. Against a surrogate whose zone tracks the setpoint this is the
-    exactly-optimal comfort controller, which makes it a sharp check on
-    whether a learned policy is earning its complexity.
-
-    Memoryless, current step only, one entry per anchored U column.
-    """
-    (setpoint,) = nm_mapping["U"]
-    return {setpoint: 0.5 * (r_now[LOW] + r_now[HIGH])}     # [b], °C
 
 
 @beartype

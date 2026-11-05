@@ -1,16 +1,11 @@
 """
-`nt data heads`, `nt data ladder` and `nt data thermostat`: offline
-diagnostics that read a dataset the way `nt model train` does and print a
-recommendation. This file is argument parsing and printing; the statistics
-are pure functions in `diagnostics`, `ladder`, `network` and `thermostat`.
-
-None is wired into `nt model train`. `heads` prints a snippet the user pastes
-into `data_head_config`; `ladder` and `thermostat` save the declarations a
-thermal block's `params` takes. They need judgment the pipeline does not
+`nt data ladder` and `nt data thermostat`: offline diagnostics that read a dataset
+the way `nt model train` does and save the declarations a thermal block's `params`
+takes. This file is argument parsing and printing; the statistics are pure functions
+in `ladder`, `network` and `thermostat`. They need judgment the pipeline does not
 have, so nothing applies them automatically.
 
 Usage:
-    nt data heads --config model_configs/modeling.yaml [--column "Total DX Power [W]"]
     nt data ladder --config model_configs/modeling.yaml [--zone COL] [--dt 30min] \
         [--candidate mine.json]
     nt data thermostat --config model_configs/modeling.yaml \
@@ -33,7 +28,7 @@ import torch
 from neurotemplate._typing import beartype
 
 from neurotemplate.common.config import load_config_from_cli, MODEL_CONFIG_DIR
-from neurotemplate.common.data_utils import get_data_splits, pool_dfs
+from neurotemplate.common.data_utils import get_data_splits
 from neurotemplate.hooks import load_modeling_hooks
 from neurotemplate.modeling import ladder
 from neurotemplate.modeling import network as nw
@@ -42,58 +37,7 @@ from neurotemplate.modeling.blocks import build_blocks
 from neurotemplate.modeling.config import ModelingConfig
 from neurotemplate.modeling.ladder import Rung
 from neurotemplate.modeling.network import Fit
-from neurotemplate.modeling.dynamics import family_by_channel
 from neurotemplate.modeling.pipeline import resolve_block_spec, resolve_nm_mapping
-from neurotemplate.modeling.diagnostics import K_MAX_DEFAULT, recommend_head
-
-
-def _print_head_recommendation(rec) -> None:
-    header, *rest = rec.evidence.splitlines()
-    print(f"\n{rec.column}  —  {header}")
-    for line in rest:
-        print(f"  {line}")
-    print()
-    print(f"  {rec.snippet}")
-
-
-@beartype
-def heads_main() -> None:
-    flags = argparse.ArgumentParser(add_help=False)
-    flags.add_argument("--column", type=str, default=None,
-                       help="Only this Y column (default: every Y column).")
-    flags.add_argument("--k-max", type=int, default=K_MAX_DEFAULT,
-                       help=f"Largest K tried in the k-means sweep (default {K_MAX_DEFAULT}).")
-    cfg, args = load_config_from_cli(
-        sys.argv[1:], cls=ModelingConfig, config_dir=MODEL_CONFIG_DIR,
-        default_config_path=MODEL_CONFIG_DIR / "modeling.yaml",
-        command_flags=flags,
-    )
-
-    hooks = load_modeling_hooks(cfg)
-    train_raws, _dev_raws, _test_raws, _freq_s = get_data_splits(cfg)
-    nm_mapping = resolve_nm_mapping(hooks, train_raws[0], cfg)
-    train_pool = pool_dfs(train_raws)
-
-    # Which family builds which channel, resolved exactly the way the trainer
-    # resolves it, so a head/family conflict is reported per channel rather
-    # than from the run-wide cfg.model — which is the wrong answer for every
-    # block that declares its own family.
-    families = family_by_channel(
-        cfg, nm_mapping, resolve_block_spec(hooks, nm_mapping, cfg),
-    )
-
-    columns = [args.column] if args.column is not None else nm_mapping["Y"]
-    unknown = [c for c in columns if c not in nm_mapping["Y"]]
-    if unknown:
-        raise SystemExit(f"--column {unknown} not in Y = {nm_mapping['Y']}")
-
-    for col in columns:
-        rec = recommend_head(
-            train_pool[col].to_numpy(), col,
-            family=families.get(col), k_max=args.k_max,
-        )
-        _print_head_recommendation(rec)
-    print()
 
 
 # ── nt data ladder ──────────────────────────────────────────────

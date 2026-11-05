@@ -116,15 +116,15 @@ def test_gru_surrogate_rolls_out_and_warms_up():
     assert torch.allclose(out["yn"][:, hmax, :], expected, atol=1e-6)
 
 
-def _demand_setup():
-    """full_setup, but the zone is its own block with the setpoint declared
-    as `demand`, the other channels an MLP block."""
+def _hinge_setup():
+    """full_setup, but the zone is its own block reading the setpoint through a
+    hinge, the other channels an MLP block."""
     s = full_setup()
     nm, norm_stats = s["nm"], s["norm_stats"]
     sysid_cfg = make_sysid_cfg(model="mlp")
     spec = {
         "zone": {"Y": [ZONE], "U": [SETPT], "model": "mlp",
-                 "inputs": {SETPT: {"kind": "demand", "sign": -1, "state": ZONE}}},
+                 "inputs": {SETPT: {"target": ZONE, "map": "nrelu"}}},
         "rtu": {"Y": [c for c in Y_COLS if c != ZONE], "model": "mlp"},
     }
     dyn_sys = get_dynamics(sysid_cfg, nm, norm_stats, block_spec=spec)
@@ -136,11 +136,11 @@ def _demand_setup():
 
 def test_a_policy_parked_on_the_inactive_side_still_gets_gradient():
     """The end-to-end form of "no dead zone". The policy is set to command
-    the highest recorded setpoint everywhere — above the zone, so the demand
+    the highest recorded setpoint everywhere — above the zone, so the hinge
     is exactly zero and the plant would ignore it — and the raw U it emits
     keeps its width. A hard relu would hand it zero gradient forever; the
     soft clamp's backward lets it learn to start cooling from a coast."""
-    s, sysid_cfg, dyn_node = _demand_setup()
+    s, sysid_cfg, dyn_node = _hinge_setup()
     cfg, nm, norm_stats = s["cfg"], s["nm"], s["norm_stats"]
     _, _, hmax = horizons(cfg, sysid_cfg)
 

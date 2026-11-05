@@ -109,26 +109,15 @@ class ControlConfig:
     mpc_rtol: float = 1e-3
     mpc_patience: int = 10
     mpc_max_iters: int = 200
-    # The residual, per U column: {column: [below, above]} in that column's
-    # physical units. A column named here commands
-    # clamp(reference_control(...)[column] + δ, umin, umax) with
-    # -below <= δ <= above, which caps how far a surrogate error can move what
-    # is deployed: [0, 0.5] lets a heating setpoint move up off the rule and
-    # never down, [0, 0] is the rule exactly. A U column not named is a free
-    # policy output over its actuation bounds. Empty: no residual, a plain
-    # policy. Requires the nt_control.reference_control hook, which
-    # returns exactly the columns named here.
-    residual_delta: dict[str, list[float]] = field(default_factory=dict)
 
-    # A per-step range for a U column, `{column: [low, high]}`: each side a
-    # number in the column's units, the name of a column (a reference the
-    # policy reads, or another command), or `[column, offset]`,
-    # that column plus a signed offset in the U column's units. The policy
-    # commands inside its actuation box as usual, and that box is mapped onto
-    # [low, high] at each step. A side naming another command orders the two:
-    # `{Cool: [[Heat, 1.0], 30.0]}` holds cooling at least 1 above heating at
-    # every step. A column cannot be both here and in residual_delta.
-    command_bounds: dict[str, list] = field(default_factory=dict)
+    # What a U column may command, `{column: [low, high]}`: each side a number in
+    # the column's units, the name of a column (a reference the policy reads, or
+    # another command), or `[column, offset]`, that column plus a signed offset in
+    # the U column's units. A column not listed takes its recorded range, the region
+    # the surrogate was identified on; a side that names a column moves at each step.
+    # A side naming another command orders the two: `{Cool: [[Heat, 1.0], 30.0]}`
+    # holds cooling at least 1 above heating at every step.
+    control_bounds: dict[str, list] = field(default_factory=dict)
 
     # ── Training ─────────────────────────────────────────────────
     epochs: int = 300
@@ -145,11 +134,7 @@ class ControlConfig:
     # rollout on plots is test_window - hmax). Matches sys-id semantics.
     test_window: int = 287
     test_stride: int = 288
-    # The best open-loop plan on the surrogate over the same windows, the
-    # bar the policy is read against (`control.plan`): solved as MPC's is,
-    # from `plan_starts` starts (the controller's commands and random ones),
-    # each window keeping its best. 0 starts skips it.
-    plan_starts: int = 4
+    # `nt control gap`'s solve (`control.plan`): as MPC's is.
     plan_lr: float = 0.02
     plan_rtol: float = 1e-3
     plan_patience: int = 10
@@ -184,9 +169,6 @@ class ControlConfig:
                              "trained dynamics surrogate)")
 
         check_one_of(self, "policy", [*policy_catalog, "mpc"])
-        if self.policy == "mpc" and self.residual_delta:
-            raise ValueError("policy: mpc plans every command itself, so it has no "
-                             "residual to box: leave residual_delta empty.")
         check_one_of(self, "progress", list(PROGRESS_LEVELS))
         check_one_of(self, "policy_nonlin", list(POLICY_NONLIN))
         check_one_of(self, "policy_bound_method", POLICY_BOUND_METHODS)
@@ -241,36 +223,22 @@ class ControlConfig:
         if self.train_stride is not None:
             check_positive(self, "train_stride")
 
-        for name in ["warmup", "patience", "plan_starts", "plan_rtol", "mpc_rtol"]:
+        for name in ["warmup", "patience", "plan_rtol", "mpc_rtol"]:
             check_non_negative(self, name)
 
         # Column names are resolved against the surrogate's U at policy build.
-        for column, box in self.residual_delta.items():
-            if not (isinstance(box, list) and len(box) == 2 and all(
-                    isinstance(side, (int, float)) and not isinstance(side, bool)
-                    and side >= 0 for side in box)):
-                raise ValueError(
-                    f"residual_delta[{column!r}] must be a pair [below, above] "
-                    f"of numbers >= 0 in the column's units, got {box!r}. "
-                    "[0, 0] emits the reference rule exactly."
-                )
-
         def side_ok(side) -> bool:
             if isinstance(side, list):
                 return (len(side) == 2 and isinstance(side[0], str)
                         and isinstance(side[1], (int, float)) and not isinstance(side[1], bool))
             return isinstance(side, (int, float, str)) and not isinstance(side, bool)
 
-        for column, pair in self.command_bounds.items():
+        for column, pair in self.control_bounds.items():
             if not (isinstance(pair, list) and len(pair) == 2 and all(map(side_ok, pair))):
                 raise ValueError(
-                    f"command_bounds[{column!r}] must be a pair [low, high], each a "
+                    f"control_bounds[{column!r}] must be a pair [low, high], each a "
                     "number in the column's units, a column name, or "
                     f"[column, offset] in the column's units, got {pair!r}.")
-            if column in self.residual_delta:
-                raise ValueError(
-                    f"{column!r} is in both residual_delta and command_bounds; a "
-                    "column is either a residual around the rule or bounded per step.")
 
     @property
     def history_steps(self) -> int:

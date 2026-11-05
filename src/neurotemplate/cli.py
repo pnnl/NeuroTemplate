@@ -6,14 +6,12 @@ after is left in `sys.argv` so the subcommand parses its own flags. Groups
 mirror the package layout:
 
     nt model train          # neurotemplate.modeling.cli.train
-    nt model optuna         # neurotemplate.modeling.cli.optuna
     nt model load           # neurotemplate.modeling.cli.load
-    nt model debug-heads    # neurotemplate.modeling.cli.debug_heads
-    nt data heads           # neurotemplate.modeling.cli.data (which head does this Y column want?)
     nt data ladder          # neurotemplate.modeling.cli.data (which RC network fits the zone?)
     nt data thermostat      # neurotemplate.modeling.cli.data (what heat does a setpoint deliver?)
     nt data plot            # neurotemplate.modeling.cli.data_plot (look at a record, one channel at a time)
     nt control train        # neurotemplate.control.cli.train
+    nt control gap          # neurotemplate.control.cli.gap (the best plan, beside a controller)
     nt export model         # neurotemplate.export.cli (trained dynamics -> ONNX package)
     nt export policy        # neurotemplate.export.cli (trained DPC policy -> ONNX package)
     nt guide [step]         # neurotemplate.guide (the guided flow; takes no verb)
@@ -31,14 +29,12 @@ from typing import Optional
 # commands; the help text is derived from it.
 COMMANDS: dict[tuple[str, str], str] = {
     ("model", "train"):       "neurotemplate.modeling.cli.train:main",
-    ("model", "optuna"):      "neurotemplate.modeling.cli.optuna:main",
     ("model", "load"):        "neurotemplate.modeling.cli.load:main",
-    ("model", "debug-heads"): "neurotemplate.modeling.cli.debug_heads:main",
-    ("data", "heads"):        "neurotemplate.modeling.cli.data:heads_main",
     ("data", "ladder"):       "neurotemplate.modeling.cli.data:ladder_main",
     ("data", "thermostat"):   "neurotemplate.modeling.cli.data:thermostat_main",
     ("data", "plot"):         "neurotemplate.modeling.cli.data_plot:main",
     ("control", "train"):     "neurotemplate.control.cli.train:main",
+    ("control", "gap"):       "neurotemplate.control.cli.gap:main",
     ("export", "model"):      "neurotemplate.export.cli:model_main",
     ("export", "policy"):     "neurotemplate.export.cli:policy_main",
 }

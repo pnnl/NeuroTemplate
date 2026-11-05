@@ -16,6 +16,7 @@ import mlflow
 import pytest
 
 from neurotemplate.common.config import load_config
+from neurotemplate.control.cli.gap import gap_report
 from neurotemplate.control.load import load_trained_policy
 from neurotemplate.control.train import train_control
 from neurotemplate.common.data_utils import get_data
@@ -153,6 +154,11 @@ def test_a_trained_surrogate_feeds_a_policy_run_and_both_reload(tmp_path, monkey
     assert cfg.sysid_run_id == model_run.run_id
     assert reloaded_sysid_cfg.model == "mlp"
     assert 0.0 <= policy_run.results.comfort_violation_rate <= 1.0
+
+    # The best plan runs on demand, from the finished run.
+    plan, report = gap_report(policy_run.run_id, starts=2)
+    assert plan.starts == 2 and plan.plan.total <= plan.policy.total
+    assert "Best plan" in report
 
 
 def test_a_model_of_your_own_trains_reloads_controls_and_exports(tmp_path, monkeypatch):

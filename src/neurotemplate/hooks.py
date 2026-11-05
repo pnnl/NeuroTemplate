@@ -19,8 +19,7 @@ every lookup.
 A trained run carries the hooks file it was trained with (`snapshot_hooks`),
 and every reload points `cfg.user_hooks_path` at that copy
 (`run_hooks_path`), never at the working directory: a rebuild reads hooks
-that no checkpoint records — a reference rule, a preview depth, actuation
-bounds — so editing the file after training would otherwise silently change
+that no checkpoint records, `power_metric` for one, so editing the file after training would otherwise silently change
 what a trained run means.
 """
 from __future__ import annotations

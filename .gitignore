@@ -13,7 +13,6 @@
 # Results directories and files
 mlruns/
 plots/
-optuna_dbs/
 data/
 *.db
 

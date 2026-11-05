@@ -34,7 +34,6 @@ from neurotemplate.modeling.experiment import resolve_device, set_seeds, set_thr
 
 from neurotemplate.control.config import ControlConfig
 from neurotemplate.control.load import load_frozen_dynamics
-from neurotemplate.control.plan import plan_on_surrogate
 from neurotemplate.control.losses import extend_norm_stats, resolve_objective
 from neurotemplate.control.scenarios import (
     build_loaders, eval_pred_steps, horizons, load_control_splits,
@@ -166,7 +165,7 @@ def train_control(cfg: ControlConfig,
                 cfg, problem, train_loader, dev_loader, logger=logger,
             )
             # The same batch through the trained policy: the shares a weight can
-            # be tuned against (a residual's Δu term is exactly zero before).
+            # be tuned against.
             trained_balance = objective_balance(
                 loss, run_objective_pass(problem, balance_batch))
             if cfg.progress in ("live", "log"):
@@ -181,13 +180,6 @@ def train_control(cfg: ControlConfig,
         )
         if not trains:
             arch["solves"] = list(policy_node.callable.solves)
-        plan = None
-        if cfg.plan_starts:
-            plan = plan_on_surrogate(cfg, sysid_cfg, cl_system, policy_node, test_dfs,
-                                     out, nm_mapping, norm_stats)
-            if cfg.progress != "silent":
-                print(f"Best plan on the surrogate: objective {plan.gap * 100:.0f}% below "
-                      "the controller's (control reportcard, Controller gap).")
 
         if cfg.plot:
             # `t` is elapsed seconds from each file's first row, so the plots
@@ -203,16 +195,11 @@ def train_control(cfg: ControlConfig,
             best_dev_loss=best_dev,
             train_time_s=train_time_s,
             balance=balance, trained_balance=trained_balance,
-            power=power_diag, objective_notes=notes, plan=plan,
+            power=power_diag, objective_notes=notes,
             sensitivity=sensitivity,
         )
         write_reportcard(md, Path(cfg.savedir), logger=logger)
         log_control_results(logger, results)
-        if plan is not None:
-            logger.log_metrics({"plan_objective": plan.plan.total,
-                                "policy_objective": plan.policy.total,
-                                "controller_gap": plan.gap,
-                                "plan_violation_rate": plan.results.comfort_violation_rate})
         logger.log_dict(objective_to_dict(balance, power_diag, notes,
                                           trained_balance),
                         name=f"{RESULTS_DIR}/objective_diagnostics.json")

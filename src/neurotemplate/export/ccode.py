@@ -77,12 +77,9 @@ def generate(onnx_path: Path, c_path: Path, function: str, onnx2c: str) -> None:
     with tempfile.TemporaryDirectory() as tmp:
         static = Path(tmp) / "static.onnx"
         prepare(onnx_path, static)
-        # Only the `unionize` pass (shared buffers for intermediate tensors):
-        # `fold_casts` folds casts of constants, which `prepare` already did,
-        # and crashes on a cast from bool.
         result = subprocess.run(
-            [onnx2c, "-f", function, "-P", str(PRECISION), "-p", "unionize", "-l", "1",
-             str(static)], capture_output=True, text=True)
+            [onnx2c, "-f", function, "-P", str(PRECISION), "-l", "1", str(static)],
+            capture_output=True, text=True)
     if result.returncode != 0:
         raise RuntimeError(f"onnx2c failed on {onnx_path.name} (exit "
                            f"{result.returncode}):\n{result.stderr[-2000:]}")

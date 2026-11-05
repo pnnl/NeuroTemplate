@@ -11,7 +11,7 @@ the hooks in here, in place: each docstring is that hook's specification
 for the library version you have installed. A trained run keeps a copy of
 this file, and everything that reloads the run uses the copy.
 
-Every function here except `hyper_args` and `block_mapping` must exist, even
+Every function here except `block_mapping` must exist, even
 when its body is a trivial return. Fill in the column lists first; every
 other hook runs as written. Then decide on model structure (`block_mapping`)
 and the physics checks (`synth_cfg`) — those two shape what you get more
@@ -31,10 +31,8 @@ from neurotemplate._typing import beartype
 from neurotemplate.common.data_utils import NormStats
 from neurotemplate.modeling.config import ModelingConfig as Config
 from neurotemplate.modeling.heads import (  # noqa: F401  — cited in comments
-    BinaryHead,
     BoundedHead,
     HeadStack,
-    OrdinalHead,
     RegressionHead,
 )
 from neurotemplate.modeling.scenarios import (  # noqa: F401  — cited in synth_cfg
@@ -101,40 +99,20 @@ def data_head_config(
     """
     Return a HeadStack with exactly one head per Y column, in Y order.
 
-    Run `nt data heads` first — it reads the data and suggests a head (plus a
-    pasteable snippet) for each Y column from the shape of its distribution,
-    not its name.
-
     All-regression (below) is the right default. Reach for another head only
-    when the channel really is discrete or bounded:
+    when the channel really is bounded:
 
       RegressionHead()                  continuous, MSE loss
-      BinaryHead()                      0/1 target, sigmoid + BCE; give the
-                                        column None in column_norm_config
-      BoundedHead(lo, hi)               clamped to [lo, hi]; pass
-                                        float("inf") / float("-inf") on an
-                                        open side for half-bounded
-      OrdinalHead(n_levels=K)           K ordered levels, values 0..K-1
-      OrdinalHead(n_levels=K, level_values=[v0, ...])
-                                        K ordered levels at given values
+      BoundedHead(lo, hi)               inside [lo, hi]; pass float("inf") /
+                                        float("-inf") on an open side
 
-    Levelled heads are rebalanced and threshold-calibrated for you
-    (`balance_levels`, `calibrate_thresholds`). Judge them by the
-    reportcard's level metrics against persistence's, not by RMSE:
-    a regression head on staged equipment fits near the mean and can score
-    well while never predicting the equipment on. Pin either by hand with
-    `level_weights=` / `decision_thresholds=` and the flag off.
-
-    Bounds and level values are in the column's physical units:
+    Bounds are in the column's physical units:
 
         BoundedHead(0.0, float("inf"))                     # physically >= 0
-        OrdinalHead(n_levels=3, level_values=[0.0, 500.0, 1700.0])
     """
     heads = []
     for col in nm_mapping["Y"]:
-        # if "on/off" in col.lower():
-        #     heads.append(BinaryHead())
-        # elif "power" in col.lower():
+        # if "power" in col.lower():
         #     heads.append(BoundedHead(0.0, float("inf")))
         # else:
         heads.append(RegressionHead())
@@ -177,9 +155,8 @@ def block_mapping(
     """
     Model structure: split Y into blocks, each its own sub-model with its own
     parameters, family (`model`) and hidden state. Return None (or delete
-    this function) for one block holding every channel. The "Blocks" and
-    "Declaring what a column is" sections of `nt docs modeling`
-    explain each choice at length; this is the contract.
+    this function) for one block holding every channel. The "Blocks" section
+    of `nt docs modeling` explains each choice at length; this is the contract.
 
     Worth doing whenever the plant is several parts that interact mainly
     through shared inputs. A joint model has to learn that the
@@ -241,24 +218,22 @@ def block_mapping(
     each fit landed in its box. A fit pressed against an edge is the data
     disagreeing.
 
-    Any other block may declare a setpoint `demand`, which changes the
+    Any other block may read a setpoint through a hinge, which changes the
     physics rather than the shapes:
 
         "zone_b": {
             ...,
             "inputs": {
-                "Zone B Setpoint [degC]": {"kind": "demand", "sign": -1,
-                                           "state": "Zone B Temp [degC]"},
+                "Zone B Cool SP [degC]": {"target": "Zone B Temp [degC]", "map": "nrelu"},
+                "Zone B Heat SP [degC]": {"target": "Zone B Temp [degC]", "map": "relu"},
             },
         }
 
-      demand   a setpoint, replaced by the thermostat's clamped error
-               against the block's own predicted state — relu(state −
-               setpoint) for cooling (sign -1), the mirror for heating — so
-               a setpoint past the state commands nothing, as on a real
-               thermostat. Without it a model renders a setpoint as a
-               smooth, always-active push, and a controller trained on it
-               inherits that. Declare every setpoint that drives the block.
+    The setpoint is replaced by the thermostat's clamped error against the block's
+    own predicted state — relu(zone − setpoint) for `nrelu`, relu(setpoint − zone)
+    for `relu` — so a setpoint past the zone commands nothing, as on a real
+    thermostat. Without it a model renders a setpoint as a smooth, always-active
+    push, and a controller trained on it inherits that.
 
     Which structure is better for your plant is a model iteration, decided
     by the physics checks, the rollout and the whiteness, not by test RMSE,
@@ -322,12 +297,12 @@ def synth_cfg(
                column where the minimum is not "nothing".
       responds `{state: {control: +1 | -1}}`: the direction each state moves
                as that control INCREASES, from a state where the control is
-               live. Required for every U. A `demand` declaration in
-               `block_mapping` does not change these signs — they describe
-               the column, not the feature built from it. It does change
-               where a sweep starts: a demand's step is measured only from
-               zone temperatures where the target calls for something, and
-               an end of its range that never does is skipped.
+               live. Required for every U. A hinge in `block_mapping` does not
+               change these signs — they describe the column, not the feature
+               built from it. It does change where a sweep starts: a hinge's
+               step is measured only from zone temperatures where the target
+               calls for something, and an end of its range that never does
+               is skipped.
 
         cool_sp = "Zone Cooling Setpoint [degC]"
         zone = "Zone Air Temperature [degC]"
@@ -378,27 +353,6 @@ def sub_plot(
 
 
 # ---------------------------------------------------------------------
-# Required only for `nt model optuna`: hyperparameter search space
-# ---------------------------------------------------------------------
-@beartype
-def hyper_args(trial, cfg: Config) -> Config:
-    """
-    Set the fields this trial should vary on `cfg` (a copy) and return it.
-    Any ModelingConfig field is fair game; keep the space small. Optuna
-    selects on dev loss, which measures fit on the data you have — not how
-    the model behaves where a controller will drive it.
-    """
-    # cfg.lr = trial.suggest_float("lr", 1e-4, 1e-2, log=True)
-    # cfg.log2_hidden_size = trial.suggest_int("log2_hidden_size", 3, 6)
-    # cfg.num_layers = trial.suggest_int("num_layers", 1, 3)
-    # One column's lag. Moving the deepest lag also moves the stride, so
-    # trials then train on different windows.
-    # cfg.history = {**cfg.history,
-    #                "Ambient Temperature [degC]": trial.suggest_int("ambient_lag", 0, 6)}
-    return cfg
-
-
-# ---------------------------------------------------------------------
 # Helper (not a hook): write the gradient-sign mapping JSON
 # ---------------------------------------------------------------------
 # `grad_gain > 0` requires `grad_path` to point at a JSON of known-sign
@@ -406,9 +360,9 @@ def hyper_args(trial, cfg: Config) -> Config:
 # that hold everywhere in state space — the penalty is evaluated at random
 # off-trajectory points, so a relationship that holds only while some
 # controller is active will fire in the wrong places — a raw setpoint's
-# partial, for one, is zero wherever the setpoint is satisfied. A setpoint
-# declared `demand` in block_mapping is differentiated as the demand feature
-# instead, so its sign here is the declared `sign` (-1 for cooling).
+# partial, for one, is zero wherever the setpoint is satisfied. A hinged setpoint
+# is differentiated as the hinge instead, so its sign is its push on the zone
+# (-1 for a cooling `nrelu`).
 # Run `python nt_model.py` to write the file.
 def write_gradient_mapping(path: str = "data/grad/mapping.json") -> str:
     mapping: dict[str, dict[str, int]] = {

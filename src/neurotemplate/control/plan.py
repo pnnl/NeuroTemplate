@@ -1,16 +1,16 @@
 """
 The best open-loop plan on the surrogate, and the controller gap.
 
-A free command per scored step, inside the actuation bounds and
-`command_bounds`, optimised through the frozen surrogate against the run's
+A free command per scored step, inside `control_bounds`, optimised through the
+frozen surrogate against the run's
 own objective (`control.solver`), on the very windows the policy is scored
 on. With the model as the plant and the forecast perfect, nothing that
 commands through the same bounds can do better on this surrogate, to the
 optimiser's reach. It is in sample and sees the whole window ahead, so it is
 a bar, not a controller.
 
-The objective is not convex, so the plan is solved from `plan_starts`
-starts: the controller's own commands, which keep the plan no worse than
+The objective is not convex, so the plan is solved from several starts: the
+controller's own commands, which keep the plan no worse than
 the controller, and random ones. Each window keeps its best start. How far
 the starts land apart says how much one start would have understated the
 bar.
@@ -22,8 +22,7 @@ Read the policy against it:
   - what the plan itself does not do (pre-cool at night, ride the band) is
     the model's or the objective's: the surrogate does not make it pay.
 
-A residual box bounds the policy and not the plan, so with one the gap also
-holds what the box costs.
+It runs on demand, `nt control gap`, because it costs more than the training.
 """
 
 from __future__ import annotations
@@ -44,10 +43,9 @@ from neurotemplate.control.objective import ObjectiveBalance, objective_balance
 from neurotemplate.control.pipeline import (
     ControlResults, evaluation_windows, score_rollout,
 )
-from neurotemplate.control.policy import with_command_bounds
+from neurotemplate.control.policy import control_box, with_control_bounds
 from neurotemplate.control.scenarios import eval_pred_steps, horizons
 from neurotemplate.control.solver import SharePlan, share_of, solve
-from neurotemplate.hooks import load_control_hooks
 
 
 @dataclass(frozen=True)
@@ -73,9 +71,9 @@ class PlanResult:
 
 def _plan_loop(plan: SharePlan, cfg, sysid_cfg, nm_mapping, policy_node: Node, plant: Node,
                umin: torch.Tensor, umax: torch.Tensor, steps: int):
-    """The closed loop with `plan` commanding, behind `command_bounds` as the
+    """The closed loop with `plan` commanding, behind `control_bounds` as the
     policy is, and that wrapper (for `base_of`)."""
-    bounded = with_command_bounds(plan, cfg, nm_mapping, list(policy_node.input_keys),
+    bounded = with_control_bounds(plan, cfg, nm_mapping, list(policy_node.input_keys),
                                   policy_node.input_map, umin, umax)
     node = Node(bounded, policy_node.input_keys, ["U"], name="plan",
                 input_map=policy_node.input_map)
@@ -87,8 +85,8 @@ def _plan_loop(plan: SharePlan, cfg, sysid_cfg, nm_mapping, policy_node: Node, p
 @beartype
 def plan_on_surrogate(cfg, sysid_cfg, cl_system, policy_node: Node, test_dfs: list,
                       policy_out: dict, nm_mapping: dict[str, list[str]],
-                      norm_stats: NormStats) -> PlanResult:
-    """Solve the free plan from `cfg.plan_starts` starts, keep each window's
+                      norm_stats: NormStats, starts: int = 4) -> PlanResult:
+    """Solve the free plan from `starts` starts, keep each window's
     best, and score it as the policy is scored.
 
     `policy_out` is the policy's rollout on the same windows, from
@@ -102,33 +100,32 @@ def plan_on_surrogate(cfg, sysid_cfg, cl_system, policy_node: Node, test_dfs: li
         policy_balance = objective_balance(loss, loss(policy_out))
 
     device = sysid_cfg.device
-    umin, umax = (b.to(device=device, dtype=torch.float32)
-                  for b in load_control_hooks(cfg).actuation_bounds(nm_mapping, norm_stats))
+    umin, umax = control_box(cfg, nm_mapping, norm_stats, device)
     plant = cl_system.nodes[1]
     windows, nu = len(data["yn"]), len(umin)
 
-    # Start 0 is the controller's own commands: behind command_bounds, at the
+    # Start 0 is the controller's own commands: behind control_bounds, at the
     # base commands the bounds map onto them. The rest are random, seeded.
     _, bounded = _plan_loop(SharePlan(umin, umax, torch.zeros(windows, steps, nu)),
                             cfg, sysid_cfg, nm_mapping, policy_node, plant, umin, umax, steps)
     own = torch.stack([bounded.base_of(u, *args) if hasattr(bounded, "base_of") else u
                        for args, u in policy_out["issued"]], dim=1)
     generator = torch.Generator().manual_seed(cfg.seed)
-    starts = [share_of(own, umin, umax)] + [
+    first_shares = [share_of(own, umin, umax)] + [
         torch.rand(windows, steps, nu, generator=generator).to(device)
-        for _ in range(cfg.plan_starts - 1)]
+        for _ in range(starts - 1)]
 
     # Every start of every window is one problem of one batch, start-major.
-    plan = SharePlan(umin, umax, torch.cat(starts))
+    plan = SharePlan(umin, umax, torch.cat(first_shares))
     loop, _ = _plan_loop(plan, cfg, sysid_cfg, nm_mapping, policy_node, plant,
                          umin, umax, steps)
-    batch = {key: x.repeat(cfg.plan_starts, *[1] * (x.dim() - 1)) for key, x in data.items()}
+    batch = {key: x.repeat(starts, *[1] * (x.dim() - 1)) for key, x in data.items()}
     result = solve(plan, lambda: window_objective(loop(dict(batch))), cfg.plan_lr,
                    cfg.plan_rtol, cfg.plan_patience, cfg.plan_max_iters)
 
-    by_start = result.best.reshape(cfg.plan_starts, windows)
+    by_start = result.best.reshape(starts, windows)
     winner = by_start.argmin(dim=0)
-    best_share = plan.share.detach().reshape(cfg.plan_starts, windows, steps, nu)[
+    best_share = plan.share.detach().reshape(starts, windows, steps, nu)[
         winner, torch.arange(windows, device=device)]
     spread = ((by_start.max(dim=0).values - by_start.min(dim=0).values)
               / by_start.min(dim=0).values.abs().clamp_min(1e-12))
@@ -138,11 +135,10 @@ def plan_on_surrogate(cfg, sysid_cfg, cl_system, policy_node: Node, test_dfs: li
     with torch.no_grad():
         out = final(dict(data))
     out["source_idx"] = source_idx
-    results = score_rollout(cfg, sysid_cfg, out, nm_mapping, norm_stats,
-                            eval_time_s=0.0, residual=False)
+    results = score_rollout(cfg, sysid_cfg, out, nm_mapping, norm_stats, eval_time_s=0.0)
     return PlanResult(results=results, out=out, policy=policy_balance,
                       plan=objective_balance(loss, loss(out)),
                       steps=result.steps, converged=result.converged,
-                      starts=cfg.plan_starts,
+                      starts=starts,
                       own_start_best=float((winner == 0).float().mean()),
                       start_spread=float(spread.median()), time_s=tic() - t0)

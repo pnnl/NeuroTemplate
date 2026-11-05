@@ -18,7 +18,7 @@ class _Linear:
             weights = torch.stack([torch.zeros_like(weights), weights])
         self.w = weights
         self.history_steps, self.ny, self.nu = weights.shape
-        self.nd, self.pre_stack = 1, None
+        self.nd, self.hinges = 1, None
 
     def sign_step(self, y, u, d):
         return torch.einsum("kij,bkj->bi", self.w, u)

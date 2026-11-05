@@ -22,9 +22,8 @@ around it asks with `getattr`:
                   cold: cold on the first call of a rollout, it seeds the state
                   from its window; warm, it carries it (see `stateful_blocks`)
     describe()    what the report card prints about it
-    head_stack    output heads, in the units its `z` is in: the level metrics,
-                  threshold calibration and the loss read them
-    pre_stack     derived inputs: the physics checks read which U is a demand
+    head_stack    output heads, in the units its `z` is in: the loss reads them
+    hinges        setpoint hinges: the physics checks read which U is one
     sign_step(y, u, d)
                   the map the gradient sign penalty differentiates, in
                   normalised units, instead of the contract's call

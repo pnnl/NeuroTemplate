@@ -37,7 +37,7 @@ OPSET = 18
 EXPORTERS = ("dynamo", "legacy")
 
 #: Every operator the template's forward paths are known to trace to, across
-#: all families, heads, the prestack and the policy. Extend it deliberately:
+#: all families, heads, the hinges and the policy. Extend it deliberately:
 #: a new entry is a new requirement on every consumer's runtime.
 ALLOWED_OPS = frozenset({
     "Add", "Cast", "Clip", "Concat", "Constant", "ConstantOfShape", "Div",

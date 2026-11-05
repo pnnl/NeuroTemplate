@@ -16,7 +16,7 @@ from control_fixtures import HIGH, LOW, SETPT, full_setup, make_nm_mapping, make
 
 def test_the_plan_improves_on_the_policy_inside_its_bounds():
     torch.manual_seed(0)   # the fixture surrogate's weights
-    s = full_setup(command_bounds={SETPT: [LOW, [HIGH, -0.5]]}, plan_max_iters=100,
+    s = full_setup(control_bounds={SETPT: [LOW, [HIGH, -0.5]]}, plan_max_iters=100,
                    test_window=30, test_stride=30)
     cfg, sysid_cfg, nm, ns = s["cfg"], s["sysid_cfg"], s["nm"], s["norm_stats"]
     policy = build_policy(cfg, sysid_cfg, nm, ns)
@@ -28,8 +28,8 @@ def test_the_plan_improves_on_the_policy_inside_its_bounds():
 
     assert plan.plan.total < plan.policy.total
     assert 0 < plan.gap < 1
-    assert plan.converged and plan.starts == cfg.plan_starts > 1
-    # The plan's commands obey command_bounds at every step, as the policy's do.
+    assert plan.converged and plan.starts == 4
+    # The plan's commands obey control_bounds at every step, as the policy's do.
     _, _, hmax = horizons(cfg, sysid_cfg)
     r = resolve_objective(cfg, nm).r_columns
     u = plan.out["U"][:, scored_steps("U", hmax), 0]
@@ -39,7 +39,7 @@ def test_the_plan_improves_on_the_policy_inside_its_bounds():
 
 def test_mpc_beats_an_untrained_policy_inside_its_bounds_and_starts_each_rollout_cold():
     future = {c: 4 for c in (LOW, HIGH, *make_nm_mapping()["D"])}
-    s = full_setup(command_bounds={SETPT: [LOW, [HIGH, -0.5]]}, future=future)
+    s = full_setup(control_bounds={SETPT: [LOW, [HIGH, -0.5]]}, future=future)
     cfg, sysid_cfg, nm, ns = s["cfg"], s["sysid_cfg"], s["nm"], s["norm_stats"]
     _, plant = make_tracking_plant(sysid_cfg, nm)   # a zone that follows its setpoint
     data, _ = evaluation_windows(cfg, sysid_cfg, [s["frame"]], nm)

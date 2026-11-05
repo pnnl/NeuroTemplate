@@ -154,8 +154,7 @@ def load_trained_dynamics(
     if not weights_path.exists():
         raise FileNotFoundError(f"Weights not found at {weights_path}")
 
-    # The head topology and calibrated thresholds as trained, independent of
-    # whatever the hooks file says now.
+    # The head topology as trained, independent of whatever the hooks file says now.
     head_stack = HeadStack.from_config(
         _load_json(artifacts_dir / "head_config.json"), nm_mapping["Y"])
     block_spec = _resolve_block_spec_artifact(artifacts_dir)

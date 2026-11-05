@@ -399,7 +399,7 @@ class _Planner:
 
     For each window: a free command per step over the next `horizon` steps,
     held as its share of the actuation range in [0, 1], `umin + share *
-    (umax - umin)` mapped onto `command_bounds`, rolled through the model
+    (umax - umin)` mapped onto `control_bounds`, rolled through the model
     graphs beside the policy and scored by the run's objective table. Adam
     at `lr` steps the share, clamped back into [0, 1] after every step,
     starting from the last plan shifted by one step (or, without one, from
@@ -418,7 +418,7 @@ class _Planner:
         self.horizon, self.lr, self.hmax = m["horizon"], m["lr"], m["hmax"]
         self.rtol, self.patience, self.max_iters = m["rtol"], m["patience"], m["max_iters"]
         self.umin, self.umax = torch.tensor(m["umin"]), torch.tensor(m["umax"])
-        self.bounds, self.terms = m["command_bounds"], m["terms"]
+        self.bounds, self.terms = m["control_bounds"], m["terms"]
         model_dir = policy_dir.parent / "model"
         model = _load_spec(model_dir / "model.json")
         if model["graph_format"] != "torch":

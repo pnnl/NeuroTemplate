@@ -10,14 +10,13 @@ file each, for tools and for looking a channel up.
 Sections (in order):
 
   Verdict       — one line per instrument: accuracy, whiteness, physics,
-                  rollout, staged channels, and any data warning
+                  rollout, and any data warning
   Model         — family, size, history; identical blocks collapsed to one line
   Data          — split sizes, role counts, head kinds, normalization
   Accuracy      — rollout RMSE against persistence, and skill; the worst
                   channels when there are many
   Whiteness     — one-step-ahead residuals (`whiteness`), grouped by the
                   period that holds the most residual power
-  Staged channels — balanced accuracy against persistence, decision thresholds
   Physics       — per check, how many channels pass, and the failures
   Rollout       — channels that ramp or drift well past the truth; omitted
                   when none do
@@ -43,12 +42,10 @@ import pandas as pd
 from neurotemplate.common.data_utils import degenerate_mapped_columns
 from neurotemplate.modeling.bounded import NEAR_EDGE, edge
 from neurotemplate.modeling.config import ModelingConfig
-from neurotemplate.modeling.calibration import Calibration
-from neurotemplate.modeling.heads import BoundedHead, HeadStack, OrdinalHead
+from neurotemplate.modeling.heads import BoundedHead, HeadStack
 from neurotemplate.modeling.whiteness import PERIOD_BANDS, Whiteness
 from neurotemplate.common.metrics import (
     ChannelMetrics,
-    LevelMetrics,
     RolloutStability,
     skill,
 )
@@ -75,9 +72,7 @@ DRIFT_RATIO_WARN = 2.0
 # one draw from whatever the seed happened to give. `pipeline.train_and_
 # evaluate` optionally trains `cfg.ensemble_seeds` models (see that field's
 # comment in ModelingConfig) and hands the per-seed results here to be
-# turned into the spread these types describe. `spread_stats` is also used
-# directly by cli/optuna.py to report the spread of a trial's per-seed dev
-# losses — the same order-statistics question, asked of a different metric.
+# turned into the spread these types describe.
 
 
 @dataclass(frozen=True)
@@ -112,9 +107,6 @@ class EnsembleSpread:
     rmse: dict[str, SeedSpread]        # channel -> spread
     physics: dict[str, SeedSpread]     # "scenario | channel" -> spread
     tau_slow: dict[str, SeedSpread]    # zone -> spread of its slowest time constant (rc_network)
-    # channel -> spread, levelled (binary / ordinal) channels only. Rare-level
-    # heads vary far more across seeds than their RMSE lets on.
-    balanced_acc: dict[str, SeedSpread] = field(default_factory=dict)
     # "scenario | channel" -> how many seeds passed the check. The loud
     # signal: a verdict that flips between seeds is not a property of the
     # model family, whatever the values' spread looks like.
@@ -144,8 +136,7 @@ def _ensemble_section(ensemble: Optional[EnsembleSpread]) -> Optional[str]:
             f"{ensemble.n_seeds - 1}`). Every other number on this card is the "
             "first seed's; this is the error bar around them.\n"]
     for title, spreads in (("Test RMSE", ensemble.rmse),
-                           ("`tau_slow` (hours)", ensemble.tau_slow),
-                           ("Balanced accuracy", ensemble.balanced_acc)):
+                           ("`tau_slow` (hours)", ensemble.tau_slow)):
         if spreads:
             shown = _widest(spreads)
             more = (f" (the {len(shown)} widest of {len(spreads)})"
@@ -194,8 +185,6 @@ def _verdict_section(
     physics: Optional[list[ScenarioResult]],
     flagged: list[RolloutStability],
     test_window: int,
-    levels: list[LevelMetrics],
-    persistence_levels: list[LevelMetrics],
     warnings: list[str],
 ) -> str:
     lines = []
@@ -223,12 +212,6 @@ def _verdict_section(
         if flagged else
         f"- **Rollout:** no channel ramps or drifts past {DRIFT_RATIO_WARN:g}× "
         f"the truth over {test_window} steps.")
-    if levels:
-        reference = {lm.name: lm.balanced_accuracy for lm in persistence_levels}
-        worst = min(levels, key=lambda lm: lm.balanced_accuracy)
-        lines.append(f"- **Staged channels:** worst balanced accuracy `{worst.name}` "
-                     f"{worst.balanced_accuracy:.2f} (persistence "
-                     f"{reference.get(worst.name, float('nan')):.2f}).")
     lines += [f"- ⚠️ {w}" for w in warnings]
     lines.append(f"\nEvery instrument's full output is in `{RESULTS_DIR}/` beside this card.")
     return _section("Verdict", "\n".join(lines))
@@ -304,33 +287,9 @@ def _edge_lines(bounded: dict, indent: str) -> list[str]:
             f"`{RESULTS_DIR}/architecture.json`:"] + lines
 
 
-def _forcing_lines(forcing: Optional[dict], indent: str) -> list[str]:
-    """Which column feeds which branch of a forcing block. A demand routed
-    into the mlp voids the block's stability guarantee, so it is called out."""
-    if not forcing:
-        return []
-    branches = []
-    if forcing.get("ambient"):
-        branches.append(f"ambient {forcing['ambient']['column']}")
-    branches += [f"linear {c} (k={t['k']:.3g})" for c, t in forcing.get("linear", {}).items()]
-    branches += [f"{'latched' if t['latched'] else 'saturating'} {c} "
-                 f"(w={t['w']:.3g}, slope_share={t['slope_share']:.2f})"
-                 for c, t in forcing.get("saturating", {}).items()]
-    if forcing.get("mlp"):
-        branches.append(f"mlp {', '.join(forcing['mlp'])}")
-    lines = [f"{indent}- forcing: " + "; ".join(branches)]
-    if forcing.get("demand_in_mlp"):
-        lines.append(f"{indent}- ⚠️ demand routed into the mlp: "
-                     f"{', '.join(forcing['demand_in_mlp'])} — the stability "
-                     "guarantee does not hold for this block")
-    return lines
-
-
 def _own_lines(info: dict, indent: str) -> list[str]:
     """What a single block reports about itself beyond its size."""
-    return (_network_lines(info, indent)
-            + _edge_lines(info.get("bounded", {}), indent)
-            + _forcing_lines(info.get("forcing"), indent))
+    return _network_lines(info, indent) + _edge_lines(info.get("bounded", {}), indent)
 
 
 def _block_signature(info: dict) -> tuple:
@@ -374,9 +333,9 @@ def _architecture_section(arch: dict) -> str:
         f"- History: {_lags_by_value(arch['history'])}",
     ]
     lines += _stack_lines(arch)
-    for column, entry in (arch.get("pre_stack") or {}).items():
-        lines.append(f"- derived input {column}: {entry['kind']} of {entry['state']}, "
-                     f"sign {entry['sign']:+d}, scale {entry['scale']:.3g}")
+    for column, entry in (arch.get("hinges") or {}).items():
+        lines.append(f"- setpoint hinge {column}: {entry['map']} against {entry['target']}, "
+                     f"scale {entry['scale']:.3g}")
     return _section("Model", "\n".join(lines))
 
 
@@ -384,14 +343,12 @@ def _architecture_section(arch: dict) -> str:
 
 
 def _head_label(head) -> str:
-    """Short label for a Head instance, e.g. 'bounded [0, +∞]' or 'ordinal K=4'."""
+    """Short label for a Head instance, e.g. 'bounded [0, +∞]'."""
     label = head.kind or type(head).__name__
     if hasattr(head, "lo") and hasattr(head, "hi"):
         lo = "−∞" if head.lo == float("-inf") else f"{head.lo:g}"
         hi = "+∞" if head.hi == float("inf") else f"{head.hi:g}"
         label += f" [{lo}, {hi}]"
-    if hasattr(head, "n_levels"):
-        label += f" K={head.n_levels}"
     return label
 
 
@@ -491,36 +448,6 @@ def _whiteness_section(white: list[Whiteness]) -> Optional[str]:
     return _section("Whiteness", "\n".join(body))
 
 
-# ── Staged channels ───────────────────────────────────────────────
-
-
-def _levels_section(levels: list[LevelMetrics], persistence_levels: list[LevelMetrics],
-                    head_stack: Optional[HeadStack],
-                    calibration: Optional[dict[str, Calibration]]) -> Optional[str]:
-    """Balanced accuracy is mean per-level recall: a constant predictor scores
-    1/K, and that is the floor, not 0. RMSE ranks a head that never fires
-    above one that does, so a staged channel is read here."""
-    if not levels:
-        return None
-    reference = {lm.name: lm.balanced_accuracy for lm in persistence_levels}
-    body = ["Balanced accuracy (mean per-level recall; a constant predictor scores "
-            f"1/K). Per-level shares and recall: `{RESULTS_DIR}/level_metrics.json`.\n",
-            "| Channel | Balanced acc | Persistence | Thresholds |", "|---|---:|---:|---|"]
-    heads = {} if head_stack is None else dict(zip(head_stack.channel_names, head_stack.heads))
-    for lm in levels:
-        head = heads.get(lm.name)
-        # With use_ste=False the smooth activation is fed back and the snap
-        # never runs, so there is no decision rule to report.
-        rule = (", ".join(f"{t:.4g}" for t in head.decision_thresholds.tolist())
-                if isinstance(head, OrdinalHead) and head.use_ste else "—")
-        if calibration and lm.name in calibration:
-            c = calibration[lm.name]
-            rule += f" (calibrated, share error {c.trace[c.kept].error:.3f})"
-        body.append(f"| `{lm.name}` | {lm.balanced_accuracy:.3f} | "
-                    f"{reference.get(lm.name, float('nan')):.3f} | {rule} |")
-    return _section("Staged channels", "\n".join(body))
-
-
 # ── Physics ───────────────────────────────────────────────────────
 
 
@@ -598,8 +525,7 @@ def _hyperparameters_line(cfg: ModelingConfig) -> str:
     return _section("Hyperparameters", (
         f"lr {cfg.lr} · batch {cfg.batch_size} · epochs {cfg.epochs} · pred steps "
         f"{cfg.train_pred_steps}/{cfg.dev_pred_steps} (train/dev) · test window "
-        f"{cfg.test_window} · curriculum {cfg.curriculum_steps} (ratio "
-        f"{cfg.curriculum_ratio}) · seed {cfg.seed} · loss gains {gains or 'none'}"))
+        f"{cfg.test_window} · seed {cfg.seed} · loss gains {gains or 'none'}"))
 
 
 @beartype
@@ -613,10 +539,7 @@ def render_reportcard(
     physics: Optional[list[ScenarioResult]] = None,
     physics_steps: Optional[int] = None,
     whiteness: Optional[list[Whiteness]] = None,
-    levels: Optional[list[LevelMetrics]] = None,
     persistence: Optional[list[ChannelMetrics]] = None,
-    persistence_levels: Optional[list[LevelMetrics]] = None,
-    calibration: Optional[dict[str, Calibration]] = None,
     ensemble: Optional[EnsembleSpread] = None,
     head_stack: Optional[HeadStack] = None,
     norm_stats: Optional[dict] = None,
@@ -638,14 +561,9 @@ def render_reportcard(
         persistence:   The same for persistence, the bar `test_metrics` is
                        scored against; required for the accuracy section.
         whiteness:     One-step residual whiteness per continuous channel.
-        levels:        Classification metrics for the binary / ordinal
-                       channels, beside `persistence_levels`.
-        calibration:   Optional {channel: Calibration} from
-                       calibrate_decision_thresholds.
         ensemble:      Optional EnsembleSpread from cfg.ensemble_seeds > 1.
-        head_stack:    Optional HeadStack, physical units: head kinds,
-                       decision thresholds, and bounded-coverage warnings
-                       against `test_df`.
+        head_stack:    Optional HeadStack, physical units: head kinds, and
+                       bounded-coverage warnings against `test_df`.
         run_name:      MLflow run name (falls back to cfg.run).
         timestamp:     ISO-ish timestamp string (defaults to now()).
         split_sizes:   Optional {split: {"rows": N, "files": K}} per split.
@@ -672,15 +590,13 @@ def render_reportcard(
 
     parts = [
         _header(name, ts, cfg.lr > 0, best_dev_loss, train_time_s, test_time_s),
-        _verdict_section(rows, white, physics, flagged, cfg.test_window,
-                         levels or [], persistence_levels or [], warnings),
+        _verdict_section(rows, white, physics, flagged, cfg.test_window, warnings),
         _architecture_section(arch),
         _data_section(nm_mapping, split_sizes, head_stack, norm_stats),
         _accuracy_section(rows, cfg.test_window),
     ]
     optional = [
         _whiteness_section(white),
-        _levels_section(levels or [], persistence_levels or [], head_stack, calibration),
         None if physics is None else _physics_section(physics, cfg.synth_hours, physics_steps),
         _rollout_section(flagged, cfg.test_window),
         _ensemble_section(ensemble),

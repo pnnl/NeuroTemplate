@@ -1,8 +1,8 @@
 """A trained run reloads with the hooks file it trained with, not today's.
 
-A rebuild reads hooks no checkpoint records — the reference rule a residual
-is anchored to has no weights — so a reload that read the working directory's
-file would silently turn a trained run into a different controller.
+A rebuild reads hooks no checkpoint records, `power_metric` for one, so a reload
+that read the working directory's file would silently turn a trained run into a
+different one.
 """
 
 import shutil
@@ -22,7 +22,7 @@ from neurotemplate.control.pipeline import train_policy
 from neurotemplate.control.policy import build_policy
 from neurotemplate.control.scenarios import build_loaders, build_window_dict
 from neurotemplate.hooks import CONTROL_SNAPSHOT, load_control_hooks, snapshot_hooks
-from control_fixtures import SETPT, full_setup, make_norm_stats
+from control_fixtures import full_setup, make_norm_stats
 
 FIXTURE_HOOKS = Path(__file__).parent / "fixtures" / "nt_control.py"
 
@@ -41,7 +41,7 @@ def test_editing_the_hooks_file_after_training_changes_nothing(tmp_path, monkeyp
     monkeypatch.chdir(tmp_path)   # MLflow's default artifact root is ./mlruns
     hooks_file = tmp_path / "site_control.py"
     shutil.copyfile(FIXTURE_HOOKS, hooks_file)
-    s = full_setup(residual_delta={SETPT: [1.0, 1.0]}, user_hooks_path=str(hooks_file),
+    s = full_setup(user_hooks_path=str(hooks_file),
                    location=f"sqlite:///{tmp_path / 'mlflow.db'}",
                    savedir=str(tmp_path / "scratch"), progress="silent")
     cfg, sysid_cfg, nm, ns = s["cfg"], s["sysid_cfg"], s["nm"], s["norm_stats"]
@@ -59,17 +59,16 @@ def test_editing_the_hooks_file_after_training_changes_nothing(tmp_path, monkeyp
     with torch.no_grad():
         trained = closed_loop(dict(windows))["U"]
 
-    # A new rule in the working directory's file, and no cached copy of it.
+    # A different hook in the working directory's file, and no cached copy of it.
     with hooks_file.open("a") as f:
-        f.write("\n_rule = reference_control\n"
-                "def reference_control(*args):\n"
-                "    return {k: v + 1.0 for k, v in _rule(*args).items()}\n")
+        f.write("\ndef power_channels(nm_mapping):\n    return []\n")
     for name in list(sys.modules):
         if name.startswith("site_control"):
             del sys.modules[name]
 
     monkeypatch.setattr(control_load, "load_frozen_dynamics", lambda *args, **kwargs: (
         s["dyn_sys"], s["dyn_node"], sysid_cfg, nm, make_norm_stats(s["plant"])))
-    _, reloaded, *_ = control_load.load_trained_policy(run_id)
+    _, reloaded, again, *_ = control_load.load_trained_policy(run_id)
     with torch.no_grad():
         assert torch.equal(reloaded(dict(windows))["U"], trained)
+    assert load_control_hooks(again).power_channels(nm)

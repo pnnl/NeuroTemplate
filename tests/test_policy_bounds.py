@@ -1,10 +1,10 @@
-"""command_bounds: a U column held inside a per-step range read from a reference."""
+"""control_bounds: the one way to bound a command, a fixed range or one read per step."""
 import pytest
 import torch
 
 from neurotemplate.control.closed_loop import build_closed_loop
 from neurotemplate.control.losses import resolve_objective
-from neurotemplate.control.policy import _reference_bounds, build_policy
+from neurotemplate.control.policy import _per_step_bounds, build_policy, control_box
 from neurotemplate.control.scenarios import build_window_dict, horizons
 from control_fixtures import SETPT, full_setup
 
@@ -27,7 +27,7 @@ def _rollout(**overrides):
 
 
 def test_a_bounded_setpoint_stays_inside_the_band_at_every_step():
-    s, out = _rollout(command_bounds={SETPT: [LOW, HIGH]})
+    s, out = _rollout(control_bounds={SETPT: [LOW, HIGH]})
     _, _, hmax = horizons(s["cfg"], s["sysid_cfg"])
     nm = s["nm"]
     u = out["U"][:, hmax - 1:, nm["U"].index(SETPT)]
@@ -43,21 +43,36 @@ def test_a_bounded_setpoint_stays_inside_the_band_at_every_step():
 
 def test_bounds_name_columns_the_policy_can_read():
     with pytest.raises(ValueError, match="not a command or a reference column"):
-        _rollout(command_bounds={SETPT: ["Nowhere [°C]", HIGH]})
+        _rollout(control_bounds={SETPT: ["Nowhere [°C]", HIGH]})
 
 
-def test_a_column_is_not_both_a_residual_and_bounded():
-    cfg = full_setup()["cfg"]
-    cfg.residual_delta = {SETPT: [0.0, 1.0]}
-    cfg.command_bounds = {SETPT: [20.0, 25.0]}
-    with pytest.raises(ValueError, match="both residual_delta and command_bounds"):
-        cfg.validate()
+def test_a_column_not_listed_takes_its_recorded_range_and_a_number_replaces_it():
+    s = full_setup()
+    umin, umax = control_box(s["cfg"], s["nm"], s["norm_stats"], "cpu")
+    stats = s["norm_stats"][SETPT]
+    assert umin.item() == pytest.approx(stats["min"]) and umax.item() == pytest.approx(stats["max"])
+    s = full_setup(control_bounds={SETPT: [22.0, 26.0]})
+    umin, umax = control_box(s["cfg"], s["nm"], s["norm_stats"], "cpu")
+    assert (umin.item(), umax.item()) == (22.0, 26.0)
+
+
+def test_a_fixed_range_holds_the_commands_and_needs_no_per_step_map():
+    s, out = _rollout(control_bounds={SETPT: [24.0, 25.0]})
+    _, _, hmax = horizons(s["cfg"], s["sysid_cfg"])
+    u = out["U"][:, hmax - 1:, 0]
+    assert (u >= 24.0 - 1e-4).all() and (u <= 25.0 + 1e-4).all()
+
+
+def test_bounds_name_u_columns():
+    s = full_setup(control_bounds={"Nowhere [°C]": [0.0, 1.0]})
+    with pytest.raises(ValueError, match="not U columns"):
+        control_box(s["cfg"], s["nm"], s["norm_stats"], "cpu")
 
 
 def test_a_bound_may_sit_a_margin_inside_a_band_edge():
     """[column, offset]: the command stays at least the margin under the band's
     ceiling, so equipment that starts past its setpoint does not overshoot."""
-    s, out = _rollout(command_bounds={SETPT: [LOW, [HIGH, -0.5]]})
+    s, out = _rollout(control_bounds={SETPT: [LOW, [HIGH, -0.5]]})
     _, _, hmax = horizons(s["cfg"], s["sysid_cfg"])
     nm = s["nm"]
     u = out["U"][:, hmax - 1:, nm["U"].index(SETPT)]
@@ -68,15 +83,13 @@ def test_a_bound_may_sit_a_margin_inside_a_band_edge():
 
 
 def _ordered(bounds, u):
-    """`_reference_bounds` over two commands in °C on a stub
+    """`_per_step_bounds` over two commands in °C on a stub
     policy that emits `u`; returns the bounded commands."""
-    from types import SimpleNamespace
     heat, cool = "Heat [°C]", "Cool [°C]"
-    cfg = SimpleNamespace(command_bounds=bounds)
     nm = {"U": [heat, cool], "D": []}
     base = lambda *args: u                      # noqa: E731
-    net = _reference_bounds(base, cfg, nm, ["yn"], {}, [],
-                            torch.tensor([0.0, 0.0]), torch.tensor([1.0, 1.0]))
+    net = _per_step_bounds(base, bounds, nm, ["yn"], {}, [],
+                           torch.tensor([0.0, 0.0]), torch.tensor([1.0, 1.0]))
     return net(torch.zeros(1)), heat, cool
 
 

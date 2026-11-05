@@ -52,7 +52,7 @@ def warn_deep_window(name: str, steps: int) -> None:
 
 @dataclass
 class ModelingConfig:
-    """Top-level config object for system-identification training, search, and loading."""
+    """Top-level config object for system-identification training and loading."""
 
     # ---- DATA ----------------------------------------------------------------
     # Train/dev/test CSV paths (all three required). Each may be a single
@@ -122,8 +122,6 @@ class ModelingConfig:
     # every `history_steps` rows; with a long `context_steps` that is few windows,
     # and with `batch_size` at or above their number, one update per epoch.
     train_stride: Optional[int] = None
-    curriculum_steps: int = 0
-    curriculum_ratio: float = 4.0
     lr: float = 0.001
 
     # ---- DEV -----------------------------------------------------------------
@@ -135,22 +133,6 @@ class ModelingConfig:
 
     # ---- LOSS ----------------------------------------------------------------
     ref_gain: float = 1.0
-
-    # ---- STAGED CHANNELS -----------------------------------------------------
-    # A binary / ordinal channel is usually a rare-event channel (a furnace
-    # that fires 2% of the time), and neither MSE nor a midpoint snap values
-    # the rare level. Both settings come from the data, not the optimiser —
-    # see modeling/calibration.py — and neither touches a regression head.
-    #
-    # Weight each levelled head's loss by the inverse square-root training
-    # frequency of its levels, so a rare level counts more but not
-    # proportionally more (a 1% level gets 10x, not 100x). Off, every sample
-    # weighs the same (the pre-existing behaviour).
-    balance_levels: bool = True
-    # After training, move each ordinal head's decision thresholds so the
-    # predicted level shares on dev rollouts match the true ones. Off, decode
-    # snaps at the level midpoints — a p=0.5 rule the data does not justify.
-    calibrate_thresholds: bool = True
 
     # ---- RUNTIME -------------------------------------------------------------
     seed: int = -1
@@ -174,14 +156,6 @@ class ModelingConfig:
     run: str = ""
     plots_dir: str = "plots"
     plot: bool = True
-    save_config: str = "last_step"
-
-    # ---- OPTUNA --------------------------------------------------------------
-    n_trials: int = 100
-    study_name: str = "study"
-    trial_epochs: int = 100
-    optuna_dir: str = "optuna_dbs"
-    trial_seeds: int = 3
 
     # ---- PHYSICS -------------------------------------------------------------
     # grad_* weights a training penalty; synth_* only sizes the post-training
@@ -199,8 +173,7 @@ class ModelingConfig:
         for name in [
             "batch_size", "log2_hidden_size", "num_layers",
             "epochs", "update_every", "train_pred_steps",
-            "dev_pred_steps", "test_window", "test_stride",
-            "curriculum_ratio", "ensemble_seeds", "trial_seeds",
+            "dev_pred_steps", "test_window", "test_stride", "ensemble_seeds",
         ]:
             check_positive(self, name)
         if self.threads is not None:
@@ -209,9 +182,8 @@ class ModelingConfig:
         for name in [
             # lr=0 is valid: it mints a checkpoint without any parameter updates.
             "lr",
-            "warmup", "patience", "curriculum_steps",
-            "ref_gain",
-            "n_trials", "grad_gain", "trial_epochs",
+            "warmup", "patience",
+            "ref_gain", "grad_gain",
             "grad_n_samples", "synth_n_scenarios",
             "synth_hours", "synth_n_plot",
         ]:
@@ -223,7 +195,6 @@ class ModelingConfig:
         # is no built-in family may be one of the hooks file's own.
         check_one_of(self, "progress", list(PROGRESS_LEVELS))
         check_one_of(self, "norm_type", ["min_max", "abs_max", "z_score", None])
-        check_one_of(self, "save_config", ["last_step", "all", "None", None])
 
         check_lag_table("history", self.history)
         # Only what a learned map reads: `context_steps` is what a model starts

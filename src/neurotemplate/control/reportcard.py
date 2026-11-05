@@ -7,25 +7,26 @@ output of every instrument in the run's `results/` folder.
 
 Sections (in order):
 
-  Verdict      — comfort, the gap to the best plan, band-jump response, and a
-                 warning for each check that fired (a dominated objective, a
-                 dead power gradient, a command the surrogate ignores, a
-                 residual pinned at its box, MPC solves at the cap)
+  Verdict      — comfort, band-jump response, and a warning for each check
+                 that fired (a dominated objective, a dead power gradient, a
+                 command the surrogate ignores, MPC solves at the cap)
   Controller   — family, size, window and bounds, identical entries grouped;
                  the surrogate is described on its own run's card
   Objective    — the loss table with each term's share before and after
                  training, the power diagnostic, and the objective's notes
   Comfort      — per regulated channel, worst first when there are many;
                  energy and effort on one line each
-  Controller gap — the controller beside the best open-loop plan
   Actuation    — per command, or only the ones parked or idle when there are
-                 many; residual boxes
+                 many
   Band jumps   — did the loop react when the reference moved
   Hyperparameters — one line
 
 Only the dominated objective and the ignored band jump are verdicts on the
 controller. Time at a bound is reported, not judged: a setpoint parked at its
 least-aggressive limit while nothing is asked of it is correct control.
+
+`render_gap_report` is the card `nt control gap` writes: the controller beside the
+best open-loop plan.
 """
 
 from __future__ import annotations
@@ -47,8 +48,6 @@ from neurotemplate._typing import beartype
 IGNORED_BELOW = 0.5
 #: A command whose surrogate gradient is zero this often cannot be learned.
 INSENSITIVE_AT = 0.5
-#: A residual pinned at a box edge this often is reported.
-PINNED_AT = 0.5
 #: Below this share of power steps passing no gradient, the clamp is not worth a line.
 DEAD_POWER_AT = 0.01
 
@@ -67,29 +66,18 @@ def _header(name: str, timestamp: str, cfg, sysid_cfg, eval_time_s: float,
     return f"# Control reportcard: {name}\n\n" + " · ".join(parts) + "\n"
 
 
-def _box(below: float, above: float) -> str:
-    if below == above:
-        return f"±{above:g}"
-    lo = f"−{below:g}" if below else "0"
-    hi = f"+{above:g}" if above else "0"
-    return f"[{lo}, {hi}]"
-
-
 # ── Verdict ───────────────────────────────────────────────────────
 
 
 def _verdict_section(results, balance: Optional[ObjectiveBalance],
                      trained: Optional[ObjectiveBalance],
-                     power: Optional[PowerDiagnostics], plan,
+                     power: Optional[PowerDiagnostics],
                      sensitivity: Optional[list[CommandSensitivity]], arch: dict) -> str:
     worst = max(results.comfort, key=lambda m: m.mean_exceedance)
     lines = [f"- **Comfort:** {results.comfort_violation_rate * 100:.1f}% of steps outside "
              f"the band, mean exceedance {results.comfort_mean_exceedance:.4g} over "
              f"{len(results.comfort)} regulated channel(s); worst `{worst.name}` "
              f"{worst.mean_exceedance:.4g}."]
-    if plan is not None:
-        lines.append(f"- **Controller gap:** the best plan on the surrogate scores "
-                     f"{plan.gap * 100:.0f}% below the controller (Controller gap).")
     if results.response:
         jumps = sum(r.n_jumps for r in results.response)
 
@@ -120,11 +108,6 @@ def _verdict_section(results, balance: Optional[ObjectiveBalance],
             lines.append(f"- ⚠️ The surrogate ignores `{s.column}` on "
                          f"{s.zero_share * 100:.0f}% of recorded windows: its gradient is "
                          "zero there, so no controller can learn or plan it.")
-    for r in results.residual:
-        for side, frac in (("lower", r.frac_at_below), ("upper", r.frac_at_above)):
-            if frac is not None and frac >= PINNED_AT:
-                lines.append(f"- ⚠️ `{r.name}` sits on its residual box's {side} edge "
-                             f"{frac * 100:.0f}% of the time (Actuation).")
     if arch.get("solves"):
         capped = sum(n >= arch["max_iters"] for n in arch["solves"]) / len(arch["solves"])
         if capped > 0:
@@ -146,16 +129,12 @@ def _grouped(entries: dict[str, str]) -> list[str]:
 
 
 def _bounds_lines(arch: dict) -> list[str]:
-    lines = ["- Actuation bounds:"] + _grouped({
+    lines = ["- Command range:"] + _grouped({
         col: f"[{lo:.4g}, {hi:.4g}]"
         for col, lo, hi in zip(arch["u_cols"], arch["umin_phys"], arch["umax_phys"])})
-    if arch.get("command_bounds"):
-        lines += ["- Per-step bounds (a name is a reference column):"] + _grouped({
-            col: f"[{low}, {high}]" for col, (low, high) in arch["command_bounds"].items()})
-    if arch.get("residual_box") is not None:
-        lines += ["- Residual box around `reference_control` (bounds the action, "
-                  "not the zone):"] + _grouped({
-                      col: _box(*box) for col, box in arch["residual_box"].items()})
+    if arch.get("control_bounds"):
+        lines += ["- `control_bounds` (a name moves per step):"] + _grouped({
+            col: f"[{low}, {high}]" for col, (low, high) in arch["control_bounds"].items()})
     return lines
 
 
@@ -258,7 +237,7 @@ def _comfort_section(results) -> str:
     return _section("Comfort", "\n".join(body))
 
 
-def _gap_section(plan, results) -> str:
+def render_gap_report(plan, results, run_id: str) -> str:
     """The controller beside the best open-loop plan on the same windows
     (`control.plan`): a bar for any controller on this surrogate."""
     names = [term.name for term in plan.policy.terms]
@@ -287,7 +266,8 @@ def _gap_section(plan, results) -> str:
         "| " + " | ".join(head) + " |",
         "|" + "|".join(["---"] + ["---:"] * (len(head) - 1)) + "|",
     ] + ["| " + " | ".join(row) + " |" for row in rows]
-    return _section("Controller gap", "\n".join(body))
+    return (f"# Controller gap: {run_id}\n\nThe best plan on the surrogate scores "
+            f"{plan.gap * 100:.0f}% below the controller.\n\n" + "\n".join(body) + "\n")
 
 
 # ── Actuation ─────────────────────────────────────────────────────
@@ -317,14 +297,6 @@ def _actuation_section(results) -> str:
                     + (_names(parked, quote=False) if parked else "none"))
         body.append(f"- Moving less than {SATURATION_TOL:.0%} of their range per step: "
                     + (_names(idle) if idle else "none"))
-    for r in results.residual:
-        pinned = ", ".join(f"{side} edge {frac * 100:.0f}%" for side, frac in
-                           (("lower", r.frac_at_below), ("upper", r.frac_at_above))
-                           if frac is not None)
-        body.append(f"- Residual `{r.name}` in {_box(r.below_cap, r.above_cap)}: mean "
-                    f"|δ| {r.mean_abs_delta:.4g}, max {r.max_abs_delta:.4g}"
-                    + (f"; pinned at the {pinned}" if pinned else
-                       " (zero-width box: this column is the rule, and |δ| must be 0)"))
     return _section("Actuation", "\n".join(body))
 
 
@@ -373,7 +345,6 @@ def render_control_reportcard(
     trained_balance: Optional[ObjectiveBalance] = None,
     power: Optional[PowerDiagnostics] = None,
     objective_notes: Optional[list[str]] = None,
-    plan=None,
     sensitivity: Optional[list[CommandSensitivity]] = None,
     run_name: Optional[str] = None,
     timestamp: Optional[str] = None,
@@ -390,8 +361,6 @@ def render_control_reportcard(
                      forward pass; `trained_balance` the same batch after.
         power:       Optional objective.power_diagnostics(...).
         objective_notes: Optional objective.objective_notes(...) prose.
-        plan:        Optional plan.PlanResult, the best open-loop plan on the
-                     same windows; None renders no gap section.
         sensitivity: Optional sensitivity.command_sensitivity(...): per
                      command, how often the surrogate does not move with it.
 
@@ -405,14 +374,12 @@ def render_control_reportcard(
     trains = cfg.policy != "mpc"
     parts = [
         _header(name, ts, cfg, sysid_cfg, results.eval_time_s, best_dev_loss, train_time_s),
-        _verdict_section(results, balance, trained_balance, power, plan, sensitivity, arch),
+        _verdict_section(results, balance, trained_balance, power, sensitivity, arch),
         _controller_section(arch),
         _objective_section(cfg, sysid_cfg, resolve_objective(cfg, nm_mapping), balance,
                            trained_balance, power, objective_notes, trains),
         _comfort_section(results),
     ]
-    if plan is not None:
-        parts.append(_gap_section(plan, results))
     parts.append(_actuation_section(results))
     response = _response_section(results)
     if response is not None:

@@ -150,14 +150,11 @@ def power_diagnostics(term_fn, out: dict, hmax: int) -> PowerDiagnostics:
     means the cost gradient is missing exactly where it was needed.
 
     The two numbers are separate because a zero power reading is not by itself
-    a defect, and reporting only the forward value gets one whole class of head
-    exactly backwards. A regression head that predicts −101 W is clamped to
-    zero and stops passing gradient; an ordinal head that snaps to a real
-    compressor-off stage reports zero and *keeps* passing gradient, because
-    the clamp is inactive at exactly zero and the snap is a straight-through
-    estimator. The first is a surrogate problem worth acting on; the second is
-    the model being right. Measuring the gradient tells them apart without the
-    diagnostic needing to know what heads exist.
+    a defect. A regression head that predicts −101 W is clamped to zero and stops
+    passing gradient, a surrogate problem worth acting on; a bounded head resting
+    on its floor reports zero and keeps passing gradient, the model being right.
+    Measuring the gradient tells them apart without the diagnostic needing to know
+    what heads exist.
 
     Reported, not judged — and a large `frac_dead` is a clamp problem (a power
     head that goes negative, or a hard clamp in a proxy), not a weighting

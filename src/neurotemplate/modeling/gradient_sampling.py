@@ -36,7 +36,7 @@ class _ContractSigns(nn.Module):
         self.scale = Scaler(nm_mapping, norm_stats)
         self.history_steps = history_steps
         self.ny, self.nu, self.nd = (len(nm_mapping[key]) for key in ("Y", "U", "D"))
-        self.pre_stack = None
+        self.hinges = None
 
     def _physical(self, x, key):
         key = key.lower()
@@ -78,13 +78,12 @@ class SampledGradientPenalty:
     head's monotone activation, which cannot change a sign, rather than just
     d(learned_correction)/d(input).
 
-    The Jacobian is taken downstream of the model's pre-stack: sampled raw
-    inputs are pushed through it first, so a `demand` column is
-    differentiated as the demand feature, not the setpoint. That is what
-    makes a sign on it meaningful — `∂z/∂setpoint` is 0 on the inactive side
-    and has no universal sign, `∂z/∂demand` does — and it turns the Y half
-    into `∂y_{k+1}/∂y_k` at *fixed* demand, the zone's own self-coefficient
-    rather than the total derivative through the thermostat.
+    The Jacobian is taken downstream of the model's setpoint hinges: sampled raw
+    inputs are pushed through them first, so a hinged column is differentiated as
+    the hinge, not the setpoint. That is what makes a sign on it meaningful —
+    `∂z/∂setpoint` is 0 on the inactive side and has no universal sign, `∂z/∂hinge`
+    does — and it turns the Y half into `∂y_{k+1}/∂y_k` at a *fixed* hinge, the zone's
+    own self-coefficient rather than the total derivative through the thermostat.
 
     Args:
         model:        anything `signed_model` returns
@@ -157,8 +156,8 @@ class SampledGradientPenalty:
         y = self._repeat_sample(self.model.ny)
         u = self._repeat_sample(self.model.nu)
         d = self._repeat_sample(self.model.nd)
-        if self.model.pre_stack is not None:
-            u = self.model.pre_stack(y, u)
+        if self.model.hinges is not None:
+            u = self.model.hinges(y, u)
         inputs = {"Y": y, "U": u, "D": d}
         leaves = {key: inputs[key].detach().requires_grad_(True) for key in self.signs}
         windows = [leaves.get(key, inputs[key]) for key in ("Y", "U", "D")]

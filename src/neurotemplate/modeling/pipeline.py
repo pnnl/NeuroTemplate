@@ -9,8 +9,7 @@ non-trivial steps):
   - render_reportcard(...)  — describe_dynamics + render
   - write_reportcard(...)   — disk + MLflow
   - log_test_results(...)   — flatten metrics into MLflow log_metrics
-  - train_and_evaluate(...) — one full training run (`nt model train`, and
-                              `nt model optuna`'s final retrain)
+  - train_and_evaluate(...) — one full training run (`nt model train`)
 
 `synth_cfg` is computed once at the entry point (via nt_model.synth_cfg)
 and passed to the evaluation path. None means "physics checks disabled for
@@ -46,21 +45,12 @@ from neurotemplate.common.data_utils import (
     to_df,
     warn_degenerate_columns,
 )
-from neurotemplate.modeling.calibration import (
-    Calibration,
-    balance_level_weights,
-    calibrate_decision_thresholds,
-    calibration_to_dict,
-)
-from neurotemplate.modeling.experiment import set_seeds, train_with_curriculum
+from neurotemplate.modeling.experiment import fit_dynamics, set_seeds
 from neurotemplate.modeling.heads import HeadStack
 from neurotemplate.common.metrics import (
     ChannelMetrics,
-    LevelMetrics,
     RolloutStability,
     metric_key,
-    level_metrics,
-    level_metrics_to_dict,
     metrics_to_dict,
     per_channel_metrics,
     rollout_stability,
@@ -139,18 +129,6 @@ def resolve_block_spec(hooks, nm_mapping: dict[str, list[str]], cfg: ModelingCon
     return None
 
 
-def build_head_stack(
-    hooks, cfg: ModelingConfig, nm_mapping: dict[str, list[str]],
-    norm_stats: dict, train_dfs: list[DataFrame],
-) -> HeadStack:
-    """The hook's head stack, in physical units, with level weights balanced
-    from the training data when `cfg.balance_levels`."""
-    head_stack = hooks.data_head_config(nm_mapping, norm_stats)
-    if cfg.balance_levels:
-        balance_level_weights(head_stack, train_dfs)
-    return head_stack
-
-
 @dataclass
 class PreparedData:
     """What a training run computes from the data once, before any model.
@@ -207,31 +185,8 @@ def prepare_data(cfg: ModelingConfig, hooks) -> PreparedData:
         norm_stats=norm_stats,
         grad_masks=get_grad_masks(grad_path=cfg.grad_path, nm_mapping=nm_mapping),
         synth_cfg=synth_cfg,
-        head_stack=build_head_stack(hooks, cfg, nm_mapping, norm_stats, train_raws),
+        head_stack=hooks.data_head_config(nm_mapping, norm_stats),
     )
-
-
-def _train(cfg, *, train_dfs, dev_dfs, nm_mapping, grad_masks, norm_stats,
-           head_stack, block_spec, logger):
-    """train_with_curriculum, then the post-training threshold calibration
-    when `cfg.calibrate_thresholds` — one step, so the primary and every
-    ensemble member get the same treatment. Returns (dyn_sys, best_dev_loss,
-    calibration); calibration is {} without ordinal heads or with the flag
-    off."""
-    dyn_sys, best_dev_loss = train_with_curriculum(
-        cfg=cfg, train_dfs=train_dfs, dev_dfs=dev_dfs,
-        nm_mapping=nm_mapping, grad_masks=grad_masks, norm_stats=norm_stats,
-        head_stack=head_stack, block_spec=block_spec, global_logger=logger,
-    )
-    calibration: dict[str, Calibration] = {}
-    if cfg.calibrate_thresholds:
-        calibration = calibrate_decision_thresholds(dyn_sys, cfg, dev_dfs, nm_mapping)
-        if cfg.progress in ("live", "log") and calibration:
-            for name, c in calibration.items():
-                print(f"Calibrated decision thresholds for {name!r}: "
-                      + ", ".join(f"{t:.4f}" for t in c.thresholds)
-                      + f"  ({len(c.trace)} pass(es), kept #{c.kept + 1})")
-    return dyn_sys, best_dev_loss, calibration
 
 
 # ── Result type ──────────────────────────────────────────────────
@@ -252,15 +207,9 @@ class TestResults:
     # Order statistics for the Y channels that are not thermal states. These
     # carry no verdict — see scenarios.ReadoutSummary.
     readouts: Optional[list[ReadoutSummary]] = None
-    # Classification view of the binary / ordinal channels: RMSE cannot tell
-    # a head that works from one that never fires, these can. Empty when the
-    # stack has no levelled head.
-    levels: list[LevelMetrics] = field(default_factory=list)
     # The same metrics for persistence — hold the last seeded state for the
-    # whole window — as the bar a surrogate has to clear. A regression head on
-    # a staged channel learns exactly this and then collapses in the rollout.
+    # whole window — as the bar a surrogate has to clear.
     persistence: list[ChannelMetrics] = field(default_factory=list)
-    persistence_levels: list[LevelMetrics] = field(default_factory=list)
     # Whiteness of the one-step-ahead residuals, per continuous Y channel.
     whiteness: list[Whiteness] = field(default_factory=list)
 
@@ -336,9 +285,6 @@ def evaluate_and_plot(
     # seeded history — and holds the last of it. Same span, same units.
     persist = test_out["Y"][:, cfg.history_steps - 1:cfg.history_steps, :].expand_as(true)
     persistence = per_channel_metrics(persist, true, nm_mapping["Y"])
-    head_stack = trained_heads(dyn_sys, norm_stats)
-    levels = _level_metrics(head_stack, pred, true)
-    persistence_levels = _level_metrics(head_stack, persist, true)
 
     # One unitless headline number: pooling channels is only meaningful
     # with each scaled by its stats, as the training loss scales them.
@@ -346,14 +292,10 @@ def evaluate_and_plot(
                            dtype=pred.dtype, device=pred.device)
     normalized_rmse = ((pred - true) / stretch).pow(2).mean().sqrt().item()
 
-    # Whiteness is a question for continuous channels; a staged one is read
-    # by its level metrics. A residual that never varies has nothing to test.
+    # A residual that never varies has nothing to test.
     residuals = one_step_residuals(cfg, dyn_sys, test_dfs, nm_mapping)
-    white = []
-    for i, name in enumerate(nm_mapping["Y"]):
-        levelled = head_stack is not None and head_stack.heads[i].levels() is not None
-        if not levelled and residuals[:, i].std() > 0:
-            white.append(whiteness(residuals[:, i], name, freq_s))
+    white = [whiteness(residuals[:, i], name, freq_s)
+             for i, name in enumerate(nm_mapping["Y"]) if residuals[:, i].std() > 0]
 
     # Physics assertions on synthetic states the recorded data never visits.
     # The verdicts are the point; the figures are for when one surprises you.
@@ -376,9 +318,7 @@ def evaluate_and_plot(
         physics=None if outcome is None else outcome.verdicts,
         physics_steps=None if outcome is None else synth_steps(cfg, freq_s),
         readouts=None if outcome is None else outcome.readouts,
-        levels=levels,
         persistence=persistence,
-        persistence_levels=persistence_levels,
         whiteness=white,
     )
 
@@ -407,30 +347,9 @@ def one_step_residuals(cfg, dyn_sys, test_dfs: list[DataFrame],
 
 
 def trained_heads(dyn_sys, norm_stats: dict) -> Optional[HeadStack]:
-    """The trained model's head stack in physical units, calibrated decision
-    thresholds included, or None without heads."""
+    """The trained model's head stack in physical units, or None without heads."""
     head_stack = getattr(contract_model(dyn_sys), "head_stack", None)
     return None if head_stack is None else head_stack.physical(norm_stats)
-
-
-def _level_metrics(
-    head_stack: Optional[HeadStack],
-    y_pred: torch.Tensor,
-    y_true: torch.Tensor,
-) -> list[LevelMetrics]:
-    """Classification metrics for every levelled channel of the (physical) stack."""
-    if head_stack is None:
-        return []
-    out = []
-    for i, (name, head) in enumerate(zip(head_stack.channel_names, head_stack.heads)):
-        head_levels = head.levels()
-        if head_levels is None:
-            continue
-        out.append(level_metrics(
-            head.level_index(y_pred[..., i]), head.level_index(y_true[..., i]),
-            head_levels.tolist(), name,
-        ))
-    return out
 
 
 def _plot_predictions(
@@ -529,7 +448,6 @@ def render_reportcard(
     best_dev_loss: Optional[float] = None,
     train_time_s: Optional[float] = None,
     split_sizes: Optional[dict[str, dict[str, int]]] = None,
-    calibration: Optional[dict[str, Calibration]] = None,
     ensemble: Optional[EnsembleSpread] = None,
 ) -> str:
     """
@@ -553,9 +471,7 @@ def render_reportcard(
         physics=test_results.physics,
         physics_steps=test_results.physics_steps,
         whiteness=test_results.whiteness,
-        levels=test_results.levels,
         persistence=test_results.persistence,
-        persistence_levels=test_results.persistence_levels,
         ensemble=ensemble,
         nm_mapping=nm_mapping,
         head_stack=head_stack,
@@ -566,7 +482,6 @@ def render_reportcard(
         train_time_s=train_time_s,
         test_time_s=test_results.test_time_s,
         split_sizes=split_sizes,
-        calibration=calibration,
     )
 
 
@@ -603,12 +518,6 @@ def log_test_results(
             flat[f"test_{safe}_skill"] = channel_skill
     for st in test_results.stability:
         flat[f"test_{metric_key(st.name)}_drift_ratio"] = st.drift_ratio
-    # Balanced accuracy is the number to sort a staged channel by — RMSE
-    # ranks a head that never fires above one that does.
-    for lm in test_results.levels:
-        flat[f"test_{metric_key(lm.name)}_balanced_acc"] = lm.balanced_accuracy
-    for lm in test_results.persistence_levels:
-        flat[f"persistence_{metric_key(lm.name)}_balanced_acc"] = lm.balanced_accuracy
     for w in test_results.whiteness:
         flat[f"test_{metric_key(w.name)}_white"] = float(w.white)
     if test_results.physics is not None:
@@ -631,11 +540,6 @@ def log_test_results(
         "rollout_stability.json": stability_to_dict(test_results.stability),
         "whiteness.json": whiteness_to_dict(test_results.whiteness),
     }
-    if test_results.levels:
-        results["level_metrics.json"] = {
-            "model": level_metrics_to_dict(test_results.levels),
-            "persistence": level_metrics_to_dict(test_results.persistence_levels),
-        }
     if test_results.physics is not None:
         results["physics_checks.json"] = checks_to_dict(test_results.physics)
     if test_results.readouts:
@@ -650,20 +554,14 @@ def run_summary_metrics(test_results: TestResults) -> dict[str, float]:
 
     `worst_channel_skill` is the lowest per-channel skill against
     persistence, so it is the weakest channel rather than an average that
-    can hide one. `worst_level_balanced_acc` is the same idea for the staged
-    channels, present only when there are any.
+    can hide one.
     """
     persistence_rmse = {m.name: m.rmse for m in test_results.persistence}
     skills = [skill(m.rmse, persistence_rmse[m.name]) for m in test_results.metrics]
-    out = {
+    return {
         "test_rmse": test_results.normalized_rmse,
         "worst_channel_skill": min(x for x in skills if not math.isnan(x)),
     }
-    if test_results.levels:
-        out["worst_level_balanced_acc"] = min(
-            lm.balanced_accuracy for lm in test_results.levels
-        )
-    return out
 
 
 # ── Seed ensemble ─────────────────────────────────────────────────
@@ -691,7 +589,6 @@ def _build_ensemble_spread(
     per_seed_metrics: list[list[ChannelMetrics]],
     per_seed_physics: list[Optional[list[ScenarioResult]]],
     per_seed_tau_slow: list[dict[str, float]],
-    per_seed_levels: list[list[LevelMetrics]],
 ) -> EnsembleSpread:
     """Group each metric's per-seed values under its channel/key and reduce
     with `spread_stats`. Every list argument has one entry per seed, in the
@@ -700,11 +597,6 @@ def _build_ensemble_spread(
     for metrics in per_seed_metrics:
         for m in metrics:
             rmse.setdefault(m.name, []).append(m.rmse)
-
-    balanced_acc: dict[str, list[float]] = {}
-    for levels in per_seed_levels:
-        for lm in levels:
-            balanced_acc.setdefault(lm.name, []).append(lm.balanced_accuracy)
 
     physics: dict[str, list[float]] = {}
     physics_passed: dict[str, int] = {}
@@ -723,7 +615,6 @@ def _build_ensemble_spread(
         rmse={k: spread_stats(v) for k, v in rmse.items()},
         physics={k: spread_stats(v) for k, v in physics.items()},
         tau_slow={k: spread_stats(v) for k, v in tau_slow.items()},
-        balanced_acc={k: spread_stats(v) for k, v in balanced_acc.items()},
         physics_passed=physics_passed,
     )
 
@@ -759,14 +650,13 @@ def _run_ensemble_members(
     per_seed_metrics = [primary_test_results.metrics]
     per_seed_physics = [primary_test_results.physics]
     per_seed_tau_slow = [_tau_slow_by_channel(describe_dynamics(primary_dyn_sys, cfg))]
-    per_seed_levels = [primary_test_results.levels]
 
     for i in range(1, cfg.ensemble_seeds):
         if cfg.progress != "silent":
             print(f"Training ensemble member {i + 1}/{cfg.ensemble_seeds} "
                   f"(seed={cfg.seed + i})...")
         set_seeds(cfg.seed + i)
-        dyn_sys, _, _ = _train(
+        dyn_sys, _ = fit_dynamics(
             quiet_cfg,
             train_dfs=train_dfs, dev_dfs=dev_dfs,
             nm_mapping=nm_mapping, grad_masks=grad_masks, norm_stats=norm_stats,
@@ -781,15 +671,13 @@ def _run_ensemble_members(
         per_seed_metrics.append(test_results.metrics)
         per_seed_physics.append(test_results.physics)
         per_seed_tau_slow.append(_tau_slow_by_channel(describe_dynamics(dyn_sys, cfg)))
-        per_seed_levels.append(test_results.levels)
 
     return _build_ensemble_spread(
         cfg.ensemble_seeds, per_seed_metrics, per_seed_physics, per_seed_tau_slow,
-        per_seed_levels,
     )
 
 
-# ── Single full training run (consolidates main + optuna Phase 2) ──
+# ── Single full training run ──────────────────────────────────────
 
 
 @beartype
@@ -807,15 +695,9 @@ def train_and_evaluate(
     logger,
     head_stack: Optional[HeadStack] = None,
     block_spec: Optional[dict[str, dict]] = None,
-    extra_metrics: Optional[dict] = None,
 ) -> TrainedModel:
     """
     Train one model, evaluate it, plot, and write the reportcard.
-
-    Used by `nt model train` end-to-end and by `nt model optuna` for the
-    Phase 2 retrain with best params. The lighter per-trial loop in
-    cli/optuna.objective calls train_with_curriculum directly — it
-    deliberately skips eval/plot/reportcard for speed.
 
     When `cfg.ensemble_seeds > 1`, this also trains that many more models at
     cfg.seed + 1 .. cfg.seed + ensemble_seeds - 1 (see `_run_ensemble_members`)
@@ -823,9 +705,6 @@ def train_and_evaluate(
     cfg.seed + 0) stays the one whose weights are logged, whose plots are
     written, and whose reportcard is rendered — the ensemble adds error bars
     around that one artifact, it does not change what artifact you get.
-
-    `extra_metrics` lets the caller log run-level numbers that aren't part
-    of the standard set (e.g. optuna's `search_time`).
 
     Returns the run as a `TrainedModel`, its id read off `logger`.
     """
@@ -835,7 +714,7 @@ def train_and_evaluate(
     # and the primary (i = 0) needs the same explicit contract rather than
     # an implicit "whatever the caller last seeded".
     set_seeds(cfg.seed)
-    dyn_sys, best_dev_loss, calibration = _train(
+    dyn_sys, best_dev_loss = fit_dynamics(
         cfg,
         train_dfs=train_dfs, dev_dfs=dev_dfs,
         nm_mapping=nm_mapping, grad_masks=grad_masks, norm_stats=norm_stats,
@@ -848,8 +727,6 @@ def train_and_evaluate(
         "best_dev_loss": best_dev_loss,
         "train_time": train_time_s,
     }
-    if extra_metrics:
-        metrics_to_log.update(extra_metrics)
     logger.log_metrics(metrics_to_log)
     logger.log_dict(norm_stats, name="norm_stats.json")
     logger.log_dict(nm_mapping, name="nm_mapping.json")
@@ -860,14 +737,9 @@ def train_and_evaluate(
     if grad_masks:
         logger.log_dict(grad_masks, name="grad_mask.json")
     # Persist head config so load_model can rebuild the exact head topology
-    # used at training time, independent of nt_model.py drift. Read off
-    # the System's own stack: that is the one carrying the calibrated
-    # decision thresholds, which are not in the saved weights.
-    trained_stack = trained_heads(dyn_sys, norm_stats)
-    if trained_stack is None:   # a custom model: the stack declared
-        trained_stack = head_stack
-    if trained_stack is not None:
-        logger.log_dict(trained_stack.to_config(), name="head_config.json")
+    # used at training time, independent of nt_model.py drift.
+    if head_stack is not None:
+        logger.log_dict(head_stack.to_config(), name="head_config.json")
 
     plot_run_dir = Path(cfg.savedir) / "plots"
     test_results = evaluate_and_plot(
@@ -892,15 +764,11 @@ def train_and_evaluate(
         )
 
     logger.log_dict(describe_dynamics(dyn_sys, cfg), name=f"{RESULTS_DIR}/architecture.json")
-    if calibration:
-        logger.log_dict({name: calibration_to_dict(c, norm_stats[name])
-                         for name, c in calibration.items()},
-                        name=f"{RESULTS_DIR}/threshold_calibration.json")
 
     md = render_reportcard(
         cfg=cfg, dyn_sys=dyn_sys, test_results=test_results,
         norm_stats=norm_stats, nm_mapping=nm_mapping,
-        head_stack=trained_stack,
+        head_stack=head_stack,
         test_dfs=test_dfs,
         run_name=cfg.run,
         best_dev_loss=best_dev_loss,
@@ -909,7 +777,6 @@ def train_and_evaluate(
             name: {"rows": sum(len(d) for d in dfs), "files": len(dfs)}
             for name, dfs in (("train", train_dfs), ("dev", dev_dfs), ("test", test_dfs))
         },
-        calibration=calibration,
         ensemble=ensemble,
     )
     write_reportcard(md, Path(cfg.savedir), logger=logger)

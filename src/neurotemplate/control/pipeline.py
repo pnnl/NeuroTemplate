@@ -7,7 +7,7 @@ frozen, so the optimizer is built over requires_grad params only.
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from time import perf_counter as tic
 from typing import Optional
@@ -27,19 +27,17 @@ from neurotemplate.control.metrics import (
     ComfortMetrics,
     EnergyMetrics,
     JumpResponse,
-    ResidualMetrics,
     actuation_metrics,
     actuation_to_dict,
     comfort_metrics,
     comfort_to_dict,
     energy_metrics,
     hours_per_step,
-    residual_metrics,
     response_audit,
     response_to_dict,
 )
 from neurotemplate.control.losses import POWER, Objective, resolve_objective
-from neurotemplate.control.policy import reference_over_horizon
+from neurotemplate.control.policy import control_box
 from neurotemplate.control.scenarios import (
     build_window_dict_multi,
     eval_pred_steps,
@@ -63,8 +61,6 @@ class ControlResults:
     response: list[JumpResponse]       # reaction to band jumps
     energy: Optional[EnergyMetrics]    # None if power_metric not implemented
     eval_time_s: float
-    # Per anchored U column; empty without a residual.
-    residual: list[ResidualMetrics] = field(default_factory=list)
 
 
 # ── Train (policy only) ──────────────────────────────────────────
@@ -213,11 +209,8 @@ def score_rollout(
     nm_mapping: dict[str, list[str]],
     norm_stats: NormStats,
     eval_time_s: float,
-    residual: bool = True,
 ) -> ControlResults:
-    """Pooled physical metrics of one finished evaluation rollout. `residual`
-    scores the deployed deviation from the reference rule, when the run has
-    one; a controller that is no residual is not scored against a box."""
+    """Pooled physical metrics of one finished evaluation rollout."""
     hooks = load_control_hooks(cfg)
     _, _, hmax = horizons(cfg, sysid_cfg)
     objective = resolve_objective(cfg, nm_mapping)
@@ -239,11 +232,9 @@ def score_rollout(
     U = out["U"][:, scored_steps("U", hmax), :]
     mean_abs_du = (U[:, 1:, :] - U[:, :-1, :]).abs().mean().item()
 
-    # Per-control behaviour, in the same physical units as the commands. The
-    # bounds come from the hook the policy is actually squashed into, so
-    # "at bound" means the limit the policy was given, not the data's spread.
-    u_lo, u_hi = (b.to(device=device, dtype=torch.float32)
-                  for b in hooks.actuation_bounds(nm_mapping, norm_stats))
+    # Per-control behaviour, in the same physical units as the commands. "At
+    # bound" means the range the policy was squashed into.
+    u_lo, u_hi = control_box(cfg, nm_mapping, norm_stats, device)
     actuation = actuation_metrics(U, u_cols, u_lo, u_hi)
     response = response_audit(
         y_ctrl, lower, upper, U, regulated, u_cols, u_lo, u_hi,
@@ -267,19 +258,6 @@ def score_rollout(
         }
         energy = energy_metrics(power, step_hours, weights)
 
-    # How much of each box a residual policy actually used. Replaying the
-    # (memoryless) rule on the recorded trajectory gives the command it would
-    # have issued at each step, so U - u_ref is the deviation that was deployed.
-    deviations = []
-    if residual and cfg.residual_delta:
-        u_ref = reference_over_horizon(cfg, out, hmax, nm_mapping)
-        for column, ref in u_ref.items():
-            j = u_cols.index(column)
-            deviations.append(residual_metrics(
-                column, U[:, :, j], ref,
-                tuple(float(side) for side in cfg.residual_delta[column]),
-            ))
-
     return ControlResults(
         comfort_violation_rate=violation_rate,
         comfort_mean_exceedance=mean_exceedance,
@@ -289,7 +267,6 @@ def score_rollout(
         response=response,
         energy=energy,
         eval_time_s=eval_time_s,
-        residual=deviations,
     )
 
 
@@ -337,15 +314,6 @@ def _flat_control_metrics(results: ControlResults) -> dict:
         flat[f"{prefix}_mean_window_peak"] = results.energy.mean_window_peak
         for name, value in results.energy.weighted_energy.items():
             flat[f"{prefix}_{metric_key(name)}_weighted_energy"] = value
-    for r in results.residual:
-        safe = metric_key(r.name)
-        flat[f"{prefix}_{safe}_residual_below"] = r.below_cap
-        flat[f"{prefix}_{safe}_residual_above"] = r.above_cap
-        flat[f"{prefix}_{safe}_mean_abs_delta"] = r.mean_abs_delta
-        # Absent for an edge at 0, where the fraction is vacuous.
-        for side, frac in (("below", r.frac_at_below), ("above", r.frac_at_above)):
-            if frac is not None:
-                flat[f"{prefix}_{safe}_frac_delta_at_{side}"] = frac
     return flat
 
 
@@ -358,7 +326,6 @@ def _control_metrics_dict(results: ControlResults) -> dict:
         "actuation": actuation_to_dict(results.actuation),
         "response": response_to_dict(results.response),
         "energy": None if results.energy is None else asdict(results.energy),
-        "residual": [asdict(r) for r in results.residual],
     }
 
 

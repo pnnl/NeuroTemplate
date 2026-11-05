@@ -17,12 +17,12 @@ from neurotemplate.control.losses import extend_norm_stats, resolve_objective
 from neurotemplate.control.pipeline import (
     evaluate_closed_loop, train_policy,
 )
-from neurotemplate.control.policy import build_policy, reference_over_horizon
+from neurotemplate.control.policy import build_policy
 from neurotemplate.control.scenarios import (
     build_loaders, horizons, load_control_splits, scored_steps,
 )
 from control_fixtures import (
-    BAND_GAINS, BAND_LOSSES, POWER_LOSSES, SETPT, TARIFF, TARIFF_SCALE,
+    BAND_GAINS, BAND_LOSSES, HIGH, LOW, POWER_LOSSES, SETPT, TARIFF, TARIFF_SCALE,
     full_setup, make_norm_stats, make_reference_df,
     write_splits,
 )
@@ -57,10 +57,10 @@ def test_a_grid_response_objective_trains():
     assert torch.isfinite(out["U"]).all()
 
 
-def test_a_residual_over_a_reference_file_trains_and_reloads(tmp_path):
-    """The band arrives as a reference file, the rule reads its columns by
+def test_a_bounded_policy_over_a_reference_file_trains_and_reloads(tmp_path):
+    """The band arrives as a reference file, the bounds read its columns by
     name, and the run rebuilds from its logged config to the same policy."""
-    s = full_setup(epochs=3, residual_delta={SETPT: [1.0, 1.0]})
+    s = full_setup(epochs=3, control_bounds={SETPT: [LOW, HIGH]})
     cfg, sysid_cfg, nm, ns = s["cfg"], s["sysid_cfg"], s["nm"], s["norm_stats"]
     write_splits(cfg, tmp_path, s["plant"], [make_reference_df(s["plant"])])
     train_dfs, _, test_dfs = load_control_splits(cfg, nm)
@@ -69,13 +69,12 @@ def test_a_residual_over_a_reference_file_trains_and_reloads(tmp_path):
 
     assert torch.isfinite(torch.tensor(best_dev))
     results, out = evaluate_closed_loop(cfg, sysid_cfg, trained, test_dfs, nm, ns)
-    # The commanded setpoint never leaves the box after training — the
-    # guarantee the residual exists to give.
-    u_ref = reference_over_horizon(cfg, out, hmax, nm)[SETPT]
-    delta = (out["U"][:, scored_steps("U", hmax), 0] - u_ref).abs()
-    assert float(delta.max()) <= 1.0 + 1e-4
-    (residual,) = results.residual
-    assert residual.max_abs_delta <= 1.0 + 1e-4
+    # The commanded setpoint never leaves the band after training.
+    r = resolve_objective(cfg, nm).r_columns
+    u = out["U"][:, scored_steps("U", hmax), 0]
+    low = out["R"][:, hmax - 1:hmax - 1 + u.shape[1], r.index(LOW)]
+    high = out["R"][:, hmax - 1:hmax - 1 + u.shape[1], r.index(HIGH)]
+    assert (u >= low - 1e-4).all() and (u <= high + 1e-4).all()
 
     # Reload as `load_trained_policy` does: the config from its logged params,
     # the reference stats rebuilt from it, the checkpoint loaded strictly.

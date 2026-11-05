@@ -366,18 +366,12 @@ def _rollout_data(yn_row, u_rows, d_rows, history_steps, n_steps, ny, device):
     }
 
 
-def _declared_demands(system) -> dict[str, dict]:
-    """`{U column: {"kind", "state", "sign", ...}}` for every `demand` the
-    surrogate declares, or {}.
-
-    Read off the model's own `PreStack` rather than the block spec, so the
-    checks and the trained run cannot disagree about what is a thermostat.
-    """
-    pre_stack = getattr(contract_model(system), "pre_stack", None)
-    if pre_stack is None:
-        return {}
-    return {col: entry for col, entry in pre_stack.to_config().items()
-            if entry["kind"] == "demand"}
+def _declared_hinges(system) -> dict[str, dict]:
+    """`{U column: {"target", "map"}}` for every setpoint hinge the surrogate declares, or
+    {}. Read off the model itself, so the checks and the trained run cannot disagree about
+    what is a thermostat."""
+    hinges = getattr(contract_model(system), "hinges", None)
+    return {} if hinges is None else hinges.declared
 
 
 # ── Scenarios ────────────────────────────────────────────────────
@@ -418,7 +412,7 @@ class _Scenario:
         self.ny = len(nm_mapping["Y"])
         self.state_idx = [nm_mapping["Y"].index(c) for c in spec.states]
         self.t_min, self.t_max = _state_range(spec, norm_stats)
-        self.demands = _declared_demands(system)
+        self.hinges = _declared_hinges(system)
 
     def _outside_range(self, col: str) -> float:
         """How far the seed range reaches past `col`'s recorded range; 0 when
@@ -574,23 +568,23 @@ class StepResponseScenario(_Scenario):
     drift decides the verdict — the same −0.23 °C drift once failed a heating
     sweep as "the wrong way" and passed a cooling sweep beside it.
 
-    A control declared `demand` is a thermostat: the clamp makes it command
+    A control declared a hinge is a thermostat: the clamp makes it command
     nothing while the zone is on the inactive side of the target. Its sweep
     is seeded only where the target is active (a cooling target below the
     zone, a heating target above it), and a target inactive across the whole
     seed range asserts nothing and is skipped — its answer is zero by
-    construction. The pairing is read off the model, so a `demand` whose
-    zone is not one of `states` is swept unrestricted.
+    construction. The pairing is read off the model, so a hinge whose zone is
+    not one of `states` is swept unrestricted.
     """
 
     label = "Step response"
 
     def _seed_range(self, col: str, target: float) -> Optional[tuple[float, float]]:
         """Where to seed `col`'s sweep to `target`, or None to skip it."""
-        demand = self.demands.get(col)
-        if demand is None or demand["state"] not in self.spec.states:
+        hinge = self.hinges.get(col)
+        if hinge is None or hinge["target"] not in self.spec.states:
             return self.t_min, self.t_max
-        if demand["sign"] < 0:      # cooling: active with the zone above
+        if hinge["map"] == "nrelu":      # cooling: active with the zone above
             lo, hi = max(self.t_min, target), self.t_max
         else:                       # heating: active with the zone below
             lo, hi = self.t_min, min(self.t_max, target)

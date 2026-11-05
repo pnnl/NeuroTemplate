@@ -26,9 +26,8 @@ What a block owns
          config's `block_models` wins over it, and without either the block
          takes `cfg.model`: a spec that never sets `model` swaps every block's
          family from the config, by one line.
-  inputs what each of its U and D columns *is*, per column — see
-         "Declaring what a column is" below. Anything undeclared is an
-         ordinary network input.
+  inputs the setpoints it reads as a thermostat's error against one of its own Y
+         channels (`hinge`). Anything undeclared is an ordinary network input.
   ambient
          the one D column that is the outdoor temperature, if any. Only the
          thermal families act on it (conduction to the outdoors, a capacity
@@ -54,23 +53,21 @@ What a block owns
          takes reads its entry, so a block can keep priors for a family it is
          swapped out of, and a family's missing entry is a loud error.
 
-Declaring what a column is
-==========================
+The setpoint hinge
+==================
 
     "inputs": {
-        "Cool SP [°C]": {"kind": "demand", "sign": -1, "state": "Zone Temp [°C]"},
+        "Cool SP [°C]": {"target": "Zone Temp [°C]", "map": "nrelu"},
     }
 
-`demand` turns a setpoint into the thermostat's clamped error against one
-of the block's *own* Y channels, `relu(sign · (setpoint − state))`, before
-the family sees it — see `prestack.Demand`. `sign` is the direction the
-state moves while the demand is active (-1 cooling, +1 heating). Pairing
-with another block's channel is refused: that is what `reads` is for. A
-block with a `demand` entry has exactly one Y channel. An `rc_network`
-block declares none: a `thermostat` block is the setpoint's physics.
+The setpoint reaches the family as `relu(zone − setpoint)` (`nrelu`, cooling) or
+`relu(setpoint − zone)` (`relu`, heating), against one of the block's *own* Y channels;
+see `hinge`. Pairing with another block's channel is refused: that is what `reads` is
+for. A block with a hinge has exactly one Y channel. An `rc_network` block declares none:
+a `thermostat` block is the setpoint's physics.
 
-Nothing is inferred: a dataset whose actuator is metered power rather than
-a setpoint never writes a `demand` entry.
+Nothing is inferred: a dataset whose actuator is metered power rather than a setpoint
+never writes one.
 
 Where the split comes from
 ===========================
@@ -115,6 +112,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 from neurotemplate._typing import beartype
+from neurotemplate.modeling.hinge import MAP_SIGNS
 
 
 @dataclass(frozen=True)
@@ -145,9 +143,8 @@ class Block:
     #: nm_mapping.
     u_names: tuple[str, ...] = ()
     d_names: tuple[str, ...] = ()
-    #: `{column: {"kind": ..., "sign": ..., "state": ...}}` for the declared
-    #: columns, validated by `build_blocks`. Empty means every column is an
-    #: ordinary input.
+    #: `{U column: {"target": Y column, "map": "relu" | "nrelu"}}`, the block's setpoint
+    #: hinges, validated by `build_blocks`. Empty means every column is an ordinary input.
     inputs: dict[str, dict] = field(default_factory=dict)
     ambient: Optional[str] = None
     scale: Optional[dict[str, float]] = None
@@ -225,8 +222,6 @@ def _resolve(columns: list[str], names: list[str], block: str, key: str,
 BLOCK_KEYS = frozenset({"Y", "U", "D", "reads", "driven_by", "residual", "model", "inputs",
                         "ambient", "scale", "solar", "params"})
 
-INPUT_KINDS = ("demand",)
-
 
 def _resolve_inputs(spec: dict, block: str, y_names: list[str],
                     u_names: list[str], d_names: list[str],
@@ -252,34 +247,22 @@ def _resolve_inputs(spec: dict, block: str, y_names: list[str],
                         f"columns {d_names}.")
 
     for column, entry in inputs.items():
-        kind = entry.get("kind")
-        if column not in u_names and column not in d_names:
-            problems.append(f"`inputs` names {column!r}, which is not one of this "
-                            f"block's U {u_names} or D {d_names} columns.")
-        if kind not in INPUT_KINDS:
-            problems.append(f"`inputs[{column!r}]` has kind {kind!r}; expected one "
-                            f"of {list(INPUT_KINDS)}.")
-            continue
-        if entry.get("sign") not in (-1, 1):
-            problems.append(f"`inputs[{column!r}]` needs `sign` of -1 or +1 — the "
-                            "direction the column pushes the state; got "
-                            f"{entry.get('sign')!r}.")
-        state = entry.get("state")
         if column not in u_names:
-            problems.append(f"`inputs[{column!r}]` is `demand`, which only a U "
-                            "column (a setpoint) can be.")
-        if state not in y_names:
-            problems.append(f"`inputs[{column!r}]` pairs with state {state!r}, "
-                            f"which is not one of this block's own Y channels "
-                            f"{y_names}. A demand may only read the block's own "
-                            "state; to see another block's, use `reads`.")
+            problems.append(f"`inputs` names {column!r}, which is not one of this block's "
+                            f"U columns {u_names}: a hinge is a setpoint.")
+        if not isinstance(entry, dict) or set(entry) != {"target", "map"}:
+            problems.append(f"`inputs[{column!r}]` must be {{target, map}}; got {entry!r}.")
+            continue
+        if entry["map"] not in MAP_SIGNS:
+            problems.append(f"`inputs[{column!r}]` has map {entry['map']!r}; expected one of "
+                            f"{list(MAP_SIGNS)}.")
+        if entry["target"] not in y_names:
+            problems.append(f"`inputs[{column!r}]` targets {entry['target']!r}, which is not "
+                            f"one of this block's own Y channels {y_names}. To see another "
+                            "block's, use `reads`.")
         if len(y_names) != 1:
-            problems.append(f"`inputs[{column!r}]` is `demand`, so this block "
-                            f"must have exactly one Y channel; it has {y_names}.")
-        unknown = sorted(set(entry) - {"kind", "sign", "state"})
-        if unknown:
-            problems.append(f"`inputs[{column!r}]` sets {unknown}; a demand is "
-                            "kind, sign and state.")
+            problems.append(f"`inputs[{column!r}]` is a hinge, so this block must have exactly "
+                            f"one Y channel; it has {y_names}.")
 
     if problems:
         raise ValueError(
@@ -314,7 +297,7 @@ def build_blocks(
         output — reading your own Y is automatic and needs no declaration.
       - an `inputs` or `ambient` declaration is malformed (see the module
         docstring); every problem in a block is listed in one message.
-      - a shared U column is declared `demand` by more than one block.
+      - a shared U column is a hinge in more than one block.
       - a block sets a key that is not one of `BLOCK_KEYS`.
     """
     y_cols, u_cols, d_cols = nm_mapping["Y"], nm_mapping["U"], nm_mapping["D"]
@@ -403,7 +386,7 @@ def build_blocks(
             tuple(y_cols[i] for i in sorted(reads_idx)), tuple(spec.get("driven_by", [])),
             spec.get("residual"),
         ))
-    _check_one_demand_per_column(blocks)
+    _check_one_hinge_per_column(blocks)
     return run_order(blocks)
 
 
@@ -426,20 +409,19 @@ def run_order(blocks: list[Block]) -> list[Block]:
     return ordered
 
 
-def _check_one_demand_per_column(blocks: list[Block]) -> None:
-    """The pre-stack rewrites a demand column once, for every block that sees
-    it, so a shared column declared `demand` by two blocks can only mean one
-    of them — and which one would be decided by dict order, silently."""
+def _check_one_hinge_per_column(blocks: list[Block]) -> None:
+    """A hinge rewrites its column once, for every block that sees it, so a shared column
+    declared by two blocks can only mean one of them, and which one would be decided by
+    dict order, silently."""
     declared_by: dict[str, list[str]] = {}
     for block in blocks:
-        for column, entry in block.inputs.items():
-            if entry["kind"] == "demand":
-                declared_by.setdefault(column, []).append(block.name)
+        for column in block.inputs:
+            declared_by.setdefault(column, []).append(block.name)
     clashes = {column: names for column, names in declared_by.items() if len(names) > 1}
     if clashes:
         raise ValueError(
-            f"block_mapping: U column(s) declared `demand` by more than one "
-            f"block: {clashes}. A demand column is rewritten once against one "
-            "state for every block that sees it; declare it in one block only."
+            f"block_mapping: U column(s) declared a hinge by more than one block: "
+            f"{clashes}. A hinge rewrites its column once, against one target, for every "
+            "block that sees it; declare it in one block only."
         )
 

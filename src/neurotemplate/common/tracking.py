@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import shutil
 from contextlib import contextmanager
-from dataclasses import replace
 from pathlib import Path
 from typing import Iterator, Optional, Protocol, Union, runtime_checkable
 
@@ -45,9 +44,6 @@ class RunLogger(MLFlowLogger):
         """Log `text` to the run as the file `name`."""
         self._mlflow.log_text(text, name)
 
-    def log_param(self, key: str, value) -> None:
-        self._mlflow.log_param(key, value)
-
     def log_parameters(self) -> None:
         """Log every config field as a run param. Neuromancer's version also
         prints each field's type to stdout, a leftover debug line."""
@@ -69,7 +65,6 @@ def tracked_run(
     *,
     stdout: list[str],
     logout: list[str],
-    run_name: Optional[str] = None,
 ) -> Iterator[RunLogger]:
     """Open the top-level MLflow run for `cfg`, and always close it.
 
@@ -79,17 +74,13 @@ def tracked_run(
     the logger's own `clean_up`, which also removes `savedir` — anything to
     keep must be logged to MLflow before the block ends.
 
-    `run_name` overrides `cfg.run` for this run's MLflow name only; `cfg`
-    itself is not modified.
-
     `save_weights=False` stops Neuromancer's Trainer from writing its own
     checkpoints at the end of `train()` — among them a pickled `best_model.pth`
     that nothing reads. Each pipeline writes `best_model_state_dict.pth`
     itself (`save_checkpoint`).
     """
-    args = cfg if run_name is None else replace(cfg, run=run_name)
     logger = RunLogger(
-        args=args,
+        args=cfg,
         savedir=cfg.savedir,
         stdout=stdout,
         verbosity=0,  # `common.progress` prints instead
