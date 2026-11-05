@@ -1,14 +1,9 @@
 # A 2-epoch run that exercises the whole control pipeline — hooks, closed
 # loop, reportcard — before you train for real:
 #   nt control train --config control_configs/debug.yaml --set sysid_run_id=<id>
-# Copy the references and the objective (and residual_delta, if you use
-# one) from your real config.
+# Copy the objective from your real config.
 
 sysid_run_id: ""
-
-train_data_path: data/train.csv
-dev_data_path: data/dev.csv
-test_data_path: data/test.csv
 
 train_pred_steps: 4
 # Your table, as in your real config.
@@ -18,10 +13,6 @@ policy_window: {}   # replace with your columns, e.g.
 # "Outdoor Temperature [°C]":   {past: 3, future: 0}
 # "Comfort Low [°C]":           {past: 0, future: 0}
 # "Comfort High [°C]":          {past: 0, future: 0}
-
-train_reference_path: data/train_reference.csv
-dev_reference_path: data/dev_reference.csv
-test_reference_path: data/test_reference.csv
 
 losses: {}   # replace with your terms, e.g.
 # comfort_lower: {column: "Comfort Low [°C]",  target: "Zone Air Temperature [°C]", map: relu,  norm: 1}

@@ -22,12 +22,6 @@ _YAML = """
 sysid_run_id: abc123
 train_pred_steps: 24
 run_dir: none
-train_data_path: train.csv
-dev_data_path:   dev.csv
-test_data_path:  test.csv
-train_reference_path: train_ref.csv
-dev_reference_path:   dev_ref.csv
-test_reference_path:  test_ref.csv
 losses:
   comfort_lower: {column: lo, target: zone, map: relu, norm: 2}
   du:            {column: setpoint, map: first_difference, norm: 1}
@@ -79,7 +73,7 @@ def test_the_table_survives_the_mlflow_param_round_trip():
               if k != "device"}
     rebuilt = dict_to_dataclass(logged, ControlConfig)
     for name in ("losses", "gains", "reference_scale", "policy_window",
-                 "train_reference_path"):
+                 "draws"):
         assert getattr(rebuilt, name) == getattr(cfg, name)
 
 

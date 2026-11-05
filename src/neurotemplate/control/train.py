@@ -39,6 +39,7 @@ from neurotemplate.control.scenarios import (
     build_loaders, eval_pred_steps, horizons, load_control_splits,
 )
 from neurotemplate.control.controller import build_controller, describe_controller
+from neurotemplate.control.policy import unread_columns
 from neurotemplate.control.sensitivity import command_sensitivity
 from neurotemplate.control.closed_loop import (
     build_closed_loop, build_control_loss, build_problem, power_term,
@@ -129,6 +130,10 @@ def train_control(cfg: ControlConfig,
                       "cannot learn or plan that command.")
 
     trains = cfg.policy != "mpc"   # MPC plans through the surrogate; nothing to train
+    if trains and cfg.progress != "silent":
+        unread = unread_columns(cfg, nm_mapping, objective.r_columns)
+        if unread:
+            print(f"Not read by the policy (not in policy_window): {unread}")
     policy_node = build_controller(cfg, sysid_cfg, nm_mapping, norm_stats, dyn_node)
     arch = describe_controller(policy_node, cfg, sysid_cfg, nm_mapping)
     cl_system = build_closed_loop(dyn_node, policy_node, cfg, sysid_cfg)

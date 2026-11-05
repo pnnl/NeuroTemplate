@@ -1,8 +1,9 @@
 """`nt init [dir]`: start an application from the template shipped with the package.
 
 The template is the `template/` directory beside this file, so the hooks and
-configs an installed library writes are the ones for that version. It never
-overwrites: if any file it would write already exists, it writes nothing.
+configs an installed library writes are the ones for that version. It reads
+nothing, and never overwrites: if any file it would write already exists, it writes
+nothing.
 """
 from __future__ import annotations
 
@@ -48,5 +49,6 @@ def main() -> None:
         raise SystemExit(f"nt init: {exc}") from exc
     for f in files:
         print(f"  wrote {target / f}")
-    print(f"\nPut your train.csv, dev.csv and test.csv in {target / 'data'}/, "
-          "then: nt guide setup")
+    print(f"\nPut your train.csv, dev.csv and test.csv in {target / 'data'}/, then run "
+          "`nt model train`: it lists the record's columns for data.yaml. `nt guide setup` "
+          "has the rest.")

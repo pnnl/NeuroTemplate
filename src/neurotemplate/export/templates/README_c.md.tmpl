@@ -15,8 +15,8 @@ state.outputs;                         /* [NT_MODEL_NY], one timestep later */
 
 #include "nt_policy.h"
 
-nt_policy_act(y, u_history, d, r, u);  /* windows in, u [NT_POLICY_NU] out; u_history only
-                                          if NT_POLICY_HAS_U_HISTORY, r only if NT_POLICY_HAS_R */
+nt_policy_act(y, u_history, d, r, u);  /* windows in, u [NT_POLICY_NU] out; each input only if
+                                          NT_POLICY_HAS_U_HISTORY, _D or _R says the policy reads it */
 ```
 
 To build them into your own program, compile the runner and the generated

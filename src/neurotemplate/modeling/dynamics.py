@@ -141,8 +141,8 @@ def _check_lags_consumed(blocks: list[Block], families: list[str], lags: list[La
                 f"history[{column!r}] is {history[column]}, but no learned block reads "
                 "it. A thermal block's window is `context_steps`, not this table. If "
                 "nothing on the control side needs it either (the policy, a loss weight, "
-                "power_metric, the plots), drop it with exclude_columns; otherwise list "
-                "it at 0."
+                "power_metric, the plots), take it out of `columns` in data.yaml; otherwise "
+                "list it at 0."
             )
         deepest = max(readers.values(), default=0)
         if deepest != history[column]:

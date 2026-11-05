@@ -4,7 +4,7 @@
 from runtime import Policy
 
 policy = Policy("policy")
-u = policy.act(y, u_history, d, r)    # {u column: command}; u_history and r only if it reads them
+u = policy.act(y, u_history, d, r)    # {u column: command}; only the inputs policy.json lists
 ```
 
 A trained policy is one stateless graph, one call per control step. A

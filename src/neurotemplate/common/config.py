@@ -131,38 +131,6 @@ def default_savedir(prefix: str = "temp") -> str:
     return f"{prefix}_{uuid.uuid4().hex[:8]}"
 
 
-def paths_as_list(value: Union[str, list[str]]) -> list[str]:
-    """Normalize a `Union[str, list[str]]` data-path field to `list[str]`.
-
-    Single strings become one-element lists so downstream code only ever
-    sees `list[df]`. Empty inputs are not silently accepted — the empty
-    case is rejected by `_check_paths_field` at validate time.
-    """
-    if isinstance(value, str):
-        return [value]
-    return list(value)
-
-
-def _check_paths_field(name: str, value: Any) -> None:
-    """Validate a data-path field accepts only non-empty string(s)."""
-    if isinstance(value, str):
-        if not value:
-            raise ValueError(f"{name} is empty; provide a CSV path.")
-        return
-    if isinstance(value, list):
-        if not value:
-            raise ValueError(f"{name} is an empty list; provide at least one path.")
-        for i, p in enumerate(value):
-            if not isinstance(p, str) or not p:
-                raise ValueError(
-                    f"{name}[{i}] must be a non-empty string, got {p!r}"
-                )
-        return
-    raise ValueError(
-        f"{name} must be a string or list of strings, got {type(value).__name__}"
-    )
-
-
 def check_positive(obj: Any, name: str) -> None:
     x = getattr(obj, name)
     if x <= 0:

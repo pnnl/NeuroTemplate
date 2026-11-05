@@ -8,7 +8,7 @@ import pandas as pd
 import torch
 from neuromancer.dataset import DictDataset
 
-from neurotemplate.common.config import paths_as_list
+from neurotemplate.common.data_file import load_data_file
 
 from neurotemplate._typing import beartype
 
@@ -96,7 +96,7 @@ def get_data(path: str) -> tuple[pd.DataFrame, float]:
             f"but {len(off_step)} row(s) break it, the first at "
             f"{row} ({off_step.iloc[0]} after the row before). "
             "Gaps are not filled or split automatically: repair the record, or "
-            "split the file at each gap and pass the pieces as a list of paths."
+            "split the file at each gap and list the pieces in data.yaml."
         )
     freq_seconds = step.total_seconds()
 
@@ -178,8 +178,9 @@ def _warn_timestamp_overlap(
 def load_split(paths: list[str], name: str) -> tuple[list[pd.DataFrame], float]:
     """Read every CSV in `paths` and return (dfs, shared_freq_seconds).
 
-    Each file must have the same sampling frequency and no NaNs. Returns
-    a list of one df for the single-path case so callers always iterate.
+    Each file must have the same sampling frequency. Returns a list of one df for
+    the single-path case so callers always iterate. Whether a column may hold a gap
+    depends on who reads it: see `check_complete`.
     """
     if not paths:
         raise ValueError(f"{name} split has no data paths.")
@@ -192,8 +193,6 @@ def load_split(paths: list[str], name: str) -> tuple[list[pd.DataFrame], float]:
                 f"from the working directory, {Path.cwd()})"
             )
         df, f = get_data(path)
-        if df.isna().any().any():
-            raise ValueError(f"NaNs found in {name}[{i}] ({path})")
         if freq is None:
             freq = f
         elif f != freq:
@@ -205,20 +204,27 @@ def load_split(paths: list[str], name: str) -> tuple[list[pd.DataFrame], float]:
     return dfs, freq
 
 
+def check_complete(dfs: list[pd.DataFrame], columns: list[str], name: str) -> None:
+    """Refuse a NaN in a column the run reads. A column it does not read may hold any."""
+    for i, df in enumerate(dfs):
+        holes = [c for c in columns if df[c].isna().any()]
+        if holes:
+            raise ValueError(f"NaNs in {name}[{i}], in columns the run reads: {holes}")
+
+
 @beartype
 def get_data_splits(cfg) -> tuple[
     list[pd.DataFrame], list[pd.DataFrame], list[pd.DataFrame], float
 ]:
-    """Load train/dev/test CSVs (one or many per split) and validate.
-
-    `cfg.{train,dev,test}_data_path` may each be a single path string or
-    a list of path strings. Returns three lists of dataframes (length
-    >= 1) plus the shared sampling frequency. Downstream code iterates
-    the lists so the single-file case requires no special handling.
+    """Load train/dev/test CSVs (one or many per split, as `data.yaml` lists them) and
+    validate. Returns three lists of dataframes (length >= 1) plus the shared sampling
+    frequency. Downstream code iterates the lists so the single-file case requires no
+    special handling.
     """
-    train_dfs, train_freq = load_split(paths_as_list(cfg.train_data_path), "train")
-    dev_dfs, dev_freq = load_split(paths_as_list(cfg.dev_data_path), "dev")
-    test_dfs, test_freq = load_split(paths_as_list(cfg.test_data_path), "test")
+    data_file = load_data_file(cfg.data_file)
+    train_dfs, train_freq = load_split(data_file.train, "train")
+    dev_dfs, dev_freq = load_split(data_file.dev, "dev")
+    test_dfs, test_freq = load_split(data_file.test, "test")
 
     if train_freq != dev_freq:
         raise ValueError(f"Train freq != dev freq: {train_freq} vs {dev_freq}")
@@ -665,7 +671,8 @@ def compute_norm_stats(
             "unit": parse_column_unit(col),
         }
 
-    return {col: col_stats(col) for col in df.columns}
+    # A column no role claims may hold anything, a label for one.
+    return {col: col_stats(col) for col in df.select_dtypes("number").columns}
 
 
 @beartype

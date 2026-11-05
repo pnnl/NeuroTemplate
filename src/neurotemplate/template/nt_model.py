@@ -1,9 +1,9 @@
 """
 Modeling hooks — the glue between NeuroTemplate and *your* dataset.
 
-The library calls each function below for a dataset-specific answer (column
-roles, output heads, model structure, physics checks) and knows nothing else
-about your data. Each docstring is that hook's specification.
+The library calls each function below for a dataset-specific answer (output heads,
+model structure, physics checks) and knows nothing else about your data; the column
+roles are in data.yaml. Each docstring is that hook's specification.
 
 The file must be named `nt_model.py` and live in the directory
 you run `nt` from, or be pointed at by `user_hooks_path` in your YAML. Fill
@@ -12,8 +12,8 @@ for the library version you have installed. A trained run keeps a copy of
 this file, and everything that reloads the run uses the copy.
 
 Every function here except `block_mapping` must exist, even
-when its body is a trivial return. Fill in the column lists first; every
-other hook runs as written. Then decide on model structure (`block_mapping`)
+when its body is a trivial return. Every hook runs as written. Decide on model
+structure (`block_mapping`)
 and the physics checks (`synth_cfg`) — those two shape what you get more
 than any hyperparameter. The examples in comments are syntax: the column
 names, and any number in them, belong to some other plant.
@@ -38,54 +38,6 @@ from neurotemplate.modeling.heads import (  # noqa: F401  — cited in comments
 from neurotemplate.modeling.scenarios import (  # noqa: F401  — cited in synth_cfg
     SynthSpec,
 )
-
-
-# ---------------------------------------------------------------------
-# Required: assign every dataframe column a role
-# ---------------------------------------------------------------------
-# Y = what the model predicts, U = what a controller can move,
-# D = exogenous inputs: things you could know without the plant (weather, a
-#     schedule). Anything the plant itself produces — a meter, a temperature
-#     the plant affects — is Y or dropped, never D: a policy can only be fed
-#     a D it has a forecast for. A price is not D either: the surrogate
-#     would learn that price drives the plant. Prices go in reference files.
-# Put in Y what a controller or its objective needs, and nothing else:
-# every extra channel costs capacity, and a cumulative counter (an energy
-# total) is an unbounded ramp no scaler can normalize.
-# A column that is constant in the training split cannot be normalized and
-# reaches the model in raw units; training warns about each one. Drop it:
-# if it ever varies later, the rollout diverges from its first step.
-# Any column not listed is dropped.
-Y_COLUMNS: list[str] = [
-    # "Tank Temperature [degC]",
-]
-U_COLUMNS: list[str] = [
-    # "Heater Command [-]",
-]
-D_COLUMNS: list[str] = [
-    # "Ambient Temperature [degC]",
-]
-
-
-@beartype
-def data_mapping(df: pd.DataFrame) -> dict[str, list[str]]:
-    """
-    Return {"Y": [...], "U": [...], "D": [...], "t": ["sec_elapsed"]}.
-
-    Names must match `df` columns exactly; `sec_elapsed` is added by the CSV
-    loader from the timestamp index. The library checks what this returns
-    (unknown or doubly-assigned columns, an empty Y) and then drops any
-    column matching the config's `exclude_columns`, so the hook only has to
-    say which column plays which role. `nt data plot` groups its channels by
-    this mapping, so it takes no config.
-
-    Timing is by role, assumed and never shifted for you: Y at row t is
-    sampled at t, or measured over the step that ends at t; U and D at row
-    t are held over the step that starts at t. Shift a column recorded the
-    other way here.
-    """
-    return {"Y": Y_COLUMNS, "U": U_COLUMNS, "D": D_COLUMNS,
-            "t": ["sec_elapsed"]}
 
 
 # ---------------------------------------------------------------------
@@ -195,7 +147,7 @@ def block_mapping(
     commanded heat) or a D, `ambient` the outdoor temperature it conducts to.
     Heat from supply flow × (supply − zone) temperature × 1.2 kJ/(m³K), or
     stage × capacity, in kW, positive heating; its rows mean what its role
-    says (see `data_mapping`). `scale` is required and says what sets the units,
+    says (`nt guide setup`). `scale` is required and says what sets the units,
     since temperature alone places only gain / C: `{heat column: 1.0}` for a
     heat in kW, or `{"C_Ti": value}` to fit a power's gain as a COP.
     `thermostat` is Y the heat, U its setpoints, `reads` the zone, `ambient` the

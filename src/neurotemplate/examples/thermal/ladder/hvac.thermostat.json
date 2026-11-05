@@ -1,0 +1,27 @@
+{
+  "gain_limit": 18.06,
+  "cooling": {
+    "setpoint": "Cooling SP [°C]",
+    "gain": [
+      14.42,
+      14.67
+    ],
+    "capacity": [
+      7.641,
+      7.947
+    ],
+    "offset": [
+      0.2889,
+      0.294
+    ],
+    "capacity2": [
+      0.101,
+      0.4273
+    ],
+    "gap": [
+      0.4904,
+      0.5038
+    ]
+  },
+  "form": "tracker+offset+stage2"
+}

@@ -17,6 +17,7 @@ mirror the package layout:
     nt guide [step]         # neurotemplate.guide (the guided flow; takes no verb)
     nt docs [name]          # neurotemplate.guide (the references; takes no verb)
     nt init [dir]           # neurotemplate.init (a new application from the template; takes no verb)
+    nt example thermal [dir]  # neurotemplate.example (a working project on synthetic data)
 """
 from __future__ import annotations
 
@@ -42,8 +43,10 @@ COMMANDS: dict[tuple[str, str], str] = {
 
 def _help_text() -> str:
     lines = ["Usage: nt <group> <verb> [args...]", "",
-             "New application: `nt init`. Then `nt guide`: the flow, one step at a time.",
-             "", "Commands:", "  nt init [dir]", "  nt guide [step]", "  nt docs [name]"]
+             "See it work:     `nt example thermal`, a project on synthetic data, zero edits.",
+             "Your own data:   `nt init`, then `nt guide`, the flow one step at a time.",
+             "", "Commands:", "  nt example thermal [dir]", "  nt init [dir]",
+             "  nt guide [step]", "  nt docs [name]"]
     for group, verb in COMMANDS:
         lines.append(f"  nt {group} {verb}")
     lines.append("")
@@ -90,6 +93,12 @@ def main(argv: Optional[list[str]] = None) -> None:
         from neurotemplate.init import main as init_main
         sys.argv = ["nt init", *argv[1:]]
         init_main()
+        return
+
+    if argv[0] == "example":
+        from neurotemplate.example import main as example_main
+        sys.argv = ["nt example", *argv[1:]]
+        example_main()
         return
 
     if len(argv) < 2:

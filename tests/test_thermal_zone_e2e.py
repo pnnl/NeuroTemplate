@@ -16,6 +16,7 @@ import numpy as np
 import pandas as pd
 import pytest
 import torch
+import yaml
 
 from neurotemplate.cli import main as nt
 from neurotemplate.common.config import load_config
@@ -31,10 +32,6 @@ STEPS_PER_HOUR = 12
 HOOKS = f'''
 import json, os
 from neurotemplate.modeling.heads import HeadStack, RegressionHead
-
-def data_mapping(df):
-    return {{"Y": [{ZONE!r}, {HEAT!r}], "U": [{SETPOINT!r}], "D": [{OUTDOOR!r}, {SOLAR!r}],
-            "t": ["sec_elapsed"]}}
 
 def data_head_config(nm_mapping, norm_stats):
     return HeadStack([RegressionHead() for _ in nm_mapping["Y"]], nm_mapping["Y"])
@@ -109,9 +106,12 @@ def test_declare_ladder_thermostat_train(tmp_path, monkeypatch):
     window = 24 * STEPS_PER_HOUR
     history = {c: 0 for c in (ZONE, HEAT, OUTDOOR, SOLAR, SETPOINT)}
     config = tmp_path / "zone.yaml"
+    (tmp_path / "data.yaml").write_text(yaml.safe_dump({
+        "train": "data/train.csv", "dev": "data/dev.csv", "test": "data/test.csv",
+        "columns": {"Y": [ZONE, HEAT], "U": [SETPOINT], "D": [OUTDOOR, SOLAR]},
+    }, allow_unicode=True), encoding="utf-8")
     config.write_text("\n".join([
-        "train_data_path: data/train.csv", "dev_data_path: data/dev.csv",
-        "test_data_path: data/test.csv", "model: rc_network",
+        "model: rc_network",
         f"user_hooks_path: {tmp_path / 'nt_model.py'}",
         "history: " + json.dumps(history, ensure_ascii=False), f"context_steps: {window + 1}",
         "epochs: 3", "warmup: 0", "patience: 3", f"train_pred_steps: {window}",

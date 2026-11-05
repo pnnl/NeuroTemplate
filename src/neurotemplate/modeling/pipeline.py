@@ -36,7 +36,9 @@ from pandas import DataFrame
 from neurotemplate._typing import beartype
 
 from neurotemplate.modeling.config import ModelingConfig
+from neurotemplate.common.data_file import ROLES, load_data_file, nm_mapping as read_roles, unclaimed
 from neurotemplate.common.data_utils import (
+    check_complete,
     compute_norm_stats,
     get_data_splits,
     get_grad_masks,
@@ -83,43 +85,9 @@ from neurotemplate.modeling.scenarios import (
 # ── Block spec resolution ────────────────────────────────────────
 
 
-ROLES = ("Y", "U", "D", "t")
-
-
-def resolve_nm_mapping(hooks, df: DataFrame, cfg: ModelingConfig) -> dict[str, list[str]]:
-    """Call the hooks module's `data_mapping`, check what it returns, and drop
-    every column matching a `cfg.exclude_columns` pattern.
-
-    Checked here rather than in the hook, so a rewritten hook gets the same
-    checks: the four roles and nothing else, every name a column of `df`,
-    no column in two roles or twice in one, every exclude pattern matching
-    some column (one that matches nothing is a typo), and a non-empty Y once
-    the excluded columns are gone. Every problem is listed at once.
-    """
-    nm_mapping = hooks.data_mapping(df=df)
-    problems = []
-    if set(nm_mapping) != set(ROLES):
-        problems.append(f"keys must be exactly {list(ROLES)}, got {sorted(nm_mapping)}")
-    named = [c for role in ROLES for c in nm_mapping.get(role, [])]
-    unknown = [c for c in named if c not in df.columns]
-    if unknown:
-        problems.append(f"columns not in the dataframe: {unknown}")
-    repeated = sorted({c for c in named if named.count(c) > 1})
-    if repeated:
-        problems.append(f"columns in more than one role (or twice in one): {repeated}")
-    unmatched = [p for p in cfg.exclude_columns if not any(p in c for c in df.columns)]
-    if unmatched:
-        problems.append(f"cfg.exclude_columns patterns match no column: {unmatched}")
-    nm_mapping = {
-        role: [c for c in names if not any(p in c for p in cfg.exclude_columns)]
-        for role, names in nm_mapping.items()
-    }
-    if not nm_mapping.get("Y"):
-        problems.append("Y is empty, so the model has nothing to predict")
-    if problems:
-        raise ValueError("data_mapping returned an unusable mapping:\n  - "
-                         + "\n  - ".join(problems))
-    return nm_mapping
+def resolve_nm_mapping(cfg: ModelingConfig, df: DataFrame) -> dict[str, list[str]]:
+    """The run's column roles, from `data.yaml`, checked against this record."""
+    return read_roles(load_data_file(cfg.data_file), list(df.columns))
 
 
 def resolve_block_spec(hooks, nm_mapping: dict[str, list[str]], cfg: ModelingConfig):
@@ -162,7 +130,12 @@ def prepare_data(cfg: ModelingConfig, hooks) -> PreparedData:
     cfg.steps_per_hour = 3600.0 / freq_s
     # Column roles only need the schema, and get_data_splits has already
     # checked every file carries the same columns.
-    nm_mapping = resolve_nm_mapping(hooks, train_raws[0], cfg)
+    nm_mapping = resolve_nm_mapping(cfg, train_raws[0])
+    for name, dfs in (("train", train_raws), ("dev", dev_raws), ("test", test_raws)):
+        check_complete(dfs, [c for role in ROLES for c in nm_mapping[role]], name)
+    left_out = unclaimed(nm_mapping, list(train_raws[0].columns))
+    if left_out and cfg.progress != "silent":
+        print(f"Not read by the model (no role in data.yaml): {left_out}")
     block_spec = resolve_block_spec(hooks, nm_mapping, cfg)
 
     norm_stats = compute_norm_stats(

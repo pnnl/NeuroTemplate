@@ -41,9 +41,13 @@ def test_a_bounded_setpoint_stays_inside_the_band_at_every_step():
     assert (u[:, :steps] <= high[:, :steps] + 1e-4).all()
 
 
-def test_bounds_name_columns_the_policy_can_read():
-    with pytest.raises(ValueError, match="not a command or a reference column"):
-        _rollout(control_bounds={SETPT: ["Nowhere [°C]", HIGH]})
+def test_a_bound_reads_a_column_the_policy_is_handed():
+    s = full_setup(control_bounds={SETPT: ["Elsewhere [°C]", HIGH]},
+                   reference_scale={"Elsewhere [°C]": 1.0},
+                   policy_window={"Zone Air Temperature [°C]": {"past": 1},
+                                  HIGH: {"past": 0, "future": 0}})
+    with pytest.raises(ValueError, match="list them in policy_window"):
+        build_policy(s["cfg"], s["sysid_cfg"], s["nm"], s["norm_stats"])
 
 
 def test_a_column_not_listed_takes_its_recorded_range_and_a_number_replaces_it():

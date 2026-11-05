@@ -120,7 +120,7 @@ def ladder_main() -> None:
     )
     hooks = load_modeling_hooks(cfg)
     train_raws, dev_raws, _test_raws, freq_s = get_data_splits(cfg)
-    nm_mapping = resolve_nm_mapping(hooks, train_raws[0], cfg)
+    nm_mapping = resolve_nm_mapping(cfg, train_raws[0])
     blocks = build_blocks(nm_mapping, resolve_block_spec(hooks, nm_mapping, cfg))
     zones = [ThermalZone.from_block(b) for b in blocks if b.scale is not None]
     if args.zone is not None:
@@ -307,7 +307,7 @@ def thermostat_main() -> None:
                          "and/or --heating COL.")
     hooks = load_modeling_hooks(cfg)
     train_raws, dev_raws, _test_raws, freq_s = get_data_splits(cfg)
-    nm_mapping = resolve_nm_mapping(hooks, train_raws[0], cfg)
+    nm_mapping = resolve_nm_mapping(cfg, train_raws[0])
     every_block = build_blocks(nm_mapping, resolve_block_spec(hooks, nm_mapping, cfg))
     blocks = [b for b in every_block if b.scale is not None]
     if args.zone is not None:

@@ -3,11 +3,10 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
-from typing import Optional, Union
+from typing import Optional
 
 from neurotemplate.common.config import (
     PROGRESS_LEVELS,
-    _check_paths_field,
     check_non_negative,
     check_one_of,
     check_positive,
@@ -31,28 +30,17 @@ class ControlConfig:
     # Optional explicit weights path (else best_model_state_dict.pth).
     weights: Optional[str] = None
 
-    # ── Data (all three required; never inherited from the sys-id run) ───
-    # Each may be a single path string or a list of path strings. With a
-    # list, files are loaded independently and their windows are pooled
-    # into one DataLoader; no rollout window ever spans two source files.
-    # Normalize via `paths_as_list(...)` at the entry point so downstream
-    # code sees a uniform `list[df]` shape.
-    train_data_path: Union[str, list[str]] = ""
-    dev_data_path: Union[str, list[str]] = ""
-    test_data_path: Union[str, list[str]] = ""
+    # ── Data ─────────────────────────────────────────────────────
+    # The record (`common.data_file`). The columns the objective, a window or a bound
+    # names that are not the surrogate's — a comfort band, a tariff — are columns no role
+    # claims in that record: they reach the policy and the loss, never the surrogate.
+    data_file: str = "data.yaml"
     batch_size: int = 256
-
-    # ── Reference files (all three together, or none) ─────────────
-    # The columns the objective names that are not the surrogate's — a comfort
-    # band, a setpoint schedule, a tariff. One list per split, parallel to its
-    # data paths: the i-th reference file is row-aligned with the i-th plant
-    # file and must carry exactly its timestamps. Listing one plant file
-    # several times against several reference files ("draws") multiplies the
-    # training windows. The reference columns reach the policy and the loss,
-    # never the surrogate.
-    train_reference_path: Union[str, list[str], None] = None
-    dev_reference_path: Union[str, list[str], None] = None
-    test_reference_path: Union[str, list[str], None] = None
+    # The same record against another band or tariff. Each file replaces the columns
+    # it shares with the record it matches by timestamp, and adds a pass over the
+    # training windows. Dev and test take no draws: to score a held-out tariff, point
+    # `test` at a file holding it. Relative paths are read from the working directory.
+    draws: list[str] = field(default_factory=list)
     # Divisor per reference column that bounds no Y column (a tariff, a power
     # cap), so the policy sees an O(1) input. Pure scaling, no shift, so a
     # zero stays a zero. A column that bounds a Y column uses that column's
@@ -70,13 +58,12 @@ class ControlConfig:
     # history depth, which is every few rows: many near-identical windows, and
     # the epoch's cost with them.
     train_stride: Optional[int] = None
-    # What the policy reads, per Y, U, D and reference column:
-    # `{column: {past: n, future: m}}`, steps before and after the current
-    # one. Every column is listed. A Y or U column takes no `future` (not
-    # yet measured, or the policy's own output); a D or reference column
-    # requires one. A U column's window ends at the previous step, the last
-    # command applied, so `past: 0` means the policy does not read it. See
-    # control.policy.build_policy.
+    # What the policy reads, any column of the record, listed only if it is read:
+    # `{column: {past: n, future: m}}`, steps before and after the current one. A
+    # Y or U column takes no `future` (not yet measured, or the policy's own output);
+    # any other column requires one. A U column's window ends at the previous step, the
+    # last command applied, so `past: 0` means the policy does not read it. See
+    # control.policy.build_policy. A trained policy's package takes only what is listed.
     policy_window: dict[str, dict[str, int]] = field(default_factory=dict)
 
     # ── Objective ────────────────────────────────────────────────
@@ -185,21 +172,6 @@ class ControlConfig:
                 "train_pred_steps at least the deepest `future`.")
         warn_deep_window("the policy's history_steps", self.history_steps)
 
-        for name in ("train_data_path", "dev_data_path", "test_data_path"):
-            _check_paths_field(name, getattr(self, name))
-
-        references = {name: getattr(self, name) for name in (
-            "train_reference_path", "dev_reference_path", "test_reference_path")}
-        unset = [name for name, value in references.items() if value is None]
-        if 0 < len(unset) < 3:
-            raise ValueError(
-                f"{', '.join(references)} must be set together or not at all "
-                f"(unset: {unset}). A split with no reference file would have "
-                "no value for a reference column the objective names."
-            )
-        for name, value in references.items():
-            if value is not None:
-                _check_paths_field(name, value)
         for name, scale in self.reference_scale.items():
             if not isinstance(scale, (int, float)) or scale <= 0:
                 raise ValueError(
@@ -257,8 +229,8 @@ def check_policy_window(table: dict) -> None:
     least one."""
     if not table:
         raise ValueError(
-            "policy_window is empty. List every Y, U, D and reference column "
-            "with its {past, future}; there is no default.")
+            "policy_window is empty. List what the policy reads, each column with its "
+            "{past, future}; there is no default.")
     for column, entry in table.items():
         if not isinstance(entry, dict) or "past" not in entry or set(entry) - set(WINDOW_KEYS):
             raise ValueError(

@@ -8,10 +8,10 @@ Opens a window with the record's channels listed down the left and one of
 them plotted against wall-clock time; click a name, or step with ↑/↓.
 `--output` writes one channel to an image instead, for an agent to read.
 
-Run from an application directory, the list is grouped by the roles
-`data_mapping` in `nt_model.py` assigns (Y / U / D), and every other numeric
-column lands in "R / unmapped": a reference file's columns, or a plant
-column the model does not use. Without a hooks file it is one flat list.
+Run from an application directory, the list is grouped by the roles `data.yaml`
+assigns (Y / U / D), and every other numeric column lands in "no role": a band, a
+tariff, or a plant column the model does not read. Without a `data.yaml` it is one
+flat list.
 
 The file is read as recorded. A gap in the timestamps breaks the line rather
 than being bridged, and nothing is filled, resampled or judged.
@@ -26,11 +26,11 @@ import matplotlib.pyplot as plt
 import pandas as pd
 from pandas.tseries.frequencies import to_offset
 
+from neurotemplate.common.data_file import ROLES, load_data_file
 from neurotemplate.common.data_utils import read_timestamped_csv
-from neurotemplate.hooks import find_cwd_modeling_hooks
 from neurotemplate.modeling.plotting import PLOT_STYLE
 
-UNMAPPED = "R / unmapped"
+UNMAPPED = "no role"
 ALL = "columns"
 
 # One line colour per group, from the library's categorical palette.
@@ -43,16 +43,16 @@ def group_channels(columns: list[str],
                    mapping: Optional[dict[str, list[str]]]) -> dict[str, list[str]]:
     """The plottable columns by role, in file order; empty groups dropped.
 
-    `mapping` is what `data_mapping` returned, or None for a flat list.
-    Names the mapping gives that are not in this file are ignored, so a
-    reference file can be plotted from an application directory.
+    `mapping` is `data.yaml`'s `columns`, or None for a flat list. Names it gives
+    that are not in this file are ignored, so a draw can be plotted from an application
+    directory.
     """
     if mapping is None:
         return {ALL: list(columns)}
     groups = {}
-    for role in ("Y", "U", "D"):
+    for role in ROLES:
         groups[role] = [c for c in columns if c in mapping.get(role, [])]
-    mapped = {c for role in ("Y", "U", "D") for c in mapping.get(role, [])}
+    mapped = {c for role in ROLES for c in mapping.get(role, [])}
     groups[UNMAPPED] = [c for c in columns if c not in mapped]
     return {group: names for group, names in groups.items() if names}
 
@@ -148,9 +148,8 @@ def show_window(df: pd.DataFrame, groups: dict[str, list[str]], first: str,
 def main() -> None:
     parser = argparse.ArgumentParser(
         prog="nt data plot",
-        description="Plot a record's channels one at a time, grouped by "
-                    "data_mapping's roles when nt_model.py is in the "
-                    "working directory.")
+        description="Plot a record's channels one at a time, grouped by the roles in "
+                    "data.yaml when one is in the working directory.")
     parser.add_argument("path", help="One CSV with a time column.")
     parser.add_argument("--column", default=None,
                         help="The channel to show first (or the one --output writes).")
@@ -166,16 +165,10 @@ def main() -> None:
     if not numeric:
         raise SystemExit(f"{args.path} has no numeric column to plot.")
 
-    hooks = find_cwd_modeling_hooks()
-    mapping = None
-    if hooks is not None:
-        # The hook sees the columns it sees in training, `sec_elapsed` included.
-        with_elapsed = df.assign(
-            sec_elapsed=(df.index - df.index[0]).total_seconds())
-        mapping = hooks.data_mapping(df=with_elapsed)
+    mapping = load_data_file("data.yaml").columns if Path("data.yaml").exists() else None
     groups = group_channels(numeric, mapping)
     if mapping is None:
-        print("No nt_model.py here: channels are listed ungrouped.")
+        print("No data.yaml here: channels are listed ungrouped.")
 
     if args.column is not None and args.column not in numeric:
         raise SystemExit(f"--column {args.column!r} is not a numeric column of "

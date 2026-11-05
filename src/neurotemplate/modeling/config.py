@@ -2,11 +2,10 @@ from __future__ import annotations
 
 import warnings
 from dataclasses import asdict, dataclass, field
-from typing import Optional, Union
+from typing import Optional
 
 from neurotemplate.common.config import (
     PROGRESS_LEVELS,
-    _check_paths_field,
     check_non_negative,
     check_one_of,
     check_positive,
@@ -55,23 +54,15 @@ class ModelingConfig:
     """Top-level config object for system-identification training and loading."""
 
     # ---- DATA ----------------------------------------------------------------
-    # Train/dev/test CSV paths (all three required). Each may be a single
-    # path string or a list of path strings. When a list is given, files
-    # are loaded independently and their windows are pooled into one
-    # DataLoader; no rollout window ever spans two source files. Inside
-    # the pipeline the value is always normalized to `list[str]` via
-    # `paths_as_list(...)` before consumption.
-    train_data_path: Union[str, list[str]] = ""
-    dev_data_path: Union[str, list[str]] = ""
-    test_data_path: Union[str, list[str]] = ""
+    # The record and its column roles (`common.data_file`). With several files in a
+    # split, windows are pooled and no rollout window spans two files.
+    data_file: str = "data.yaml"
     # Optional JSON mapping used by data_utils.get_grad_masks (None disables grads).
     grad_path: Optional[str] = None
     # DataLoader batch size used in data_utils.get_loader.
     batch_size: int = 256
     # Normalization strategy: min_max | abs_max | z_score | None.
     norm_type: Optional[str] = "z_score"
-    # Exact column names to drop before Y/U/D mapping.
-    exclude_columns: list[str] = field(default_factory=list)
     # Optional path or dotted module name for the modeling hooks file.
     # If unset, the library looks for `nt_model.py` in CWD.
     user_hooks_path: Optional[str] = None
@@ -217,9 +208,6 @@ class ModelingConfig:
 
         if (self.grad_gain > 0) and (self.grad_path is None):
             raise ValueError("grad_gain set but not grad_path")
-
-        for name in ("train_data_path", "dev_data_path", "test_data_path"):
-            _check_paths_field(name, getattr(self, name))
 
     @property
     def history_steps(self) -> int:

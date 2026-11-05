@@ -25,11 +25,11 @@ steps reads real rows, not SystemPreview's `nearest` copy of the final one.
 The closed loop trims them back to Hmax + P after the rollout
 (`closed_loop.ForecastSystem`), so everything downstream sees P scored steps.
 
-R is read from each split's reference files, joined row for row onto the plant
-frame by `load_control_splits`, and windowed by the same `sliding_windows` call
-as the rest. It is a key the rollout never writes, so it passes through
-SystemPreview untouched and never reaches the dynamics, whose Node reads only
-yn, U and D.
+R is the record's columns no role claims that the run names, windowed by the same
+`sliding_windows` call as the rest. It is a key the rollout never writes, so it passes
+through SystemPreview untouched and never reaches the dynamics, whose Node reads only
+yn, U and D. A draw (`cfg.draws`) is the record again with some columns replaced, one
+more pass over the training windows.
 
 The closed-loop System rolls out with start_iter = Hmax - 1 and an explicit
 nsteps = P, so predicted yn occupies indices [Hmax : Hmax+P].
@@ -50,10 +50,11 @@ from pandas import DataFrame
 
 from neuromancer.dataset import DictDataset
 
-from neurotemplate.common.config import paths_as_list
-from neurotemplate.common.data_utils import get_data_splits, load_split, sliding_windows
+from neurotemplate.common.data_utils import (
+    check_complete, get_data, get_data_splits, sliding_windows,
+)
 from neurotemplate.control.losses import (
-    ROLE_KEYS, Objective, check_weights, resolve_objective,
+    POWER, ROLE_KEYS, Objective, check_weights, resolve_objective,
 )
 
 from neurotemplate._typing import beartype
@@ -106,53 +107,21 @@ def scored_series(objective: Objective, name: str, data: dict, hmax: int,
     return data[key][:, scored_steps(key, hmax), j]
 
 
-def _span(df: DataFrame) -> str:
-    return f"{df.index[0]} to {df.index[-1]} ({len(df)} rows)"
-
-
-def _attach_references(plants: list[DataFrame], split: str, cfg,
-                       r_columns: list[str]) -> list[DataFrame]:
-    """Each plant frame with its reference file's `r_columns` joined on.
-
-    The pairing is positional and the timestamps must match exactly: a
-    reference covering other dates is re-stamped when it is prepared, so
-    whether it is aligned to the wall clock or used as a shape is a choice made
-    in the data, not one the loader guesses at.
-    """
-    plant_paths = paths_as_list(getattr(cfg, f"{split}_data_path"))
-    ref_paths = paths_as_list(getattr(cfg, f"{split}_reference_path"))
-    if len(ref_paths) != len(plant_paths):
-        raise ValueError(
-            f"{split}_reference_path lists {len(ref_paths)} file(s) but "
-            f"{split}_data_path lists {len(plant_paths)}; they pair up one to "
-            "one. To pair one plant file with several reference draws, list "
-            "the plant file once per draw."
-        )
-    refs, _ = load_split(ref_paths, f"{split} reference")
-    joined = []
-    for plant, ref, plant_path, ref_path in zip(plants, refs, plant_paths,
-                                                ref_paths):
-        if not plant.index.equals(ref.index):
-            raise ValueError(
-                f"{ref_path} must carry exactly the timestamps of its plant "
-                f"file {plant_path}: the reference covers {_span(ref)}, the "
-                f"plant file {_span(plant)}."
-            )
-        missing = [c for c in r_columns if c not in ref.columns]
-        if missing:
-            raise ValueError(
-                f"{ref_path} has no column(s) {missing}, which the objective "
-                f"names. Its columns: {[c for c in ref.columns if c != 'sec_elapsed']}"
-            )
-        clash = [c for c in r_columns if c in plant.columns]
-        if clash:
-            raise ValueError(
-                f"{clash} are columns of both {plant_path} and {ref_path}. A "
-                "reference column must come from one place; rename it in one "
-                "of them."
-            )
-        joined.append(plant.join(ref[r_columns]))
-    return joined
+def _with_draw(path: str, records: list[DataFrame]) -> DataFrame:
+    """The record `path`'s timestamps match, with every column they share replaced: the
+    same weeks against another band or tariff. Matching no record is a refusal, and so
+    is a column the record does not have, which could only be a typo."""
+    draw, _ = get_data(path)
+    for record in records:
+        if record.index.equals(draw.index):
+            stray = sorted(set(draw.columns) - set(record.columns))
+            if stray:
+                raise ValueError(f"draw {path} has column(s) {stray} that its record does not.")
+            return record.assign(**{c: draw[c] for c in draw.columns if c != "sec_elapsed"})
+    spans = [f"{r.index[0]} to {r.index[-1]} ({len(r)} rows)" for r in records]
+    raise ValueError(f"draw {path} covers {draw.index[0]} to {draw.index[-1]} ({len(draw)} rows), "
+                     f"which matches no training record: {spans}. A draw carries exactly its "
+                     "record's timestamps.")
 
 
 @beartype
@@ -166,18 +135,26 @@ def load_control_splits(
     """
     objective = resolve_objective(cfg, nm_mapping)
     train, dev, test, _ = get_data_splits(cfg)
-    splits = []
-    for split, plants in (("train", train), ("dev", dev), ("test", test)):
-        if objective.r_columns:
-            plants = _attach_references(plants, split, cfg, objective.r_columns)
-        check_weights(objective, plants, split)
-        splits.append(plants)
-    return splits[0], splits[1], splits[2]
+    train = train + [_with_draw(path, train) for path in cfg.draws]
+    read = [c for role in ("Y", "U", "D") for c in nm_mapping[role]] + objective.r_columns
+    for split, frames in (("train", train), ("dev", dev), ("test", test)):
+        missing = [c for c in objective.r_columns if c not in frames[0].columns]
+        if missing:
+            raise ValueError(
+                f"{missing} are not columns of the surrogate (Y {nm_mapping['Y']}, U "
+                f"{nm_mapping['U']}, D {nm_mapping['D']}) or `{POWER}`, and the {split} "
+                f"record has no such column. It has: "
+                f"{[c for c in frames[0].columns if c != 'sec_elapsed']}")
+        check_complete(frames, read, split)
+        check_weights(objective, frames, split)
+    return train, dev, test
 
 
 def forecast_tail(cfg) -> int:
-    """F: how far past the rollout's last step the policy reads a forecast."""
-    return max((entry.get("future", 0) for entry in cfg.policy_window.values()), default=0)
+    """F: how far past the rollout's last step the controller reads a forecast. MPC
+    previews every D and reference column over its whole horizon."""
+    tail = max((entry.get("future", 0) for entry in cfg.policy_window.values()), default=0)
+    return max(tail, cfg.mpc_horizon) if cfg.policy == "mpc" else tail
 
 
 @beartype

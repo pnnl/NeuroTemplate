@@ -26,7 +26,8 @@ from neurotemplate.modeling.contract import contract_model
 from neurotemplate.modeling.load import evaluate_run, load_trained_dynamics
 from neurotemplate.modeling.train import train_model
 from control_fixtures import (
-    make_control_cfg, make_nm_mapping, make_raw_df, make_reference_df, write_splits,
+    make_control_cfg, make_nm_mapping, make_raw_df, make_reference_df, write_data_file,
+    write_splits,
 )
 from model_fixtures import uniform_history
 
@@ -99,9 +100,7 @@ def _surrogate_then_policy(tmp_path, model: str, hooks_path: Path):
     history = json.dumps(uniform_history(make_nm_mapping(), 4), ensure_ascii=False)
     config_path = tmp_path / "modeling.yaml"
     config_path.write_text(f"""
-train_data_path: {plant_path}
-dev_data_path: {plant_path}
-test_data_path: {plant_path}
+data_file: {write_data_file(tmp_path, plant_path)}
 user_hooks_path: {hooks_path}
 model: {model}
 history: {history}

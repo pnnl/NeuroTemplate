@@ -8,7 +8,9 @@ void nt_policy_act(const float y[NT_POLICY_Y_STEPS][NT_POLICY_Y_N],
 #if NT_POLICY_HAS_U_HISTORY
                    const float u_history[NT_POLICY_U_HISTORY_STEPS][NT_POLICY_U_HISTORY_N],
 #endif
+#if NT_POLICY_HAS_D
                    const float d[NT_POLICY_D_STEPS][NT_POLICY_D_N],
+#endif
 #if NT_POLICY_HAS_R
                    const float r[NT_POLICY_R_STEPS][NT_POLICY_R_N],
 #endif
@@ -20,7 +22,9 @@ void nt_policy_act(const float y[NT_POLICY_Y_STEPS][NT_POLICY_Y_N],
 #if NT_POLICY_HAS_U_HISTORY
                     (const float (*)[NT_POLICY_U_HISTORY_STEPS][NT_POLICY_U_HISTORY_N])u_history,
 #endif
+#if NT_POLICY_HAS_D
                     (const float (*)[NT_POLICY_D_STEPS][NT_POLICY_D_N])d,
+#endif
 #if NT_POLICY_HAS_R
                     (const float (*)[NT_POLICY_R_STEPS][NT_POLICY_R_N])r,
 #endif

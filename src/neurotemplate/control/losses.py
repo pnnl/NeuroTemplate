@@ -27,9 +27,10 @@ optional), then the `map`, then the `norm` — the power mean
 
 Every name resolves to one role, in this order: the reserved `power` (the
 `power_metric` hook's output), a Y, U or D column of the surrogate, and
-otherwise a column of the reference files. The reference columns are the
-control-side `R` key: windowed beside Y/U/D, read by the policy, never by the
-surrogate.
+otherwise a column of the record no role claims, a reference. The reference columns
+are the control-side `R` key: windowed beside Y/U/D, read by the policy if its window
+lists them, never by the surrogate. The objective, the window and `control_bounds` may
+each name one.
 
 How the policy normalises an `R` column it reads is declared rather than
 inferred. A column bound to a Y target (the `column` of an entry whose `target`
@@ -203,24 +204,17 @@ def _bands(terms: list[LossTerm], nm_mapping: dict[str, list[str]]) -> list[Band
 @beartype
 def resolve_objective(cfg, nm_mapping: dict[str, list[str]]) -> Objective:
     """`cfg.losses` resolved against the surrogate's columns, or a refusal
-    naming every way it cannot be."""
+    naming every way it cannot be. `r_columns` also holds what the window and the
+    bounds name beyond the surrogate's columns."""
     terms = parse_losses(cfg.losses, cfg.gains)
     roles: dict[str, str] = {}
     for term in terms:
         for name in (term.column, term.target, term.weight):
             if name is not None:
                 roles[name] = _role(name, nm_mapping)
+    for name in (*cfg.policy_window, *bound_columns(cfg.control_bounds)):
+        roles.setdefault(name, _role(name, nm_mapping))
     r_columns = sorted(name for name, role in roles.items() if role == "R")
-
-    has_files = cfg.train_reference_path is not None
-    _require(not r_columns or has_files,
-             f"{r_columns} are not columns of the surrogate (Y {nm_mapping['Y']}, "
-             f"U {nm_mapping['U']}, D {nm_mapping['D']}) or `{POWER}`, and no "
-             "reference files are set to supply them "
-             "(train_reference_path / dev_reference_path / test_reference_path).")
-    _require(r_columns or not has_files,
-             "Reference files are set but no loss term names one of their "
-             "columns, so they would be read and ignored.")
 
     targets_of: dict[str, list[str]] = {}
     for term in terms:
@@ -261,6 +255,18 @@ def resolve_objective(cfg, nm_mapping: dict[str, list[str]]) -> Objective:
 
     return Objective(terms=terms, roles=roles, r_columns=r_columns,
                      bound_to=bound_to, bands=_bands(terms, nm_mapping))
+
+
+def bound_columns(bounds: dict[str, list]) -> list[str]:
+    """The columns `control_bounds` sides name."""
+    named = []
+    for pair in bounds.values():
+        for side in pair:
+            if isinstance(side, str):
+                named.append(side)
+            elif isinstance(side, list):
+                named.append(side[0])
+    return named
 
 
 @beartype

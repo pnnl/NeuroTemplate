@@ -4,7 +4,8 @@ Export a trained DPC policy into `<out>/policy/`.
     policy/
       policy.onnx|.pt2|.c   (y[, u_history], d[, r]) -> u, physical units
       policy.h              C only: the contract as C constants
-      policy.json           each input's columns, window length and alignment
+      policy.json           each input's columns, window length and alignment: what
+                            the policy reads and nothing else
       reference/
         inputs.csv          real closed-loop windows the trained policy saw,
                             one per row (see `runtime.window_columns`)
@@ -44,7 +45,9 @@ from neurotemplate.control.losses import resolve_objective
 from neurotemplate.control.pipeline import evaluate_closed_loop
 from neurotemplate.control.controller import describe_controller
 from neurotemplate.control.mpc import MPC, _inner_keys
-from neurotemplate.control.policy import _bound_side, _PerStepBounds, with_control_bounds
+from neurotemplate.control.policy import (
+    _bound_side, _PerStepBounds, read_columns, with_control_bounds,
+)
 from neurotemplate.hooks import load_control_hooks
 from neurotemplate.export import ccode
 from neurotemplate.export.package import (
@@ -60,9 +63,8 @@ from neurotemplate.export.verify import AGREEMENT_TOL, REPRODUCE_TOL
 #: export that is wrong disagrees on most of them.
 MPC_AGREEMENT_SHARE = 0.95
 
-#: Every input a policy Node may read, in the order `build_policy` gives
-#: them; "U" only when it reads past commands, "R" only when its objective
-#: names reference columns.
+#: Every input a policy Node may read, in the order `build_policy` gives them: a key
+#: only when the policy reads one of its columns.
 POLICY_KEYS = ["yn", "U", "D", "R"]
 #: Policy Node input key -> graph input name.
 GRAPH_NAMES = {"yn": "y", "U": "u_history", "D": "d", "R": "r"}
@@ -72,7 +74,9 @@ GRAPH_NAMES = {"yn": "y", "U": "u_history", "D": "d", "R": "r"}
 class PolicyInput:
     """One policy input: its window, and its columns' typical value."""
     key: str                # the Node's input key
-    columns: list[str]
+    columns: list[str]      # what the graph takes: the columns the policy reads
+    positions: list[int]    # where each sits among its key's columns
+    width: int              # how many columns the key has, read or not
     steps: int              # window length the graph takes
     current_row: int        # where the present step sits; later rows are preview.
                             # For u_history, `steps`: it ends the step before.
@@ -81,18 +85,22 @@ class PolicyInput:
 
 def policy_inputs(policy_node, cfg, nm_mapping: dict[str, list[str]],
                   norm_stats: dict[str, dict]) -> list[PolicyInput]:
-    """Every input the policy reads, in the order its Node passes them.
+    """Every input the policy reads, in the order its Node passes them. MPC reads every
+    column of its keys; a trained policy, what its window lists.
 
     `norm_stats` carries the reference columns (`losses.extend_norm_stats`).
     """
+    r_columns = resolve_objective(cfg, nm_mapping).r_columns
     columns = {"yn": nm_mapping["Y"], "U": nm_mapping["U"], "D": nm_mapping["D"],
-               "R": resolve_objective(cfg, nm_mapping).r_columns}
+               "R": r_columns}
+    read = columns if cfg.policy == "mpc" else read_columns(cfg, nm_mapping, r_columns)
     inputs = []
     for key in policy_node.input_keys:
         window = policy_node.input_map[key]
-        cols = columns[key]
+        cols = read[key]
         inputs.append(PolicyInput(
-            key, cols, _graph_rows(key, window), window["past"],
+            key, cols, [columns[key].index(c) for c in cols], len(columns[key]),
+            _graph_rows(key, window), window["past"],
             [float(norm_stats[c]["shift"]) for c in cols]))
     return inputs
 
@@ -108,15 +116,17 @@ def _graph_rows(key: str, window: dict) -> int:
 class PolicyGraph(nn.Module):
     """A trained policy, physical units on both sides as the policy already is.
 
-    Each input arrives as `[batch, steps, n]` and is flattened time-major —
-    the layout `SystemPreview.get_mapped_data` hands the Node — before the
+    Each input arrives as `[batch, steps, n]`, holding only the columns the policy
+    reads. The columns it does not read are put back as zeros, since its windows hold
+    every column of a key and its gather drops the rest, and the window is flattened
+    time-major — the layout `SystemPreview.get_mapped_data` hands the Node — before the
     policy sees it.
     `u_history` gets its newest row repeated as the current one, as SystemPreview pads
     it in the closed loop; the policy drops that row, so the recipient
     never supplies it.
 
-    This class is the graph of a policy that reads no past commands;
-    `_PolicyGraphWithU` takes `u_history` too. `policy_graph` picks.
+    This class is the graph of a policy that reads past commands and D; the others
+    drop one or both from the signature. `policy_graph` picks.
     """
 
     def __init__(self, policy: nn.Module, inputs: list[PolicyInput]):
@@ -127,52 +137,70 @@ class PolicyGraph(nn.Module):
         # because torch.export cannot map dynamic shapes onto `*args`. The
         # reference columns are one tensor for the same reason: their count is
         # config-dependent, an argument count cannot be.
-        if [key for key in POLICY_KEYS if key in self.keys] != self.keys or \
-                not {"yn", "D"} <= set(self.keys):
+        if [key for key in POLICY_KEYS if key in self.keys] != self.keys or "yn" not in self.keys:
             raise ValueError(f"unexpected policy inputs {self.keys}; expected "
-                             f"{POLICY_KEYS}, U and R optional.")
+                             f"{POLICY_KEYS}, all but yn optional.")
+        # Each input's columns back in their key's order: `[read..., unread zeros...]`,
+        # gathered. A key read in full passes through.
+        self.unread = {spec.key: spec.width - len(spec.positions) for spec in inputs}
+        for spec in inputs:
+            unread = [j for j in range(spec.width) if j not in spec.positions]
+            order = torch.tensor(spec.positions + unread).argsort()
+            self.register_buffer(f"_order_{spec.key}", order, persistent=False)
 
-    def forward(self, y: torch.Tensor, d: torch.Tensor,
+    def forward(self, y: torch.Tensor, u_history: torch.Tensor, d: torch.Tensor,
                 r: torch.Tensor | None = None) -> torch.Tensor:
-        return self._command({"yn": y, "D": d, "R": r})
+        return self._command({"yn": y, "U": u_history, "D": d, "R": r})
 
     def _command(self, windows: dict[str, torch.Tensor | None]) -> torch.Tensor:
         flat = []
         for key in self.keys:
             x = windows[key]
+            if self.unread[key]:
+                zeros = torch.zeros_like(x[:, :, :1]).expand(-1, -1, self.unread[key])
+                x = torch.cat([x, zeros], dim=-1).index_select(-1, getattr(self, f"_order_{key}"))
             if key == "U":
                 x = torch.cat([x, x[:, -1:]], dim=1)
             flat.append(x.reshape(x.shape[0], -1))
         return self.policy(*flat)
 
 
-class _PolicyGraphWithU(PolicyGraph):
-    """`PolicyGraph` for a policy that reads past commands:
-    `(y, u_history, d[, r])`."""
-
-    def forward(self, y: torch.Tensor, u_history: torch.Tensor, d: torch.Tensor,
+class _NoPastCommands(PolicyGraph):
+    def forward(self, y: torch.Tensor, d: torch.Tensor,
                 r: torch.Tensor | None = None) -> torch.Tensor:
-        return self._command({"yn": y, "U": u_history, "D": d, "R": r})
+        return self._command({"yn": y, "D": d, "R": r})
+
+
+class _NoD(PolicyGraph):
+    def forward(self, y: torch.Tensor, u_history: torch.Tensor,
+                r: torch.Tensor | None = None) -> torch.Tensor:
+        return self._command({"yn": y, "U": u_history, "R": r})
+
+
+class _NoPastCommandsNoD(PolicyGraph):
+    def forward(self, y: torch.Tensor, r: torch.Tensor | None = None) -> torch.Tensor:
+        return self._command({"yn": y, "R": r})
 
 
 def policy_graph(policy: nn.Module, inputs: list[PolicyInput]) -> PolicyGraph:
     """The graph for `policy`: torch.export and the ONNX exporter bind the
     inputs positionally to `forward`, so its signature lists exactly the
     windows the policy reads."""
-    reads_u = any(spec.key == "U" for spec in inputs)
-    graph = _PolicyGraphWithU if reads_u else PolicyGraph
+    keys = {spec.key for spec in inputs}
+    graph = {(True, True): PolicyGraph, (False, True): _NoPastCommands,
+             (True, False): _NoD, (False, False): _NoPastCommandsNoD}["U" in keys, "D" in keys]
     return graph(policy, inputs)
 
 
 def physical_windows(flat: dict[str, torch.Tensor],
                      inputs: list[PolicyInput]) -> dict[str, torch.Tensor]:
     """Node windows (`closed_loop_windows`) as the graph takes them:
-    `{key: [windows, steps, n]}`, U without its current row."""
+    `{key: [windows, steps, n]}`, the read columns only, U without its current row."""
     out = {}
     for spec in inputs:
-        n = len(spec.columns)
-        rows = flat[spec.key].shape[-1] // n
-        out[spec.key] = flat[spec.key].reshape(-1, rows, n)[:, :spec.steps]
+        rows = flat[spec.key].shape[-1] // spec.width
+        window = flat[spec.key].reshape(-1, rows, spec.width)[:, :spec.steps]
+        out[spec.key] = window[:, :, spec.positions]
     return out
 
 

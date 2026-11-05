@@ -18,7 +18,7 @@ import torch
 
 from neurotemplate.modeling.config import ModelingConfig
 from neurotemplate.common.config import ConfigError, dict_to_dataclass, _parse_value
-from neurotemplate.common.data_utils import load_split
+from neurotemplate.common.data_utils import check_complete, load_split
 from neurotemplate.common.tracking import CHECKPOINT
 from neurotemplate.modeling.experiment import resolve_device, set_seeds
 from neurotemplate.modeling.heads import HeadStack
@@ -176,6 +176,7 @@ def evaluate_trained(cfg, dyn_sys, data_paths: list[str], norm_stats: dict,
     of dataframes — callers needing a row count sum lengths across the list.
     """
     raw_dfs, freq_s = load_split(data_paths, "--data")
+    check_complete(raw_dfs, [c for role in ("Y", "U", "D") for c in nm_mapping[role]], "--data")
     test_results = evaluate_and_plot(
         cfg=cfg, dyn_sys=dyn_sys,
         test_dfs=raw_dfs,

@@ -321,7 +321,8 @@ class Policy:
     Stateless: one graph, one call per control step. Each input is a window
     of physical values, oldest row first, whose length, columns and alignment
     `policy.json` states (`inputs.<name>.steps` / `.columns` /
-    `.current_row`): `y` and `d` end at the current step, and `d` and `r` may
+    `.current_row`), the columns the policy reads and nothing else:
+    `y` and `d` end at the current step, and `d` and `r` may
     run past it into the known future (forecast weather; the reference
     columns — a comfort band, a setpoint schedule, a tariff). `u_history`,
     for a policy that reads past commands, holds the commands applied over
@@ -344,8 +345,7 @@ class Policy:
         """The command for one step: `{u column: value}`.
 
         Each argument is `[steps, n]` for that input (see `self.inputs`);
-        `u_history` only for a policy that reads past commands, `r` only for one
-        whose objective names reference columns. `time_s`, for an MPC policy
+        only the inputs `self.inputs` names are read. `time_s`, for an MPC policy
         only, is the step's deadline: planning stops once that many seconds
         have passed, if it has not converged first.
         """

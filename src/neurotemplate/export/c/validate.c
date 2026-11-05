@@ -176,7 +176,10 @@ static void check_policy(void)
     /* inputs.csv holds one window per row, time-major: y, u_history, d, then r. */
     table input = read_csv("policy/reference/inputs.csv");
     table expected = read_csv("policy/reference/expected_actions.csv");
-    float y[NT_POLICY_Y_STEPS][NT_POLICY_Y_N], d[NT_POLICY_D_STEPS][NT_POLICY_D_N];
+    float y[NT_POLICY_Y_STEPS][NT_POLICY_Y_N];
+#if NT_POLICY_HAS_D
+    float d[NT_POLICY_D_STEPS][NT_POLICY_D_N];
+#endif
 #if NT_POLICY_HAS_U_HISTORY
     float u_history[NT_POLICY_U_HISTORY_STEPS][NT_POLICY_U_HISTORY_N];
 #endif
@@ -195,8 +198,10 @@ static void check_policy(void)
         for (int t = 0; t < NT_POLICY_U_HISTORY_STEPS; t++)
             for (int i = 0; i < NT_POLICY_U_HISTORY_N; i++) u_history[t][i] = (float)cell(&input, w, c++);
 #endif
+#if NT_POLICY_HAS_D
         for (int t = 0; t < NT_POLICY_D_STEPS; t++)
             for (int i = 0; i < NT_POLICY_D_N; i++) d[t][i] = (float)cell(&input, w, c++);
+#endif
 #if NT_POLICY_HAS_R
         for (int t = 0; t < NT_POLICY_R_STEPS; t++)
             for (int i = 0; i < NT_POLICY_R_N; i++) r[t][i] = (float)cell(&input, w, c++);
@@ -205,7 +210,9 @@ static void check_policy(void)
 #if NT_POLICY_HAS_U_HISTORY
                       u_history,
 #endif
+#if NT_POLICY_HAS_D
                       d,
+#endif
 #if NT_POLICY_HAS_R
                       r,
 #endif

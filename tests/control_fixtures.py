@@ -11,6 +11,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 import torch
+import yaml
 
 from neurotemplate.modeling.config import ModelingConfig as Config
 from neurotemplate.common.data_utils import compute_norm_stats
@@ -146,12 +147,6 @@ def make_control_cfg(future: dict[str, int] | None = None, u_past: int = 0,
     cfg.sysid_run_id = "test-run"
     cfg.losses = {k: dict(v) for k, v in BAND_LOSSES.items()}
     cfg.gains = dict(BAND_GAINS)
-    # Placeholders: unit tests build frames in memory and never read these;
-    # `write_splits` points them at real files.
-    cfg.train_data_path = cfg.dev_data_path = cfg.test_data_path = "plant.csv"
-    cfg.train_reference_path = "reference.csv"
-    cfg.dev_reference_path = "reference.csv"
-    cfg.test_reference_path = "reference.csv"
     cfg.train_pred_steps = 6
     # hmax = max(sysid_cfg.history_steps=4, cfg.history_steps=3) = 4; test_window includes warmup.
     cfg.test_window = 12
@@ -197,20 +192,31 @@ def make_tracking_plant(sysid_cfg: Config, nm_mapping: dict):
     return dyn_sys.eval(), dyn_sys.nodes[0]
 
 
+def write_data_file(tmp_path, record_path, nm: dict | None = None):
+    """A `data.yaml` in `tmp_path` reading `record_path` for every split, with the
+    fixture's column roles; returns its path."""
+    nm = nm or make_nm_mapping()
+    path = tmp_path / "data.yaml"
+    path.write_text(yaml.safe_dump({
+        "train": str(record_path), "dev": str(record_path), "test": str(record_path),
+        "columns": {role: nm[role] for role in ("Y", "U", "D")},
+    }, allow_unicode=True), encoding="utf-8")
+    return path
+
+
 def write_splits(cfg, tmp_path, plant: pd.DataFrame,
                  references: list[pd.DataFrame]) -> None:
-    """Write `plant` once and each reference as its own file, and point every
-    split at them: the plant file listed once per reference draw."""
-    plant_path = tmp_path / "plant.csv"
-    plant.drop(columns="sec_elapsed").rename_axis("timestamp").to_csv(plant_path)
-    ref_paths = []
-    for i, ref in enumerate(references):
-        path = tmp_path / f"reference_{i}.csv"
-        ref.rename_axis("timestamp").to_csv(path)
-        ref_paths.append(str(path))
-    for split in ("train", "dev", "test"):
-        setattr(cfg, f"{split}_data_path", [str(plant_path)] * len(ref_paths))
-        setattr(cfg, f"{split}_reference_path", ref_paths)
+    """The record with the first reference's columns in it, read by every split, and
+    the rest of the references as draws."""
+    record = plant.drop(columns="sec_elapsed").join(references[0]).rename_axis("timestamp")
+    path = tmp_path / "plant.csv"
+    record.to_csv(path)
+    cfg.data_file = str(write_data_file(tmp_path, path))
+    cfg.draws = []
+    for i, ref in enumerate(references[1:], start=1):
+        draw = tmp_path / f"draw_{i}.csv"
+        ref.rename_axis("timestamp").to_csv(draw)
+        cfg.draws.append(str(draw))
 
 
 def full_setup(reference: pd.DataFrame | None = None, **control_overrides):

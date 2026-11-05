@@ -32,7 +32,6 @@ import shutil
 import sys
 from pathlib import Path
 from types import ModuleType
-from typing import Optional
 
 _MODELING_MODULE = "nt_model"
 _CONTROL_MODULE = "nt_control"
@@ -104,14 +103,6 @@ def load_modeling_hooks(cfg) -> ModuleType:
     """Return the modeling hooks module for this run."""
     if cfg.user_hooks_path:
         return _import_from_path_or_dotted(cfg.user_hooks_path)
-    return _import_from_cwd(_MODELING_MODULE)
-
-
-def find_cwd_modeling_hooks() -> Optional[ModuleType]:
-    """The working directory's modeling hooks, or None if it has no
-    `nt_model.py` — for config-free tools that only want the column roles."""
-    if not (Path.cwd() / f"{_MODELING_MODULE}.py").exists():
-        return None
     return _import_from_cwd(_MODELING_MODULE)
 
 

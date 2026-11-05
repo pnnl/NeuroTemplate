@@ -25,7 +25,7 @@ class _Linear:
 
 
 def _penalty(weights: torch.Tensor, mask: torch.Tensor) -> float:
-    cfg = ModelingConfig(train_data_path="x", dev_data_path="x", test_data_path="x")
+    cfg = ModelingConfig()
     return float(SampledGradientPenalty(_Linear(weights), {"U": mask}, 8, "cpu", cfg).compute())
 
 

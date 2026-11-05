@@ -52,7 +52,10 @@ static void run_model(void)
 #ifdef NT_HAVE_POLICY
 static void run_policy(void)
 {
-    float y[NT_POLICY_Y_STEPS][NT_POLICY_Y_N], d[NT_POLICY_D_STEPS][NT_POLICY_D_N];
+    float y[NT_POLICY_Y_STEPS][NT_POLICY_Y_N];
+#if NT_POLICY_HAS_D
+    float d[NT_POLICY_D_STEPS][NT_POLICY_D_N];
+#endif
 #if NT_POLICY_HAS_U_HISTORY
     float u_history[NT_POLICY_U_HISTORY_STEPS][NT_POLICY_U_HISTORY_N];
 #endif
@@ -68,8 +71,10 @@ static void run_policy(void)
     for (int t = 0; t < NT_POLICY_U_HISTORY_STEPS; t++)
         for (int i = 0; i < NT_POLICY_U_HISTORY_N; i++) u_history[t][i] = NT_POLICY_U_HISTORY_TYPICAL[i];
 #endif
+#if NT_POLICY_HAS_D
     for (int t = 0; t < NT_POLICY_D_STEPS; t++)
         for (int i = 0; i < NT_POLICY_D_N; i++) d[t][i] = NT_POLICY_D_TYPICAL[i];
+#endif
 #if NT_POLICY_HAS_R
     for (int t = 0; t < NT_POLICY_R_STEPS; t++)
         for (int i = 0; i < NT_POLICY_R_N; i++) r[t][i] = NT_POLICY_R_TYPICAL[i];
@@ -81,7 +86,9 @@ static void run_policy(void)
 #if NT_POLICY_HAS_U_HISTORY
                       u_history,
 #endif
+#if NT_POLICY_HAS_D
                       d,
+#endif
 #if NT_POLICY_HAS_R
                       r,
 #endif

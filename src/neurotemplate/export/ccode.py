@@ -171,6 +171,7 @@ def policy_header(spec: dict, typical: dict[str, list[float]],
         f'#define NT_POLICY_EXPORT_ID "{spec["export_id"]}"',
         f"#define NT_POLICY_NU {len(spec['u_columns'])}",
         f"#define NT_POLICY_HAS_U_HISTORY {int('u_history' in inputs)}",
+        f"#define NT_POLICY_HAS_D {int('d' in inputs)}",
         f"#define NT_POLICY_HAS_R {int('r' in inputs)}",
     ]
     for name, entry in inputs.items():

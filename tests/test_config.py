@@ -13,6 +13,7 @@ import pytest
 from neurotemplate.common.config import (
     apply_overrides, dict_to_dataclass, parse_set_args,
 )
+from neurotemplate.control.config import ControlConfig
 from neurotemplate.modeling.config import ModelingConfig as Config
 
 _OPTIONAL = ("norm_type", "device", "grad_path")
@@ -42,13 +43,9 @@ def test_every_float_format_resolves_to_the_same_number(value):
 # ── Multi-path data fields ───────────────────────────────────────
 
 def test_set_parses_a_json_list():
-    """`--set train_data_path='[...]'` goes through `_parse_value`, which
-    JSON-decodes bracketed values. MLflow's Python-repr form (single quotes)
-    round-trips via the `ast.literal_eval` fallback."""
-    merged = apply_overrides(
-        {"train_data_path": "old.csv", "dev_data_path": "dev.csv",
-         "test_data_path": "test.csv", "history": {"y": 0}},
-        parse_set_args(['train_data_path=["a.csv","b.csv"]']))
-    cfg = dict_to_dataclass(merged, Config)
-    cfg.validate()
-    assert cfg.train_data_path == ["a.csv", "b.csv"]
+    """`--set draws='[...]'` goes through `_parse_value`, which JSON-decodes bracketed
+    values. MLflow's Python-repr form (single quotes) round-trips via the
+    `ast.literal_eval` fallback."""
+    merged = apply_overrides({"draws": ["old.csv"]},
+                             parse_set_args(['draws=["a.csv","b.csv"]']))
+    assert dict_to_dataclass(merged, ControlConfig).draws == ["a.csv", "b.csv"]

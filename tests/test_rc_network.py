@@ -312,7 +312,7 @@ def test_a_plain_forward_is_a_model_with_the_penalty_and_named_columns():
     stats = unit_stats(mapping)
     masks = {"U": torch.zeros(1, 1, 2, 1)}
     masks["U"][0, 0, 1, 0] = 1            # a higher cooling setpoint cools less: heat rises
-    cfg = ModelingConfig(train_data_path="x", dev_data_path="x", test_data_path="x")
+    cfg = ModelingConfig()
     penalty = SampledGradientPenalty(signed_model(model, mapping, stats, 12), masks, 8, "cpu", cfg)
     window = [torch.randn(2, 12, n) for n in (2, 1, 1)]
     model(*window)

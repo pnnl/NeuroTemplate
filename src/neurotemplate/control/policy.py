@@ -5,10 +5,10 @@ A bounded network wrapped in a Neuromancer Node:
 
     [yn-window(, U-window), D-window(, R-window)]  ->  U
 
-U is the commands already applied, present only when `policy_window` gives a
-U column a `past`; R is the objective's reference columns (control.losses),
-present only when it names one. Each column is read over its own `past` and
-`future` (see `build_policy`).
+Every key's window holds every column of that key: U the commands already applied,
+R the record's reference columns (control.losses). The policy reads only what
+`policy_window` lists, each column over its own `past` and `future` (see `build_policy`),
+and a key none of whose columns it reads is not an input at all.
 
 Every window arrives in physical units and every command leaves in them.
 The learned map alone computes in normalised units (`_NormalizedNet`): its
@@ -44,7 +44,7 @@ from neuromancer.system import Node
 from neuromancer.modules import blocks
 
 from neurotemplate.common.data_utils import NormStats
-from neurotemplate.control.losses import resolve_objective
+from neurotemplate.control.losses import bound_columns, resolve_objective
 from neurotemplate.modeling import windows
 
 from neurotemplate._typing import beartype
@@ -192,67 +192,84 @@ class _PerStepBounds(nn.Module):
 
 
 def _window_table(cfg, nm_mapping: dict[str, list[str]],
-                  r_columns: list[str]) -> dict[str, list[tuple[int, int]]]:
-    """`cfg.policy_window` as `(past, future)` per column, per input key, in
-    the order each key carries its columns.
+                  r_columns: list[str]) -> dict[str, list[Optional[tuple[int, int]]]]:
+    """`cfg.policy_window` as `(past, future)` per column, None for a column the policy
+    does not read, per input key, in the order each key carries its columns.
 
-    The table must name every Y, U, D and reference column and nothing else.
-    A Y column takes no `future` (it is not measured yet), nor does a U
-    column (it is the policy's own output); a D or reference column needs
-    one, because how far ahead to look at a forecast is the decision.
+    A Y column takes no `future` (it is not measured yet), nor does a U column (it is
+    the policy's own output); any other column needs one, because how far ahead to look
+    at a forecast is the decision.
     """
     columns = {"yn": nm_mapping["Y"], "U": nm_mapping["U"], "D": nm_mapping["D"],
                "R": r_columns}
-    listed = [c for cols in columns.values() for c in cols]
-    missing = [c for c in listed if c not in cfg.policy_window]
-    extra = sorted(set(cfg.policy_window) - set(listed))
-    if missing or extra:
-        raise ValueError(
-            "policy_window must list every Y, U, D and reference column and "
-            f"nothing else. Missing: {missing}. Not a policy input: {extra}.")
     wrong = [f"{c} ({'Y' if key == 'yn' else key}: "
              f"{'takes no' if key in ('yn', 'U') else 'needs a'} `future`)"
              for key, cols in columns.items() for c in cols
-             if ("future" in cfg.policy_window[c]) != (key in ("D", "R"))]
+             if c in cfg.policy_window
+             and ("future" in cfg.policy_window[c]) != (key in ("D", "R"))]
     if wrong:
         raise ValueError(
             f"policy_window: {', '.join(wrong)}. A Y column is not measured "
-            "ahead and a U column is the policy's own output; a D or "
-            "reference column is a forecast, and its `future` says how far "
+            "ahead and a U column is the policy's own output; any other "
+            "column is a forecast, and its `future` says how far "
             "ahead the policy sees it.")
+    if not any(c in cfg.policy_window for c in nm_mapping["Y"]):
+        raise ValueError("policy_window lists no Y column, so the policy could not see the "
+                         f"plant at all. Y: {nm_mapping['Y']}.")
     return {key: [(cfg.policy_window[c]["past"], cfg.policy_window[c].get("future", 0))
-                  for c in cols]
+                  if c in cfg.policy_window else None for c in cols]
             for key, cols in columns.items()}
 
 
-def _input_keys(table: dict[str, list[tuple[int, int]]]) -> list[str]:
-    """The policy's positional inputs: U only when some U column has a past,
-    R only when the objective names a reference column."""
-    reads_u = any(past > 0 for past, _ in table["U"])
-    return (["yn"] + (["U"] if reads_u else []) + ["D"]
-            + (["R"] if table["R"] else []))
+def _reads(key: str, span: Optional[tuple[int, int]]) -> bool:
+    """A U column's window ends at the previous step, so `past: 0` holds no row."""
+    return span is not None and (key != "U" or span[0] > 0)
 
 
-def _input_window(key: str, spans: list[tuple[int, int]]) -> dict:
-    """The input_map entry for one key: its deepest `past` and `future`.
+def _input_keys(table: dict[str, list[Optional[tuple[int, int]]]]) -> list[str]:
+    """The policy's positional inputs: the keys it reads a column of."""
+    return [key for key in ("yn", "U", "D", "R")
+            if any(_reads(key, span) for span in table[key])]
+
+
+def read_columns(cfg, nm_mapping: dict[str, list[str]],
+                 r_columns: list[str]) -> dict[str, list[str]]:
+    """What a trained policy reads, per input key, in the order the key carries them."""
+    columns = {"yn": nm_mapping["Y"], "U": nm_mapping["U"], "D": nm_mapping["D"],
+               "R": r_columns}
+    table = _window_table(cfg, nm_mapping, r_columns)
+    return {key: [c for c, span in zip(columns[key], table[key]) if _reads(key, span)]
+            for key in _input_keys(table)}
+
+
+def unread_columns(cfg, nm_mapping: dict[str, list[str]], r_columns: list[str]) -> list[str]:
+    """The columns the surrogate or the objective names that the policy does not read."""
+    read = {c for cols in read_columns(cfg, nm_mapping, r_columns).values() for c in cols}
+    return [c for c in nm_mapping["Y"] + nm_mapping["U"] + nm_mapping["D"] + r_columns
+            if c not in read]
+
+
+def _input_window(key: str, spans: list[Optional[tuple[int, int]]]) -> dict:
+    """The input_map entry for one key: the deepest `past` and `future` it reads.
 
     A U window ends at the current step like every other, but U holds only
     the commands already applied, so that last row is SystemPreview's
     `nearest` copy of the previous command; `_key_gather` drops it.
     """
-    return {"past": max(past for past, _ in spans),
-            "future": 0 if key == "U" else max(future for _, future in spans),
+    listed = [span for span in spans if span is not None]
+    return {"past": max(past for past, _ in listed),
+            "future": 0 if key == "U" else max(future for _, future in listed),
             "pad_mode": "nearest"}
 
 
-def _key_gather(key: str, spans: list[tuple[int, int]]) -> list[int]:
+def _key_gather(key: str, spans: list[Optional[tuple[int, int]]]) -> list[int]:
     """Indices narrowing one key's window to each column's own steps:
     `t` relative to the current step with `-past <= t <= future`, and
-    `-past <= t <= -1` for U."""
+    `-past <= t <= -1` for U. A column the policy does not read keeps no row."""
     window = _input_window(key, spans)
     now = window["past"]
-    keep = tuple((j, now - past, now - 1 if key == "U" else now + future)
-                 for j, (past, future) in enumerate(spans))
+    keep = tuple((j, now - span[0], now - 1 if key == "U" else now + span[1])
+                 for j, span in enumerate(spans) if span is not None)
     rows = window["past"] + 1 + window["future"]
     return windows.window_gather((len(spans),), (rows,), (keep,))
 
@@ -337,9 +354,14 @@ def build_policy(
     # deepest column, and each column is gathered down to its own steps
     # before the net sees it, so the input width is a per-column sum:
     # past + 1 + future for yn, D and R, and past for U, whose window ends
-    # at the previous step.
+    # at the previous step; nothing for a column it does not read.
     table = _window_table(cfg, nm_mapping, r_columns)
     keys = _input_keys(table)
+    unlisted = [c for c in bound_columns(cfg.control_bounds)
+                if c in r_columns and c not in cfg.policy_window]
+    if unlisted:
+        raise ValueError(f"control_bounds reads {unlisted} at each step, so the deployed policy "
+                         "has to be handed them: list them in policy_window.")
     input_map = {key: _input_window(key, table[key]) for key in keys}
     key_gathers = {key: _key_gather(key, table[key]) for key in keys}
     insize = sum(len(indices) for indices in key_gathers.values())
@@ -451,7 +473,7 @@ def _per_step_bounds(net, moving: dict[str, list], nm_mapping, keys, input_map, 
             if side not in r_columns or "R" not in keys:
                 problems.append(f"{column!r} is bounded by {side!r}, which is not a "
                                 f"command or a reference column the policy reads "
-                                f"(U {u_columns}, R {r_columns})")
+                                f"(U {u_columns}, R {r_columns}): list it in policy_window")
                 continue
             sources[side] = (keys.index("R"), input_map["R"]["past"], len(r_columns),
                              r_columns.index(side))
@@ -484,17 +506,14 @@ def describe_policy(
     between config and reality shows up on the card.
 
     The window table is reported alongside `insize` so a reader can re-check
-    the sum — past + 1 + future per Y, D and reference column, past per U
-    column — by eye: a wrong window is otherwise an invisible failure.
+    the sum — past + 1 + future per listed Y, D and reference column, past per
+    listed U column — by eye: a wrong window is otherwise an invisible failure.
     """
     # Unwrap: Node -> [_PerStepBounds] -> _Commands -> _NormalizedNet -> MLP_bounds
     raw = policy_node.callable
     if isinstance(raw, _PerStepBounds):
         raw = raw.base
     net = raw.base.base
-
-    r_columns = resolve_objective(cfg, nm_mapping).r_columns
-    columns = nm_mapping["Y"] + nm_mapping["U"] + nm_mapping["D"] + r_columns
 
     # Actuator limits in physical units, which is what a reader can sanity
     # check against the building.
@@ -510,7 +529,7 @@ def describe_policy(
         "outsize": int(net.out_features),
         "inputs": list(policy_node.input_keys),
         "ny": len(nm_mapping["Y"]),
-        "window": {c: dict(cfg.policy_window[c]) for c in columns},
+        "window": {c: dict(entry) for c, entry in cfg.policy_window.items()},
         "hsizes": [int(lin.out_features) for lin in net.linear[:-1]],
         "param_count": sum(p.numel() for p in net.parameters()),
         "u_cols": list(u_cols),

@@ -1,0 +1,9 @@
+train: data/train.csv
+dev: data/dev.csv
+test: data/test.csv
+columns:
+  Y: ["Zone [°C]", "Heat [kW]", "Power [kW]"]
+  U: ["Cooling SP [°C]"]
+  D: ["Outdoor [°C]", "Solar [W/m²]"]
+# The band and the tariff are in the record too, and no role claims them: the
+# controller's objective names them, and the model never reads them.

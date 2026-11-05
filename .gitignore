@@ -9,6 +9,7 @@
 # Ignore configuration files, except the template's
 *.yaml
 !/src/neurotemplate/template/**/*.yaml
+!/src/neurotemplate/examples/**/*.yaml
 
 # Results directories and files
 mlruns/
