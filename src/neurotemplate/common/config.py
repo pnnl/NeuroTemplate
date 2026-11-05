@@ -127,8 +127,9 @@ def dict_to_dataclass(data: dict, cls: Type[T], path: str = "") -> T:
     return cls(**kwargs)
 
 
-#: A window, written as a time: `5h`, `20m`, `6s`, `100ms`, `10us`. Zero needs no unit.
-_TIME = re.compile(r"(\d+(?:\.\d+)?)(h|m|s|ms|us)")
+#: A window, written as a time: `5h`, `20m`, `1h30m`, `6s`, `100ms`, `10us`. Zero needs no unit.
+_TIME_PART = r"(\d+(?:\.\d+)?)(ms|us|h|m|s)"
+_TIME = re.compile(f"(?:{_TIME_PART})+")
 _MICROSECONDS = {"h": 3_600_000_000, "m": 60_000_000, "s": 1_000_000, "ms": 1_000, "us": 1}
 #: A value for any window field, in `Union` so the loader leaves it alone.
 Time = Union[str, int]
@@ -139,10 +140,11 @@ def time_microseconds(value: Time, name: str) -> Fraction:
     because a count of steps means nothing until you know the timestep."""
     if value in (0, "0"):
         return Fraction(0)
-    match = _TIME.fullmatch(value) if isinstance(value, str) else None
-    if match is None:
-        raise ConfigError(f"{name} is a time, like 5h, 20m, 6s, 100ms or 10us; got {value!r}.")
-    return Fraction(match.group(1)) * _MICROSECONDS[match.group(2)]
+    if not (isinstance(value, str) and _TIME.fullmatch(value)):
+        raise ConfigError(f"{name} is a time, like 5h, 20m, 1h30m, 6s, 100ms or 10us; "
+                          f"got {value!r}.")
+    return sum(Fraction(amount) * _MICROSECONDS[unit]
+               for amount, unit in re.findall(_TIME_PART, value))
 
 
 def time_steps(value: Time, steps_per_hour: Optional[float], name: str) -> int:

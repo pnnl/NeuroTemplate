@@ -121,7 +121,8 @@ def ladder_main() -> None:
     hooks = load_modeling_hooks(cfg)
     train_raws, dev_raws, _test_raws, freq_s = get_data_splits(cfg)
     nm_mapping = resolve_nm_mapping(cfg, train_raws[0])
-    blocks = build_blocks(nm_mapping, resolve_block_spec(hooks, nm_mapping, cfg))
+    blocks = build_blocks(nm_mapping, resolve_block_spec(hooks, nm_mapping, cfg),
+                          every_y_claimed=False)
     zones = [ThermalZone.from_block(b) for b in blocks if b.scale is not None]
     if args.zone is not None:
         zones = [z for z in zones if z.zone == args.zone]
@@ -308,7 +309,8 @@ def thermostat_main() -> None:
     hooks = load_modeling_hooks(cfg)
     train_raws, dev_raws, _test_raws, freq_s = get_data_splits(cfg)
     nm_mapping = resolve_nm_mapping(cfg, train_raws[0])
-    every_block = build_blocks(nm_mapping, resolve_block_spec(hooks, nm_mapping, cfg))
+    every_block = build_blocks(nm_mapping, resolve_block_spec(hooks, nm_mapping, cfg),
+                               every_y_claimed=False)
     blocks = [b for b in every_block if b.scale is not None]
     if args.zone is not None:
         blocks = [b for b in blocks if ThermalZone.from_block(b).zone == args.zone]
@@ -322,7 +324,10 @@ def thermostat_main() -> None:
                          f"produces; it has {list(block.driven_by)}. A zone whose heat is a U "
                          "has no thermostat to fit.")
     heat = block.driven_by[0]
-    producer = next(b for b in every_block if heat in b.y_names)
+    producer = next((b for b in every_block if heat in b.y_names), None)
+    if producer is None:
+        raise SystemExit(f"No block produces {heat!r}, the heat block {block.name!r} is driven by. "
+                         "Declare its thermostat block; see `nt guide thermal-zone`.")
     missing = [c for c in setpoints.values() if c not in producer.u_names]
     if missing:
         raise SystemExit(f"setpoint(s) {missing} are not U columns of block {producer.name!r}, "

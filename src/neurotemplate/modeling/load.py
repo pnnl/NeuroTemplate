@@ -15,6 +15,7 @@ from urllib.parse import urlparse
 
 import mlflow
 import torch
+from mlflow.exceptions import MlflowException
 
 from neurotemplate.modeling.config import ModelingConfig
 from neurotemplate.common.config import ConfigError, dict_to_dataclass, _parse_value
@@ -31,8 +32,22 @@ from neurotemplate._typing import beartype
 
 
 @beartype
+def _get_run(run_id: str):
+    """The run, or a refusal saying where it was looked for: the store is relative to the
+    working directory, so the usual cause is running from outside the project."""
+    try:
+        return mlflow.get_run(run_id)
+    except MlflowException as error:
+        if error.error_code != "RESOURCE_DOES_NOT_EXIST":
+            raise
+        raise ConfigError(f"Run {run_id} is not in the tracking store of {Path.cwd()}. The store "
+                          "is relative to the working directory: run this from the project "
+                          "that trained it.") from error
+
+
+@beartype
 def _load_run_params(run_id: str) -> dict[str, object]:
-    run = mlflow.get_run(run_id)
+    run = _get_run(run_id)
     return {k: _parse_value(v) for k, v in run.data.params.items()}
 
 
@@ -45,6 +60,10 @@ def config_from_run_params(run_id: str, cls: type = ModelingConfig):
     them, rather than reloading without settings it was trained with.
     """
     params = _load_run_params(run_id)
+    wants_control = any(f.name == "sysid_run_id" for f in fields(cls))
+    if wants_control != ("sysid_run_id" in params):
+        kinds = ("control", "model") if wants_control else ("model", "control")
+        raise ConfigError(f"Run {run_id} is a {kinds[1]} run; this takes a {kinds[0]} run.")
     stale = sorted(set(params) - {f.name for f in fields(cls)})
     if stale:
         raise ConfigError(
@@ -62,7 +81,7 @@ def resolve_artifacts_dir(run_dir: Optional[str], run_id: str) -> Path:
         if not p.exists():
             raise FileNotFoundError(f"Run dir {run_dir} not found.")
         return p / "artifacts"
-    uri = mlflow.get_run(run_id).info.artifact_uri
+    uri = _get_run(run_id).info.artifact_uri
     return Path(urlparse(uri).path)
 
 

@@ -197,7 +197,7 @@ on yours.
    barely placed. Put its snippet in the zone block's `params` as `rc_network`, and edit it
    as you like: a node, an edge, an input into another node. `--candidate mine.json`
    runs your version through the same tests. The ladder needs no setpoints, only the
-   zone, its inputs and the weather. It will not select a node the record cannot place (an infinite error bar, or slower than the
+   zone, its inputs and the weather, and no block but the zone's: add the others when you reach them. It will not select a node the record cannot place (an infinite error bar, or slower than the
    record is long); on closed-loop data, where the HVAC holds the zone, that is often
    the envelope, and the card says so.
 4. **`nt data thermostat --cooling COL --heating COL`** fits the map from setpoint

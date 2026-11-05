@@ -30,6 +30,52 @@ def test_a_finished_batch_lets_go_of_its_graph():
     assert held_by_trainer[0].grad_fn is None
 
 
+def _trainer_stub():
+    from types import SimpleNamespace
+    return SimpleNamespace(train_metric="train_loss", eval_metric="mean_dev_loss", epochs=9,
+                           patience=3, badcount=4)
+
+
+def test_training_that_cannot_return_a_trained_model_stops_with_a_reason():
+    """Silent runs too: this is not a matter of what gets printed."""
+    from neurotemplate.common.progress import Progress
+
+    progress = Progress("silent", 1)
+    progress.begin_train(_trainer_stub())
+    with pytest.raises(RuntimeError, match="epoch 1.*every weight is lost"):
+        progress.end_epoch(_trainer_stub(), {"mean_train_loss": float("nan"),
+                                             "mean_dev_loss": 1.0})
+
+    # A non-finite dev loss may recover, so only one that never is finite is refused.
+    progress = Progress("silent", 1)
+    progress.begin_train(_trainer_stub())
+    progress.end_epoch(_trainer_stub(), {"mean_train_loss": 1.0,
+                                         "mean_dev_loss": float("inf")})
+    with pytest.raises(RuntimeError, match="No finite dev loss"):
+        progress.end_train(_trainer_stub(), {})
+
+    progress.end_epoch(_trainer_stub(), {"mean_train_loss": 1.0, "mean_dev_loss": 0.5})
+    progress.end_train(_trainer_stub(), {})
+
+
+def test_a_run_of_the_other_kind_or_outside_the_store_says_so(tmp_path, monkeypatch):
+    from neurotemplate.common.config import ConfigError
+    from neurotemplate.control.config import ControlConfig
+    from neurotemplate.modeling import load
+    from neurotemplate.modeling.config import ModelingConfig
+
+    monkeypatch.setattr(load, "_load_run_params", lambda run_id: {"epochs": 3})
+    with pytest.raises(ConfigError, match="is a model run; this takes a control run"):
+        load.config_from_run_params("abc", ControlConfig)
+    monkeypatch.setattr(load, "_load_run_params", lambda run_id: {"sysid_run_id": "x"})
+    with pytest.raises(ConfigError, match="is a control run; this takes a model run"):
+        load.config_from_run_params("abc", ModelingConfig)
+
+    mlflow.set_tracking_uri(f"sqlite:///{tmp_path}/mlflow.db")
+    with pytest.raises(ConfigError, match="run this from the project"):
+        load._get_run("0" * 32)
+
+
 def test_a_finished_run_carries_its_state_dict_and_no_pickled_model(
         tmp_path, monkeypatch):
     """Neuromancer's Trainer pickles the whole model as `best_model.pth`

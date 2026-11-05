@@ -40,7 +40,7 @@ past:
   "Ambient Temperature [degC]": 15m
 ```
 
-Windows are times everywhere, `5h`, `20m`, `6s`, `100ms`, `10us`: one that is not a whole
+Windows are times everywhere, `5h`, `20m`, `1h30m`, `6s`, `100ms`, `10us`: one that is not a whole
 number of the data's steps is a loud error, once the data has loaded. A table says what learned
 maps read, each column at its own lag. A `gru` reads one lag for every column it reads,
 because its window is its warm-up. The build refuses a lag no block actually reads, and a hinged

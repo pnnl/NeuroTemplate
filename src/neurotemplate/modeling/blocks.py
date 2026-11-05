@@ -276,6 +276,7 @@ def _resolve_inputs(spec: dict, block: str, y_names: list[str],
 def build_blocks(
     nm_mapping: dict[str, list[str]],
     block_spec: Optional[dict[str, dict]] = None,
+    every_y_claimed: bool = True,
 ) -> list[Block]:
     """Turn a `block_mapping` hook result into validated index slices.
 
@@ -284,6 +285,9 @@ def build_blocks(
     "params": {...}}}`.
     Passing None (no hook) gives one block holding every Y and U channel
     and reading every D column.
+
+    `every_y_claimed=False` is for `nt data ladder` and `nt data thermostat`, which fit one
+    part of a model whose other blocks need not exist yet: a Y may then go unclaimed.
 
     Raises ValueError if:
       - Y is not partitioned exactly: every Y channel in one and only one
@@ -354,7 +358,7 @@ def build_blocks(
             "one block. Each Y channel belongs to exactly one block."
         )
     unclaimed_y = [c for i, c in enumerate(y_cols) if i not in claimed_y]
-    if unclaimed_y:
+    if unclaimed_y and every_y_claimed:
         raise ValueError(
             f"block_mapping: Y column(s) {unclaimed_y} are not claimed by any "
             "block. Every Y channel belongs to exactly one block."
@@ -392,14 +396,15 @@ def build_blocks(
 
 def run_order(blocks: list[Block]) -> list[Block]:
     """`blocks` with every block after those that drive it; a stable sort, so
-    a spec with no `driven_by` keeps its order. A cycle has no order to run in."""
+    a spec with no `driven_by` keeps its order. A cycle has no order to run in, and a column
+    no block produces yet (`every_y_claimed=False`) holds nothing up."""
     producer = {column: block.name for block in blocks for column in block.y_names}
     ordered: list[Block] = []
     remaining = list(blocks)
     while remaining:
         done = {block.name for block in ordered}
         ready = next((b for b in remaining
-                      if all(producer[c] in done for c in b.driven_by)), None)
+                      if all(c not in producer or producer[c] in done for c in b.driven_by)), None)
         if ready is None:
             raise ValueError("block_mapping: `driven_by` forms a cycle among "
                              f"{[b.name for b in remaining]}; close a loop through "

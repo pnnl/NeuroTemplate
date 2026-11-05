@@ -12,6 +12,7 @@ is the one thing the loss trajectory says that changes what to do next.
 
 from __future__ import annotations
 
+from math import isfinite
 from time import perf_counter
 
 from neuromancer.callbacks import Callback
@@ -44,6 +45,13 @@ class Progress(Callback):
 
     def end_epoch(self, trainer, output) -> None:
         self.epochs_run += 1
+        train = float(output[f"mean_{trainer.train_metric}"])
+        if not isfinite(train):
+            raise RuntimeError(
+                f"The training loss is {train} at epoch {self.epochs_run}: a non-finite gradient "
+                "has gone through the optimizer, so every weight is lost and no later epoch can "
+                "recover. Look for a parameter or an input at an extreme (a capacity near zero, "
+                "a box far off the data) in what this run declares.")
         dev = float(output[trainer.eval_metric])
         if dev < self.best_dev:
             self.best_dev, self.best_epoch = dev, self.epochs_run
@@ -54,7 +62,6 @@ class Progress(Callback):
                   f"about {_duration(per_epoch * trainer.epochs)}.", flush=True)
         if self.level in ("live", "log") and (
                 self.epochs_run == 1 or self.epochs_run % self.update_every == 0):
-            train = float(output[f"mean_{trainer.train_metric}"])
             line = (f"epoch {self.epochs_run}/{trainer.epochs}  train {train:.4g}  "
                     f"dev {dev:.4g}  best {self.best_dev:.4g} "
                     f"@ {self.best_epoch}  {per_epoch:.1f} s/epoch")
@@ -64,7 +71,12 @@ class Progress(Callback):
                 print(line, flush=True)
 
     def end_train(self, trainer, output) -> None:
-        if self.level == "silent" or self.best_epoch is None:
+        if self.best_epoch is None:
+            raise RuntimeError(
+                f"No finite dev loss in {self.epochs_run} epochs, so there is no best model: "
+                "what training would return is the model as built. The rollouts on the dev "
+                "split blow up or read a missing value.")
+        if self.level == "silent":
             return
         if self.level == "live":
             print()

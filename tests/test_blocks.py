@@ -35,6 +35,14 @@ def test_each_block_gets_its_own_channels_and_its_names():
     assert [b.y_names for b in blocks] == [("north T",), ("south T",)]
 
 
+def test_a_data_command_can_fit_one_block_before_the_others_exist():
+    """The zone before its thermostat: the heat that drives it has no block yet."""
+    spec = {"north": {"Y": ["north T"], "driven_by": ["south T"]}}
+    with pytest.raises(ValueError, match="not claimed"):
+        build_blocks(MAPPING, spec)
+    assert [b.name for b in build_blocks(MAPPING, spec, every_y_claimed=False)] == ["north"]
+
+
 def test_unclaimed_controls_are_shared_with_every_block():
     """One air handler serving several blocks is the reason U is not
     required to partition: leave it out and every block gets it."""

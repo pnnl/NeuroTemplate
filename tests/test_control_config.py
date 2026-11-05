@@ -67,7 +67,7 @@ def test_a_preview_past_the_training_rollout_is_refused(tmp_path):
 
 
 @pytest.mark.parametrize("value,steps", [("5h", 60), ("20m", 4), ("300s", 1), (0, 0), ("0", 0),
-                                         ("1.5h", 18)])
+                                         ("1.5h", 18), ("23h55m", 287)])
 def test_a_window_is_a_time(value, steps):
     assert time_steps(value, 12.0, "horizon") == steps
 

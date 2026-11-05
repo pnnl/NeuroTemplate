@@ -44,6 +44,9 @@ from neurotemplate.modeling.network import (
 from neurotemplate.modeling.hinge import straight_through
 
 SIDES = {"cooling": -1, "heating": +1}
+#: The smallest smoothing width: well under any capacity that does real work, and large
+#: enough that 1 / width² stays a float32.
+MIN_WIDTH = 1e-3
 
 
 @dataclass(frozen=True)
@@ -86,7 +89,16 @@ def unpack(form: Form, sides: tuple[str, ...], theta: torch.Tensor) -> dict[str,
             for (name, positive), t in zip(parameter_names(form, sides), theta)}
 
 
+def _floored_width(width: torch.Tensor) -> torch.Tensor:
+    """A smoothing width no smaller than `MIN_WIDTH`, and exactly `width` above it. A capacity
+    fitted with an outdoor slope can fall to 1e-25 at some hour: the forward pass survives
+    that, but the gradient's 1 / width² overflows and takes every weight to NaN. As a `relu`,
+    because onnx2c cannot generate a Max."""
+    return width + torch.relu(MIN_WIDTH - width)
+
+
 def _smooth_clip(u: torch.Tensor, cap: torch.Tensor, width: torch.Tensor) -> torch.Tensor:
+    width = _floored_width(width)
     return width * (F.softplus(u / width) - F.softplus((u - cap) / width))
 
 
@@ -136,7 +148,7 @@ def _start_at(p, side, form):
 def _switches(p, side, error, capacity):
     """A latched stage's `(on, hold)`: smooth steps whose slope, times the
     capacity, is the side's gain."""
-    width = capacity / (2 * p[f"{side}.gain"])
+    width = _floored_width(capacity / (2 * p[f"{side}.gain"]))
     return (torch.sigmoid((error - p[f"{side}.on_at"]) / width),
             torch.sigmoid((error + p[f"{side}.off_at"]) / width))
 

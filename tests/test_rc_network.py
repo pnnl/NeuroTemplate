@@ -6,7 +6,7 @@ import pytest
 
 import torch
 
-from neurotemplate.modeling import ladder, network as nw
+from neurotemplate.modeling import ladder, network as nw, thermostat as th
 from neurotemplate.modeling.ladder import Rung
 
 DT_H = 0.5
@@ -221,6 +221,24 @@ def test_a_zone_behind_a_thermostat_block_sees_the_heat_of_the_step_being_taken(
     expected = a @ nodes + b @ torch.tensor([float(series.ambient[-1]), heat], dtype=nw.DTYPE)
     assert math.isclose(float(out[1]), heat, abs_tol=1e-4)
     assert math.isclose(float(out[0]), float(expected[0]), abs_tol=1e-4)
+
+
+def test_a_capacity_near_zero_leaves_every_gradient_finite():
+    """A fitted outdoor slope can take a capacity to 1e-25 at some hour. The heat survives
+    that; without a floor on the smoothing width the gradient does not, and one NaN gradient
+    is every weight lost."""
+    capacity = torch.tensor([1e-25, 8.0], dtype=torch.float32, requires_grad=True)
+    gain = torch.tensor(10.0, requires_grad=True)
+    th.soft_clip(gain * torch.tensor([0.1, 0.1]), capacity, smooth=True).sum().backward()
+    assert torch.isfinite(capacity.grad).all() and torch.isfinite(gain.grad).all()
+
+    p = {"cooling.gain": gain, "cooling.on_at": torch.tensor(0.1),
+         "cooling.off_at": torch.tensor(0.1)}
+    on, _ = th._switches(p, "cooling", torch.tensor([0.1, 0.1]), capacity)
+    assert torch.isfinite(torch.autograd.grad(on.sum(), capacity)[0]).all()
+
+    width = torch.tensor([1e-3, 0.4, 3.7], dtype=torch.float32)
+    assert torch.equal(th._floored_width(width), width)     # above the floor, nothing changes
 
 
 def test_a_network_that_pins_nothing_is_refused():
