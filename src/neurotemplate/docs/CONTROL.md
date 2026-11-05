@@ -11,28 +11,19 @@ with no optimizer online.
 Everything it learns, it learns from the surrogate. A policy is only as
 good as the surrogate is about the actuators, and the surrogate's own
 scores for a policy are facts about the surrogate. Judge controllers
-against each other and against a rule on the same surrogate, and judge the
-winner on the plant.
+against each other on the same surrogate, and judge the winner on the plant.
+A user who wants to compare to a rule can do that themselves.
 
 ## What you provide
 
-The hooks in `nt_control.py`, scaffolded by `nt init` with a docstring each:
-
-| Hook | Says | |
-|---|---|---|
-| `actuation_bounds` | the box each control may command | required |
-| `power_channels` | which outputs meter power: the plots, and `power_metric`'s default | required |
-| `plot_context_channels` | disturbances drawn on the closed-loop plot | required |
-| `power_metric` | the power signal that energy, cost and peak terms reduce; by default the sum of `power_channels` | to replace the default with a proxy |
-| `reference_control` | a rule to anchor a residual policy to | with `residual_delta` |
-
-The surrogate is a config field, `sysid_run_id`. Column roles come from
-it. Every hook takes and returns physical units. Everything else, including the objective and what the policy reads, is in
-`control_configs/control.yaml`, which explains each setting and how to size
-it.
+An objective, in `control_configs/control.yaml`. That and the column roles are all a run needs:
+the latest model run is its surrogate, and everything else is a default it prints. `nt docs config`
+lists every setting; `nt docs hooks` the hooks, all optional, of which `power_channels` is the one
+a `power` term needs. Column roles come from the surrogate, and the record from `data.yaml`.
 
 ```bash
-nt control train --config control_configs/debug.yaml --set sysid_run_id=<model_run>
+nt control train --config control_configs/debug.yaml
+nt control train --set sysid_run_id=<another model run>
 ```
 
 ## The objective is a table over named columns
@@ -56,39 +47,35 @@ exchange rate per °C or per W. Gains therefore do not port between plants.
 The set of regulated outputs is derived from the `relu` and `nrelu` rows,
 and the reportcard scores bands and band changes against exactly those.
 
-**Reference columns are data, in their own files.** A name that is neither
-a surrogate column nor `power`, such as a band, a schedule or a tariff, is
-read from reference files: one per plant file, row-aligned with it and
-carrying exactly its timestamps. The policy sees them; the surrogate never
-does. `make_references.py`, written by `nt init`, writes
-such files, and it is example code to edit. Listing one plant file against
-several reference files trains on several draws.
+**Reference columns are columns of the record no role claims.** A name that is neither
+a surrogate column nor `power`, such as a band, a schedule or a tariff, is read from the
+record. The objective just names it. The policy reads it if its window lists it; the surrogate
+never does. Dividing it for the policy is by its target's stats if it bounds a Y column, and
+otherwise by `reference_scale`, set from its largest magnitude and printed unless you set it.
 
 ## What the policy reads: `policy_window`
 
 ```yaml
 policy_window:                       # syntax, not values
-  "Zone Temperature": {past: 3}
-  "Cooling Setpoint": {past: 1}
-  "Outdoor Temperature": {past: 0, future: 12}
-  "Tariff":           {past: 0, future: 48}
+  "Zone Temperature": {past: 15m}
+  "Cooling Setpoint": {past: 5m}
+  "Outdoor Temperature": {past: 0, future: 1h}
+  "Tariff":           {past: 0, future: 4h}
 ```
 
-Every column the policy could read is listed: each `Y`, `U` and `D` column
-of the surrogate and each reference column the objective names. `past`
-counts steps before the current one; `future` counts steps after it, and only
-a forecast has one. No `future` may exceed `train_pred_steps`, since nothing
-past a training rollout is scored. Training windows carry the rows a
-preview reads past the rollout's end, so a file needs those rows too. A `D` or reference column requires it, and a `Y` column
-cannot take it. A `U` column's window ends at the previous step, the last
-command applied. `past: 0` there means the policy does not read its own
-commands; with `past: 1` it sees the move a `first_difference` row is pricing.
-The deepest `past`, plus the current step, is the policy's history; with the
-surrogate's `history_steps` it sets how many recorded steps seed each rollout,
-and it is how far apart dev windows start, and training windows unless
-`train_stride` says otherwise. A short history means many near-identical
-windows: a `train_stride` of a few hours makes an epoch that much cheaper. The
-reportcard lists the table and the input width it gives.
+The policy reads what this lists, for any role, and nothing else: each run prints what it leaves
+unread, and the exported package takes only what is listed, so nobody has to rebuild a column it
+does not use. Unset, it reads the regulated outputs and the `D` columns 3 steps back, the last
+command, and each `D` and reference column a horizon ahead. `past` is how far before the current
+step; `future` how far after it, and only a forecast has one. No `future` may exceed `horizon`,
+since nothing past a training rollout is scored. A `D` or reference column requires one, and a `Y`
+column cannot take one. Every step's preview reads real rows of the record, to the rollout's last
+step, so a file needs those rows. A `U` column's window ends at the previous step, the last command
+applied: `past: 0` there means the policy does not read it; with `past: 5m` it sees the move a
+`first_difference` row is pricing. The deepest `past`, with the surrogate's history, sets how many
+recorded steps seed each rollout. Training windows start `train_stride` apart, a quarter of a horizon
+by default, and dev windows `dev_stride`, a whole one. The reportcard lists the table and the input
+width it gives.
 
 ## Grid response: energy, cost and peak
 
@@ -113,115 +100,96 @@ these hold:
 - **There is somewhere to store it.** A narrow band leaves no room, and
   then "no price response" is a measurement of the band.
 - **One training rollout holds the action and its payoff**, the dip and the
-  coast (`train_pred_steps`).
+  coast (`horizon`).
 - **The power side is a cost term, not an energy term.** Energy rewards
   using less at every hour, and its cheapest answer is to stop: load
   shedding, with comfort going backwards.
 
-What it looks like when it works: below the rule through the cheap hours,
+What it looks like when it works: below where the data sat through the cheap hours,
 then at the band edge, not past it, through the expensive ones.
 
 **Confirm that the policy reads the price and not the clock.** A tariff
 that repeats daily can be learned as time of day, which the disturbances
-already carry. Train on a real price record sliced at random offsets
-(`make_references.py` does this by default). Then evaluate against a test
-reference with the peak moved (see below) and check that the load moves
+already carry. Train on draws of a real price record sliced at random offsets. Then
+evaluate against a test file with the peak moved (see below) and check that the load moves
 with it, and compare against the same config with the cost gain at 0.
 
 ## Train on several draws of the price
 
-A policy trained against one tariff learns that tariff's hours as much as
-its prices. Listing the plant file several times against several reference
-files (the tariff shifted earlier and later, its contrast changed) makes it
-read the price instead, and it then holds the band better on a tariff it has
-not seen. `make_references.py` writes draws from a price history; any
-transformation of your own reference file works the same way.
+A policy trained against one tariff learns that tariff's hours as much as its prices. `draws` lists
+files against the same record, each with another band or tariff, which makes it read the price instead,
+and it then holds the band better on a tariff it has not seen:
+
+```yaml
+draws: [data/tariff_later.csv, data/tariff_earlier.csv]
+```
+
+Each file replaces the columns it shares with the record, matched by timestamp, and adds a pass over the
+training windows. With several records, a draw applies to the one its timestamps match, and matching none
+is a loud error. Dev and test take no draws; to score a held-out tariff, point `test` at a file holding it.
 
 ## Bounds: where each command may go
 
-By default each control commands anywhere inside `actuation_bounds`, the
-data's range. `command_bounds` narrows a control to a range that moves with
-a forecast at each step, `{column: [low, high]}`, each side a number in the
-column's units, a reference column the policy reads, or another command:
+`control_bounds` is the one mechanism. A column not listed takes its recorded range. A listed one is
+`{column: [low, high]}`, each side a number in the column's units, a reference column the policy reads, or
+another command:
 
 ```yaml
-command_bounds:                     # syntax, not values
+control_bounds:                     # syntax, not values
   "Cooling Setpoint": ["Comfort Low", ["Comfort High", -0.5]]
   "Heating Setpoint": [15.0, "Comfort Low"]
 ```
 
 A side `[column, offset]` is that column plus a signed offset in the command's
 units: `["Comfort High", -0.5]` is half a degree under the ceiling,
-`["Comfort Low", -1.0]` a degree under the floor. Equipment that starts only once the state is past its setpoint (a
-latching thermostat) overshoots a setpoint held at the band edge, so keep the
-command a margin inside it.
-
-The policy's whole output range is mapped onto `[low, high]`, so every
-command in it is reachable and none outside it is. Bounding cooling inside
-the band and heating under its floor keeps the two from crossing; where no
-band separates them, a side naming the other command orders them directly:
+`["Comfort Low", -1.0]` a degree under the floor. Equipment that starts only once the state is past its
+setpoint (a latching thermostat) overshoots a setpoint held at the band edge, so keep the
+command a margin inside it. A numeric side also sets what "at a bound" means on the reportcard; a side
+naming a column is read at each step, so the policy's whole output range is mapped onto `[low, high]`, every
+command in it reachable and none outside it. Bounding cooling inside the band and heating under its floor
+keeps the two from crossing; where no band separates them, a side naming the other command orders them directly:
 
 ```yaml
-command_bounds:
+control_bounds:
   "Heating Setpoint": [15.0, 22.0]
   "Cooling Setpoint": [["Heating Setpoint", 1.0], 30.0]   # at least 1 above heating
 ```
 
 Bounds that read other commands are mapped after them, in whatever order
-they are declared; bounds that read each other in a cycle are refused.
-
-## Residual control: a correction to a trusted rule
-
-With `residual_delta`, an anchored control commands
-`reference_control(...) + δ`, with `δ` kept inside a per-column box, rather
-than commanding a setpoint outright. The rule does the routine work and
-keeps the band, the policy adjusts it for whatever else the objective asks,
-and the box limits what a surrogate that is wrong somewhere can cost you.
-Training starts exactly at the rule. A box of `[0, 0]` locks a control to
-the rule, and every box `[0, 0]` scores the rule itself on your surrogate,
-which is the run to read every later one against.
-
-Use it for a small correction to a rule you trust. It is not the way to
-make a policy behave on a model that is wrong: a box narrow enough to make
-that safe is too narrow to reach what pays (a night pre-cool from a setback
-rule is several degrees away). Fix the model instead; `nt guide check` is the
-test. A column is either anchored or in `command_bounds`, not both.
+they are declared; bounds that read each other in a cycle are refused. A column a bound reads must be
+in `policy_window`, so the deployed policy is handed it.
 
 Nothing is rounded to an actuator's resolution; that is the building
 management system's job. Smoothness comes from a `first_difference` row.
 
 ## MPC: planning through the surrogate at every step
 
-`policy: mpc` trains nothing. At every step it plans the next `mpc_horizon`
-commands through its own copy of the surrogate, inside the actuation bounds
-and `command_bounds`, against the same objective, with Adam at `mpc_lr` from
-its previous plan, and commands the first. Its forecast is what
-`policy_window` gives a policy, so every D and reference column's `future`
-must reach the horizon. It has no `residual_delta`.
+`policy: mpc` trains nothing, a one-line toggle. At every step it plans the next `horizon` of
+commands through its own copy of the surrogate, inside `control_bounds`, against the same objective,
+with Adam from its previous plan, and commands the first. Its forecast is every D and reference
+column over that horizon. DPC is at best MPC; a policy's purpose is to be faster, easier and more
+flexible, and MPC stays as a comparator and as a tool for those who want it.
 
-Each command is held as its share of its actuation range, in [0, 1]; Adam
-steps the share by about `mpc_lr` of the range and clamps it back into the
-box. A window's solve stops as early stopping does: once `mpc_patience`
-steps pass without its objective improving by more than `mpc_rtol` of it.
-It keeps the best plan it saw. `mpc_max_iters` caps it, so a solve always
-ends, and ends the same way on any machine. The reportcard gives the steps
-the test windows' solves took and how often one hit the cap; a cap hit
-means a window was still improving. A deadline belongs to deployment: the
-exported `Policy.act(..., time_s=)` stops planning at it.
+Each command is held as its share of its range, in [0, 1]; Adam steps the share by about the `solver`'s
+`lr` of the range and clamps it back into the box. A window's solve stops as early stopping does: once
+`patience` steps pass without its objective improving by more than `rtol` of it. It keeps the best plan
+it saw. `max_iters` caps it, so a solve always ends, and ends the same way on any machine. The reportcard
+gives the steps the test windows' solves took and how often one hit the cap; a cap hit means a window was
+still improving. A deadline belongs to deployment: the exported `Policy.act(..., time_s=)` stops planning
+at it.
 
-A trained policy is one forward pass per step and MPC is a solve, so the
-choice is compute against what the Controller gap says a policy leaves on
-the table. Both are scored the same way, and both export (MPC with
+A trained policy is one forward pass per step and MPC is a solve, so the choice is compute against what
+`nt control gap` says a policy leaves on the table. Both are scored the same way, and both export (MPC with
 `--format torch`, see [EXPORT.md](EXPORT.md)).
 
 ## What every run reports
 
-`control_reportcard.md` opens with a verdict: comfort, the gap to the best
-plan, the band-jump response, and a warning for each check below that fired.
+`control_reportcard.md` opens with a verdict: comfort, the band-jump response, and a warning
+for each check below that fired.
 The rest reports exceptions rather than inventories; each instrument's full
 output is a JSON file in the run's `results/` folder, and the headline
 numbers are MLflow metrics. The surrogate is described on its own run's
-reportcard. These are instruments, read against the rule or a previous run.
+reportcard. These are instruments, read against a previous run or the best plan.
 
 **Before training:**
 
@@ -233,9 +201,8 @@ reportcard. These are instruments, read against the rule or a previous run.
   through it.
 - **Objective balance**: each term's share of the objective on one real
   batch, with a warning when one term outweighs the rest combined. It is
-  taken at the starting point, the rule for a residual policy, so it says a
-  term is present, not that it is strong enough. The same print after
-  training says more.
+  taken at the starting point, so it says a term is present, not that it is
+  strong enough. The same print after training says more.
 - **Power clamped to zero**: the share of steps where power is exactly 0
   and gives no gradient. Those are often the cheap hours that load should
   move into.
@@ -251,36 +218,27 @@ reportcard. These are instruments, read against the rule or a previous run.
   output out of band, whether a control moved, whether the output
   followed, and whether it got back in. Pooled violation rates can rank
   controllers backwards on exactly this.
-- **Residual saturation**: for each anchored control, how much of the time
-  `δ` sat at each edge of its box. A box edge that binds most of the time
-  means the rule is wrong for this plant, or the optimizer is riding a
-  surrogate error into the wall.
-- **Controller gap**: the policy beside the best open-loop plan on the same
-  test windows, term by term. The plan is a free command per step through the
-  same surrogate, bounds and objective, optimised with every step ahead known,
-  so nothing commanding through those bounds does better on this surrogate.
-  The gap between them is the controller's: its inputs, structure or
-  training. What the plan does not do either (a pre-cool, riding the band
-  edge) the surrogate or the objective does not reward, and no controller
-  will find it. It cannot see where the surrogate is wrong about the plant.
-  It is solved as MPC's plans are (`plan_lr`, `plan_rtol`, `plan_patience`,
-  `plan_max_iters`) from `plan_starts` starts, the controller's own commands
-  and random ones, each window keeping its best; the reportcard says how far
-  the starts landed apart and whether every window stopped before the cap.
-  `plan_starts: 0` skips it.
 
-`nt guide control` is the run-by-run ladder (the rule, the band terms only,
-the full objective, its price-blind twin) and how to read the plots.
+**On demand, `nt control gap --run_id <run>`:** the policy beside the best open-loop plan on the same
+test windows, term by term, written to the run's `results/control_gap.md`. The plan is a free command per
+step through the same surrogate, bounds and objective, optimised with every step ahead known, so nothing
+commanding through those bounds does better on this surrogate. The gap between them is the controller's:
+its inputs, structure or training. What the plan does not do either (a pre-cool, riding the band edge) the
+surrogate or the objective does not reward, and no controller will find it. It cannot see where the surrogate
+is wrong about the plant. It is solved as MPC's plans are (the `solver` block) from `--starts` starts, the
+controller's own commands and random ones, each window keeping its best; the report says how far the starts
+landed apart and whether every window stopped before the cap.
+
+`nt guide control` is the run-by-run ladder (the band terms only, the full objective, its price-blind twin)
+and how to read the plots.
 
 Each optional capability is off until you ask for it:
 
 | Want | Implement | Then declare |
 |---|---|---|
 | an energy objective, and the energy section of the reportcard | `power_channels` (or a proxy in `power_metric`) | a `{column: power, norm: 1}` row |
-| price-driven load shifting | `power_channels`, and a tariff column in the reference files (`make_references.py --price`) | a `{column: power, norm: 1, weight: <tariff>}` row, `reference_scale`, a `future` on the tariff in `policy_window` |
+| price-driven load shifting | `power_channels`, and a tariff column in the record | a `{column: power, norm: 1, weight: <tariff>}` row, a `future` on the tariff in `policy_window` |
 | peak shaving | `power_channels` | a `{column: power, norm: 4}` row |
-| a small correction to a trusted rule, per U column | `reference_control` | `residual_delta` |
-| the rule itself, scored | `reference_control` | `residual_delta` with every box `[0, 0]` |
 
 ## From Python
 
@@ -290,8 +248,7 @@ from neurotemplate.control.config import ControlConfig
 from neurotemplate.control.load import load_trained_policy
 from neurotemplate.control.train import train_control
 
-cfg = load_config("control_configs/control.yaml", ControlConfig,
-                  {"sysid_run_id": model_run_id})
+cfg = load_config("control_configs/control.yaml", ControlConfig)
 run = train_control(cfg)              # run.run_id, run.results (the test closed loop)
 policy_node, cl_system, cfg, sysid_cfg, nm_mapping, norm_stats = (
     load_trained_policy(run.run_id))
@@ -301,15 +258,16 @@ As in modeling, `train_control` sets torch's thread count from `threads` and
 the default device for the process, and `load_trained_policy` takes the same
 `device=` as `load_trained_dynamics`: this machine's, never the run's.
 
-To evaluate a trained policy against another reference without retraining,
-for example the same week with the price peak moved:
+To evaluate a trained policy against another record without retraining,
+for example the same week with the price peak moved, point its `data_file` at a
+`data.yaml` whose `test` holds it:
 
 ```python
 from neurotemplate.control.pipeline import evaluate_closed_loop
 from neurotemplate.control.scenarios import load_control_splits
 
 _, cl_system, cfg, sysid_cfg, nm_mapping, norm_stats = load_trained_policy(run_id)
-cfg.test_reference_path = ["data/test_reference_shifted.csv"]
+cfg.data_file = "data_shifted.yaml"
 _, _, test_dfs = load_control_splits(cfg, nm_mapping)
 results, _ = evaluate_closed_loop(cfg, sysid_cfg, cl_system, test_dfs,
                                   nm_mapping, norm_stats)

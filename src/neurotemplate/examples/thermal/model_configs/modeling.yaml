@@ -1,10 +1,6 @@
+# Everything else is a default the run prints; `nt docs config` lists what can be set.
 model: rc_network
-past: {"Zone [°C]": 0, "Heat [kW]": 0, "Power [kW]": 0, "Cooling SP [°C]": 0,
-          "Outdoor [°C]": 0, "Solar [W/m²]": 0}
-context: 725m
-epochs: 30
+past: {"Power [kW]": 0}
 horizon: 12h
-train_stride: 2h
+epochs: 30
 batch_size: 32
-test_horizon: 24h
-test_stride: 12h

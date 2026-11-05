@@ -1,26 +1,5 @@
-# A 2-epoch run that exercises the whole modeling pipeline — hooks, heads,
-# physics checks, plots — before you spend real time:
-#   nt model train --config model_configs/debug.yaml
-# Keep `model` (and anything your hooks depend on) the same as your real
-# config, so the smoke run builds the model you will actually train.
-
-model: nssm
-# Your columns, as in your real config; short lags keep the smoke run fast.
-history: {}   # replace with your columns, e.g.
-#  "Tank Temperature [degC]": 3
-#  "Heater Command [-]": 3
-#  "Ambient Temperature [degC]": 3
-log2_hidden_size: 3
-num_layers: 1
-
+# A 2-epoch run that exercises the whole modeling pipeline: nt model train --config model_configs/debug.yaml
 epochs: 2
 warmup: 0
 patience: 2
-train_pred_steps: 4
-dev_pred_steps: 4
-
-test_window: 47
-test_stride: 48
-
-seed: 1234
-run: "debug"
+run: debug

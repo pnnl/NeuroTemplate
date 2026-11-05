@@ -96,5 +96,5 @@ def main() -> None:
     print(f"Wrote {target}/: a project on synthetic data, ready to run:\n\n"
           f"  cd {target}\n"
           "  nt model train\n"
-          "  nt control train --set sysid_run_id=<the run id it printed>\n"
+          "  nt control train\n"
           "  nt export policy --run_id <the control run id> --out delivery\n")

@@ -27,6 +27,7 @@ from neurotemplate._typing import beartype
 
 import mlflow
 
+from neurotemplate.common.config import fields_set, settings_report
 from neurotemplate.common.reportcard import RESULTS_DIR
 from neurotemplate.common.run_summary import write_run_summary
 from neurotemplate.common.tracking import save_checkpoint, tracked_run
@@ -34,8 +35,13 @@ from neurotemplate.modeling.experiment import resolve_device, set_seeds, set_thr
 
 from neurotemplate.control.config import ControlConfig
 from neurotemplate.control.load import load_frozen_dynamics
-from neurotemplate.control.losses import extend_norm_stats, resolve_objective
-from neurotemplate.control.scenarios import build_loaders, horizons, load_control_splits
+from neurotemplate.control.load import latest_model_run
+from neurotemplate.control.losses import (
+    extend_norm_stats, fill_reference_scale, resolve_objective,
+)
+from neurotemplate.control.scenarios import (
+    build_loaders, horizons, load_control_splits, shortest_test_rollout,
+)
 from neurotemplate.control.controller import build_controller, describe_controller
 from neurotemplate.control.policy import unread_columns
 from neurotemplate.control.sensitivity import command_sensitivity
@@ -63,6 +69,13 @@ from neurotemplate.control.pipeline import (
 from neurotemplate.hooks import CONTROL_SNAPSHOT, load_control_hooks, snapshot_hooks
 
 
+#: What each run names even when you left it alone. Everything else sits in
+#: `nt docs config`, and appears on "You set" only when you set it.
+COMMON_SETTINGS = ("sysid_run_id", "policy", "policy_window", "horizon", "test_horizon",
+                   "train_stride", "dev_stride", "test_stride", "reference_scale", "epochs",
+                   "lr", "batch_size", "log2_policy_hidden", "policy_layers", "seed")
+
+
 @dataclass
 class TrainedPolicy:
     """One finished control run: its MLflow id and what it produced."""
@@ -84,6 +97,7 @@ def train_control(cfg: ControlConfig,
     `config_path` is the file `cfg` came from, recorded in the run summary;
     None for a config built in code.
     """
+    given = fields_set(cfg)
     cfg = deepcopy(cfg)
     cfg.validate()
     cfg.device = resolve_device(cfg.device)
@@ -92,23 +106,30 @@ def train_control(cfg: ControlConfig,
 
     # Point MLflow at the sys-id tracking store *before* loading the run.
     mlflow.set_tracking_uri(cfg.location)
+    cfg.sysid_run_id = cfg.sysid_run_id or latest_model_run()
 
     dyn_sys, dyn_node, sysid_cfg, nm_mapping, sysid_stats = (
         load_frozen_dynamics(cfg.sysid_run_id, cfg.run_dir, cfg.weights,
                              device=cfg.device)
     )
+    # The windows mean nothing before the surrogate says the timestep.
     cfg.steps_per_hour = sysid_cfg.steps_per_hour
-    cfg.check_windows()   # the windows mean nothing before the surrogate says the timestep
     # The objective's names resolve against the surrogate's columns, so this
     # is the first point a misnamed column can fail — before any data loads.
     objective = resolve_objective(cfg, nm_mapping)
-    norm_stats = extend_norm_stats(objective, cfg, sysid_stats)
+    cfg.fill_window_table(objective.regulated, nm_mapping, objective.r_columns)
+    objective = resolve_objective(cfg, nm_mapping)
 
     _, _, hmax = horizons(cfg, sysid_cfg)
-    # One list per split (length >= 1), each plant file joined with its
-    # reference file; the loaders window each file in isolation — no rollout
-    # spans two files.
+    # One list per split (length >= 1); the loaders window each file in
+    # isolation — no rollout spans two files.
     train_dfs, dev_dfs, test_dfs = load_control_splits(cfg, nm_mapping)
+    cfg.fill_common_windows(shortest_test_rollout(cfg, sysid_cfg, test_dfs))
+    cfg.check_windows()
+    fill_reference_scale(objective, cfg, train_dfs)
+    norm_stats = extend_norm_stats(objective, cfg, sysid_stats)
+    if cfg.progress != "silent":
+        print(settings_report(cfg, given, COMMON_SETTINGS))
     train_loader, dev_loader = build_loaders(
         cfg, sysid_cfg, nm_mapping, train_dfs, dev_dfs,
     )

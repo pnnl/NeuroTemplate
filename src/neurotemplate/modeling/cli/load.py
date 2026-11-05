@@ -89,11 +89,10 @@ def main() -> None:
     grad_masks = get_grad_masks(grad_path=grad_path_for_eval, nm_mapping=nm_mapping)
 
     # --no_synth → opt out by passing synth_cfg=None;
-    # otherwise compute from nt_model.
-    synth_cfg = (
-        None if args.no_synth
-        else load_modeling_hooks(cfg).synth_cfg(nm_mapping, norm_stats)
-    )
+    # otherwise compute from nt_model, if it says how.
+    hooks = load_modeling_hooks(cfg)
+    synth_cfg = (hooks.synth_cfg(nm_mapping, norm_stats)
+                 if not args.no_synth and hasattr(hooks, "synth_cfg") else None)
 
     # Plot dir
     if args.plot_dir is not None:

@@ -9,6 +9,7 @@ Freezing is explicit here: the dynamics is held fixed while the policy trains
 from __future__ import annotations
 
 
+import mlflow
 import torch
 
 from neurotemplate.common.tracking import CHECKPOINT
@@ -58,6 +59,20 @@ def load_frozen_dynamics(
     dyn_node = dyn_sys.nodes[0]
 
     return dyn_sys, dyn_node, sysid_cfg, nm_mapping, norm_stats
+
+
+def latest_model_run() -> str:
+    """The most recent finished sys-id run in the tracking store. Only those log
+    `norm_type`, so it tells them from the control runs beside them."""
+    runs = mlflow.search_runs(search_all_experiments=True,
+                              filter_string="attributes.status = 'FINISHED'",
+                              order_by=["attributes.start_time DESC"])
+    if "params.norm_type" in runs.columns:
+        models = runs[runs["params.norm_type"].notna()]
+        if len(models):
+            return models.iloc[0]["run_id"]
+    raise ValueError("No finished model run in this tracking store: run `nt model train`, or "
+                     "set sysid_run_id.")
 
 
 def load_trained_policy(run_id: str, run_dir=None, sysid_run_dir=None, device=None):

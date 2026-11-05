@@ -207,8 +207,9 @@ def evaluate_run(
     dyn_sys, cfg, nm_mapping, norm_stats = load_trained_dynamics(
         run_id, run_dir=run_dir, weights=weights)
     set_seeds(cfg.seed)
-    synth_cfg = (load_modeling_hooks(cfg).synth_cfg(nm_mapping, norm_stats)
-                 if physics_checks else None)
+    hooks = load_modeling_hooks(cfg)
+    synth_cfg = (hooks.synth_cfg(nm_mapping, norm_stats)
+                 if physics_checks and hasattr(hooks, "synth_cfg") else None)
     cfg.plot = plot_dir is not None
     test_results, _ = evaluate_trained(cfg, dyn_sys, data_paths, norm_stats,
                                        nm_mapping, synth_cfg, plot_dir)

@@ -1,7 +1,7 @@
 """The thermal-zone flow, end to end, on a plant the library could have made.
 
-A two-node network behind a cooling tracker, its heat metered a step late,
-goes through what the guide tells an agent to do: declare the columns, run
+The example's plant, a two-node network behind a cooling tracker with its heat metered a
+step late, goes through what the guide tells an agent to do: declare the columns, run
 `nt data ladder` and `nt data thermostat`, paste their snippets into the
 block, and train `rc_network`. The trained model must then track the plant
 a day ahead from its setpoints alone.
@@ -12,8 +12,6 @@ import math
 import sys
 
 import mlflow
-import numpy as np
-import pandas as pd
 import pytest
 import torch
 import yaml
@@ -25,9 +23,7 @@ from neurotemplate.modeling.config import ModelingConfig
 from neurotemplate.modeling.ladder import Rung
 from neurotemplate.modeling.train import train_model
 
-ZONE, HEAT, SETPOINT = "Zone [°C]", "Heat [kW]", "Cooling SP [°C]"
-OUTDOOR, SOLAR = "Outdoor [°C]", "Solar [W/m²]"
-STEPS_PER_HOUR = 12
+from neurotemplate.example import HEAT, OUTDOOR, SETPOINT, SOLAR, ZONE, thermal_plant
 
 HOOKS = f'''
 import json, os
@@ -58,34 +54,6 @@ def sub_plot(df_true, column_name):
 '''
 
 
-def _plant(days: float, seed: int, start: str) -> pd.DataFrame:
-    """The network under a tracker, the setpoint stepped every two hours."""
-    network = Rung(mass=True).network((HEAT,), SOLAR, (), {HEAT: 1.0})
-    values = {"C_Ti": 1.5, "C_Tm": 20.0, "R_Ti_Tm": 0.4, "R_Ti_ambient": 3.0,
-              f"gain_{HEAT}_Ti": 1.0, f"gain_{SOLAR}_Ti": 0.004,
-              "sigma_Ti": 0.05, "sigma_Tm": 0.02, "sigma_y": 0.02}
-    a, b, _, _ = nw.discrete_model(network, nw.as_tensors(values), 1 / STEPS_PER_HOUR)
-    a, b = a.numpy(), b.numpy()
-    rng = np.random.default_rng(seed)
-    steps = int(days * 24 * STEPS_PER_HOUR)
-    hours = np.arange(steps) / STEPS_PER_HOUR
-    outdoor = 27 + 6 * np.sin(2 * np.pi * (hours - 9) / 24)
-    solar = 800 * np.clip(np.sin(2 * np.pi * (hours - 6) / 24), 0, None)
-    setpoint = rng.choice([21.0, 22.5, 24.0, 26.0, 28.0], steps // 24 + 1).repeat(24)[:steps]
-    x, zone, heat = np.array([24.0, 24.0]), np.empty(steps), np.zeros(steps)
-    for k in range(steps):
-        zone[k] = x[0] + rng.normal(0, 0.02)
-        delivered = -np.clip(15.0 * (x[0] - setpoint[k] - 0.3), 0.0, 8.0)
-        if k + 1 < steps:
-            heat[k + 1] = delivered          # the meter reports the step that ends here
-        x = a @ x + b @ np.array([outdoor[k], delivered, solar[k]]) \
-            + rng.normal(0, [0.01, 0.003])
-    return pd.DataFrame({ZONE: zone, HEAT: heat, SETPOINT: setpoint, OUTDOOR: outdoor,
-                         SOLAR: solar},
-                        index=pd.date_range(start, periods=steps, freq="5min",
-                                            name="timestamp"))
-
-
 @pytest.fixture(autouse=True)
 def _restore_tracking_uri():
     previous = mlflow.get_tracking_uri()
@@ -101,7 +69,7 @@ def test_declare_ladder_thermostat_train(tmp_path, monkeypatch):
     (tmp_path / "data").mkdir()
     for split, days, seed, start in (("train", 8, 0, "2025-07-01"), ("dev", 3, 1, "2025-07-09"),
                                      ("test", 3, 2, "2025-07-12")):
-        _plant(days, seed, start).to_csv(tmp_path / "data" / f"{split}.csv")
+        thermal_plant(days, seed, start).to_csv(tmp_path / "data" / f"{split}.csv")
     (tmp_path / "nt_model.py").write_text(HOOKS, encoding="utf-8")
     past = {c: 0 for c in (ZONE, HEAT, OUTDOOR, SOLAR, SETPOINT)}
     config = tmp_path / "zone.yaml"

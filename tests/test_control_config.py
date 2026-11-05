@@ -13,7 +13,7 @@ import pytest
 from neurotemplate.common.config import CONTROL_CONFIG_DIR, ConfigError, time_steps
 from neurotemplate.common.config import load_config_from_cli
 from neurotemplate.control.config import ControlConfig
-from neurotemplate.control.losses import resolve_objective
+from neurotemplate.control.losses import fill_reference_scale, resolve_objective
 from control_fixtures import (
     BAND_GAINS, BAND_LOSSES, HIGH, LOW, SETPT, SUPPLY_T, TARIFF, ZONE, make_control_cfg, make_nm_mapping,
 )
@@ -61,6 +61,7 @@ def test_yaml_fills_what_it_names_and_defaults_the_rest(tmp_path):
 
 def test_a_preview_past_the_training_rollout_is_refused(tmp_path):
     cfg = _load(tmp_path, _YAML, "horizon=30m")   # `oat` previews an hour
+    cfg.fill_common_windows(288)
     with pytest.raises(ValueError, match="never rewarded"):
         cfg.check_windows()      # once the surrogate has said the timestep
 
@@ -115,9 +116,6 @@ _SUPPLY_GAINS = {**BAND_GAINS, "supply_lower": 1.0, "supply_upper": 1.0}
 
 
 @pytest.mark.parametrize("fields,message", [
-    # A tariff has no target to borrow stats from, so it must say its scale.
-    ({"losses": _band(cost=_COST), "gains": {**BAND_GAINS, "cost": 1.0}},
-     "needs a `reference_scale` entry"),
     # A weight is data: one the rollout predicts would carry gradient.
     ({"losses": _band(comfort_lower={"weight": ZONE})}, "must be data"),
 ])
@@ -125,6 +123,21 @@ def test_resolve_names_the_problem(fields, message):
     cfg = make_control_cfg(policy_window={}, **fields)   # not what is under test
     with pytest.raises(ValueError, match=message):
         resolve_objective(cfg, make_nm_mapping())
+
+
+def test_a_tariffs_scale_is_its_largest_magnitude_in_the_training_record():
+    """Set by a rule and written back, so the run logs it and a reload reads it; a band
+    borrows its target's stats instead, and one you set stays yours."""
+    import pandas as pd
+    cfg = make_control_cfg(losses=_band(cost=_COST), gains={**BAND_GAINS, "cost": 1.0},
+                           policy_window={})
+    objective = resolve_objective(cfg, make_nm_mapping())
+    frame = pd.DataFrame({TARIFF: [0.1, -0.6, 0.2], LOW: [20.0] * 3, HIGH: [25.0] * 3})
+    fill_reference_scale(objective, cfg, [frame])
+    assert cfg.reference_scale == {TARIFF: 0.6}
+    cfg.reference_scale[TARIFF] = 0.3
+    fill_reference_scale(objective, cfg, [frame])
+    assert cfg.reference_scale == {TARIFF: 0.3}
 
 
 def test_one_band_column_may_bound_several_outputs():

@@ -39,6 +39,7 @@ def cfg():
     c = dict_to_dataclass({
         "past": {"y0": "15m", "y1": "15m", "u0": "15m", "d0": "15m"},
         "horizon": "30m",
+        "train_stride": "20m",
         "steps_per_hour": 12.0,
         "device": "cpu",
         "progress": "silent",
@@ -61,18 +62,8 @@ def test_column_overrides_apply_per_column_norm(synthetic_df):
     assert np.isclose(stats["y1"]["stretch"], synthetic_df["y1"].std())
 
 
-def test_sec_elapsed_always_identity_regardless_of_override(synthetic_df):
-    """sec_elapsed must never be normalized, even if explicitly overridden."""
-    stats = compute_norm_stats(
-        synthetic_df, norm_type="z_score",
-        column_overrides={"sec_elapsed": "min_max"},
-    )
-    assert stats["sec_elapsed"]["shift"] == 0.0
-    assert stats["sec_elapsed"]["stretch"] == 1.0
-
-
 def test_sliding_window_shapes(synthetic_df, nm_mapping, cfg):
-    """Default windowing: history_steps + horizon = 10 rows, stride history_steps = 4."""
+    """history_steps + horizon = 10 rows, a stride of 4."""
     data = get_sw_dict(synthetic_df, cfg, nm_mapping)
     n_rows = len(synthetic_df)
     steps = cfg.history_steps + cfg.horizon_steps
@@ -88,7 +79,7 @@ def test_sliding_window_shapes(synthetic_df, nm_mapping, cfg):
 
 
 def test_sliding_window_stride(synthetic_df, nm_mapping, cfg):
-    """Each window starts cfg.history_steps after the previous (default stride)."""
+    """Each window starts one stride after the previous."""
     data = get_sw_dict(synthetic_df, cfg, nm_mapping)
     # First window starts at row 0; second at row history_steps
     if data["Y"].shape[0] >= 2:

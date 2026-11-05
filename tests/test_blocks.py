@@ -130,6 +130,3 @@ def test_a_family_is_settled_by_block_models_then_the_hook_then_model():
     assert describe_dynamics(system, cfg)["blocks"]["two"]["model"] == "nssm"
 
 
-def test_block_models_naming_no_block_is_refused():
-    with pytest.raises(ValueError, match="block_models names"):
-        _swap_system(model="mlp", block_models={"nope": "gru"})

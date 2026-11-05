@@ -6,6 +6,8 @@ from dataclasses import asdict, dataclass, field
 from typing import Optional
 
 from neurotemplate.common.config import (
+    DEFAULT_HORIZON_STEPS,
+    DEFAULT_PAST_STEPS,
     PROGRESS_LEVELS,
     Time,
     TimedWindows,
@@ -32,7 +34,7 @@ class ControlConfig(TimedWindows):
     """Knobs for loading a frozen surrogate and training a DPC policy."""
 
     # ── Sys-id model to control against ──────────────────────────
-    # MLflow run id of the trained dynamics surrogate (required).
+    # MLflow run id of the trained dynamics surrogate. Unset, the latest finished one.
     sysid_run_id: str = ""
     # Optional override for the run's artifacts directory.
     run_dir: Optional[str] = None
@@ -53,7 +55,8 @@ class ControlConfig(TimedWindows):
     # Divisor per reference column that bounds no Y column (a tariff, a power
     # cap), so the policy sees an O(1) input. Pure scaling, no shift, so a
     # zero stays a zero. A column that bounds a Y column uses that column's
-    # normalisation instead, and must not be listed here.
+    # normalisation instead, and must not be listed here. Unset, its largest
+    # magnitude in the training record.
     reference_scale: dict[str, float] = field(default_factory=dict)
 
     # Optional path or dotted module name for the control hooks file.
@@ -63,17 +66,20 @@ class ControlConfig(TimedWindows):
     # ── Control horizon / policy window ──────────────────────────
     # How far a training rollout predicts, past its history; for `policy: mpc`, how far
     # each step plans ahead (every D and reference column's `future` must reach it).
-    horizon: Time = "4h"
-    # Time between the starts of training windows. Unset, one window per policy
-    # history depth, which is every few rows: many near-identical windows, and
-    # the epoch's cost with them.
+    # Unset, 48 steps.
+    horizon: Optional[Time] = None
+    # Time between the starts of training windows, and of dev windows. Unset, a quarter
+    # of a horizon, and a whole one.
     train_stride: Optional[Time] = None
+    dev_stride: Optional[Time] = None
     # What the policy reads, any column of the record, listed only if it is read:
     # `{column: {past: n, future: m}}`, steps before and after the current one. A
     # Y or U column takes no `future` (not yet measured, or the policy's own output);
     # any other column requires one. A U column's window ends at the previous step, the
     # last command applied, so `past: 0` means the policy does not read it. See
     # control.policy.build_policy. A trained policy's package takes only what is listed.
+    # Unset: the regulated outputs and the D columns 3 steps back, the last command, and
+    # each D and reference column a horizon ahead.
     policy_window: dict[str, dict[str, Time]] = field(default_factory=dict)
 
     # ── Objective ────────────────────────────────────────────────
@@ -121,8 +127,9 @@ class ControlConfig(TimedWindows):
 
     # ── Evaluation (long closed-loop rollout) ────────────────────
     # How far a test rollout runs, past its history, and how far apart they start.
-    test_horizon: Time = "24h"
-    test_stride: Time = "24h"
+    # Unset, 288 steps or what the shortest test file holds, and not overlapping.
+    test_horizon: Optional[Time] = None
+    test_stride: Optional[Time] = None
 
     # ── Runtime ──────────────────────────────────────────────────
     # Timesteps per hour: the surrogate's, set when it loads.
@@ -159,10 +166,6 @@ class ControlConfig(TimedWindows):
             POLICY_BOUND_METHODS, POLICY_NONLIN, policy_catalog,
         )
 
-        if not self.sysid_run_id:
-            raise ValueError("sysid_run_id must be set (MLflow run id of the "
-                             "trained dynamics surrogate)")
-
         check_one_of(self, "policy", [*policy_catalog, "mpc"])
         check_one_of(self, "progress", list(PROGRESS_LEVELS))
         check_one_of(self, "policy_nonlin", list(POLICY_NONLIN))
@@ -171,10 +174,7 @@ class ControlConfig(TimedWindows):
         # Which columns, and which may look ahead, is checked at policy
         # build, against the surrogate's columns and the objective's.
         check_policy_window(self.policy_window)
-        for name in ("horizon", "test_horizon", "test_stride"):
-            time_microseconds(getattr(self, name), name)
-        if self.train_stride is not None:
-            time_microseconds(self.train_stride, "train_stride")
+        self._check_common_times()
 
         for name, scale in self.reference_scale.items():
             if not isinstance(scale, (int, float)) or scale <= 0:
@@ -216,9 +216,25 @@ class ControlConfig(TimedWindows):
                     "number in the column's units, a column name, or "
                     f"[column, offset] in the column's units, got {pair!r}.")
 
+    def fill_window_table(self, regulated: list[str], nm_mapping: dict[str, list[str]],
+                          r_columns: list[str]) -> None:
+        """`policy_window`, when unset: see the field's comment. Written back so the run
+        logs it. It needs `horizon`, so that is filled here if it was unset."""
+        if self.horizon is None:
+            self.horizon = self._time(DEFAULT_HORIZON_STEPS)
+        if self.policy_window:
+            return
+        past = self._time(DEFAULT_PAST_STEPS)
+        self.policy_window = {
+            **{c: {"past": past} for c in regulated},
+            **{c: {"past": self._time(1)} for c in nm_mapping["U"]},
+            **{c: {"past": past, "future": self.horizon} for c in nm_mapping["D"]},
+            **{c: {"past": 0, "future": self.horizon} for c in r_columns},
+        }
+
     def check_windows(self) -> None:
         """Every window a whole number of steps, and nothing previewed past a rollout: run
-        once the surrogate has set the timestep."""
+        once the surrogate has set the timestep and the defaults have been filled."""
         self._check_common_windows()
         deepest = max((e.get("future", 0) for e in self.window_steps.values()), default=0)
         if deepest > self.horizon_steps:
@@ -249,11 +265,7 @@ class ControlConfig(TimedWindows):
 
 
 def check_policy_window(table: dict) -> None:
-    """Each entry is `{past: time[, future: time]}`, and there is at least one."""
-    if not table:
-        raise ValueError(
-            "policy_window is empty. List what the policy reads, each column with its "
-            "{past, future}; there is no default.")
+    """Each entry is `{past: time[, future: time]}`."""
     for column, entry in table.items():
         if not isinstance(entry, dict) or "past" not in entry or set(entry) - set(WINDOW_KEYS):
             raise ValueError(

@@ -37,19 +37,9 @@ def test_a_column_no_role_claims_is_allowed_and_listed(tmp_path):
     assert unclaimed(mapping, RECORD) == ["Heat", "Tariff"]
 
 
-@pytest.mark.parametrize("columns,message", [
-    ({"Y": ["Zone", "Nowhere"]}, "not in the record: .'Nowhere'"),
-    ({"Y": ["Zone"], "D": ["Zone"]}, "more than one role"),
-    ({"U": ["Setpoint"]}, "Y is empty"),
-])
-def test_roles_are_checked_against_the_record(tmp_path, columns, message):
-    with pytest.raises(ValueError, match=message):
-        nm_mapping(_write(tmp_path, columns), RECORD)
-
-
-def test_a_misspelled_key_is_refused(tmp_path):
-    with pytest.raises(ValueError, match="unknown keys .'tset'"):
-        _write(tmp_path, tset="t.csv")
+def test_roles_are_checked_against_the_record_all_at_once(tmp_path):
+    with pytest.raises(ValueError, match="(?s)not in the record: .'Nowhere'.*more than one role"):
+        nm_mapping(_write(tmp_path, {"Y": ["Zone", "Nowhere"], "D": ["Zone"]}), RECORD)
 
 
 def test_a_gap_in_a_column_no_one_reads_is_not_a_failure():

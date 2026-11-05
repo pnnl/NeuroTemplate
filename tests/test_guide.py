@@ -26,7 +26,7 @@ def test_every_reference_is_tracked_and_every_nt_docs_mention_resolves():
     """The references ship with the package, so `nt docs <name>` in the guide, the
     template or a doc must name one, and each must be tracked to reach the wheel."""
     import subprocess
-    from neurotemplate.guide import DOCS, doc_paths
+    from neurotemplate.guide import DOCS, doc_paths, hook_sections
     from neurotemplate.init import TEMPLATE
     docs = doc_paths()
     repo = GUIDE.parents[2]
@@ -36,4 +36,14 @@ def test_every_reference_is_tracked_and_every_nt_docs_mention_resolves():
     shipped = [GUIDE, *docs.values(), *TEMPLATE.rglob("*.py"), *TEMPLATE.rglob("*.md")]
     mentioned = {name for path in shipped
                  for name in re.findall(r"`nt docs (\w+)`", path.read_text(encoding="utf-8"))}
-    assert mentioned and mentioned <= set(docs), mentioned - set(docs)
+    known = set(docs) | set(hook_sections()[1]) | {"config"}
+    assert mentioned and mentioned <= known, mentioned - known
+
+
+def test_nt_docs_prints_a_hook_and_the_config_reference(capsys):
+    from neurotemplate.cli import main as nt
+    nt(["docs", "block_mapping"])
+    assert "def block_mapping" in capsys.readouterr().out
+    nt(["docs", "config"])
+    out = capsys.readouterr().out
+    assert "`past`" in out and "`control_bounds`" in out

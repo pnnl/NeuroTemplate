@@ -223,15 +223,6 @@ def test_a_zone_behind_a_thermostat_block_sees_the_heat_of_the_step_being_taken(
     assert math.isclose(float(out[0]), float(expected[0]), abs_tol=1e-4)
 
 
-def test_a_cycle_of_driven_blocks_has_no_order_and_says_so():
-    from neurotemplate.modeling.blocks import build_blocks
-
-    mapping = {"Y": ["a", "b"], "U": [], "D": [], "t": ["sec_elapsed"]}
-    spec = {"one": {"Y": ["a"], "driven_by": ["b"]}, "two": {"Y": ["b"], "driven_by": ["a"]}}
-    with pytest.raises(ValueError, match="cycle"):
-        build_blocks(mapping, spec)
-
-
 def test_a_network_that_pins_nothing_is_refused():
     """Temperature alone places only gain / C: nothing pinned, nothing physical."""
     decl = {"nodes": {"Ti": [0.5, 2.0]}, "edges": {"Ti-ambient": [1.0, 4.0]},

@@ -76,20 +76,13 @@ THERMAL_FAMILIES = ("rc_network", "thermostat")
 
 @beartype
 def column_lags(cfg: ModelingConfig, nm_mapping: dict[str, list[str]]) -> Lags:
-    """`cfg.past` as one lag per column, in steps, in nm_mapping order.
-
-    The table must name exactly the model's columns: a missing one has no
-    lag, and an extra one is a declaration nothing reads.
-    """
+    """`cfg.past` as one lag per column, in steps, in nm_mapping order. A table names
+    only the model's columns: an extra one is a declaration nothing reads."""
     columns = [c for key in _KEYS for c in nm_mapping[key]]
-    missing = [c for c in columns if c not in cfg.past]
-    extra = sorted(set(cfg.past) - set(columns))
-    if missing or extra:
-        raise ValueError(
-            "past must list every Y, U and D column of the model and "
-            f"nothing else. Missing: {missing}. Not a model column: {extra}."
-        )
-    lags = cfg.lags
+    extra = sorted(set(cfg.past) - set(columns)) if isinstance(cfg.past, dict) else []
+    if extra:
+        raise ValueError(f"past names {extra}, which are not Y, U or D columns of the model.")
+    lags = cfg.lags_for(columns)
     return tuple(tuple(lags[c] for c in nm_mapping[key]) for key in _KEYS)
 
 
@@ -219,6 +212,18 @@ FAMILIES: dict[str, Callable] = {
 VALID_MODEL_NAMES = tuple(FAMILIES)
 
 
+def fill_context(cfg: ModelingConfig, nm_mapping: dict[str, list[str]],
+                 block_spec: Optional[dict[str, dict]]) -> None:
+    """`context`, when unset: a day when a block is an rc_network, whose filter places its
+    hidden nodes from it, and nothing otherwise. A day is plenty for buildings measured
+    so far, and it costs records, so a model that keeps no such state is not charged it."""
+    if cfg.context is None:
+        filtered = cfg.model in VALID_MODEL_NAMES and any(
+            resolve_family(cfg, block)[0] == "rc_network"
+            for block in build_blocks(nm_mapping, block_spec))
+        cfg.context = "24h" if filtered else 0
+
+
 def resolve_family(cfg: ModelingConfig, block: Block) -> tuple[str, str]:
     """`(family, where it came from)` for one block: the config's `block_models`,
     then the block's own `model`, then the config's `model`."""
@@ -334,7 +339,7 @@ def describe_dynamics(dyn_sys: SystemPreview, cfg: ModelingConfig) -> dict:
       - factory: the model family, or `mixed (a, b)` when the blocks use different
         families (each block names its own), or a custom model's name
       - residual: whether the run's `cfg.predicts` is an increment
-      - history: each column's lag in steps, and history_steps, the window depth
+      - past: the run's `cfg.past`, and history_steps, the window depth
       - ny / nu / nd: shape parameters
       - param_count: total trainable parameters
       - blocks: per-block descriptors, `{name: info}`; a custom model is one
@@ -363,7 +368,7 @@ def describe_dynamics(dyn_sys: SystemPreview, cfg: ModelingConfig) -> dict:
     return {
         "factory": factory,
         "residual": cfg.predicts == "increment",
-        "history": dict(cfg.lags),
+        "past": cfg.past,
         "history_steps": int(cfg.history_steps),
         "ny": int(ny),
         "nu": int(nu),
@@ -504,11 +509,13 @@ def get_dynamics(
     _refuse_declarations(cfg, blocks, families)
     _warn_ignored_declarations(blocks, families)
     column_lags(cfg, nm_mapping)   # the history table names exactly the columns
-    declared = cfg.lags
+    declared = cfg.lags_for([c for key in _KEYS for c in nm_mapping[key]])
     _check_hinge_lags(blocks, declared)
     lags = [block_lags(family, block, declared, cfg.history_steps)
             for block, family in zip(blocks, families)]
-    _check_lags_consumed(blocks, families, lags, declared)
+    # A table says each column on purpose; one time for all is not a claim about each.
+    if isinstance(cfg.past, dict):
+        _check_lags_consumed(blocks, families, lags, declared)
     if head_stack is not None:
         _check_value_heads(blocks, families, head_stack)
 

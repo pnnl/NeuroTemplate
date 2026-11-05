@@ -1,6 +1,9 @@
-sysid_run_id: ""
+# The objective is the goal, so it is yours to write; everything else is a default the
+# run prints, `nt docs config` lists what can be set, and the latest model run is its model.
 policy: mlp
-log2_policy_hidden: 5
+horizon: 12h
+epochs: 30
+batch_size: 32
 policy_window:
   "Zone [°C]": {past: 15m}
   "Outdoor [°C]": {past: 0, future: 6h}
@@ -14,10 +17,3 @@ losses:
   cost: {column: power, norm: 1, weight: "Tariff [$/kWh]"}
   du: {column: "Cooling SP [°C]", map: first_difference, norm: 1}
 gains: {comfort_lower: 100.0, comfort_upper: 100.0, cost: 10.0, du: 0.5}
-reference_scale: {"Tariff [$/kWh]": 0.48}
-epochs: 30
-horizon: 12h
-train_stride: 2h
-batch_size: 32
-test_horizon: 24h
-test_stride: 12h

@@ -158,19 +158,61 @@ def time_steps(value: Time, steps_per_hour: Optional[float], name: str) -> int:
     return int(steps)
 
 
+def steps_as_time(steps: int, steps_per_hour: float) -> Time:
+    """`steps` of the data as a config writes them: whole hours or minutes, or seconds."""
+    if steps == 0:
+        return 0
+    seconds = Fraction(3600) * steps / Fraction(steps_per_hour).limit_denominator(10**9)
+    for unit, size in (("h", 3600), ("m", 60)):
+        if (seconds / size).denominator == 1:
+            return f"{seconds / size}{unit}"
+    return f"{float(seconds)}s"
+
+
+#: What a window left unset comes to, in steps of the data so it is always a whole number
+#: of them. One place, printed by every run (`settings_report`).
+DEFAULT_PAST_STEPS = 3
+DEFAULT_HORIZON_STEPS = 48
+DEFAULT_TEST_HORIZON_STEPS = 288
+#: Training windows start a quarter of a horizon apart: enough windows without
+#: near-identical ones. Dev and test windows do not overlap.
+TRAIN_STRIDES_PER_HORIZON = 4
+
+
 class TimedWindows:
     """What both configs share: their windows are times, read as steps once the data has
     set `steps_per_hour`."""
 
     steps_per_hour: Optional[float]
-    context: Time
-    horizon: Time
-    test_horizon: Time
+    horizon: Optional[Time]
+    test_horizon: Optional[Time]
     train_stride: Optional[Time]
-    test_stride: Time
+    dev_stride: Optional[Time]
+    test_stride: Optional[Time]
 
     def _steps(self, name: str) -> int:
         return time_steps(getattr(self, name), self.steps_per_hour, name)
+
+    def _time(self, steps: int) -> Time:
+        return steps_as_time(steps, self.steps_per_hour)
+
+    def fill_common_windows(self, longest_test_horizon: int) -> None:
+        """What each unset window comes to, written back so the run logs it.
+        `longest_test_horizon` is what the shortest test file can hold, in steps."""
+        if self.horizon is None:
+            self.horizon = self._time(DEFAULT_HORIZON_STEPS)
+        if self.test_horizon is None:
+            if longest_test_horizon < 1:
+                raise ValueError(
+                    "The shortest test file is too short to hold a test rollout after its "
+                    "history; use a longer file, or a shorter `past` or `context`.")
+            self.test_horizon = self._time(min(DEFAULT_TEST_HORIZON_STEPS, longest_test_horizon))
+        if self.train_stride is None:
+            self.train_stride = self._time(max(1, self.horizon_steps // TRAIN_STRIDES_PER_HORIZON))
+        if self.dev_stride is None:
+            self.dev_stride = self.horizon
+        if self.test_stride is None:
+            self.test_stride = self.test_horizon
 
     @property
     def horizon_steps(self) -> int:
@@ -181,21 +223,54 @@ class TimedWindows:
         return self._steps("test_horizon")
 
     @property
-    def train_stride_steps(self) -> Optional[int]:
-        return None if self.train_stride is None else self._steps("train_stride")
+    def train_stride_steps(self) -> int:
+        return self._steps("train_stride")
+
+    @property
+    def dev_stride_steps(self) -> int:
+        return self._steps("dev_stride")
 
     @property
     def test_stride_steps(self) -> int:
         return self._steps("test_stride")
 
     def _check_common_windows(self) -> None:
-        """Every window readable and the ones that must be, positive: run once the data
-        has set the timestep."""
-        for name in ("horizon", "test_horizon", "test_stride"):
+        """Every window a whole number of steps, and positive: run once the data has set
+        the timestep and the defaults have been filled."""
+        for name in ("horizon", "test_horizon", "train_stride", "dev_stride", "test_stride"):
             if self._steps(name) <= 0:
                 raise ValueError(f"{name} must be positive, got {getattr(self, name)}")
-        if self.train_stride_steps is not None and self.train_stride_steps <= 0:
-            raise ValueError(f"train_stride must be positive, got {self.train_stride}")
+
+    def _check_common_times(self) -> None:
+        """Every set window spelled as a time: before any data has loaded."""
+        for name in ("horizon", "test_horizon", "train_stride", "dev_stride", "test_stride"):
+            if getattr(self, name) is not None:
+                time_microseconds(getattr(self, name), name)
+
+
+def fields_set(cfg) -> set[str]:
+    """The fields of `cfg` that differ from the dataclass's default: what the caller
+    chose, read before a run fills in what it did not."""
+    fresh = type(cfg)()
+    return {f.name for f in fields(cfg)
+            if f.name != "savedir" and getattr(cfg, f.name) != getattr(fresh, f.name)}
+
+
+def _setting(cfg, name: str) -> str:
+    value = getattr(cfg, name)
+    if isinstance(value, dict) and len(value) > 3:
+        return f"{name}: {len(value)} entries"
+    return f"{name}: {value}"
+
+
+def settings_report(cfg, given: set[str], common: tuple[str, ...]) -> str:
+    """Two lines: what the caller set, and what the library chose. `common` is what is
+    worth naming when left alone; a setting nobody set outside it stays out of the way,
+    and `--print-config` has them all."""
+    you_set = [_setting(cfg, name) for name in sorted(given)]
+    defaults = [_setting(cfg, name) for name in common if name not in given]
+    return ("You set: " + (" · ".join(you_set) or "nothing") + "\n"
+            + "Defaults used: " + (" · ".join(defaults) or "none"))
 
 
 def default_savedir(prefix: str = "temp") -> str:

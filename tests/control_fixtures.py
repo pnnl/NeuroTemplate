@@ -151,6 +151,7 @@ def make_control_cfg(future: dict[str, int] | None = None, u_past: int = 0,
     # hmax = max(sysid_cfg.history_steps=4, cfg.history_steps=3) = 4, so a 12-row window.
     cfg.test_horizon = steps(8)
     cfg.test_stride = steps(5)
+    cfg.train_stride, cfg.dev_stride = steps(3), steps(3)
     cfg.batch_size = 4
     cfg.epochs = 1
     cfg.solver["max_iters"] = 2  # the plan runs; its convergence is test_plan's

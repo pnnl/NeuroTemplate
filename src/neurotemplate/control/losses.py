@@ -38,7 +38,8 @@ is in Y) uses that target's shift and stretch, so the policy compares like with
 like. One band column may bound several targets — one comfort band over every
 zone — and then takes the stats of the first of them in Y order. Every other
 `R` column — a tariff, a cap on `power` — is divided by its entry in
-`reference_scale`, with no shift, so a zero stays a zero.
+`reference_scale`, with no shift, so a zero stays a zero; unset, it is the column's
+largest magnitude in the training record (`fill_reference_scale`).
 
 The regulated set is derived: the Y targets of the `relu`/`nrelu` entries.
 """
@@ -244,11 +245,6 @@ def resolve_objective(cfg, nm_mapping: dict[str, list[str]]) -> Objective:
             _require(name not in scales,
                      f"reference_scale[{name!r}] is set, but {name!r} bounds "
                      f"{bound_to[name]!r} and is normalised with its stats.")
-        else:
-            _require(name in scales,
-                     f"Reference column {name!r} bounds no Y column, so it needs "
-                     "a `reference_scale` entry: the divisor that gives the "
-                     "policy an O(1) input (no shift, so a zero stays a zero).")
     stray = sorted(set(scales) - set(r_columns))
     _require(not stray, f"reference_scale names {stray}, which are not "
              f"reference columns of the objective ({r_columns}).")
@@ -267,6 +263,15 @@ def bound_columns(bounds: dict[str, list]) -> list[str]:
             elif isinstance(side, list):
                 named.append(side[0])
     return named
+
+
+def fill_reference_scale(objective: Objective, cfg, frames: list) -> None:
+    """Each unbound reference column's divisor, when unset: its largest magnitude in the
+    training frames, or 1 for a column that is always 0. Written back so the run logs it."""
+    for name in objective.r_columns:
+        if name not in objective.bound_to and name not in cfg.reference_scale:
+            largest = max(float(frame[name].abs().max()) for frame in frames)
+            cfg.reference_scale[name] = largest or 1.0
 
 
 @beartype

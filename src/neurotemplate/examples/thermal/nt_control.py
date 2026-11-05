@@ -1,16 +1,9 @@
-"""What a `power` loss term prices: the meter the model predicts."""
-
-POWER = "Power [kW]"
-POWER_METRIC_IMPLEMENTED = True
+"""What a `power` loss term prices, and what the plots show beside the commands."""
 
 
 def power_channels(nm_mapping):
-    return [POWER]
+    return ["Power [kW]"]
 
 
 def plot_context_channels(nm_mapping):
     return ["Outdoor [°C]"]
-
-
-def power_metric(yn, U, D, nm_mapping):
-    return yn[:, :, nm_mapping["Y"].index(POWER)]

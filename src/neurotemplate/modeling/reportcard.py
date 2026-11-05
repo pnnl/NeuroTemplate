@@ -224,13 +224,14 @@ def _lag_list(lags: dict[str, int]) -> str:
     return ", ".join(f"{column} {lag}" for column, lag in lags.items())
 
 
-def _lags_by_value(lags: dict[str, int]) -> str:
-    """Columns grouped by their lag, longest first: `lag 5: a, b, … (+n)`."""
-    groups: dict[int, list[str]] = {}
-    for column, lag in lags.items():
-        groups.setdefault(lag, []).append(column)
-    return "; ".join(f"lag {lag}: {_names(cols)}"
-                     for lag, cols in sorted(groups.items(), reverse=True))
+def _past_line(past) -> str:
+    """One time for every column, or columns grouped by their own: `15m: a, b, … (+n)`."""
+    if not isinstance(past, dict):
+        return f"{past} for every column"
+    groups: dict[str, list[str]] = {}
+    for column, value in past.items():
+        groups.setdefault(str(value), []).append(column)
+    return "; ".join(f"{value}: {_names(cols)}" for value, cols in groups.items())
 
 
 def _block_parts(info: dict) -> list[str]:
@@ -330,7 +331,7 @@ def _architecture_section(arch: dict) -> str:
         f"- `{arch['factory']}`" + (" (predicts increments)" if arch["residual"] else "")
         + f", {arch['param_count']:,} trainable params, history {arch['history_steps']} steps; "
         f"ny={arch['ny']}, nu={arch['nu']}, nd={arch['nd']}",
-        f"- History: {_lags_by_value(arch['history'])}",
+        f"- Past: {_past_line(arch['past'])}",
     ]
     lines += _stack_lines(arch)
     for column, entry in (arch.get("hinges") or {}).items():

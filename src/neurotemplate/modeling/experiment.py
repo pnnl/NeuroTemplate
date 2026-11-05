@@ -138,6 +138,7 @@ def build_trainer(
         dfs=dev_dfs, cfg=cfg, nm_mapping=nm_mapping,
         name="dev",
         steps=cfg.history_steps + cfg.horizon_steps,
+        stride=cfg.dev_stride_steps,
     )
     if cfg.lr > 0:
         check_parameters_reach_loss(problem, next(iter(train_loader)))

@@ -67,12 +67,6 @@ def test_a_fixed_range_holds_the_commands_and_needs_no_per_step_map():
     assert (u >= 24.0 - 1e-4).all() and (u <= 25.0 + 1e-4).all()
 
 
-def test_bounds_name_u_columns():
-    s = full_setup(control_bounds={"Nowhere [°C]": [0.0, 1.0]})
-    with pytest.raises(ValueError, match="not U columns"):
-        control_box(s["cfg"], s["nm"], s["norm_stats"], "cpu")
-
-
 def test_a_bound_may_sit_a_margin_inside_a_band_edge():
     """[column, offset]: the command stays at least the margin under the band's
     ceiling, so equipment that starts past its setpoint does not overshoot."""

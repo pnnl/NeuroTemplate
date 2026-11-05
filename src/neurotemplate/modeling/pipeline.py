@@ -48,7 +48,7 @@ from neurotemplate.common.data_utils import (
     warn_degenerate_columns,
 )
 from neurotemplate.modeling.experiment import fit_dynamics, set_seeds
-from neurotemplate.modeling.heads import HeadStack
+from neurotemplate.modeling.heads import HeadStack, RegressionHead
 from neurotemplate.common.metrics import (
     ChannelMetrics,
     RolloutStability,
@@ -61,7 +61,7 @@ from neurotemplate.common.metrics import (
 )
 from neurotemplate.common.reportcard import RESULTS_DIR, write_reportcard as _write_reportcard
 from neurotemplate.modeling.contract import contract_model
-from neurotemplate.modeling.dynamics import describe_dynamics
+from neurotemplate.modeling.dynamics import describe_dynamics, fill_context
 from neurotemplate.modeling.plotting import plot_predictions, plot_synthetic
 from neurotemplate.modeling.reportcard import (
     EnsembleSpread,
@@ -128,7 +128,6 @@ def prepare_data(cfg: ModelingConfig, hooks) -> PreparedData:
     """
     train_raws, dev_raws, test_raws, freq_s = get_data_splits(cfg)
     cfg.steps_per_hour = 3600.0 / freq_s
-    cfg.check_windows()
     # Column roles only need the schema, and get_data_splits has already
     # checked every file carries the same columns.
     nm_mapping = resolve_nm_mapping(cfg, train_raws[0])
@@ -138,17 +137,26 @@ def prepare_data(cfg: ModelingConfig, hooks) -> PreparedData:
     if left_out and cfg.progress != "silent":
         print(f"Not read by the model (no role in data.yaml): {left_out}")
     block_spec = resolve_block_spec(hooks, nm_mapping, cfg)
+    fill_context(cfg, nm_mapping, block_spec)
+    cfg.fill_windows(min(len(df) for df in test_raws))
+    cfg.check_windows()
 
+    norm_config = getattr(hooks, "column_norm_config", lambda nm: {})
     norm_stats = compute_norm_stats(
         df=pool_dfs(train_raws), norm_type=cfg.norm_type,
-        column_overrides=hooks.column_norm_config(nm_mapping),
+        column_overrides=norm_config(nm_mapping),
     )
     warn_degenerate_columns(norm_stats, nm_mapping)
-    synth_cfg = hooks.synth_cfg(nm_mapping, norm_stats)
+    synth_cfg = None
+    if hasattr(hooks, "synth_cfg"):
+        synth_cfg = hooks.synth_cfg(nm_mapping, norm_stats)
     if synth_cfg is not None:
         # Before the first epoch, not after the last: the checks run once
         # training is over, and `build_scenarios` re-validates on reload.
         synth_cfg.validate(nm_mapping)
+    elif cfg.progress != "silent":
+        print("No physics checks will run: define `synth_cfg` in nt_model.py "
+              "(`nt docs synth_cfg`).")
     return PreparedData(
         train_dfs=train_raws,
         dev_dfs=dev_raws,
@@ -159,7 +167,8 @@ def prepare_data(cfg: ModelingConfig, hooks) -> PreparedData:
         norm_stats=norm_stats,
         grad_masks=get_grad_masks(grad_path=cfg.grad_path, nm_mapping=nm_mapping),
         synth_cfg=synth_cfg,
-        head_stack=hooks.output_heads(nm_mapping, norm_stats),
+        head_stack=(hooks.output_heads(nm_mapping, norm_stats) if hasattr(hooks, "output_heads")
+                    else HeadStack([RegressionHead() for _ in nm_mapping["Y"]], nm_mapping["Y"])),
     )
 
 

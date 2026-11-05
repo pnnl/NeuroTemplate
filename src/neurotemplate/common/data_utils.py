@@ -362,14 +362,13 @@ def get_sw_dict(
         nm_mapping: Column mapping that defines Y/U/D/t extraction order.
         steps: window length. None uses history_steps + horizon; a
             negative value means one window spanning the whole frame.
-        stride: rows between window starts. None uses `cfg.train_stride_steps`, and
-            without one `history_steps`.
+        stride: rows between window starts. None uses `cfg.train_stride_steps`.
     """
     if steps is None:
         steps = cfg.history_steps + cfg.horizon_steps
     elif steps < 0:
         steps = df.shape[0]
-    stride = stride or cfg.train_stride_steps or cfg.history_steps
+    stride = stride or cfg.train_stride_steps
 
     Y, U, D, t = [sliding_windows(df, nm_mapping[key], steps, stride, cfg.device)
                   for key in ("Y", "U", "D", "t")]
@@ -442,6 +441,7 @@ def get_loader(
     nm_mapping: dict[str, list[str]],
     name: str,
     steps: Optional[int] = None,
+    stride: Optional[int] = None,
 ):
     """
     Args:
@@ -452,9 +452,10 @@ def get_loader(
         nm_mapping: Column mapping that defines Y/U/D/t extraction order.
         name: Split name stored on the DictDataset for logging/debugging.
         steps: Optional override for window length (None uses history_steps + horizon).
+        stride: Optional override for rows between window starts.
     """
 
-    data = get_sw_dict_multi(dfs, cfg, nm_mapping, steps)
+    data = get_sw_dict_multi(dfs, cfg, nm_mapping, steps, stride)
 
     dataset = DictDataset(data, name=name)
 

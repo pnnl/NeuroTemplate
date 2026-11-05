@@ -7,71 +7,53 @@ A controller is later trained against that rollout, so the surrogate is
 judged on how it behaves over many steps, and in states the data never
 visited, not only on its one-step error.
 
-The column roles are yours to set. `Y` is what a controller or its objective
-needs, `U` is what a controller can command, and `D` is what you could know
+The column roles are yours to set, in `data.yaml`. `Y` is what a controller or its
+objective needs, `U` is what a controller can command, and `D` is what you could know
 without the plant, such as weather or schedules, since a policy is later fed
-`D` from a forecast.
+`D` from a forecast. A column no role claims is allowed, and each run lists it.
 
 **Timing, by role.** `Y` at row t is sampled at t, or measured over the step
 that ends at t (a meter). `U` and `D` at row t are held over the step that
 starts at t, `[t, t+1)`: the command applied, the weather in force. The
 library assumes this and never shifts a column; a column recorded the other
-way is shifted in `data_mapping`.
+way is shifted in your prep script.
 
 ## What you provide
 
-The hooks in `nt_model.py`, scaffolded by `nt init` with a docstring each:
-
-| Hook | Says | |
-|---|---|---|
-| `data_mapping` | which columns are `Y`, `U` and `D`; config's `exclude_columns` then drops some | required |
-| `data_head_config` | an output head per `Y` column: regression, binary, bounded or ordinal | required |
-| `column_norm_config` | per-column normalization overrides | required |
-| `synth_cfg` | which outputs are thermal states, for the physics checks (`None` skips them) | required |
-| `sub_plot` | how output plots are grouped | required |
-| `block_mapping` | blocks, a family per block, what each column is, a thermal zone's network and thermostat | optional |
-| `custom_models` | models of your own, by name ("Your own model") | optional |
-| `hyper_args` | the search space for `nt model optuna` | that command only |
-
-"Required" means the function must exist, even if it returns the trivial
-answer. Settings that are not about your data, such as the family default,
-network size and training schedule, live in `model_configs/modeling.yaml`,
-where every field is annotated. So does `history`, the one setting there
-that names your columns.
+Column roles, in `data.yaml`. That is all a run needs: the default black box runs on them.
+`nt docs hooks` lists the hooks, all optional, where you change the model; `nt docs config`
+every setting. Each run prints what you set apart from the defaults it used.
 
 ```bash
 nt model train --config model_configs/debug.yaml            # a smoke run first
 nt model train --set epochs=200 --set ensemble_seeds=3      # one-off overrides
 ```
 
-## What the model reads: `history`
+## What the model reads: `past` and `context`
 
-`history` gives every `Y`, `U` and `D` column a lag, the steps before the
-current one the model reads. Every column is listed, and there is no
-default.
+`past` is how far before the current step the model reads: one time for every column, or
+a table, a column it does not name reading the current row only. Unset, 3 steps.
 
 ```yaml
-history:
-  "Tank Temperature [degC]": 11      # syntax, not values
-  "Heater Command [-]": 0
-  "Ambient Temperature [degC]": 3
+past:
+  "Tank Temperature [degC]": 1h      # syntax, not values
+  "Ambient Temperature [degC]": 15m
 ```
 
-The table lists what learned maps read: each column at its own lag. A `gru`
-reads one lag for every column it reads, because its window is its warm-up. The
-build refuses a table that misses a column, a lag no block actually reads, and a
-`demand` setpoint lagged further back than its state. The reportcard lists the
-lags each block reads.
+Windows are times everywhere, `5h`, `20m`, `6s`, `100ms`, `10us`: one that is not a whole
+number of the data's steps is a loud error, once the data has loaded. A table says what learned
+maps read, each column at its own lag. A `gru` reads one lag for every column it reads,
+because its window is its warm-up. The build refuses a lag no block actually reads, and a hinged
+setpoint lagged further back than its zone. The reportcard lists the lags each block reads.
 
-`context_steps` is the record a model that keeps state starts from, beyond what
-the table asks: an `rc_network`'s filter places its hidden nodes from it. The
-thermal blocks are not in the table, so a column only they read is listed at 0.
+`context` is the record a model that keeps state starts from, beyond what `past` asks: an
+`rc_network`'s filter places its hidden nodes from it. Unset, a day for a model with an
+`rc_network` block, nothing otherwise. The thermal blocks are not in the table.
 
-The larger of the deepest lag plus one and `context_steps` is `history_steps`:
-the rows of every column a model is handed, the seeded history before the first
-prediction, and the rows an exported model takes. Training windows start
-`train_stride` rows apart, by default `history_steps`; a long context then means
-few windows, and with `batch_size` above their number, one update per epoch.
+The deeper of the two is the seeded history before the first prediction, and the rows an exported
+model takes. Rollouts then predict `horizon` past it in training and on dev, and `test_horizon` on
+test. Training windows start `train_stride` apart, a quarter of a horizon by default; dev windows
+`dev_stride`, a whole one; test windows `test_stride`, a whole test horizon.
 
 ## Model families
 
@@ -84,8 +66,8 @@ few windows, and with `batch_size` above their number, one update per epoch.
 | `rc_network` | grey box | a thermal zone: a declared RC network, driven by a commanded input or another block's output, all physical |
 | `thermostat` | grey box | setpoints to heat: a tracker or latch with physical parameters, a block of its own |
 
-The black boxes often fit best and are fine for prediction you won't steer
-by. Nothing bounds their long rollouts, so read the stability and physics
+The black boxes are fully legitimate, particularly with gradient constraints (`grad_path`),
+and often fit best. Nothing bounds their long rollouts, so read the stability and physics
 sections of the reportcard before planning against one.
 
 ### rc_network and thermostat: a thermal zone you can read
@@ -124,7 +106,7 @@ Everything inside is physical:
   gain is held under its `gain_limit`, `C_zone / dt`, the bound past which the
   discrete loop would ring.
 - **The hidden nodes are filtered, not guessed.** The first call of a rollout runs
-  a Kalman filter over the `context_steps` window, driven by the recorded inputs,
+  a Kalman filter over the `context` window, driven by the recorded inputs,
   and leaves every node where the record puts it. After that the zone needs one
   row: the nodes carry over.
 
@@ -184,7 +166,7 @@ def block_mapping(nm_mapping, cfg):
         "zone":  {"Y": ["Zone Temperature"], "U": [], "driven_by": ["Delivered Heat"],
                   "model": "rc_network", ...},
         "power": {"Y": ["Total Power"], "U": [], "driven_by": ["Delivered Heat"],
-                  "model": "mlp", "residual": False},
+                  "model": "mlp", "predicts": "value"},
     }
 ```
 
@@ -197,9 +179,9 @@ def block_mapping(nm_mapping, cfg):
   from j to j + 1, the last row what the producer just wrote. A heat is `driven_by`:
   a meter or a zone reading it through `reads` is a step late. A cycle of
   `driven_by` is refused; close a loop through `reads`, as a thermostat does.
-- `residual` lets a block say whether it predicts a change on the last row or the
-  value itself, whatever the run's `residual` says. A meter says the value: under a
-  residual it integrates its own errors.
+- `predicts` lets a block say whether its output is an `increment` on the last row or the
+  `value` itself, whatever the run's `predicts` says. A meter says the value: as an
+  increment it integrates its own errors.
 
 There is no conduction between blocks: they interact only through shared
 inputs, `reads` and `driven_by`.
@@ -226,7 +208,7 @@ physics instead of having to learn it:
 
 | Declaration | Acts in | Does |
 |---|---|---|
-| `demand` | every family | replaces a setpoint with the thermostat's clamped error against the block's own state, `relu(zone − setpoint)` for cooling, computed from the model's own prediction during a rollout. A setpoint above the zone is then free in the surrogate, as it is in the plant. |
+| `inputs: {setpoint: {target: zone, map: nrelu}}` | every family | the setpoint hinge: replaces a setpoint with the thermostat's clamped error against the block's own state, `relu(zone − setpoint)` for `nrelu` and `relu(setpoint − zone)` for `relu`, computed from the model's own prediction during a rollout. A setpoint above the zone is then free in the surrogate, as it is in the plant. The gradient stays alive on the inactive side, so a controller can learn to leave it. |
 | `ambient`, `scale`, `solar` | `rc_network`, `thermostat` | the outdoor temperature the network conducts to, what sets its units, the irradiance the ladder may route into more than one node |
 
 Nothing is inferred from column names. A declaration changes the
@@ -254,7 +236,7 @@ def custom_models():
 ```
 
 It is the same contract the built-in families are behind: each is a
-`stepper.Stepper` (normalise, derive inputs, core, residual, heads, physical
+`stepper.Stepper` (normalise, setpoint hinges, core, increment, heads, physical
 units) around a core, and the pieces are yours to use. A short `forward` over
 them is the natural way to write what blocks cannot say, such as a signal no
 column records:
@@ -279,10 +261,9 @@ class Building(nn.Module):
 ```
 
 - It is one `torch.nn.Module` over every column, so `block_mapping` returns
-  `None`: blocks are the built-in families' structure. A bound or a level goes
-  inside the model. If it owns a `head_stack`, as a `Stepper` does when handed one,
-  the library's level metrics and calibration use it; a head declared in
-  `data_head_config` that the model does not own is refused.
+  `None`: blocks are the built-in families' structure. A bound goes inside the
+  model, or in a `head_stack` it owns, as a `Stepper` does when handed one; a head
+  declared in `output_heads` that the model does not own is refused.
 - State that outlives the window (a filtered mass, a latch) goes through two
   methods, `rollout_state()` and `set_rollout_state(state)`, the state one
   `[batch, width]` tensor. When the state is `None` the model is cold and
@@ -312,7 +293,7 @@ are named. Each instrument's full output is a JSON file in the run's
 against the previous run or against persistence, not against a fixed
 threshold.
 
-- **Accuracy**: rollout RMSE over `test_window` steps beside persistence
+- **Accuracy**: rollout RMSE over `test_horizon` beside persistence
   (holding the last measured state), and skill, 1 − RMSE / persistence. At
   or below 0 the model adds nothing to a copy-forward.
 - **Whiteness** of the one-step-ahead residuals, every test step predicted
@@ -321,8 +302,7 @@ threshold.
   dynamics leaves white noise; what it leaves instead is grouped by the
   period holding the most residual power. Under an hour is a missing fast
   state or lag, daily is a daily driver no input carries (occupancy,
-  internal gains), the longest periods a slow drift. Continuous outputs
-  only; staged ones have level metrics.
+  internal gains), the longest periods a slow drift.
 - **Physics checks**, when `synth_cfg` describes the thermal states. They
   test four things in synthetic states the data never contains:
   equilibrium, step response, reachability and free decay, each answered in
@@ -333,14 +313,6 @@ threshold.
 - **Rollout**: channels whose rollout ramps (monotone, unlike the truth) or
   drifts more than twice the truth's own drift. A model that has stopped
   responding to its inputs emits a ramp that a short window's error hides.
-- **Level metrics** for binary and ordinal outputs, scored as a classifier:
-  balanced accuracy beside persistence's. Staged equipment is a rare-event
-  channel, where a low error can mean the model never predicts the event.
-
-Staged outputs get two things set from the data, both on by default: each
-level's loss is weighted by how rare it is, and an ordinal head's decision
-thresholds are moved after training until the predicted level shares match
-the true ones. The kept thresholds are saved with the run.
 
 Test error is measured on the excitation in your data, which is rarely
 where a controller will drive the plant. The rollout and physics sections
@@ -365,17 +337,15 @@ oat = expand(hourly_oat, "5min", "quadratic")      # a smooth physical one
 
 `smooth` needs the `prep` extra. `nt data plot FILE` shows a record as
 recorded, one channel at a time, gaps as breaks in the line; run from the
-application directory, its channel list is grouped by `data_mapping`'s roles
+application directory, its channel list is grouped by `data.yaml`'s roles
 (`--column C --output P.png` writes one channel to an image instead). Before
-training, `nt data heads` reports
-which output head a column's distribution suggests, and `nt data ladder`
-and `nt data thermostat` a thermal zone's network and thermostat (see
-"rc_network"). All are advice, not checks.
+training, `nt data ladder` and `nt data thermostat` report a thermal zone's network and
+thermostat (see "rc_network"). All are advice, not checks. Deriving or shifting a column
+belongs in your prep script.
 
-## Searching, rescoring, scripting
+## Rescoring, scripting
 
 ```bash
-nt model optuna --set n_trials=50                         # search space: hyper_args
 nt model load --run_id <run> --data data/next_week.csv    # score a run on other data
 ```
 
@@ -397,9 +367,11 @@ dyn_sys, cfg, nm_mapping, norm_stats = load_trained_dynamics(run.run_id)
 `load_config` is `--config` plus `--set`. Scoring always uses the run's own
 normalization, never statistics fitted to the new data.
 
-A training call sets two process-wide torch settings from its config, as the
-command line does: the CPU thread count (`threads`, 1 unless set; `null`
-leaves torch's own) and, off the CPU, the default device. A reload runs on
+Anyone can search over `train_model` themselves: it is one call. A training call sets two
+process-wide torch settings from its config, as the command line does: the CPU thread count
+(`threads`, 1 unless set; `null` means one per core) and, off the CPU, the default device.
+Importing the package first starts OpenMP at one thread (`OMP_NUM_THREADS`, unless you set it),
+because `threads: 1` alone leaves its workers spinning. A reload runs on
 this machine, not wherever the run trained: `load_trained_dynamics(run_id,
 device="cuda")`, or no `device` for CUDA if present and the CPU otherwise.
 

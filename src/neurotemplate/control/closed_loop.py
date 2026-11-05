@@ -74,20 +74,26 @@ def build_closed_loop(dyn_node, policy_node, cfg, sysid_cfg) -> SystemPreview:
 
 @beartype
 def power_term(cfg, nm_mapping: dict[str, list[str]]):
-    """The per-step power signal as a plain callable, or None when unimplemented.
+    """The per-step power signal as a plain callable, or None when no hook says what it
+    is: `power_metric`, or else the sum of the `power_channels` the surrogate predicts.
 
     Signature is `(yn, U, D) -> [batch, time]` over the *scored horizon*
     slices, physical units. Shared with `control.objective` so the shape check
     sweeps exactly the quantity the loss minimizes, not a re-derivation of it.
     """
     hooks = load_control_hooks(cfg)
-    if not getattr(hooks, "POWER_METRIC_IMPLEMENTED", False):
+    if hasattr(hooks, "power_metric"):
+        return lambda yn, u, d: hooks.power_metric(yn, u, d, nm_mapping)
+    channels = power_channels(hooks, nm_mapping)
+    if not channels:
         return None
+    indices = [nm_mapping["Y"].index(c) for c in channels]
+    return lambda yn, u, d: sum(yn[:, :, i] for i in indices)
 
-    def term(yn, u, d):
-        return hooks.power_metric(yn, u, d, nm_mapping)
 
-    return term
+def power_channels(hooks, nm_mapping: dict[str, list[str]]) -> list[str]:
+    """The Y columns that meter power, in plot order; none without the hook."""
+    return hooks.power_channels(nm_mapping) if hasattr(hooks, "power_channels") else []
 
 
 @beartype
@@ -152,9 +158,9 @@ def _term_values(cfg, sysid_cfg, nm_mapping: dict[str, list[str]]):
         names = [t.name for t in objective.terms
                  if POWER in (t.column, t.target)]
         raise NotImplementedError(
-            f"losses {names} read `{POWER}`, which needs "
-            "nt_control.power_metric implemented (set "
-            "POWER_METRIC_IMPLEMENTED = True)."
+            f"losses {names} read `{POWER}`, and nothing says what it is: define "
+            "`power_channels` in nt_control.py, or `power_metric` for a proxy "
+            "(`nt docs power_channels`)."
         )
 
     def series(name: str, data: dict) -> torch.Tensor:

@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import warnings
 from dataclasses import asdict, dataclass, field
-from typing import Optional
+from typing import Optional, Union
 
 from neurotemplate.common.config import (
+    DEFAULT_PAST_STEPS,
     PROGRESS_LEVELS,
     Time,
     TimedWindows,
@@ -73,14 +74,14 @@ class ModelingConfig(TimedWindows):
     # A built-in family (mlp, nssm, lssm, gru, rc_network), or a name in the hooks
     # file's custom_models() (see modeling.contract).
     model: str = "nssm"
-    # How far before the current step the model reads, per Y, U and D column:
-    # `{column: time}`. Every column is listed. Each learned map reads only its
-    # columns' own lags (see dynamics.column_lags).
-    past: dict[str, Time] = field(default_factory=dict)
+    # How far before the current step the model reads: one time for every column, or
+    # `{column: time}`, a column not named reading the current row only. Each learned
+    # map reads only its columns' own lags (see dynamics.column_lags). Unset, 3 steps.
+    past: Union[Time, dict[str, Time], None] = None
     # History every model is handed, beyond what `past` asks: what a model that keeps
     # state starts from. An `rc_network`'s filter runs over this window to place its
-    # hidden nodes. 0 asks for nothing beyond `past`.
-    context: Time = 0
+    # hidden nodes. Unset, 24h when a block is an rc_network, and otherwise nothing.
+    context: Optional[Time] = None
     log2_hidden_size: int = 6
     num_layers: int = 3
     # A model's output is the change from the last row (`increment`) or the next
@@ -111,18 +112,19 @@ class ModelingConfig(TimedWindows):
     update_every: int = 10
     warmup: int = 5
     patience: int = 25
-    # How far a training or dev rollout predicts, past its history.
-    horizon: Time = "4h"
-    # Time between the starts of training and dev windows. None means one window per
-    # history depth; with a long `context` that is few windows, and with `batch_size`
-    # at or above their number, one update per epoch.
+    # How far a training or dev rollout predicts, past its history. Unset, 48 steps.
+    horizon: Optional[Time] = None
+    # Time between the starts of training windows, and of dev windows. Unset, a quarter
+    # of a horizon, and a whole one.
     train_stride: Optional[Time] = None
+    dev_stride: Optional[Time] = None
     lr: float = 0.001
 
     # ---- TEST ----------------------------------------------------------------
     # How far a test rollout predicts, past its history, and how far apart they start.
-    test_horizon: Time = "24h"
-    test_stride: Time = "24h"
+    # Unset, 288 steps or what the shortest test file holds, and not overlapping.
+    test_horizon: Optional[Time] = None
+    test_stride: Optional[Time] = None
 
     # ---- LOSS ----------------------------------------------------------------
     ref_gain: float = 1.0
@@ -189,38 +191,54 @@ class ModelingConfig(TimedWindows):
         check_one_of(self, "norm_type", ["min_max", "abs_max", "z_score", None])
 
         check_one_of(self, "predicts", ["increment", "value"])
-        check_lag_table("past", self.past)
-        for name in ("context", "horizon", "test_horizon", "test_stride"):
-            time_microseconds(getattr(self, name), name)
-        if self.train_stride is not None:
-            time_microseconds(self.train_stride, "train_stride")
+        if isinstance(self.past, dict):
+            check_lag_table("past", self.past)
+        elif self.past is not None:
+            time_microseconds(self.past, "past")
+        if self.context is not None:
+            time_microseconds(self.context, "context")
+        self._check_common_times()
 
         if (self.grad_gain > 0) and (self.grad_path is None):
             raise ValueError("grad_gain set but not grad_path")
+
+    def fill_windows(self, shortest_test_rows: int) -> None:
+        """What each unset window comes to, written back so the run logs it: once the
+        data has set the timestep and `context` has been decided (`dynamics`)."""
+        if self.past is None:
+            self.past = self._time(DEFAULT_PAST_STEPS)
+        self.context = 0 if self.context is None else self.context
+        self.fill_common_windows(shortest_test_rows - self.history_steps)
 
     def check_windows(self) -> None:
         """Every window a whole number of steps: run once the data has set the timestep."""
         self._check_common_windows()
         # Only what a learned map reads: `context` is what a model starts from, not
         # inputs to a network.
-        warn_deep_window("past", max(self.lags.values(), default=-1) + 1)
+        warn_deep_window("past", self.deepest_lag + 1)
+
+    def lags_for(self, columns: list[str]) -> dict[str, int]:
+        """`past` for `columns`, in steps."""
+        table = self.past if isinstance(self.past, dict) else dict.fromkeys(columns, self.past)
+        return {c: time_steps(table.get(c, 0), self.steps_per_hour, f"past[{c!r}]")
+                for c in columns}
 
     @property
-    def lags(self) -> dict[str, int]:
-        """`past` in steps."""
-        return {column: time_steps(value, self.steps_per_hour, f"past[{column!r}]")
-                for column, value in self.past.items()}
+    def deepest_lag(self) -> int:
+        """The deepest `past`, in steps."""
+        values = self.past.values() if isinstance(self.past, dict) else [self.past]
+        return max((time_steps(v, self.steps_per_hour, "past") for v in values), default=0)
 
     @property
     def context_steps(self) -> int:
-        return self._steps("context")
+        return self._steps("context") if self.context is not None else 0
 
     @property
     def history_steps(self) -> int:
         """Rows of every column the model is handed: the deepest lag plus the
         current step, or `context` if that is more. Data windows, the
         seeded history and the model export all run at this depth."""
-        return max(max(self.lags.values(), default=-1) + 1, self.context_steps)
+        return max(self.deepest_lag + 1, self.context_steps)
 
     def asdict(self) -> dict:
         return asdict(self)

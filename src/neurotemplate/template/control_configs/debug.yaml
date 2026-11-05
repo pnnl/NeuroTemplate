@@ -1,30 +1,10 @@
-# A 2-epoch run that exercises the whole control pipeline — hooks, closed
-# loop, reportcard — before you train for real:
-#   nt control train --config control_configs/debug.yaml --set sysid_run_id=<id>
+# A 2-epoch run that exercises the whole control pipeline: nt control train --config control_configs/debug.yaml
 # Copy the objective from your real config.
-
-sysid_run_id: ""
-
-train_pred_steps: 4
-# Your table, as in your real config.
-policy_window: {}   # replace with your columns, e.g.
-# "Zone Air Temperature [°C]":  {past: 3}
-# "Zone Cooling Setpoint [°C]": {past: 1}
-# "Outdoor Temperature [°C]":   {past: 3, future: 0}
-# "Comfort Low [°C]":           {past: 0, future: 0}
-# "Comfort High [°C]":          {past: 0, future: 0}
-
-losses: {}   # replace with your terms, e.g.
-# comfort_lower: {column: "Comfort Low [°C]",  target: "Zone Air Temperature [°C]", map: relu,  norm: 1}
-# comfort_upper: {column: "Comfort High [°C]", target: "Zone Air Temperature [°C]", map: nrelu, norm: 1}
-gains: {}   # one per term, e.g. {comfort_lower: 1.0, comfort_upper: 1.0}
-
+losses:
+  comfort_lower: {column: "Band Low", target: "Zone Temperature", map: relu, norm: 1}
+  comfort_upper: {column: "Band High", target: "Zone Temperature", map: nrelu, norm: 1}
+gains: {comfort_lower: 1.0, comfort_upper: 1.0}
 epochs: 2
 warmup: 0
 patience: 2
-
-test_window: 47
-test_stride: 48
-
-seed: 1234
-run: "debug"
+run: debug

@@ -60,7 +60,7 @@ def plot_predictions(
     run_dir: str,
     logger: Optional[RunLog] = None,
 ) -> None:
-    sub_plot = load_modeling_hooks(cfg).sub_plot
+    sub_plot = getattr(load_modeling_hooks(cfg), "sub_plot", lambda df, column: None)
 
     def log_artifact(path: str, artifact_path: Optional[str] = None) -> None:
         if logger is not None:

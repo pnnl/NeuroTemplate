@@ -31,14 +31,6 @@ else:
 # ---------------------------------------------------------------------
 # REQUIRED user hook: cooling power for the energy/cost/peak objectives
 # ---------------------------------------------------------------------
-# This dataset metres HVAC power directly: RTU Fan Power [W] and RTU DX Power
-# [W] are Y channels produced by the surrogate. Total electrical power is just
-# their sum:
-#
-#     P = RTU Fan Power + RTU DX Power           [W]
-#
-# Minimising this minimises HVAC electrical energy use.
-POWER_METRIC_IMPLEMENTED = True
 
 
 @beartype

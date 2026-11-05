@@ -23,15 +23,3 @@ def block_mapping(nm_mapping, cfg):
 def output_heads(nm_mapping, norm_stats):
     return HeadStack([BoundedHead(0.0, float("inf")) if c == POWER else RegressionHead()
                       for c in nm_mapping["Y"]], nm_mapping["Y"])
-
-
-def column_norm_config(nm_mapping):
-    return {}
-
-
-def synth_cfg(nm_mapping, norm_stats):
-    return None
-
-
-def sub_plot(df_true, column_name):
-    return None

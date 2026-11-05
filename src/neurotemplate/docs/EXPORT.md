@@ -47,7 +47,7 @@ compiled C through ctypes. The batch is fixed at 1.
 
 Measured on one model and one policy (macOS arm64, Python 3.11): a
 grey-box zone plus an MLP power block, 13,897 parameters, history 12,
-hidden state width 1, and a linear residual policy. Rollouts ran over a 2,004-step test
+hidden state width 1, and a linear policy. Rollouts ran over a 2,004-step test
 split. Installed sizes exclude the interpreter.
 
 | | onnx | torch | c, from Python | c, from C |
@@ -150,7 +150,7 @@ state = model.warmup(history)         # the last history_steps rows of every col
 state = model.step(state, inputs)     # one step; inputs holds every u and d column
 
 policy = Policy("policy")
-command = policy.act(y, u_history, d, r)  # {u column: value}; u_history and r only if it reads them
+command = policy.act(y, u_history, d, r)  # {u column: value}; only the inputs policy.json lists
 ```
 
 That is the same in every format. A policy that reads past commands takes

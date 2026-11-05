@@ -55,12 +55,12 @@ NeuroTemplate = { path = "../neurotemplate", editable = true }
 nt init            # or: nt init my_app
 ```
 
-This writes both hook files, both config directories with every field
-annotated, a smoke-run config per side, `make_references.py`, an empty
-`data/`, and `AGENTS.md` (with a `CLAUDE.md` pointing at it) for an agent
-working in the directory. It writes nothing if any of those files exists.
-Put the record in `data/` as `train.csv`, `dev.csv` and `test.csv`, split in
-time order; then `nt guide setup`.
+This reads nothing and writes `data.yaml` with its paths and no columns, both hook menus,
+both config directories, a smoke-run config per side, an empty `data/`, and `AGENTS.md` (with a
+`CLAUDE.md` pointing at it) for an agent working in the directory. It writes nothing if any of
+those files exists. Put the record in `data/` as `train.csv`, `dev.csv` and `test.csv`, split in
+time order; `nt model train` then lists its columns, ready to paste into `data.yaml`. `nt guide setup`
+has the rest. To see it all work first, `nt example thermal` writes a project on synthetic data.
 
 Run `nt` from the application's root. The library finds
 `nt_model.py` and `nt_control.py` there, or wherever
@@ -68,9 +68,9 @@ a config's `user_hooks_path` points.
 
 **A trained run keeps a copy of its hooks file.** Reloading a run, to score
 it, to train a policy on it or to export it, imports that copy, never the
-file in your working directory. A hook such as a reference rule or an
-actuation bound has no weights, so editing it after training would
-otherwise silently change what the trained run is. The copy is a single
+file in your working directory. A hook such as `power_metric` has no
+weights, so editing it after training would otherwise silently change what the
+trained run is. The copy is a single
 file, so training refuses a hooks file that imports a module sitting next
 to it. Keep shared code inside the hooks file, or install it as a package.
 

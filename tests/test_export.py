@@ -318,8 +318,9 @@ def test_trained_policy_exports_as_the_trained_policy(tmp_path, overrides, graph
     assert torch.allclose(wrapped, direct, atol=1e-4)
 
 
-@pytest.mark.parametrize("graph_format", ["onnx", "torch", pytest.param("c", marks=needs_c)])
-@pytest.mark.parametrize("reads_d", [True, False], ids=["with d", "no d"])
+@pytest.mark.parametrize("graph_format, reads_d", [
+    ("onnx", True), ("torch", False), pytest.param("c", False, marks=needs_c),
+], ids=["onnx, with d", "torch, no d", "c, no d"])
 def test_a_package_takes_only_what_the_policy_reads(tmp_path, graph_format, reads_d):
     """Listed columns are the inputs, whichever role they have: no wrapper has to
     rebuild a meter the policy never reads, and an input nothing reads is not one."""

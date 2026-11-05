@@ -137,6 +137,13 @@ def load_control_splits(
     return train, dev, test
 
 
+def shortest_test_rollout(cfg, sysid_cfg, frames: list[DataFrame]) -> int:
+    """How many steps the shortest test file holds after a rollout's history and the
+    forecast its last step reads."""
+    _, _, hmax = horizons(cfg, sysid_cfg)
+    return min(len(frame) for frame in frames) - hmax - forecast_tail(cfg)
+
+
 def forecast_tail(cfg) -> int:
     """F: how far past the rollout's last step the controller reads a forecast. MPC
     previews every D and reference column over its whole horizon."""
@@ -212,13 +219,12 @@ def build_loaders(
     train_dfs: list[DataFrame],
     dev_dfs: list[DataFrame],
 ):
-    """(train_loader, dev_loader). Dev windows start H_ctrl rows apart, for unique
-    starts; training windows `cfg.train_stride` apart, or H_ctrl when unset.
+    """(train_loader, dev_loader), windows starting `cfg.train_stride` and
+    `cfg.dev_stride` apart.
 
     `train_dfs` / `dev_dfs` are always lists (length >= 1). With multiple
     files per split, windows are pooled but no window spans two files.
     """
-    _, h_ctrl, _ = horizons(cfg, sysid_cfg)
     gen = torch.Generator(device=sysid_cfg.device)
     gen.manual_seed(cfg.seed)
 
@@ -232,5 +238,5 @@ def build_loaders(
             shuffle=shuffle, generator=gen, drop_last=False,
         )
 
-    return (loader(train_dfs, "train", True, cfg.train_stride_steps or h_ctrl),
-            loader(dev_dfs, "dev", False, h_ctrl))
+    return (loader(train_dfs, "train", True, cfg.train_stride_steps),
+            loader(dev_dfs, "dev", False, cfg.dev_stride_steps))

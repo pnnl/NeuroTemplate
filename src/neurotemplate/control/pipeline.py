@@ -37,6 +37,7 @@ from neurotemplate.control.metrics import (
     response_to_dict,
 )
 from neurotemplate.control.losses import POWER, Objective, resolve_objective
+from neurotemplate.control.closed_loop import power_channels, power_term
 from neurotemplate.control.policy import control_box
 from neurotemplate.control.scenarios import (
     build_window_dict_multi,
@@ -209,7 +210,6 @@ def score_rollout(
     eval_time_s: float,
 ) -> ControlResults:
     """Pooled physical metrics of one finished evaluation rollout."""
-    hooks = load_control_hooks(cfg)
     _, _, hmax = horizons(cfg, sysid_cfg)
     objective = resolve_objective(cfg, nm_mapping)
     regulated = objective.regulated
@@ -239,12 +239,12 @@ def score_rollout(
     )
 
     energy = None
-    if getattr(hooks, "POWER_METRIC_IMPLEMENTED", False):
-        power = hooks.power_metric(
+    power_signal = power_term(cfg, nm_mapping)
+    if power_signal is not None:
+        power = power_signal(
             out["yn"][:, scored_steps("yn", hmax), :],
             out["U"][:, scored_steps("U", hmax), :],
             out["D"][:, scored_steps("D", hmax), :],
-            nm_mapping,
         )
         # Each weight a power term carries (a tariff, a carbon series) rides
         # through the rollout untouched, so it is co-indexed with the power it
@@ -370,11 +370,11 @@ def plot_closed_loop(
     d_cols, y_cols = nm_mapping["D"], nm_mapping["Y"]
     context = {
         name: out["D"][:, scored_steps("D", hmax), d_cols.index(name)].cpu()
-        for name in hooks.plot_context_channels(nm_mapping)
+        for name in getattr(hooks, "plot_context_channels", lambda nm: [])(nm_mapping)
     }
     power = {
         name: out["yn"][:, scored_steps("yn", hmax), y_cols.index(name)].clamp_min(0.0).cpu()
-        for name in hooks.power_channels(nm_mapping)
+        for name in power_channels(hooks, nm_mapping)
     }
 
     # Reference columns that are not a band edge — a tariff, a cap — on their

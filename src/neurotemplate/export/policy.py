@@ -48,7 +48,7 @@ from neurotemplate.control.mpc import MPC, _inner_keys
 from neurotemplate.control.policy import (
     _bound_side, _PerStepBounds, read_columns, with_control_bounds,
 )
-from neurotemplate.hooks import load_control_hooks
+from neurotemplate.control.closed_loop import power_term
 from neurotemplate.export import ccode
 from neurotemplate.export.package import (
     FLOAT_FORMAT, check_graph_format, install, provenance, write_graph, write_json,
@@ -370,14 +370,14 @@ def _mpc_block(mpc: MPC, cfg, nm_mapping: dict[str, list[str]]) -> dict:
 
 
 class _PowerGraph(torch.nn.Module):
-    """`power_metric` over planned trajectories, for the MPC runtime."""
+    """The power signal over planned trajectories, for the MPC runtime."""
 
-    def __init__(self, hook, nm_mapping: dict[str, list[str]]):
+    def __init__(self, power):
         super().__init__()
-        self.hook, self.nm_mapping = hook, nm_mapping
+        self.power = power
 
     def forward(self, y: torch.Tensor, u: torch.Tensor, d: torch.Tensor) -> torch.Tensor:
-        return self.hook(y, u, d, self.nm_mapping)
+        return self.power(y, u, d)
 
 
 def _write_power_graph(cfg, nm_mapping, mpc: MPC, inputs: list[PolicyInput],
@@ -386,7 +386,7 @@ def _write_power_graph(cfg, nm_mapping, mpc: MPC, inputs: list[PolicyInput],
     typical = {spec.key: torch.tensor(spec.shift) for spec in inputs}
     args = tuple(x.expand(2, mpc.horizon, -1).clone()
                  for x in (typical["yn"], 0.5 * (mpc.umin + mpc.umax), typical["D"]))
-    write_graph(_PowerGraph(load_control_hooks(cfg).power_metric, nm_mapping), args,
+    write_graph(_PowerGraph(power_term(cfg, nm_mapping)), args,
                 ["y", "u", "d"], ["power"], policy_dir / "power", "torch", "dynamo",
                 export_id, run_id, "onnx2c")
 
