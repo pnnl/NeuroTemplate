@@ -15,7 +15,7 @@ from neurotemplate.common.config import load_config_from_cli
 from neurotemplate.control.config import ControlConfig
 from neurotemplate.control.losses import fill_reference_scale, resolve_objective
 from control_fixtures import (
-    BAND_GAINS, BAND_LOSSES, HIGH, LOW, SETPT, SUPPLY_T, TARIFF, ZONE, make_control_cfg, make_nm_mapping,
+    BAND_GAINS, BAND_LOSSES, HIGH, LOW, SUPPLY_T, TARIFF, ZONE, make_control_cfg, make_nm_mapping,
 )
 
 _YAML = """

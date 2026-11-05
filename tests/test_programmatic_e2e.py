@@ -51,6 +51,7 @@ def _restore_tracking_uri():
 #: physical units, behind the contract as written (`modeling.contract`).
 USER_MODEL = """
 
+import torch
 import torch.nn as nn
 
 

@@ -20,7 +20,6 @@ from neurotemplate.cli import main as nt
 from neurotemplate.common.config import load_config
 from neurotemplate.modeling import network as nw
 from neurotemplate.modeling.config import ModelingConfig
-from neurotemplate.modeling.ladder import Rung
 from neurotemplate.modeling.train import train_model
 
 from neurotemplate.example import HEAT, OUTDOOR, SETPOINT, SOLAR, ZONE, thermal_plant

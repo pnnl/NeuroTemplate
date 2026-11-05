@@ -11,7 +11,7 @@ import torch
 from neurotemplate.control.closed_loop import build_control_loss
 from neurotemplate.control.losses import window_power_mean
 from neurotemplate.control.windows import horizons
-from control_fixtures import HIGH, LOW, SETPT, ZONE, full_setup
+from control_fixtures import ZONE, full_setup
 
 
 def _data(s, zone, low=24.0, high=25.0, u=None):

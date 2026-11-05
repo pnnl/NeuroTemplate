@@ -508,7 +508,7 @@ def get_dynamics(
     families = [resolve_family(cfg, block)[0] for block in blocks]
     _refuse_declarations(cfg, blocks, families)
     _warn_ignored_declarations(blocks, families)
-    column_lags(cfg, nm_mapping)   # the history table names exactly the columns
+    column_lags(cfg, nm_mapping)   # a `past` table names only the model's columns
     declared = cfg.lags_for([c for key in _KEYS for c in nm_mapping[key]])
     _check_hinge_lags(blocks, declared)
     lags = [block_lags(family, block, declared, cfg.history_steps)
@@ -590,7 +590,7 @@ def _custom_model(cfg: ModelingConfig, nm_mapping: dict[str, list[str]],
             f"model {cfg.model!r} is one module over every column, so "
             "block_mapping has nothing to split: return None from it. Blocks "
             "are the built-in families' structure; wire parts in its forward.")
-    column_lags(cfg, nm_mapping)   # the history table names exactly the columns
+    column_lags(cfg, nm_mapping)   # a `past` table names only the model's columns
     model = custom[cfg.model](cfg, nm_mapping, norm_stats)
     if not isinstance(model, nn.Module):
         raise TypeError(f"custom_models()[{cfg.model!r}] returned "

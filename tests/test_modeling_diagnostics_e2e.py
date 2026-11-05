@@ -14,17 +14,14 @@ is how it stayed untested long enough to grow a bug.
 
 from pathlib import Path
 
-import pytest
 import torch
 
-from neurotemplate.modeling.pipeline import evaluate_and_plot, log_test_results
+from neurotemplate.modeling.pipeline import evaluate_and_plot
 from control_fixtures import (
     make_frozen_dynamics, make_nm_mapping, make_norm_stats, make_raw_df,
     make_sysid_cfg,
 )
 import nt_model as hooks
-from fake_logger import FakeLogger
-from model_fixtures import unit_stats
 
 
 def _evaluate(tmp_path, synth: bool = True):

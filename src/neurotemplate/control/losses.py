@@ -191,7 +191,7 @@ def _bands(terms: list[LossTerm], nm_mapping: dict[str, list[str]]) -> list[Band
         _require(side not in target_sides,
                  f"`{term.target}` has two {side} bounds ({target_sides.get(side)!r} "
                  f"and {term.column!r}). Combine them into one column of the "
-                 "reference file: the reportcard scores each regulated output "
+                 "record: the reportcard scores each regulated output "
                  "against one band.")
         target_sides[side] = term.column
     _require(bool(sides),

@@ -20,8 +20,6 @@ import os
 
 import torch
 
-from neurotemplate.common.data_utils import NormStats
-
 if os.environ.get("RUNTIME_TYPING", 0):
     from beartype import beartype
 else:

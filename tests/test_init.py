@@ -3,7 +3,7 @@ import subprocess
 
 import pytest
 
-from neurotemplate.example import EXAMPLES, write_example
+from neurotemplate.example import EXAMPLES
 from neurotemplate.init import TEMPLATE, template_files, write_template
 
 

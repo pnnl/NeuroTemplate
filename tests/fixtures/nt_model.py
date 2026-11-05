@@ -14,8 +14,6 @@ import os
 import json
 from typing import Optional, Tuple
 
-from neurotemplate.modeling.config import ModelingConfig as Config
-import torch
 
 from neurotemplate.common.data_utils import NormStats
 from neurotemplate.modeling.heads import (

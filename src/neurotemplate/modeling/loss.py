@@ -65,7 +65,7 @@ def build_loss(
     # sides drop them. This is the same span pipeline.evaluate_and_plot scores.
     #
     # Each channel is scored normalised, with its own head's loss (MSE for a
-    # regression head, BCE for binary, ...), or blanket MSE without heads.
+    # regression head), or blanket MSE without heads.
     shift = torch.tensor([norm_stats[c]["shift"] for c in nm_mapping["Y"]],
                          dtype=torch.float32, device=cfg.device)
     stretch = torch.tensor([norm_stats[c]["stretch"] for c in nm_mapping["Y"]],
