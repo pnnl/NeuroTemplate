@@ -84,9 +84,10 @@ class ThermalZone:
 
 def _warn_signed_gains(zones: list[ThermalZone], train_raws) -> None:
     """A gain input enters as gain · value with gain ≥ 0, so a column that
-    goes negative cannot push both ways and fits at zero. Solar is left out:
-    irradiance reads a little below zero at night, which is sensor noise."""
-    columns = sorted({c for z in zones for c in z.gains + z.drives if c not in z.y_inputs})
+    goes negative cannot push both ways and fits at zero. A drive is left out, since a
+    signed heat with a positive gain does push both ways, and so is solar: irradiance
+    reads a little below zero at night, which is sensor noise."""
+    columns = sorted({c for z in zones for c in z.gains})
     signed = [c for c in columns if min(float(raw[c].min()) for raw in train_raws) < 0]
     if signed:
         print(f"WARNING: input(s) {signed} take negative values. Every gain is >= 0, so a "
@@ -258,7 +259,7 @@ def _fit_notes(fit: Fit) -> list[str]:
     limit = nw.at_limit(fit)
     if limit:
         notes.append(f"At a limit (zero or infinity): {limit}. A gain there is left out "
-                     "of the snippet; a noise there is a node the network needs no push for.")
+                     "of the snippet, so remove that column from the block's `D`; a noise there is a node the network needs no push for.")
     wide = [k for k, se in fit.log_se.items() if se > 1.0 and k not in limit]
     if wide:
         notes.append(f"Barely placed (error bar wider than ×e): {wide}.")
@@ -374,7 +375,8 @@ def thermostat_main() -> None:
     if unplaced:
         print(f"  Not placed by this record: {unplaced}. The snippet leaves an offset or "
               "slope null and a scale's box a factor of 1000 wide: declare those from what "
-              "you know of the equipment.")
+              "you know of the equipment, in the snippet, as a [low, high] box or a number "
+              "(`\"heating\": {\"capacity\": [40, 60], ...}`, from a design capacity).")
     out_dir = Path("ladder")
     out_dir.mkdir(exist_ok=True)
     path = out_dir / f"{producer.name}.thermostat.json"

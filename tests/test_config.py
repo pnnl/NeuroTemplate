@@ -11,7 +11,7 @@ fields, which accept one path or many.
 import pytest
 
 from neurotemplate.common.config import (
-    apply_overrides, dict_to_dataclass, parse_set_args,
+    ConfigError, apply_overrides, dict_to_dataclass, parse_set_args,
 )
 from neurotemplate.control.config import ControlConfig
 from neurotemplate.modeling.config import ModelingConfig as Config
@@ -49,3 +49,11 @@ def test_set_parses_a_json_list():
     merged = apply_overrides({"draws": ["old.csv"]},
                              parse_set_args(['draws=["a.csv","b.csv"]']))
     assert dict_to_dataclass(merged, ControlConfig).draws == ["a.csv", "b.csv"]
+
+
+def test_a_dotted_override_sets_one_entry_and_keeps_the_rest():
+    merged = apply_overrides({"gains": {"cost": 1.0, "du": 0.5}},
+                             parse_set_args(["gains.cost=2.0"]))
+    assert merged == {"gains": {"cost": 2.0, "du": 0.5}}
+    with pytest.raises(ConfigError, match="gains.typo"):
+        apply_overrides({"gains": {"cost": 1.0}}, {"gains.typo": 2.0})

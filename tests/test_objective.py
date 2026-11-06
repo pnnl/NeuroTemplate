@@ -10,7 +10,6 @@ from neurotemplate.control.closed_loop import (
     build_closed_loop, build_control_loss, build_problem,
 )
 from neurotemplate.metrics.objective import (
-    DOMINANCE_FACTOR,
     objective_balance,
     power_diagnostics,
     run_objective_pass,
@@ -56,18 +55,6 @@ def test_a_pass_leaves_the_module_in_the_mode_it_found_it():
     problem.train()
     run_objective_pass(problem, batch)
     assert problem.training
-
-
-def test_a_lopsided_weight_is_flagged_as_dominant():
-    """The measured failure: an energy gain suited to the last dataset."""
-    problem, loss, batch, _ = _problem(du=0.0, energy=1e4)
-    out = run_objective_pass(problem, batch)
-
-    balance = objective_balance(loss, out)
-
-    dominant = balance.dominant()
-    assert [t.name for t in dominant] == ["energy_loss"]
-    assert dominant[0].ratio_to_rest > DOMINANCE_FACTOR
 
 
 # ── power_diagnostics ────────────────────────────────────────────

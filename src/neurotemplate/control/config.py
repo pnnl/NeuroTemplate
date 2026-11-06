@@ -256,8 +256,7 @@ class ControlConfig(TimedWindows):
     @property
     def history_steps(self) -> int:
         """The policy's window depth: its deepest `past`, plus the current
-        step. The closed loop seeds at least this many steps, and training
-        windows start this far apart."""
+        step. The closed loop seeds at least this many steps."""
         return max((entry["past"] for entry in self.window_steps.values()), default=-1) + 1
 
     def asdict(self) -> dict:

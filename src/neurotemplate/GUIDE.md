@@ -17,7 +17,7 @@ working. Start from the one that fits:
 
 | guide | for |
 |---|---|
-| `nt guide thermal-zone` | a zone served by staged cooling and heating, its delivered heat measured |
+| `nt guide thermal-zone` | a zone served by staged cooling and heating, its delivered heat measured, or computed from supply flow and temperature |
 | `nt guide own-model` | a model of your own, given the library's training, checks, control and export |
 | `nt guide mpc` | planning through the model at every step instead of training a policy |
 
@@ -60,7 +60,8 @@ work first, `nt example thermal` writes a project on synthetic data, zero edits.
 
    `nt data plot data/train.csv` then lists the record's channels under those roles.
 3. **Smoke run**: `nt model train --config model_configs/debug.yaml`. It takes
-   seconds and catches every wrong name.
+   seconds and catches every wrong name. Two epochs say nothing about the model: a rollout
+   thousands of degrees off here only means it has barely trained.
 4. **Coverage.** The model only knows commands the data issued, and the controller's
    bounds default to that range. If the controller must go somewhere the data never
    went, the model cannot tell it what happens there.
@@ -71,13 +72,17 @@ lists every field.
 
 ## model
 
-The default black box runs on column roles alone, so run it first: it is the bar anything
-else has to clear. Then decide the structure; it matters more than any hyperparameter. Hooks
+The default black box runs on column roles alone, so a real fit of it (not the smoke run) is a
+quick number for anything else to beat. Nothing bounds its long rollouts, so a poor one says
+that black box needs more care, not that the record cannot be modelled. Then decide the structure; it matters more than any hyperparameter. Hooks
 are where you change the model, and `nt docs hooks` lists them, one line each.
 
 1. **`synth_cfg`, the physics checks.** A few lines that test the model in states the data
-   never visits. A failed step response means do not plan against this model, and test
-   error will not tell you. A run without it says so.
+   never visits, which test error will not show. A step response the wrong way means a
+   controller will pull that command backwards: fix it before planning against this model.
+   A failure of size only (it responded, but too little, or drifted at rest) is worth reading
+   before you plan through it, not a veto: compare controllers on it and judge on the plant.
+   A run without the hook says so.
 2. **`block_mapping`, what reaches each output.** It splits the outputs into blocks, each
    seeing its own inputs. Give an output only the inputs that drive it: a block that sees an
    input it does not depend on learns the data's correlations through it, and a controller
@@ -115,7 +120,9 @@ few: one seed is one draw.
 2. **Build it up a run at a time.** The band terms alone first: if they come out
    much worse than the data, a model iteration is worth more than any gain. Then the
    full objective. Before training, a run prints each term's share of the objective;
-   a term near 0% does nothing, so size the gains from that print.
+   size the gains from that print, and from its blind twin (step 9). A priced term near 0%
+   does nothing. A band term near 0% may be fully holding: it reads zero inside the band, so
+   a controller keeping comfort shows cost near 100%, which is the good case.
 3. **What the controller sees**, `policy_window`: the columns it reads, each with a
    `past`, and forecasts with a `future`. It reads what the window lists and nothing
    else, each run prints what it leaves unread, and the exported package takes only
@@ -124,8 +131,10 @@ few: one seed is one draw.
    and `horizon` must hold both in one rollout (a day, for daily cycles); a `future` longer
    than it is refused. Size the preview against the surrogate's time constants on its
    reportcard. No `future` can exceed the forecast available at run time: the exported
-   controller refuses to act without it. Every step's preview reads real rows of the
-   record, to the rollout's last step.
+   controller refuses to act without it. A `future` counts rows after the current one, so a
+   forecast of 288 rows that includes the present holds 287 steps ahead, one short of `24h` at
+   5 minutes: use `23h55m` there. Every step's preview reads real rows of the record, to the
+   rollout's last step.
 4. **Bounds.** `control_bounds` is the one mechanism: `{column: [low, high]}`, each side a
    number, a column, `[column, offset]`, or another command, which keeps two commands from
    crossing. A column not listed takes its recorded range. Where one actuator is unpriced,
@@ -133,8 +142,9 @@ few: one seed is one draw.
    half the bill.
 5. **Time before you train.** After its first epoch a run prints the seconds per
    epoch and what the configured epochs will cost; size `epochs`, `horizon`
-   and the previews from it. A larger batch is faster, not slower: each batch is a rollout
-   of model calls. The run ends by saying whether patience stopped it or the epoch cap did,
+   and the previews from it. A larger batch makes an epoch faster, since each batch is a
+   rollout of model calls, but it gives fewer updates per epoch. `progress: log` prints each
+   epoch. The run ends by saying whether patience stopped it or the epoch cap did,
    with the dev loss still falling.
 6. **Train on several draws of the price.** `draws` in the config lists files holding the
    same timestamps with another band or tariff: each replaces the columns it shares with the
@@ -197,7 +207,9 @@ on yours.
    barely placed. Put its snippet in the zone block's `params` as `rc_network`, and edit it
    as you like: a node, an edge, an input into another node. `--candidate mine.json`
    runs your version through the same tests. The ladder needs no setpoints, only the
-   zone, its inputs and the weather, and no block but the zone's: add the others when you reach them. It will not select a node the record cannot place (an infinite error bar, or slower than the
+   zone, its inputs and the weather, and no block but the zone's: add the others when you reach
+   them. A `driven_by` column must still be a `Y` in `data.yaml`. An input whose gain fits at
+   zero is left out of the snippet, so take it out of the block's `D` too. It will not select a node the record cannot place (an infinite error bar, or slower than the
    record is long); on closed-loop data, where the HVAC holds the zone, that is often
    the envelope, and the card says so.
 4. **`nt data thermostat --cooling COL --heating COL`** fits the map from setpoint
@@ -207,7 +219,9 @@ on yours.
    form rolls out better. Put its snippet in the thermostat block's `params` as
    `thermostat`; it carries the gain limit the zone's capacitance sets. A side the
    record never exercised comes back unplaced (a null offset, a wide box): declare it
-   from what you know of the equipment, or the build refuses.
+   from what you know of the equipment, or the build refuses. A summer record's heating side
+   is usually this: `"heating": {"capacity": [40, 60], ...}` in the snippet, from a design
+   capacity, with a value that suits yours.
 5. **Windows.** `context` is the record the zone's filter places its hidden nodes from:
    a day by default for a network, which was plenty on the buildings measured, and it is
    long enough when a longer one stops changing the day-ahead error. The thermal blocks
@@ -223,7 +237,8 @@ on yours.
    sees heating learns "heating on, so cooling off", and the controller runs the furnace
    to make the modelled cooling power fall.
 7. **Bounds that suit a thermostat.** The cooling setpoint inside the band with a
-   margin under its ceiling; heating under the floor, which keeps the two from
+   margin under its ceiling: the margin is how far above its setpoint the zone holds, so
+   measure that on the record. Heating under the floor, which keeps the two from
    crossing; gas heating bounded when the tariff prices electricity.
 
 `nt_model.py`, once steps 3 and 4 have written both files. `nt data` reads your blocks to
@@ -231,6 +246,10 @@ find the zone and its inputs, so until then leave out the line loading a file th
 exist yet:
 
 ```python
+import json
+
+from neurotemplate.modeling.heads import BoundedHead, HeadStack, RegressionHead
+
 def block_mapping(nm_mapping, cfg):
     return {
         "hvac": {"Y": ["Delivered Heat"], "U": ["Cooling Setpoint", "Heating Setpoint"],
@@ -252,7 +271,7 @@ def output_heads(nm_mapping, norm_stats):         # meters cannot read below zer
     return HeadStack(heads, nm_mapping["Y"])
 ```
 
-with `power_channels` naming the two meters. `control_configs/control.yaml`:
+with `power_channels`, in `nt_control.py`, naming the two meters. `control_configs/control.yaml`:
 
 ```yaml
 policy_window:                  # what it reads, and a day of band and price ahead

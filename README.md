@@ -14,7 +14,8 @@ uv run nt init              # data.yaml, hook menus, configs, data/, AGENTS.md
 uv run nt guide
 ```
 
-[INSTALL.md](src/neurotemplate/docs/INSTALL.md) has the details.
+[INSTALL.md](src/neurotemplate/docs/INSTALL.md) has the details. The command is `nt`; the
+Python package is `neurotemplate`, so `import neurotemplate`, not `import nt`.
 
 **Start with `nt guide`** (the same text is [GUIDE.md](GUIDE.md)). It is the whole
 flow in four short steps, each a few decisions and the command whose output settles

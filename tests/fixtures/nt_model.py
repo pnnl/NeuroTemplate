@@ -112,7 +112,8 @@ def synth_cfg(
     return SynthSpec(
         states=states,
         ambient=ambient,
-        off={setpoint: norm_stats[setpoint]["max"]},
+        off={setpoint: norm_stats[setpoint]["max"],
+             **{c: 0.0 for c in nm_mapping["Y"] if c not in states}},
         # Raising a cooling setpoint asks for less cooling, so the zone warms:
         # +1. The library sweeps the setpoint from its off value (the maximum)
         # down to its minimum and expects the zone to fall.

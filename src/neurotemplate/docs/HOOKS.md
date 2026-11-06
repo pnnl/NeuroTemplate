@@ -174,14 +174,16 @@ def synth_cfg(nm_mapping, norm_stats):
 
 - `states`: Y channels that hold at rest and relax toward `ambient`, temperatures typically; not
   meters, since an equilibrium value written into a power channel is meaningless.
-- `off`: the physical value of each U column when it asks for nothing. Not guessable (a cooling
-  setpoint is off at its *maximum*, a heating setpoint at its *minimum*), so required for every U. Pick a
-  value that is off across the whole `states` range. Other columns default to their recorded minimum;
-  give an `off` for any column where the minimum is not "nothing", such as a signed heat.
+- `off`: the physical value of each U column when it asks for nothing, and of each Y that is not a
+  state. Not guessable (a cooling setpoint is off at its *maximum*, a heating setpoint at its *minimum*,
+  a signed heat at 0, where its minimum is full cooling), so required for those. Pick a setpoint value
+  that is off across the whole `states` range. A D column defaults to its recorded minimum; give an
+  `off` where the minimum is not "nothing".
 - `responds`: `{state: {control: +1 | -1}}`, the direction each state moves as that control
   *increases*, from a state where the control is live. Required for every U. A hinge does not change
   these signs, but it changes where a sweep starts: a step is measured only from zone temperatures
-  where the target calls for something, and an end of its range that never does is skipped.
+  where the target calls for something, and an end of its range that never does is skipped. A
+  `thermostat` block's setpoints are treated the same way.
 
 All values are physical; the library validates the spec against the columns before anything runs. The
 checks are instruments, not gates. A step that barely moves the state means its forcing is too weak;

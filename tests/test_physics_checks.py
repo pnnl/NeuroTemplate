@@ -45,7 +45,7 @@ def _spec(**overrides) -> SynthSpec:
     base = dict(
         states=[ZONE],
         ambient=AMBIENT,
-        off={SETPT: 26.0},
+        off={SETPT: 26.0, POWER: 0.0},
         responds={ZONE: {SETPT: +1}},
     )
     base.update(overrides)
@@ -183,7 +183,7 @@ def test_a_hinge_target_inactive_everywhere_is_skipped_not_failed():
     nm = {"Y": [ZONE, POWER], "U": [HEAT], "D": [AMBIENT], "t": ["sec_elapsed"]}
     stats = dict(NORM_STATS, **{HEAT: {"shift": 0.0, "stretch": 1.0,
                                        "min": 16.0, "max": 24.0}})
-    spec = SynthSpec(states=[ZONE], ambient=AMBIENT, off={HEAT: 10.0},
+    spec = SynthSpec(states=[ZONE], ambient=AMBIENT, off={HEAT: 10.0, POWER: 0.0},
                      responds={ZONE: {HEAT: +1}})
 
     def thermostat(y, u, d):

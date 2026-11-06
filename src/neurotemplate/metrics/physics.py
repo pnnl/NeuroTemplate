@@ -63,6 +63,7 @@ import torch
 
 from neurotemplate._typing import beartype
 from neurotemplate.modeling.contract import contract_model
+from neurotemplate.modeling.rc_network import ThermostatBlock
 
 
 # Pass thresholds, all expressed as a share of a state channel's own recorded
@@ -101,12 +102,12 @@ class SynthSpec:
                   their ranges (see `_state_range`).
       ambient     the D column the states relax toward.
       off         physical value of each column when nothing is running.
-                  **Required for every control column** and only for those:
-                  an actuator's "off" is not guessable (a cooling setpoint is
-                  off at its *maximum*, not its minimum). Any other column left
-                  out is held at its recorded minimum, which is what "no
-                  forcing" means for solar, occupancy, power and flow — list it
-                  in `off` if your plant idles somewhere else.
+                  **Required for every control column and every Y that is not
+                  a state**: neither is guessable (a cooling setpoint is off at
+                  its *maximum*, and a signed heat at 0, where its minimum is
+                  full cooling). A D column left out is held at its recorded
+                  minimum, which is what "no forcing" means for solar and
+                  occupancy — list it in `off` if your plant idles somewhere else.
 
                   For a *setpoint* actuator, "off" has to be off across the
                   whole `states` range, since equilibria are sampled from all
@@ -156,10 +157,12 @@ class SynthSpec:
             problems.append(f"`ambient` ({self.ambient!r}) is not a D column. "
                             f"D = {d}")
 
-        missing = [c for c in u if c not in self.off]
+        missing = [c for c in u + [c for c in y if c not in self.states]
+                   if c not in self.off]
         if missing:
-            problems.append(f"`off` must give a value for every control "
-                            f"column; missing: {missing}")
+            problems.append(f"`off` must give a value for every control and every Y that "
+                            f"is not a state (0 for a meter or a signed heat at rest); "
+                            f"missing: {missing}")
         known = set(y) | set(u) | set(d)
         stray = [c for c in self.off if c not in known]
         if stray:
@@ -277,9 +280,8 @@ def _resting_value(col: str, spec: SynthSpec, norm_stats: dict) -> float:
     """`off` if the spec gives one, else the column's recorded minimum.
 
     The single fallback in this module, and it is deliberate: "no forcing"
-    really is the minimum for irradiance, occupancy, power, flow and stage
-    signals, which is most of what is left once the controls are covered.
-    Controls are never defaulted — `SynthSpec.validate` demands them.
+    really is the minimum for irradiance and occupancy, which is what is left
+    once `SynthSpec.validate` has demanded the controls and the non-state Ys.
     """
     if col in spec.off:
         return float(spec.off[col])
@@ -367,11 +369,16 @@ def _rollout_data(yn_row, u_rows, d_rows, history_steps, n_steps, ny, device):
 
 
 def _declared_hinges(system) -> dict[str, dict]:
-    """`{U column: {"target", "map"}}` for every setpoint hinge the surrogate declares, or
-    {}. Read off the model itself, so the checks and the trained run cannot disagree about
-    what is a thermostat."""
-    hinges = getattr(contract_model(system), "hinges", None)
-    return {} if hinges is None else hinges.declared
+    """`{U column: {"target", "map"}}` for every setpoint hinge the surrogate declares and
+    every setpoint of a thermostat block, or {}. Read off the model itself, so the checks
+    and the trained run cannot disagree about what is a thermostat."""
+    model = contract_model(system)
+    hinges = getattr(model, "hinges", None)
+    declared = {} if hinges is None else dict(hinges.declared)
+    for module in model.modules():
+        if isinstance(module, ThermostatBlock):
+            declared.update(module.setpoint_hinges())
+    return declared
 
 
 # ── Scenarios ────────────────────────────────────────────────────
@@ -568,7 +575,7 @@ class StepResponseScenario(_Scenario):
     drift decides the verdict — the same −0.23 °C drift once failed a heating
     sweep as "the wrong way" and passed a cooling sweep beside it.
 
-    A control declared a hinge is a thermostat: the clamp makes it command
+    A control declared a hinge, or a `thermostat` block's setpoint, is a thermostat: it makes it command
     nothing while the zone is on the inactive side of the target. Its sweep
     is seeded only where the target is active (a cooling target below the
     zone, a heating target above it), and a target inactive across the whole

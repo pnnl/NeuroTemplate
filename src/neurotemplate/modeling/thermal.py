@@ -57,8 +57,11 @@ class RCZone(nn.Module):
         self.coarse_taus = declaration.get("time_constants_h")
         declared = [c for c, _ in self.network.inputs]
         if sorted(set(declared)) != sorted(inputs):
+            unused = sorted(set(inputs) - set(declared))
             raise ValueError(f"RCZone {name!r} is handed {sorted(inputs)}, but its network "
-                             f"declares {sorted(set(declared))}")
+                             f"declares {sorted(set(declared))}. A column its network does not "
+                             f"use, here {unused}, comes out of the block's `D` (`nt data "
+                             "ladder` leaves out an input whose gain fits at zero).")
         # A column may enter several nodes: the drive has one column per entry.
         self._order = [inputs.index(c) for c in declared]
         self.window, self.dt_h = window, dt_h
@@ -196,8 +199,9 @@ class Thermostat(nn.Module):
                 if value is None:
                     raise ValueError(
                         f"thermostat {name!r}: {side}.{key} is not declared (null where the "
-                        "record did not place it): give it a box from what you know of the "
-                        "equipment.")
+                        "record did not place it): give it from what you know of the "
+                        f"equipment, in its declaration: `\"{side}\": {{\"{key}\": "
+                        "[low, high], ...}`, or a number to pin it.")
                 box = (parse_box(f"{side}.{key}", value) if positive
                        else _linear_box(f"{side}.{key}", value))
                 self.names.append(f"{side}.{key}")

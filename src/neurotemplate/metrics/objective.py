@@ -5,9 +5,12 @@ Objective diagnostics: how big is each term?
 and nothing checks that a gain suits the magnitude of what it multiplies.
 That is the highest-frequency failure in this library's record — four campaigns
 out of four — and it is a *scale* problem: the term has the right shape but the
-wrong magnitude, so it dominates the objective or vanishes from it.
-`objective_balance` answers it in one forward pass by printing every term's
-contribution and share.
+wrong magnitude. `objective_balance` shows it in one forward pass by printing
+every term's contribution and share.
+
+The shares are reported, not judged. A band term is a hinge and reads zero while the
+band holds, so a controller keeping comfort shows cost near 100%, which is the good
+case. A share cannot tell you the trade; the blind twin in `nt guide control` does.
 
 The worked example: a power proxy of `(cooling_setpoint - outdoor)^2` that
 came out at 1.7x the entire comfort objective. The numbers were on screen from
@@ -26,10 +29,6 @@ from neurotemplate.control.windows import scored_steps
 from neurotemplate._typing import beartype
 
 
-# A term worth more than this multiple of everything else put together is
-# running the show, whatever the other weights say.
-DOMINANCE_FACTOR = 2.0
-
 @dataclass
 class TermBalance:
     """One objective term's contribution on a single batch."""
@@ -38,17 +37,11 @@ class TermBalance:
     share: float           # of the summed objective
     ratio_to_rest: float   # value / sum of the other terms; inf when alone
 
-    def dominates(self, factor: float = DOMINANCE_FACTOR) -> bool:
-        return self.ratio_to_rest > factor
-
 
 @dataclass
 class ObjectiveBalance:
     terms: list[TermBalance]
     total: float
-
-    def dominant(self, factor: float = DOMINANCE_FACTOR) -> list[TermBalance]:
-        return [t for t in self.terms if t.dominates(factor)]
 
 
 @dataclass
@@ -212,8 +205,7 @@ def objective_to_dict(balance: ObjectiveBalance,
     """JSON-serializable objective diagnostics (for MLflow / disk)."""
     def terms(b: ObjectiveBalance) -> dict:
         return {t.name: {"value": t.value, "share": t.share,
-                         "ratio_to_rest": t.ratio_to_rest,
-                         "dominates": t.dominates()}
+                         "ratio_to_rest": t.ratio_to_rest}
                 for t in b.terms}
 
     return {
@@ -228,14 +220,6 @@ def objective_to_dict(balance: ObjectiveBalance,
 
 
 @beartype
-def objective_warnings(balance: ObjectiveBalance) -> list[str]:
-    """One line per term that outweighs every other term combined."""
-    return [f"WARNING: {t.name} is {t.ratio_to_rest:.1f}x every other term combined. "
-            "Whatever the other weights say, this is the objective being optimised."
-            for t in balance.dominant()]
-
-
-@beartype
 def format_objective_report(balance: ObjectiveBalance,
                             power: Optional[PowerDiagnostics] = None,
                             notes: Optional[list[str]] = None,
@@ -246,10 +230,8 @@ def format_objective_report(balance: ObjectiveBalance,
     lines = [f"Objective term balance (one batch, {when}):"]
     for t in balance.terms:
         ratio = "inf" if t.ratio_to_rest == float("inf") else f"{t.ratio_to_rest:.2f}x"
-        note = "  <-- dominates" if t.dominates() else ""
         lines.append(f"  {t.name:<22s} {t.value:>12.4g}  "
-                     f"{t.share * 100:>3.0f}%  {ratio:>8s} the rest{note}")
-    lines += [f"  {w}" for w in objective_warnings(balance)]
+                     f"{t.share * 100:>3.0f}%  {ratio:>8s} the rest")
     if power is not None:
         lines.append(f"  power exactly zero on {power.frac_zero * 100:.1f}% of "
                      "scored steps")

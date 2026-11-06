@@ -59,7 +59,8 @@ class Progress(Callback):
 
         if self.level == "summary" and self.epochs_run == 1:
             print(f"{per_epoch:.1f} s per epoch; {trainer.epochs} epochs at most: "
-                  f"about {_duration(per_epoch * trainer.epochs)}.", flush=True)
+                  f"about {_duration(per_epoch * trainer.epochs)}. `progress: log` prints each "
+                  "epoch.", flush=True)
         if self.level in ("live", "log") and (
                 self.epochs_run == 1 or self.epochs_run % self.update_every == 0):
             line = (f"epoch {self.epochs_run}/{trainer.epochs}  train {train:.4g}  "

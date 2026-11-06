@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import re
 import uuid
@@ -359,10 +360,18 @@ def parse_set_args(overrides: list[str]) -> dict[str, Any]:
 
 
 def apply_overrides(config_dict: dict, overrides: dict[str, Any]) -> dict:
-    unknown = sorted(set(overrides) - set(config_dict))
-    if unknown:
-        raise ConfigError(f"Override target does not exist: {', '.join(unknown)}")
-    return {**config_dict, **overrides}
+    """`overrides` on top of `config_dict`. A dotted key (`gains.cost`) sets one
+    entry of a table and leaves the rest; an undotted one replaces the whole field."""
+    merged = copy.deepcopy(config_dict)
+    for key, value in overrides.items():
+        *parents, leaf = key.split(".")
+        table = merged
+        for parent in parents:
+            table = table.get(parent) if isinstance(table, dict) else None
+        if not isinstance(table, dict) or leaf not in table:
+            raise ConfigError(f"Override target does not exist: {key}")
+        table[leaf] = value
+    return merged
 
 
 def load_config(path: Union[str, Path], cls: Type[T],
@@ -463,7 +472,11 @@ def load_config_from_cli(
     cli_args = parser.parse_args(argv)
 
     if cli_args.list_configs:
-        for name in list_available_configs(config_dir):
+        names = list_available_configs(config_dir)
+        if not names:
+            raise SystemExit(f"No configs in {config_dir.resolve()}: run `nt` from the project "
+                             "directory.")
+        for name in names:
             print(name)
         raise SystemExit(0)
 

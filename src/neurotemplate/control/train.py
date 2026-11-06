@@ -53,7 +53,6 @@ from neurotemplate.metrics.objective import (
     objective_balance,
     objective_notes,
     objective_to_dict,
-    objective_warnings,
     power_diagnostics,
     run_objective_pass,
 )
@@ -170,11 +169,8 @@ def train_control(cfg: ControlConfig,
     power_diag = (power_diagnostics(power, balance_out, hmax)
                   if power is not None and objective.reads_power else None)
     notes = objective_notes(objective, cfg)
-    if cfg.progress in ("live", "log"):
+    if cfg.progress != "silent":
         print(format_objective_report(balance, power_diag, notes, trains))
-    elif cfg.progress == "summary":
-        for line in objective_warnings(balance) + [f"NOTE: {n}" for n in notes]:
-            print(line)
 
     cfg.run = ("DPC " if trains else "MPC ") + cfg.run
     term_keys = [term.key for term in objective.terms]

@@ -46,7 +46,10 @@ def block_mapping(nm_mapping, cfg):
     return {{"zone": zone, "hvac": hvac}}
 
 def synth_cfg(nm_mapping, norm_stats):
-    return None
+    from neurotemplate.metrics.physics import SynthSpec
+    return SynthSpec(states=[{ZONE!r}], ambient={OUTDOOR!r},
+                     off={{{SETPOINT!r}: 40.0, {HEAT!r}: 0.0}},
+                     responds={{{ZONE!r}: {{{SETPOINT!r}: +1}}}})
 
 def sub_plot(df_true, column_name):
     return None
@@ -95,3 +98,6 @@ def test_declare_ladder_thermostat_train(tmp_path, monkeypatch):
     result = train_model(cfg, config_path=str(config))
     zone_rmse = next(m.rmse for m in result.test_results.metrics if m.name == ZONE)
     assert math.isfinite(zone_rmse) and zone_rmse < 0.1, zone_rmse
+    # A thermostat commands nothing on its inactive side, and is not failed for it.
+    silent = [r.name for r in result.test_results.physics if "Did not respond" in r.headline]
+    assert silent == []

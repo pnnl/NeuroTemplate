@@ -8,8 +8,8 @@ output of every instrument in the run's `results/` folder.
 Sections (in order):
 
   Verdict      — comfort, band-jump response, and a warning for each check
-                 that fired (a dominated objective, a dead power gradient, a
-                 command the surrogate ignores, MPC solves at the cap)
+                 that fired (a dead power gradient, a command the surrogate
+                 ignores, MPC solves at the cap)
   Controller   — family, size, window and bounds, identical entries grouped;
                  the surrogate is described on its own run's card
   Objective    — the loss table with each term's share before and after
@@ -21,8 +21,7 @@ Sections (in order):
   Band jumps   — did the loop react when the reference moved
   Hyperparameters — one line
 
-Only the dominated objective and the ignored band jump are verdicts on the
-controller. Time at a bound is reported, not judged: a setpoint parked at its
+Only the ignored band jump is a verdict on the controller. Time at a bound is reported, not judged: a setpoint parked at its
 least-aggressive limit while nothing is asked of it is correct control.
 
 `render_gap_report` is the card `nt control gap` writes: the controller beside the
@@ -44,7 +43,7 @@ from neurotemplate.metrics.model_card import MAX_ROWS, WORST_ROWS
 
 from neurotemplate._typing import beartype
 
-#: A band-jump request actuated less often than this is "largely ignored".
+#: A band-jump request neither actuated nor answered this often is "largely ignored".
 IGNORED_BELOW = 0.5
 #: A command whose surrogate gradient is zero this often cannot be learned.
 INSENSITIVE_AT = 0.5
@@ -52,10 +51,10 @@ INSENSITIVE_AT = 0.5
 DEAD_POWER_AT = 0.01
 
 
-def _header(name: str, timestamp: str, cfg, sysid_cfg, eval_time_s: float,
+def _header(name: str, timestamp: str, cfg, eval_time_s: float,
             best_dev_loss: Optional[float], train_time_s: Optional[float]) -> str:
-    parts = [timestamp, f"sys-id run `{cfg.sysid_run_id}` ({sysid_cfg.model}; "
-             "its reportcard describes the surrogate)"]
+    parts = [timestamp, f"sys-id run `{cfg.sysid_run_id}` (its reportcard describes "
+             "the surrogate)"]
     if cfg.policy == "mpc":
         parts.append("MPC: nothing trained")
     if best_dev_loss is not None:
@@ -87,19 +86,18 @@ def _verdict_section(results, balance: Optional[ObjectiveBalance],
                      f"{share('frac_actuated') * 100:.0f}%, moved the right way on "
                      f"{share('frac_closed') * 100:.0f}%, back in band on "
                      f"{share('frac_resolved') * 100:.0f}%.")
-        ignored = [r for r in results.response if r.frac_actuated < IGNORED_BELOW]
+        # A controller that acted ahead of the jump need not move on its step, so
+        # a request counts as ignored only if the channel did not answer it either.
+        ignored = [r for r in results.response
+                   if r.frac_actuated < IGNORED_BELOW and r.frac_closed < IGNORED_BELOW]
         if ignored:
             lines.append("- ⚠️ Requests largely ignored: " + _names(
-                [f"{r.name} / {r.direction} ({r.frac_actuated * 100:.0f}% actuated)"
+                [f"{r.name} / {r.direction} ({r.frac_actuated * 100:.0f}% actuated, "
+                 f"{r.frac_closed * 100:.0f}% moved the right way)"
                  for r in ignored], quote=False) + " (Band jumps).")
     else:
         lines.append("- **Band jumps:** none left a channel outside its band, so the "
                      "response is untested; a test reference whose band steps tests it.")
-    for b, when in ((balance, "before training"), (trained, "after training")):
-        if b is not None:
-            for t in b.dominant():
-                lines.append(f"- ⚠️ `{t.name}` runs the objective {when}: "
-                             f"{t.ratio_to_rest:.1f}× every other term combined (Objective).")
     if power is not None and power.frac_dead > DEAD_POWER_AT:
         lines.append(f"- ⚠️ No gradient through power on {power.frac_dead * 100:.0f}% of "
                      "scored steps: a clamp on the power path (Objective).")
@@ -373,7 +371,7 @@ def render_control_reportcard(
     )
     trains = cfg.policy != "mpc"
     parts = [
-        _header(name, ts, cfg, sysid_cfg, results.eval_time_s, best_dev_loss, train_time_s),
+        _header(name, ts, cfg, results.eval_time_s, best_dev_loss, train_time_s),
         _verdict_section(results, balance, trained_balance, power, sensitivity, arch),
         _controller_section(arch),
         _objective_section(cfg, sysid_cfg, resolve_objective(cfg, nm_mapping), balance,

@@ -156,6 +156,13 @@ class ThermostatBlock(_Physical):
         if problems:
             raise ValueError(f"thermostat block {block.name!r}: " + "; ".join(problems))
 
+    def setpoint_hinges(self) -> dict[str, dict]:
+        """Each setpoint as the physics checks read a hinge: it commands nothing while
+        the zone is on its inactive side."""
+        maps = {"cooling": "nrelu", "heating": "relu"}
+        return {setpoint: {"target": self.zone_name, "map": maps[side]}
+                for side, setpoint in zip(self.hvac.sides, self.hvac.setpoints)}
+
     def forward(self, y: torch.Tensor, u: torch.Tensor, d: torch.Tensor) -> torch.Tensor:
         windows = (y, u, d)
         setpoints = torch.stack([self.column(windows, c)[:, -1] for c in self.hvac.setpoints],

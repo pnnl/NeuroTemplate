@@ -155,6 +155,10 @@ def _ensemble_section(ensemble: Optional[EnsembleSpread]) -> Optional[str]:
 # ── Header and verdict ────────────────────────────────────────────
 
 
+#: A run this short is a smoke test: its scores describe an untrained model.
+SMOKE_EPOCHS = 5
+
+
 def _header(name: str, timestamp: str, trained: bool,
             best_dev_loss: Optional[float], train_time_s: Optional[float],
             test_time_s: Optional[float]) -> str:
@@ -588,6 +592,10 @@ def render_reportcard(
                 f"Constant in this data: {_names(frozen)}. Normalization had nothing "
                 "to scale, so they stay in raw units; one that varies at evaluation "
                 "time arrives far out of range. Exclude it or widen the excitation.")
+
+    if 0 < cfg.lr and cfg.epochs <= SMOKE_EPOCHS:
+        warnings.append(f"Only {cfg.epochs} epochs: this run shows the wiring works and "
+                        "says nothing about the model.")
 
     parts = [
         _header(name, ts, cfg.lr > 0, best_dev_loss, train_time_s, test_time_s),

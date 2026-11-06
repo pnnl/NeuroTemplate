@@ -145,6 +145,22 @@ from guesses:
          "params": {"rc_network": json.load(open("ladder/zone.json"))}},
 ```
 
+`ladder/zone.json`, what `nt data ladder` writes and `params: {rc_network: ...}` takes. Each
+parameter is a number (pinned) or `[low, high]` (a box); C in kWh/K and R in K/kW for a heat in kW:
+
+```json
+{"nodes":  {"Ti": [1.5, 1.6], "Tm": [19, 21]},
+ "edges":  {"Ti-Tm": [0.39, 0.41], "Ti-ambient": [2.9, 3.1]},
+ "inputs": {"Heat [kW]": {"Ti": 1.0}, "Solar": {"Ti": [0.003, 0.005]}},
+ "noise":  {"Ti": 0.01, "Tm": 0.01, "sensor": 0.05},
+ "time_constants_h": [[0.5, 0.01], [40, null]]}
+```
+
+`Ti` is the node the zone temperature reads, `ambient` is the block's `ambient` column, and an
+input may enter several nodes. `noise` is the Kalman filter's. `time_constants_h` is a record, not a
+declaration: the fit's `[value, error bar]`, null where the record does not place one, which the
+reportcard holds a later fit against.
+
 Training then fits every parameter inside its box by the rollout loss. That
 is the fine fit: the likelihood at 5 min chases sensor noise and cycling and
 shortens the slow mode, the rollout loss seeded by the filter does not. The
