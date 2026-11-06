@@ -15,47 +15,24 @@ def _restore_tracking_uri():
     mlflow.set_tracking_uri(previous)
 
 
-def test_a_finished_batch_lets_go_of_its_graph():
-    """Neuromancer's Trainer holds each batch's loss until the epoch's mean. Held
-    with its graph, an epoch of thermal rollouts passed 2.5 GB and was killed."""
-    import torch
-    from types import SimpleNamespace
-
-    from neurotemplate.common.progress import Progress
-
-    loss = (torch.ones(1, requires_grad=True) * 2).sum()
-    held_by_trainer = [loss]
-    Progress("silent", 1).end_batch(SimpleNamespace(train_metric="train_loss"),
-                                    {"train_loss": loss})
-    assert held_by_trainer[0].grad_fn is None
-
-
-def _trainer_stub():
-    from types import SimpleNamespace
-    return SimpleNamespace(train_metric="train_loss", eval_metric="mean_dev_loss", epochs=9,
-                           patience=3, badcount=4)
-
-
 def test_training_that_cannot_return_a_trained_model_stops_with_a_reason():
     """Silent runs too: this is not a matter of what gets printed."""
     from neurotemplate.common.progress import Progress
 
     progress = Progress("silent", 1)
-    progress.begin_train(_trainer_stub())
-    with pytest.raises(RuntimeError, match="epoch 1.*every weight is lost"):
-        progress.end_epoch(_trainer_stub(), {"mean_train_loss": float("nan"),
-                                             "mean_dev_loss": 1.0})
+    progress.start(9)
+    with pytest.raises(RuntimeError, match="step 1.*every weight is lost"):
+        progress.update(1, float("nan"), 1.0)
 
     # A non-finite dev loss may recover, so only one that never is finite is refused.
     progress = Progress("silent", 1)
-    progress.begin_train(_trainer_stub())
-    progress.end_epoch(_trainer_stub(), {"mean_train_loss": 1.0,
-                                         "mean_dev_loss": float("inf")})
+    progress.start(9)
+    progress.update(1, 1.0, float("inf"))
     with pytest.raises(RuntimeError, match="No finite dev loss"):
-        progress.end_train(_trainer_stub(), {})
+        progress.finish()
 
-    progress.end_epoch(_trainer_stub(), {"mean_train_loss": 1.0, "mean_dev_loss": 0.5})
-    progress.end_train(_trainer_stub(), {})
+    progress.update(2, 1.0, 0.5)
+    progress.finish()
 
 
 def test_a_run_of_the_other_kind_or_outside_the_store_says_so(tmp_path, monkeypatch):

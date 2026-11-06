@@ -474,6 +474,20 @@ def get_loader(
     return loader
 
 
+def cycle_batches(loader):
+    """`next_batch()` for `fit`: the loader's batches, over and over."""
+    batches = iter(loader)
+
+    def next_batch() -> dict:
+        nonlocal batches
+        try:
+            return next(batches)
+        except StopIteration:
+            batches = iter(loader)
+            return next(batches)
+    return next_batch
+
+
 # Convert windowed tensors back to a DataFrame.
 @beartype
 def to_df(

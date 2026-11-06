@@ -15,7 +15,8 @@ from typing import Optional
 import torch
 from matplotlib import rc_context
 
-from neurotemplate.nm.trainer import Trainer
+from neurotemplate.common.fit import fit
+from neurotemplate.common.data_utils import cycle_batches
 
 from neurotemplate.common.data_utils import NormStats, axis_label
 from neurotemplate.common.progress import Progress
@@ -83,29 +84,15 @@ def train_policy(
         )
     optimizer = torch.optim.Adam(trainable, lr=cfg.lr)
 
-    trainer = Trainer(
-        problem=problem,
-        train_data=train_loader,
-        dev_data=dev_loader,
-        optimizer=optimizer,
-        logger=logger,
-        patience=cfg.patience,
-        warmup=cfg.warmup,
-        epochs=cfg.epochs,
-        device=cfg.device,
-        eval_metric="mean_dev_loss",
-        callback=Progress(cfg.progress, cfg.update_every),
-        # Neuromancer prints its own epoch line only when there is no logger.
-        epoch_verbose=cfg.epochs + 1,
-    )
     t0 = tic()
-    trainer.train()  # leaves the best weights loaded
+    fitted = fit(problem, optimizer, cycle_batches(train_loader), dev_loader,
+                 iters=cfg.epochs * len(train_loader), eval_every=len(train_loader),
+                 clip=100.0, patience=cfg.patience, warmup=cfg.warmup, device=cfg.device,
+                 progress=Progress(cfg.progress, cfg.update_every), logger=logger)
     train_time_s = tic() - t0
     if logger is not None:
-        save_checkpoint(logger, trainer.best_model)
-
-    cl_system = trainer.model.nodes[0]
-    return cl_system, trainer.get_devloss(), train_time_s
+        save_checkpoint(logger, fitted.best_state)
+    return problem.nodes[0], fitted.best_dev, train_time_s
 
 
 # ── Evaluate (long closed-loop rollout) ──────────────────────────

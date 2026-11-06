@@ -10,7 +10,6 @@ import pandas as pd
 import pytest
 import torch
 import torch.nn as nn
-from neurotemplate.nm.trainer import Trainer
 
 from neurotemplate.common.data_utils import compute_norm_stats
 from neurotemplate.metrics.sensitivity import command_sensitivity
@@ -33,9 +32,9 @@ def _frame(n: int = 80) -> pd.DataFrame:
 
 
 def test_lr_zero_trains_nothing_and_reports_no_training(tmp_path, monkeypatch):
-    def no_training(self):
+    def no_training(*args, **kwargs):
         raise AssertionError("lr: 0 ran the training loop")
-    monkeypatch.setattr(Trainer, "train", no_training)
+    monkeypatch.setattr(experiment, "fit", no_training)
     cfg = trainable_cfg(tmp_path, NM_MAPPING, lr=0.0, progress="silent")
     df = _frame()
     run = train_and_evaluate(

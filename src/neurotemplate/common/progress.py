@@ -2,11 +2,11 @@
 What a training run prints, at one of four levels (`cfg.progress`):
 
     silent   nothing
-    summary  seconds per epoch after the first, then the end summary
-    live     one line rewritten in place every `update_every` epochs, then the summary
-    log      the same line printed as a new line every `update_every` epochs, then the summary
+    summary  seconds per step after the first evaluation, then the end summary
+    live     one line rewritten in place at every `update_every`th evaluation, then the summary
+    log      the same line printed as a new line, then the summary
 
-The end summary says why training stopped and where the best dev loss was, which
+The end summary says how training ended and where the best dev loss was, which
 is the one thing the loss trajectory says that changes what to do next.
 """
 
@@ -15,78 +15,64 @@ from __future__ import annotations
 from math import isfinite
 from time import perf_counter
 
-from neurotemplate.nm.trainer import Callback
-
 
 def _duration(seconds: float) -> str:
     return f"{seconds:.0f} s" if seconds < 120 else f"{seconds / 60:.1f} min"
 
 
-class Progress(Callback):
-    """A Neuromancer `Callback` printing one training call's progress, and letting
-    go of each batch's graph once it has been used."""
+class Progress:
+    """One training call's progress; also where a lost run stops."""
 
     def __init__(self, level: str, update_every: int):
-        super().__init__()
         self.level = level
         self.update_every = update_every
+        self.early = False
 
-    def begin_train(self, trainer) -> None:
-        self.start = perf_counter()
-        self.epochs_run = 0
-        self.best_epoch = None
+    def start(self, iters: int) -> None:
+        self.begin = perf_counter()
+        self.iters = iters
+        self.evaluations = 0
+        self.best_step = None
         self.best_dev = float("inf")
 
-    def end_batch(self, trainer, output) -> None:
-        # Neuromancer's Trainer keeps every batch's loss until the epoch's mean, and
-        # with it the batch's whole graph: an epoch of thermal rollouts passed 2.5 GB
-        # at any batch size. In place, so the tensor in its list lets go too.
-        output[trainer.train_metric].detach_()
-
-    def end_epoch(self, trainer, output) -> None:
-        self.epochs_run += 1
-        train = float(output[f"mean_{trainer.train_metric}"])
+    def update(self, step: int, train: float, dev: float) -> None:
+        self.evaluations += 1
         if not isfinite(train):
             raise RuntimeError(
-                f"The training loss is {train} at epoch {self.epochs_run}: a non-finite gradient "
-                "has gone through the optimizer, so every weight is lost and no later epoch can "
-                "recover. Look for a parameter or an input at an extreme (a capacity near zero, "
-                "a box far off the data) in what this run declares.")
-        dev = float(output[trainer.eval_metric])
+                f"The training loss is {train} at step {step}: a non-finite gradient has gone "
+                "through the optimizer, so every weight is lost and no later step can recover. "
+                "Look for a parameter or an input at an extreme (a capacity near zero, a box far "
+                "off the data) in what this run declares.")
         if dev < self.best_dev:
-            self.best_dev, self.best_epoch = dev, self.epochs_run
-        per_epoch = (perf_counter() - self.start) / self.epochs_run
+            self.best_dev, self.best_step = dev, step
+        per_step = (perf_counter() - self.begin) / step
 
-        if self.level == "summary" and self.epochs_run == 1:
-            print(f"{per_epoch:.1f} s per epoch; {trainer.epochs} epochs at most: "
-                  f"about {_duration(per_epoch * trainer.epochs)}. `progress: log` prints each "
-                  "epoch.", flush=True)
+        if self.level == "summary" and self.evaluations == 1:
+            print(f"{per_step:.2f} s per step; {self.iters} steps: about "
+                  f"{_duration(per_step * self.iters)}. `progress: log` prints each evaluation.",
+                  flush=True)
         if self.level in ("live", "log") and (
-                self.epochs_run == 1 or self.epochs_run % self.update_every == 0):
-            line = (f"epoch {self.epochs_run}/{trainer.epochs}  train {train:.4g}  "
-                    f"dev {dev:.4g}  best {self.best_dev:.4g} "
-                    f"@ {self.best_epoch}  {per_epoch:.1f} s/epoch")
+                self.evaluations == 1 or self.evaluations % self.update_every == 0):
+            line = (f"step {step}/{self.iters}  train {train:.4g}  dev {dev:.4g}  best "
+                    f"{self.best_dev:.4g} @ {self.best_step}  {per_step:.2f} s/step")
             if self.level == "live":
                 print(f"\r{line}\033[K", end="", flush=True)
             else:
                 print(line, flush=True)
 
-    def end_train(self, trainer, output) -> None:
-        if self.best_epoch is None:
+    def stopped_early(self) -> None:
+        self.early = True
+
+    def finish(self) -> None:
+        if self.best_step is None:
             raise RuntimeError(
-                f"No finite dev loss in {self.epochs_run} epochs, so there is no best model: "
-                "what training would return is the model as built. The rollouts on the dev "
-                "split blow up or read a missing value.")
+                f"No finite dev loss in {self.evaluations} evaluations, so there is no best "
+                "model: what training would return is the model as built. The rollouts on the "
+                "dev split blow up or read a missing value.")
         if self.level == "silent":
             return
         if self.level == "live":
             print()
-        best = self.best_epoch
-        if trainer.badcount > trainer.patience:
-            why = f"stopped by patience at epoch {self.epochs_run}"
-        else:
-            # Patience never ran out, so the dev loss was still improving.
-            why = (f"reached the {trainer.epochs}-epoch cap before patience "
-                   f"({trainer.patience}) ran out; more epochs may help")
-        print(f"Training {why}. Best dev loss {self.best_dev:.4g} at epoch {best}; "
-              f"{_duration(perf_counter() - self.start)}.", flush=True)
+        print(f"Training {'stopped early' if self.early else 'finished'}. Best dev loss "
+              f"{self.best_dev:.4g} at step {self.best_step}; "
+              f"{_duration(perf_counter() - self.begin)}.", flush=True)

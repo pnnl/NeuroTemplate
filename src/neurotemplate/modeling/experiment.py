@@ -19,7 +19,8 @@ from pandas import DataFrame
 
 from neurotemplate._typing import beartype
 
-from neurotemplate.common.data_utils import NormStats, get_loader
+from neurotemplate.common.data_utils import NormStats, cycle_batches, get_loader
+from neurotemplate.common.fit import fit
 from neurotemplate.common.progress import Progress
 from neurotemplate.common.tracking import RunLog, save_checkpoint
 from neurotemplate.modeling.heads import HeadStack
@@ -30,7 +31,6 @@ from neurotemplate.modeling.bounded import physical_parameters
 from neurotemplate.modeling.config import ModelingConfig
 
 from neurotemplate.nm.problem import Problem
-from neurotemplate.nm.trainer import Trainer
 from neurotemplate.nm.system import System
 
 
@@ -93,9 +93,9 @@ def build_trainer(
     head_stack: Optional[HeadStack] = None,
     block_spec: Optional[dict[str, dict]] = None,
     logger: Optional[RunLog] = None,
-) -> Trainer:
+) -> tuple:
     """
-    Construct a Neuromancer Trainer with a standard Problem.
+    The Problem, its optimizer and the train and dev loaders.
 
     The Problem contains:
       - A SystemPreview node for autoregressive rollout
@@ -143,24 +143,7 @@ def build_trainer(
     if cfg.lr > 0:
         check_parameters_reach_loss(problem, next(iter(train_loader)))
 
-    trainer = Trainer(
-        problem=problem,
-        train_data=train_loader,
-        dev_data=dev_loader,
-        optimizer=optimizer,
-        logger=logger,
-        patience=cfg.patience,
-        warmup=cfg.warmup,
-        epochs=cfg.epochs,
-        device=cfg.device,
-        eval_metric="mean_dev_loss",
-        lr_scheduler=True,
-        callback=Progress(cfg.progress, cfg.update_every),
-        # Neuromancer prints its own epoch line only when there is no logger.
-        epoch_verbose=cfg.epochs + 1,
-    )
-
-    return trainer
+    return problem, optimizer, train_loader, dev_loader
 
 
 def _parameter_groups(problem: Problem, cfg: ModelingConfig) -> list[dict]:
@@ -218,7 +201,7 @@ def fit_dynamics(
 
     Returns (trained_system, best_dev_loss).
     """
-    trainer = build_trainer(
+    problem, optimizer, train_loader, dev_loader = build_trainer(
         cfg=cfg,
         train_dfs=train_dfs,
         dev_dfs=dev_dfs,
@@ -229,12 +212,18 @@ def fit_dynamics(
         block_spec=block_spec,
         logger=logger,
     )
+    system = problem.nodes[0]
     if cfg.lr == 0:
         if cfg.progress != "silent":
             print("lr: 0: nothing to train; the model is kept as built.")
-    else:
-        trainer.train()
-    # At lr: 0, best_model is the model as built.
+        if logger is not None:
+            logger.log_weights(problem)
+            save_checkpoint(logger, problem.state_dict())
+        return system, None
+    fitted = fit(problem, optimizer, cycle_batches(train_loader), dev_loader,
+                 iters=cfg.epochs * len(train_loader), eval_every=len(train_loader),
+                 clip=100.0, patience=cfg.patience, warmup=cfg.warmup, device=cfg.device,
+                 progress=Progress(cfg.progress, cfg.update_every), logger=logger)
     if logger is not None:
-        save_checkpoint(logger, trainer.best_model)
-    return trainer.model.nodes[0], None if cfg.lr == 0 else trainer.get_devloss()
+        save_checkpoint(logger, fitted.best_state)
+    return system, fitted.best_dev

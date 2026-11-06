@@ -4,10 +4,8 @@ from types import SimpleNamespace
 
 
 class FakeLogger:
-    """Every call the pipelines (and Neuromancer's Trainer) make on a logger,
-    kept in plain containers for a test to read back."""
-
-    save_weights = False   # Trainer writes no checkpoint of its own
+    """Every call the pipelines make on a logger, kept in plain containers for a
+    test to read back."""
 
     def __init__(self, run_id: str = "0" * 32, savedir=None):
         self.run = SimpleNamespace(info=SimpleNamespace(run_id=run_id))
