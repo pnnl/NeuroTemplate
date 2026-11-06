@@ -10,7 +10,7 @@ import pandas as pd
 import pytest
 import torch
 import torch.nn as nn
-from neuromancer.trainer import Trainer
+from neurotemplate.nm.trainer import Trainer
 
 from neurotemplate.common.data_utils import compute_norm_stats
 from neurotemplate.metrics.sensitivity import command_sensitivity

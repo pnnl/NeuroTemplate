@@ -40,8 +40,8 @@ from typing import Optional
 import torch
 import torch.nn as nn
 
-from neuromancer.system import Node
-from neuromancer.modules import blocks
+from neurotemplate.nm.system import Node
+from neurotemplate.nm import blocks
 
 from neurotemplate.common.data_utils import NormStats
 from neurotemplate.control.losses import bound_columns, resolve_objective

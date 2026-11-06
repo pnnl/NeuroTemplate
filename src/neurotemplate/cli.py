@@ -66,12 +66,9 @@ def main(argv: Optional[list[str]] = None) -> None:
     # Dependencies' import-time noise (a deprecated alias) is not the user's
     # to act on, and every line of it lands in an agent's context. The
     # library's own warnings, and the user's hooks', still show.
-    for package in ("tensorly", "neuromancer", "neuralop", "torch_harmonics"):
+    for package in ("tensorly", "neuralop", "torch_harmonics"):
         warnings.filterwarnings("ignore", category=DeprecationWarning, module=package)
         warnings.filterwarnings("ignore", category=FutureWarning, module=package)
-    # Neuromancer hands its LR scheduler the loss tensor, and torch warns once per run.
-    warnings.filterwarnings("ignore", message="Converting a tensor with requires_grad",
-                            module="torch.optim.lr_scheduler")
 
     if not argv or argv[0] in ("-h", "--help"):
         print(_help_text())

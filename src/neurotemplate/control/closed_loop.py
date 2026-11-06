@@ -21,10 +21,9 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 
-from neuromancer.system import SystemPreview
-from neuromancer.problem import Problem
-from neuromancer.constraint import Loss
-from neuromancer.loss import PenaltyLoss
+from neurotemplate.nm.system import SystemPreview
+from neurotemplate.nm.problem import Problem
+from neurotemplate.nm.loss import Loss, PenaltyLoss
 
 from neurotemplate.control.losses import (
     POWER, LossTerm, apply_map, resolve_objective, window_power_mean,

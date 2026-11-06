@@ -15,7 +15,7 @@ from typing import Optional
 import torch
 from matplotlib import rc_context
 
-from neuromancer.trainer import Trainer
+from neurotemplate.nm.trainer import Trainer
 
 from neurotemplate.common.data_utils import NormStats, axis_label
 from neurotemplate.common.progress import Progress

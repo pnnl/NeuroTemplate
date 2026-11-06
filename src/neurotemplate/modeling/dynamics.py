@@ -47,7 +47,7 @@ from neurotemplate.modeling.config import ModelingConfig
 
 from neurotemplate._typing import beartype
 
-from neuromancer.system import Node, SystemPreview
+from neurotemplate.nm.system import Node, SystemPreview
 
 from neurotemplate.hooks import load_modeling_hooks
 from neurotemplate.modeling.contract import Windowed, contract_model, stateful_blocks

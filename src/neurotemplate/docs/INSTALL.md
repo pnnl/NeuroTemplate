@@ -20,16 +20,6 @@ uv run nt init
 `uv add` puts one command, `nt`, on the environment's `PATH`; `nt init` writes
 the application (below).
 
-**Neuromancer is pinned to one git commit.** If the application lists its
-own Neuromancer source, such as a local checkout, point it at the same
-commit or drop it. Otherwise `uv sync` refuses with conflicting URLs for
-`neuromancer`.
-
-**Importing the library sets `NUMBA_DISABLE_JIT=1`** unless the environment
-sets it. Neuromancer imports pyts, which compiles numba kernels at import
-(20-60 s) for a plot this library never draws. Your own numba code in the same
-process then runs uncompiled; `NUMBA_DISABLE_JIT=0` keeps the JIT.
-
 ### Optional extras
 
 | Extra | Adds | For |

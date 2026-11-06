@@ -6,7 +6,7 @@ from typing import Optional, TypedDict
 
 import pandas as pd
 import torch
-from neuromancer.dataset import DictDataset
+from neurotemplate.nm.dataset import DictDataset
 
 from neurotemplate.common.data_file import load_data_file
 

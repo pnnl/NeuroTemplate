@@ -15,7 +15,7 @@ from __future__ import annotations
 from math import isfinite
 from time import perf_counter
 
-from neuromancer.callbacks import Callback
+from neurotemplate.nm.trainer import Callback
 
 
 def _duration(seconds: float) -> str:

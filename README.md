@@ -2,8 +2,8 @@
 
 Learn a dynamics model of a system from its time-series record, train a
 controller against that model, and ship either one as a small package that
-runs without this library. Built on
-[Neuromancer](https://github.com/pnnl/neuromancer).
+runs without this library. Built on PyTorch; its rollout and training
+core began as a copy of [Neuromancer](https://github.com/pnnl/neuromancer)'s.
 
 ```bash
 uv init my_app && cd my_app

@@ -16,8 +16,7 @@ from typing import Optional
 
 import torch
 
-from neuromancer.constraint import Loss
-from neuromancer.loss import PenaltyLoss
+from neurotemplate.nm.loss import Loss, PenaltyLoss
 
 from neurotemplate.modeling.config import ModelingConfig
 from neurotemplate.modeling.contract import contract_model

@@ -1,23 +1,13 @@
 [project]
 name = "NeuroTemplate"
 version = "0.2.0"
-description = "Neuromancer-based template for system identification and differentiable predictive control."
+description = "A template for system identification and differentiable predictive control."
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
     "beartype>=0.22.3",
-    # neuromancer.callbacks imports IPython.display without declaring it.
-    "ipython",
     "matplotlib>=3.10.7",
     "mlflow>=3.9.0",
-    # A commit on pnnl/neuromancer develop with the linear-memory rollout
-    # method this library depends on.
-    "neuromancer @ git+https://github.com/pnnl/neuromancer.git@1f7b4f1c15210d7db92b9b98e8aa97014a867768",
-    # neuromancer imports neuralop's SFNO and GINO without pinning it: 2.x lacks
-    # SFNO and 0.x lacks GINO. Without the floor a resolver preferring a newer
-    # torch-harmonics walks back to 0.3.0, and `nt` cannot import. 1.0.2 itself
-    # pins torch-harmonics to 0.7.3.
-    "neuraloperator>=1,<2",
     "numpy>=2.2.6",
     # ONNX export (neurotemplate.export). onnxruntime 1.24 ships no cp310
     # wheels, and this project still supports 3.10.
@@ -40,11 +30,6 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/neurotemplate"]
-
-# Lets hatchling build with the git-pinned `neuromancer @ git+https://...`
-# dependency.
-[tool.hatch.metadata]
-allow-direct-references = true
 
 [project.optional-dependencies]
 # neurotemplate.prep's smoother; training never imports it.

@@ -31,7 +31,7 @@ import copy
 import torch
 import torch.nn as nn
 
-from neuromancer.system import Node
+from neurotemplate.nm.system import Node
 
 from neurotemplate._typing import beartype
 from neurotemplate.common.data_utils import NormStats

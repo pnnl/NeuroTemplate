@@ -10,7 +10,7 @@ plan (`control.plan`, `nt control gap`).
 
 from __future__ import annotations
 
-from neuromancer.system import Node
+from neurotemplate.nm.system import Node
 
 from neurotemplate._typing import beartype
 from neurotemplate.common.data_utils import NormStats

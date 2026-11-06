@@ -49,7 +49,7 @@ from __future__ import annotations
 import torch
 from pandas import DataFrame
 
-from neuromancer.dataset import DictDataset
+from neurotemplate.nm.dataset import DictDataset
 
 from neurotemplate.common.data_utils import (
     check_complete, get_data, get_data_splits, sliding_windows,

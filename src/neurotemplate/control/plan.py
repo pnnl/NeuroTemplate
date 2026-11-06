@@ -32,7 +32,7 @@ from time import perf_counter as tic
 
 import torch
 
-from neuromancer.system import Node
+from neurotemplate.nm.system import Node
 
 from neurotemplate._typing import beartype
 from neurotemplate.common.data_utils import NormStats

@@ -15,7 +15,7 @@ from typing import Optional
 import torch
 import torch.nn as nn
 # Aliased: `blocks` is also this package's per-block module.
-from neuromancer.modules import blocks as nm_blocks
+from neurotemplate.nm import blocks as nm_blocks
 
 from neurotemplate.modeling import windows
 
