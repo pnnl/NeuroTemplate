@@ -36,6 +36,8 @@ The rollout (`SystemPreview`) hands a node one flat window per key;
 
 from __future__ import annotations
 
+from typing import Optional
+
 import torch
 import torch.nn as nn
 
@@ -43,8 +45,9 @@ import torch.nn as nn
 class Windowed(nn.Module):
     """A contract model as a rollout node's callable.
 
-    `SystemPreview` hands the node `[batch, history_steps * n]` per key; the
-    contract takes `[batch, history_steps, n]`.
+    `SystemPreview` hands the node `[batch, rows * n]` per key; the contract takes
+    `[batch, rows, n]`. `rows` is `history_steps`, or fewer when the model reads only
+    its newest rows on this call (`rows_wanted`).
     """
 
     def __init__(self, model: nn.Module, widths: tuple[int, int, int], history_steps: int):
@@ -53,8 +56,12 @@ class Windowed(nn.Module):
         self.widths = tuple(widths)
         self.history_steps = history_steps
 
+    def rows_wanted(self) -> Optional[int]:
+        return self.model.rows_wanted() if hasattr(self.model, "rows_wanted") else None
+
     def forward(self, y: torch.Tensor, u: torch.Tensor, d: torch.Tensor) -> torch.Tensor:
-        return self.model(*(x.reshape(x.shape[0], self.history_steps, width)
+        rows = y.shape[1] // self.widths[0]
+        return self.model(*(x.reshape(x.shape[0], rows, width)
                             for x, width in zip((y, u, d), self.widths)))
 
 

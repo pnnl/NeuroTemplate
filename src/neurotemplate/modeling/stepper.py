@@ -93,7 +93,15 @@ class Stepper(nn.Module):
         z = self.core(y, u, d)
         return torch.where(self.residual_mask, z + y[:, -1], z)
 
+    def rows_wanted(self) -> Optional[int]:
+        return self.core.rows_wanted() if hasattr(self.core, "rows_wanted") else None
+
     def forward(self, y: torch.Tensor, u: torch.Tensor, d: torch.Tensor) -> torch.Tensor:
+        # A core that reads only its newest rows on this call (`Blocks.rows_wanted`) has
+        # only those normalised.
+        rows = self.core.rows_wanted() if hasattr(self.core, "rows_wanted") else None
+        if rows is not None:
+            y, u, d = y[:, -rows:], u[:, -rows:], d[:, -rows:]
         y = self.scale.normalize("Y", y)
         u = self.scale.normalize("U", u)
         d = self.scale.normalize("D", d)

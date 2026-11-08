@@ -284,6 +284,12 @@ class Blocks(nn.Module):
         self._read = {channel for driven in self._driven for _, channel in driven}
         self._outputs = ([], None)
 
+    def rows_wanted(self) -> Optional[int]:
+        """The most any core reads on this call, None if one reads its whole window."""
+        wants = [core.rows_wanted() if hasattr(core, "rows_wanted") else None
+                 for core in self.cores]
+        return None if None in wants else max(wants)
+
     def reads_outputs_through(self, residual_mask: torch.Tensor,
                               head_stack: Optional[HeadStack]) -> None:
         """What turns a block's `z` into the value a block driven by it reads,
