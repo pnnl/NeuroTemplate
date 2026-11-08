@@ -112,6 +112,10 @@ class ZoneBlock(_Physical):
         if problems:
             raise ValueError(f"rc_network block {block.name!r}: " + "; ".join(problems))
 
+    def rows_wanted(self) -> Optional[int]:
+        """Warm, the zone carries its nodes and reads only the newest row (`Blocks`)."""
+        return None if self.zone.rollout_state() is None else 1
+
     def forward(self, y: torch.Tensor, u: torch.Tensor, d: torch.Tensor) -> torch.Tensor:
         windows = (y, u, d)
         next_zone = self.zone(self.column(windows, self.zone_name),

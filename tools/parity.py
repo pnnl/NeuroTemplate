@@ -45,6 +45,7 @@ def arm_example(nt, d, policy):
         f = p / "control_configs" / "control.yaml"; c = yaml.safe_load(f.read_text())
         for k, v in c["policy_window"].items():
             if "future" in v: v["future"] = "12h"
+            v.pop("stride", None)   # MPC plans over every row
         c["solver"] = {"max_iters": 5}; c["test_stride"] = "24h"
         f.write_text(yaml.safe_dump(c, allow_unicode=True))
     sh(nt, "control", "train", "--set", "iters=12", "--set", f"policy={policy}", *QUICK, cwd=p)

@@ -258,6 +258,10 @@ class Blocks(nn.Module):
     `blocks.run_order` gives them. A `driven_by` column's rows mean what a U's
     do: row j held over the step from j to j + 1, its last row what the producer
     just wrote, head and all.
+
+    A core with a `rows_wanted()` method says how many of the newest rows it reads
+    on this call (None for all), and is handed only those: a warm thermal zone
+    carries its state and reads one row of a window as long as its context.
     """
 
     def __init__(self, blocks: list[Block], families: list[str], lags: list[Lags],
@@ -297,14 +301,16 @@ class Blocks(nn.Module):
         written: dict[int, torch.Tensor] = {}
         outs = []
         for i, (core, spec) in enumerate(zip(self.cores, self.specs)):
-            y_in = y.index_select(2, getattr(self, f"_y{i}"))
+            rows = core.rows_wanted() if hasattr(core, "rows_wanted") else None
+            yw, uw, dw = (y, u, d) if rows is None else (y[:, -rows:], u[:, -rows:], d[:, -rows:])
+            y_in = yw.index_select(2, getattr(self, f"_y{i}"))
             if self._driven[i]:
                 columns = list(y_in.unbind(-1))
                 for at, channel in self._driven[i]:
-                    columns[at] = torch.cat([y[:, 1:, channel], written[channel][:, None]], dim=1)
+                    columns[at] = torch.cat([yw[:, 1:, channel], written[channel][:, None]], dim=1)
                 y_in = torch.stack(columns, dim=-1)
-            out = core(y_in, u.index_select(2, getattr(self, f"_u{i}")),
-                       d.index_select(2, getattr(self, f"_d{i}")))
+            out = core(y_in, uw.index_select(2, getattr(self, f"_u{i}")),
+                       dw.index_select(2, getattr(self, f"_d{i}")))
             for at, channel in enumerate(spec.y_idx):
                 if channel in self._read:
                     written[channel] = self._value(out[:, at], y[:, -1, channel], channel)
