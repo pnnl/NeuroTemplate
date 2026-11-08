@@ -2,7 +2,7 @@
 What a training run prints, at one of four levels (`cfg.progress`):
 
     silent   nothing
-    summary  seconds per step after the first evaluation, then the end summary
+    summary  seconds per step and the run's estimate after its first step, then the end summary
     live     one line rewritten in place at every evaluation, then the summary
     log      the same line printed as a new line, then the summary
 
@@ -33,6 +33,14 @@ class Progress:
         self.best_step = None
         self.best_dev = float("inf")
 
+    def first_step(self) -> None:
+        """After the first step: what the run will cost, before it is spent."""
+        if self.level == "silent":
+            return
+        per_step = perf_counter() - self.begin
+        print(f"{per_step:.2f} s per step; {self.iters} steps: about "
+              f"{_duration(per_step * self.iters)}, before the dev evaluations.", flush=True)
+
     def update(self, step: int, train: float, dev: float) -> None:
         self.evaluations += 1
         if not isfinite(train):
@@ -45,10 +53,6 @@ class Progress:
             self.best_dev, self.best_step = dev, step
         per_step = (perf_counter() - self.begin) / step
 
-        if self.level == "summary" and self.evaluations == 1:
-            print(f"{per_step:.2f} s per step; {self.iters} steps: about "
-                  f"{_duration(per_step * self.iters)}. `progress: log` prints each evaluation.",
-                  flush=True)
         if self.level in ("live", "log"):
             line = (f"step {step}/{self.iters}  train {train:.4g}  dev {dev:.4g}  best "
                     f"{self.best_dev:.4g} @ {self.best_step}  {per_step:.2f} s/step")

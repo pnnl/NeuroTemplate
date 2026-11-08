@@ -104,6 +104,8 @@ def fit(problem, optimizer, train_batches: Iterator[dict], dev_batches: Iterable
         torch.nn.utils.clip_grad_norm_(problem.parameters(), CLIP)
         optimizer.step()
         scheduler.step()
+        if step == 1:
+            progress.first_step()
         # Detached: a held loss holds its whole graph.
         output = {k: v.detach() if isinstance(v, torch.Tensor) else v for k, v in output.items()}
         losses.append(output["train_loss"])

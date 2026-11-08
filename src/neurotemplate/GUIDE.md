@@ -140,8 +140,8 @@ few: one seed is one draw.
    crossing. A column not listed takes its recorded range. Where one actuator is unpriced,
    bound it: a controller will run it against the priced one and let the cost term see only
    half the bill.
-5. **Time before you train.** After its first evaluation a run prints the seconds per
-   step and what `iters` will cost; size `iters`, `horizon` and the previews from it. A
+5. **Time before you train.** After its first step a run prints the seconds per step
+   and what `iters` will cost; size `iters`, `horizon` and the previews from it. A
    larger batch costs more per step, since each batch is a rollout of model calls.
    `progress: log` prints each evaluation. Training runs the whole budget and keeps the
    best dev loss; the run ends by saying at which step that was. A best at the last step
