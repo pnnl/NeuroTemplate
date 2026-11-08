@@ -26,7 +26,7 @@ every setting. Each run prints what you set apart from the defaults it used.
 
 ```bash
 nt model train --config model_configs/debug.yaml            # a smoke run first
-nt model train --set epochs=200 --set ensemble_seeds=3      # one-off overrides
+nt model train --set iters=6000 --set ensemble_seeds=3     # one-off overrides
 ```
 
 ## What the model reads: `past` and `context`
@@ -374,7 +374,7 @@ from neurotemplate.modeling.config import ModelingConfig
 from neurotemplate.modeling.load import evaluate_run, load_trained_dynamics
 from neurotemplate.modeling.train import train_model
 
-cfg = load_config("model_configs/modeling.yaml", ModelingConfig, {"epochs": 50})
+cfg = load_config("model_configs/modeling.yaml", ModelingConfig, {"iters": 500})
 run = train_model(cfg)                           # run.run_id, run.test_results
 results = evaluate_run(run.run_id, ["data/next_week.csv"])
 dyn_sys, cfg, nm_mapping, norm_stats = load_trained_dynamics(run.run_id)

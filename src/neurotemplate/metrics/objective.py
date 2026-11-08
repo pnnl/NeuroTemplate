@@ -14,7 +14,7 @@ case. A share cannot tell you the trade; the blind twin in `nt guide control` do
 
 The worked example: a power proxy of `(cooling_setpoint - outdoor)^2` that
 came out at 1.7x the entire comfort objective. The numbers were on screen from
-epoch 1; nobody was comparing them.
+the first evaluation; nobody was comparing them.
 """
 
 from __future__ import annotations

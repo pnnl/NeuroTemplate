@@ -1,5 +1,4 @@
-# A 2-epoch run that exercises the whole modeling pipeline: nt model train --config model_configs/debug.yaml
-epochs: 2
-warmup: 0
-patience: 2
+# A 4-step run that exercises the whole modeling pipeline: nt model train --config model_configs/debug.yaml
+iters: 4
+eval_every: 2
 run: debug

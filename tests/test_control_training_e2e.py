@@ -43,7 +43,7 @@ def _train(s, dfs=None):
 
 
 def test_a_grid_response_objective_trains():
-    s = full_setup(epochs=3, losses={**BAND_LOSSES, **POWER_LOSSES},
+    s = full_setup(iters=6, losses={**BAND_LOSSES, **POWER_LOSSES},
                    gains={**BAND_GAINS, "energy": 0.1, "cost": 0.1, "peak": 0.1},
                    reference_scale={TARIFF: TARIFF_SCALE})
     _, trained, best_dev = _train(s)
@@ -60,7 +60,7 @@ def test_a_grid_response_objective_trains():
 def test_a_bounded_policy_over_a_reference_file_trains_and_reloads(tmp_path):
     """The band arrives as a reference file, the bounds read its columns by
     name, and the run rebuilds from its logged config to the same policy."""
-    s = full_setup(epochs=3, control_bounds={SETPT: [LOW, HIGH]})
+    s = full_setup(iters=6, control_bounds={SETPT: [LOW, HIGH]})
     cfg, sysid_cfg, nm, ns = s["cfg"], s["sysid_cfg"], s["nm"], s["norm_stats"]
     write_splits(cfg, tmp_path, s["plant"], [make_reference_df(s["plant"])])
     train_dfs, _, test_dfs = load_control_splits(cfg, nm)

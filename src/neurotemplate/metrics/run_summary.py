@@ -27,9 +27,9 @@ RUN_SUMMARY_NAME = f"{RESULTS_DIR}/run_summary.json"
 # The fields a submission audit compares against the config it claims to
 # have run. Keep in step with the audit, not with the full config.
 _PARAM_FIELDS = {
-    "model": ("model", "epochs", "lr", "batch_size", "horizon",
+    "model": ("model", "iters", "lr", "lr_final", "batch_size", "horizon",
               "past", "test_horizon", "norm_type", "seed"),
-    "control": ("epochs", "lr", "batch_size", "horizon", "policy_window",
+    "control": ("iters", "lr", "lr_final", "batch_size", "horizon", "policy_window",
                 "losses", "gains", "seed", "sysid_run_id"),
 }
 

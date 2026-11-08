@@ -12,6 +12,7 @@ from neurotemplate.common.config import (
     check_non_negative,
     check_one_of,
     check_positive,
+    check_training,
     default_savedir,
     time_microseconds,
     time_steps,
@@ -105,20 +106,24 @@ class ModelingConfig(TimedWindows):
     physical_lr: float = 0.05
 
     # ---- TRAIN ---------------------------------------------------------------
-    epochs: int = 300
+    # Gradient steps: a fixed budget, with the best weights on dev kept. Provisional
+    # until a plant bench sets it.
+    iters: int = 3000
+    # Steps between scorings of the dev set.
+    eval_every: int = 100
+    # The peak rate: it ramps up over the first 5% of the steps, then follows a cosine
+    # down to `lr_final` (`common.fit`). `lr: 0` trains nothing and keeps the model as built.
+    lr: float = 1e-3
+    # Where the cosine ends.
+    lr_final: float = 1e-5
     # What training prints: silent | summary | live | log (`common.progress`).
     progress: str = "summary"
-    # How often `live` and `log` update, in epochs.
-    update_every: int = 10
-    warmup: int = 5
-    patience: int = 25
     # How far a training or dev rollout predicts, past its history. Unset, 48 steps.
     horizon: Optional[Time] = None
     # Time between the starts of training windows, and of dev windows. Unset, a quarter
     # of a horizon, and a whole one.
     train_stride: Optional[Time] = None
     dev_stride: Optional[Time] = None
-    lr: float = 0.001
 
     # ---- TEST ----------------------------------------------------------------
     # How far a test rollout predicts, past its history, and how far apart they start.
@@ -167,16 +172,16 @@ class ModelingConfig(TimedWindows):
     def validate(self) -> None:
         for name in [
             "batch_size", "log2_hidden_size", "num_layers",
-            "epochs", "update_every", "ensemble_seeds",
+            "ensemble_seeds",
         ]:
             check_positive(self, name)
+        check_training(self)
         if self.threads is not None:
             check_positive(self, "threads")
 
         for name in [
             # lr=0 is valid: it mints a checkpoint without any parameter updates.
             "lr",
-            "warmup", "patience",
             "ref_gain", "grad_gain",
             "grad_n_samples", "synth_n_scenarios",
             "synth_hours", "synth_n_plot",

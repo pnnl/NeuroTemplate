@@ -2,7 +2,8 @@
 # run prints, `nt docs config` lists what can be set, and the latest model run is its model.
 policy: mlp
 horizon: 12h
-epochs: 30
+iters: 120
+eval_every: 10
 batch_size: 32
 policy_window:
   "Zone [°C]": {past: 15m}

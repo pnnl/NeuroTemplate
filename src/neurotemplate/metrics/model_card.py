@@ -156,7 +156,7 @@ def _ensemble_section(ensemble: Optional[EnsembleSpread]) -> Optional[str]:
 
 
 #: A run this short is a smoke test: its scores describe an untrained model.
-SMOKE_EPOCHS = 5
+SMOKE_ITERS = 20
 
 
 def _header(name: str, timestamp: str, trained: bool,
@@ -528,7 +528,7 @@ def _hyperparameters_line(cfg: ModelingConfig) -> str:
     gains = ", ".join(f"{name} {gain}" for name, gain in
                       (("ref", cfg.ref_gain), ("grad", cfg.grad_gain)) if gain != 0)
     return _section("Hyperparameters", (
-        f"lr {cfg.lr} · batch {cfg.batch_size} · epochs {cfg.epochs} · horizon "
+        f"lr {cfg.lr} to {cfg.lr_final} · batch {cfg.batch_size} · {cfg.iters} steps · horizon "
         f"{cfg.horizon} · test horizon {cfg.test_horizon} · seed {cfg.seed} · "
         f"loss gains {gains or 'none'}"))
 
@@ -593,8 +593,8 @@ def render_reportcard(
                 "to scale, so they stay in raw units; one that varies at evaluation "
                 "time arrives far out of range. Exclude it or widen the excitation.")
 
-    if 0 < cfg.lr and cfg.epochs <= SMOKE_EPOCHS:
-        warnings.append(f"Only {cfg.epochs} epochs: this run shows the wiring works and "
+    if 0 < cfg.lr and cfg.iters <= SMOKE_ITERS:
+        warnings.append(f"Only {cfg.iters} steps: this run shows the wiring works and "
                         "says nothing about the model.")
 
     parts = [

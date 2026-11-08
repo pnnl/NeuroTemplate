@@ -17,7 +17,7 @@ is the flow in four steps; do them in order and read each when you reach it.
 | `nt_control.py` | a menu of the control hooks, all optional |
 | `model_configs/modeling.yaml` | settings for a model run; none are needed |
 | `control_configs/control.yaml` | the objective, yours to edit |
-| `*/debug.yaml` | a two-epoch smoke run per side |
+| `*/debug.yaml` | a four-step smoke run per side |
 | `data/` | the record, split in time order into `train.csv`, `dev.csv`, `test.csv` |
 
 The hook file names and the two config directory names are fixed: `nt` imports and

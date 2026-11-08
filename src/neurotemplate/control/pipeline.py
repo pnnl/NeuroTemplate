@@ -86,9 +86,8 @@ def train_policy(
 
     t0 = tic()
     fitted = fit(problem, optimizer, cycle_batches(train_loader), dev_loader,
-                 iters=cfg.epochs * len(train_loader), eval_every=len(train_loader),
-                 clip=100.0, patience=cfg.patience, warmup=cfg.warmup, device=cfg.device,
-                 progress=Progress(cfg.progress, cfg.update_every), logger=logger)
+                 iters=cfg.iters, eval_every=cfg.eval_every, final_ratio=cfg.lr_final / cfg.lr,
+                 device=cfg.device, progress=Progress(cfg.progress), logger=logger)
     train_time_s = tic() - t0
     if logger is not None:
         save_checkpoint(logger, fitted.best_state)

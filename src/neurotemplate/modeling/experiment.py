@@ -221,9 +221,8 @@ def fit_dynamics(
             save_checkpoint(logger, problem.state_dict())
         return system, None
     fitted = fit(problem, optimizer, cycle_batches(train_loader), dev_loader,
-                 iters=cfg.epochs * len(train_loader), eval_every=len(train_loader),
-                 clip=100.0, patience=cfg.patience, warmup=cfg.warmup, device=cfg.device,
-                 progress=Progress(cfg.progress, cfg.update_every), logger=logger)
+                 iters=cfg.iters, eval_every=cfg.eval_every, final_ratio=cfg.lr_final / cfg.lr,
+                 device=cfg.device, progress=Progress(cfg.progress), logger=logger)
     if logger is not None:
         save_checkpoint(logger, fitted.best_state)
     return system, fitted.best_dev

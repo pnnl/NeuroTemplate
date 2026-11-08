@@ -397,8 +397,6 @@ def make_reset_init(model: nn.Module):
     weights, which is exactly what we want the loss to shape.
 
     Returns None for stateless blocks, leaving SystemPreview's identity init.
-
-    Note: unrelated to ModelingConfig.warmup, which counts early-stopping epochs.
     """
     blocks = stateful_blocks(model)
     if not blocks:

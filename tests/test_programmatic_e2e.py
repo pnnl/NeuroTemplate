@@ -107,8 +107,7 @@ model: {model}
 past: {past}
 log2_hidden_size: 2
 num_layers: 1
-epochs: 50
-warmup: 0
+iters: 50
 horizon: 20m
 test_horizon: 100m
 test_stride: 2h
@@ -119,7 +118,7 @@ progress: silent
 device: cpu
 """)
     model_cfg = load_config(config_path, ModelingConfig, {
-        "epochs": 2, "location": location, "savedir": str(tmp_path / "model"),
+        "iters": 4, "location": location, "savedir": str(tmp_path / "model"),
     })
     as_loaded = replace(model_cfg)
     model_run = train_model(model_cfg, config_path=str(config_path))
@@ -140,7 +139,7 @@ def test_a_trained_surrogate_feeds_a_policy_run_and_both_reload(tmp_path, monkey
         tmp_path, "mlp", FIXTURES / "nt_model.py")
 
     dyn_sys, sysid_cfg, nm, _ = load_trained_dynamics(model_run.run_id)
-    assert sysid_cfg.epochs == 2
+    assert sysid_cfg.iters == 4
     assert [m.name for m in model_run.test_results.metrics] == nm["Y"]
 
     # Scored again from its id on its own test split, the run reports what

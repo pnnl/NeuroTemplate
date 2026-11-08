@@ -71,7 +71,7 @@ from neurotemplate.hooks import CONTROL_SNAPSHOT, load_control_hooks, snapshot_h
 #: What each run names even when you left it alone. Everything else sits in
 #: `nt docs config`, and appears on "You set" only when you set it.
 COMMON_SETTINGS = ("sysid_run_id", "policy", "policy_window", "horizon", "test_horizon",
-                   "train_stride", "dev_stride", "test_stride", "reference_scale", "epochs",
+                   "train_stride", "dev_stride", "test_stride", "reference_scale", "iters",
                    "lr", "batch_size", "log2_policy_hidden", "policy_layers", "seed")
 
 

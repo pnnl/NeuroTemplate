@@ -39,7 +39,7 @@ QUICK = ["--set", "plot=false", "--set", "seed=3", "--set", "progress=silent"]
 
 def arm_example(nt, d, policy):
     sh(nt, "example", "thermal", "project", cwd=d); p = Path(d) / "project"
-    sh(nt, "model", "train", "--set", "epochs=3", *QUICK, cwd=p)
+    sh(nt, "model", "train", "--set", "iters=12", "--set", "eval_every=4", *QUICK, cwd=p)
     if policy == "mpc":
         import yaml
         f = p / "control_configs" / "control.yaml"; c = yaml.safe_load(f.read_text())
@@ -47,23 +47,23 @@ def arm_example(nt, d, policy):
             if "future" in v: v["future"] = "12h"
         c["solver"] = {"max_iters": 5}; c["test_stride"] = "24h"
         f.write_text(yaml.safe_dump(c, allow_unicode=True))
-    sh(nt, "control", "train", "--set", "epochs=3", "--set", f"policy={policy}", *QUICK, cwd=p)
+    sh(nt, "control", "train", "--set", "iters=12", "--set", "eval_every=4", "--set", f"policy={policy}", *QUICK, cwd=p)
     return p
 
 def arm_roles(nt, d, model, *more):
     yaml, ZONE, LOW, HIGH = write_roles_project(nt, d, model)
-    sh(nt, "model", "train", "--set", "epochs=4", "--set", f"model={model}", *more, *QUICK, cwd=d)
+    sh(nt, "model", "train", "--set", "iters=16", "--set", "eval_every=4", "--set", f"model={model}", *more, *QUICK, cwd=d)
     return d
 
 def arm_roles_control(nt, d, model, policy):
     yaml, ZONE, LOW, HIGH = write_roles_project(nt, d, model)
-    sh(nt, "model", "train", "--set", "epochs=3", "--set", f"model={model}", *QUICK, cwd=d)
+    sh(nt, "model", "train", "--set", "iters=12", "--set", "eval_every=4", "--set", f"model={model}", *QUICK, cwd=d)
     cfgp = Path(d) / "control_configs"
     objective = {"losses": {"low": {"column": LOW, "target": ZONE, "map": "relu", "norm": 1},
                             "high": {"column": HIGH, "target": ZONE, "map": "nrelu", "norm": 1}},
                  "gains": {"low": 1.0, "high": 1.0}}
     f = cfgp / "control.yaml"; c = yaml.safe_load(f.read_text()) or {}; c.update(objective); f.write_text(yaml.safe_dump(c, allow_unicode=True))
-    sh(nt, "control", "train", "--set", "epochs=3", "--set", f"policy={policy}", *QUICK, cwd=d)
+    sh(nt, "control", "train", "--set", "iters=12", "--set", "eval_every=4", "--set", f"policy={policy}", *QUICK, cwd=d)
     return d
 
 ARMS = {

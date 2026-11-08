@@ -2,5 +2,6 @@
 model: rc_network
 past: {"Power [kW]": 0}
 horizon: 12h
-epochs: 30
+iters: 120
+eval_every: 10
 batch_size: 32

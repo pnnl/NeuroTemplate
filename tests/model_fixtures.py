@@ -38,7 +38,7 @@ def trainable_cfg(savedir, nm_mapping: dict[str, list[str]], **over) -> Modeling
     """A config small and fast enough to actually train, end to end, in a test."""
     return model_cfg(**{
         "model": "mlp", "past": uniform_past(nm_mapping, 4), "log2_hidden_size": 2,
-        "epochs": 2, "warmup": 0, "patience": 5,
+        "iters": 4,
         "horizon": steps(4), "test_horizon": steps(6), "test_stride": steps(10), "batch_size": 8,
         "norm_type": "min_max", "plot": False, "seed": 7,
         "savedir": str(savedir), **over,

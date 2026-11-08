@@ -83,7 +83,7 @@ def test_declare_ladder_thermostat_train(tmp_path, monkeypatch):
         "model: rc_network",
         f"user_hooks_path: {tmp_path / 'nt_model.py'}",
         "past: " + json.dumps(past, ensure_ascii=False), "context: 1445m",
-        "epochs: 3", "warmup: 0", "patience: 3", "horizon: 24h",
+        "iters: 6", "horizon: 24h",
         "test_horizon: 1435m", "test_stride: 6h", "plot: false", "seed: 0", "progress: silent",
         f"savedir: {tmp_path / 'run'}", f"location: sqlite:///{tmp_path / 'mlflow.db'}",
     ]), encoding="utf-8")

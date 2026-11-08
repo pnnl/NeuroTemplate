@@ -19,20 +19,20 @@ def test_training_that_cannot_return_a_trained_model_stops_with_a_reason():
     """Silent runs too: this is not a matter of what gets printed."""
     from neurotemplate.common.progress import Progress
 
-    progress = Progress("silent", 1)
+    progress = Progress("silent")
     progress.start(9)
     with pytest.raises(RuntimeError, match="step 1.*every weight is lost"):
         progress.update(1, float("nan"), 1.0)
 
     # A non-finite dev loss may recover, so only one that never is finite is refused.
-    progress = Progress("silent", 1)
+    progress = Progress("silent")
     progress.start(9)
     progress.update(1, 1.0, float("inf"))
     with pytest.raises(RuntimeError, match="No finite dev loss"):
-        progress.finish()
+        progress.finish([])
 
     progress.update(2, 1.0, 0.5)
-    progress.finish()
+    progress.finish([])
 
 
 def test_a_run_of_the_other_kind_or_outside_the_store_says_so(tmp_path, monkeypatch):
@@ -41,7 +41,7 @@ def test_a_run_of_the_other_kind_or_outside_the_store_says_so(tmp_path, monkeypa
     from neurotemplate.modeling import load
     from neurotemplate.modeling.config import ModelingConfig
 
-    monkeypatch.setattr(load, "_load_run_params", lambda run_id: {"epochs": 3})
+    monkeypatch.setattr(load, "_load_run_params", lambda run_id: {"iters": 3})
     with pytest.raises(ConfigError, match="is a model run; this takes a control run"):
         load.config_from_run_params("abc", ControlConfig)
     monkeypatch.setattr(load, "_load_run_params", lambda run_id: {"sysid_run_id": "x"})

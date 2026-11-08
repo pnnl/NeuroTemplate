@@ -60,7 +60,7 @@ work first, `nt example thermal` writes a project on synthetic data, zero edits.
 
    `nt data plot data/train.csv` then lists the record's channels under those roles.
 3. **Smoke run**: `nt model train --config model_configs/debug.yaml`. It takes
-   seconds and catches every wrong name. Two epochs say nothing about the model: a rollout
+   seconds and catches every wrong name. Four steps say nothing about the model: a rollout
    thousands of degrees off here only means it has barely trained.
 4. **Coverage.** The model only knows commands the data issued, and the controller's
    bounds default to that range. If the controller must go somewhere the data never
@@ -140,12 +140,12 @@ few: one seed is one draw.
    crossing. A column not listed takes its recorded range. Where one actuator is unpriced,
    bound it: a controller will run it against the priced one and let the cost term see only
    half the bill.
-5. **Time before you train.** After its first epoch a run prints the seconds per
-   epoch and what the configured epochs will cost; size `epochs`, `horizon`
-   and the previews from it. A larger batch makes an epoch faster, since each batch is a
-   rollout of model calls, but it gives fewer updates per epoch. `progress: log` prints each
-   epoch. The run ends by saying whether patience stopped it or the epoch cap did,
-   with the dev loss still falling.
+5. **Time before you train.** After its first evaluation a run prints the seconds per
+   step and what `iters` will cost; size `iters`, `horizon` and the previews from it. A
+   larger batch costs more per step, since each batch is a rollout of model calls.
+   `progress: log` prints each evaluation. Training runs the whole budget and keeps the
+   best dev loss; the run ends by saying at which step that was. A best at the last step
+   was still improving.
 6. **Train on several draws of the price.** `draws` in the config lists files holding the
    same timestamps with another band or tariff: each replaces the columns it shares with the
    record and adds a pass over the training windows. Give each a different tariff, shifted a
@@ -227,7 +227,7 @@ on yours.
    long enough when a longer one stops changing the day-ahead error. The thermal blocks
    are not in the `past` table. `horizon` long enough for one rollout to hold an action and
    its payoff. `train_stride` sets how far apart training windows start, a quarter of a
-   horizon by default. With `batch_size` above the number of windows, an epoch is one update.
+   horizon by default.
    Training moves every parameter inside its box; the reportcard prints the time constants
    beside the ladder's and flags one that left its error bars.
 6. **Meters in their own block** (`model: mlp`), `driven_by` the heat so they see the step

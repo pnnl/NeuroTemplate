@@ -153,7 +153,7 @@ def make_control_cfg(future: dict[str, int] | None = None, u_past: int = 0,
     cfg.test_stride = steps(5)
     cfg.train_stride, cfg.dev_stride = steps(3), steps(3)
     cfg.batch_size = 4
-    cfg.epochs = 1
+    cfg.iters = 2
     cfg.solver["max_iters"] = 2  # the plan runs; its convergence is test_plan's
     cfg.policy = "mlp"      # the family with more to get wrong; linear is tested on its own
     cfg.seed = 0

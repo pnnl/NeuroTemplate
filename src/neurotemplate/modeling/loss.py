@@ -9,7 +9,7 @@ All loss terms are proper Neuromancer objectives so they flow through
 Problem.forward() and show up with correct labels in the Trainer's
 output dict. The gradient penalty is train-only: it samples fresh random
 points on every call, so scoring it in eval would make dev_loss (and so
-early stopping) noisy without measuring anything about the fit.
+the best checkpoint) noisy without measuring anything about the fit.
 """
 
 from typing import Optional

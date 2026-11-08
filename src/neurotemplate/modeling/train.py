@@ -7,7 +7,7 @@ the command line:
     from neurotemplate.modeling.train import train_model
 
     cfg = load_config("model_configs/modeling.yaml", ModelingConfig,
-                      {"epochs": 1})
+                      {"iters": 4})
     run = train_model(cfg)
     run.run_id, run.test_results.metrics
 
@@ -35,10 +35,10 @@ from neurotemplate.modeling.pipeline import (
 #: What each run names even when you left it alone. Everything else sits in
 #: `nt docs config`, and appears on "You set" only when you set it.
 COMMON_SETTINGS = ("model", "past", "context", "horizon", "test_horizon", "train_stride",
-                   "dev_stride", "test_stride", "epochs", "lr", "batch_size",
+                   "dev_stride", "test_stride", "iters", "lr", "batch_size",
                    "log2_hidden_size", "num_layers", "seed", "steps_per_hour")
 
-#: Loss terms echoed to stdout each epoch, and the substrings of the metric
+#: Loss terms echoed to stdout at each evaluation, and the substrings of the metric
 #: keys logged to MLflow.
 STDOUT_METRICS = ["train_loss", "train_ref_loss", "train_grad_penalty", "dev_loss"]
 LOGGED_METRICS = ["train_loss", "dev_loss", "ref_loss", "grad_penalty", "time",

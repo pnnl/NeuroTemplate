@@ -729,7 +729,7 @@ def warn_degenerate_columns(
 
     The reportcard says this too, but only once the run has finished. The
     condition is knowable the moment `norm_stats` is frozen — before a single
-    epoch — and someone watching a loss curve scroll past should not have to
+    step — and someone watching a loss curve scroll past should not have to
     open a markdown file to learn that a channel is carrying raw physical units.
     """
     frozen = degenerate_mapped_columns(norm_stats, nm_mapping)

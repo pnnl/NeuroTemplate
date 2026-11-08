@@ -35,7 +35,7 @@ def _latest_run() -> str:
                               max_results=1).iloc[0].run_id
 
 
-QUICK = ["--set", "epochs=2", "--set", "plot=false"]
+QUICK = ["--set", "iters=4", "--set", "plot=false"]
 
 
 def test_the_thermal_example_runs_model_control_and_export_with_zero_edits(
@@ -46,7 +46,7 @@ def test_the_thermal_example_runs_model_control_and_export_with_zero_edits(
     nt(["model", "train", *QUICK])
     nt(["control", "train", *QUICK])                  # takes the latest model run
     out = capsys.readouterr().out
-    assert "You set:" in out and "epochs: 2" in out and "Defaults used:" in out
+    assert "You set:" in out and "iters: 4" in out and "Defaults used:" in out
     assert "Not read by the policy" in out and HEAT in out
     nt(["export", "policy", "--run_id", _latest_run(), "--out", "delivery"])
     inputs = json.loads((tmp_path / "project/delivery/policy/policy.json").read_text())["inputs"]

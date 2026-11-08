@@ -171,7 +171,7 @@ column over that horizon. DPC is at best MPC; a policy's purpose is to be faster
 flexible, and MPC stays as a comparator and as a tool for those who want it.
 
 Each command is held as its share of its range, in [0, 1]; Adam steps the share by about the `solver`'s
-`lr` of the range and clamps it back into the box. A window's solve stops as early stopping does: once
+`lr` of the range and clamps it back into the box. A window's solve stops once
 `patience` steps pass without its objective improving by more than `rtol` of it. It keeps the best plan
 it saw. `max_iters` caps it, so a solve always ends, and ends the same way on any machine. The reportcard
 gives the steps the test windows' solves took and how often one hit the cap; a cap hit means a window was

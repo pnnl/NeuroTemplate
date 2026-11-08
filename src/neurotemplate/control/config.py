@@ -11,9 +11,9 @@ from neurotemplate.common.config import (
     PROGRESS_LEVELS,
     Time,
     TimedWindows,
-    check_non_negative,
     check_one_of,
     check_positive,
+    check_training,
     default_savedir,
     time_microseconds,
     time_steps,
@@ -116,14 +116,19 @@ class ControlConfig(TimedWindows):
     control_bounds: dict[str, list] = field(default_factory=dict)
 
     # ── Training ─────────────────────────────────────────────────
-    epochs: int = 300
+    # Gradient steps: a fixed budget, with the best weights on dev kept. Provisional
+    # until a plant bench sets it.
+    iters: int = 3000
+    # Steps between scorings of the dev set.
+    eval_every: int = 100
+    # The peak rate: it ramps up over the first 5% of the steps, then follows a cosine
+    # down to `lr_final` (`common.fit`).
+    # The paper's 5e-3 saturated the example's policy within its ramp.
+    lr: float = 1e-3
+    # Where the cosine ends.
+    lr_final: float = 1e-5
     # What training prints: silent | summary | live | log (`common.progress`).
     progress: str = "summary"
-    # How often `live` and `log` update, in epochs.
-    update_every: int = 10
-    warmup: int = 5
-    patience: int = 25
-    lr: float = 0.001
 
     # ── Evaluation (long closed-loop rollout) ────────────────────
     # How far a test rollout runs, past its history, and how far apart they start.
@@ -188,14 +193,13 @@ class ControlConfig(TimedWindows):
         for name in [
             "batch_size",
             "log2_policy_hidden", "policy_layers",
-            "epochs", "update_every", "lr",
+            "lr",
         ]:
             check_positive(self, name)
+        check_training(self)
         if self.threads is not None:
             check_positive(self, "threads")
 
-        for name in ["warmup", "patience"]:
-            check_non_negative(self, name)
         for name in ("lr", "patience", "max_iters"):
             if self.solver[name] <= 0:
                 raise ValueError(f"solver[{name!r}] must be positive, got {self.solver[name]}")
