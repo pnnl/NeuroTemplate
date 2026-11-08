@@ -52,8 +52,8 @@ setpoint lagged further back than its zone. The reportcard lists the lags each b
 
 The deeper of the two is the seeded history before the first prediction, and the rows an exported
 model takes. Rollouts then predict `horizon` past it in training and on dev, and `test_horizon` on
-test. Training windows start `train_stride` apart, a quarter of a horizon by default; dev windows
-`dev_stride`, a whole one; test windows `test_stride`, a whole test horizon.
+test. Training windows start at any row of the records, drawn afresh at every step; dev windows
+start `dev_stride` apart, a whole horizon by default; test windows `test_stride`, a whole test horizon.
 
 ## Model families
 

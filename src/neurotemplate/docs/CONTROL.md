@@ -73,8 +73,8 @@ column cannot take one. Every step's preview reads real rows of the record, to t
 step, so a file needs those rows. A `U` column's window ends at the previous step, the last command
 applied: `past: 0` there means the policy does not read it; with `past: 5m` it sees the move a
 `first_difference` row is pricing. The deepest `past`, with the surrogate's history, sets how many
-recorded steps seed each rollout. Training windows start `train_stride` apart, a quarter of a horizon
-by default, and dev windows `dev_stride`, a whole one. The reportcard lists the table and the input
+recorded steps seed each rollout. Training windows start at any row of the records, drawn afresh at
+every step, and dev windows `dev_stride` apart, a whole horizon by default. The reportcard lists the table and the input
 width it gives.
 
 ## Grid response: energy, cost and peak

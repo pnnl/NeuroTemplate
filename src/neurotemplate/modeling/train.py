@@ -34,7 +34,7 @@ from neurotemplate.modeling.pipeline import (
 
 #: What each run names even when you left it alone. Everything else sits in
 #: `nt docs config`, and appears on "You set" only when you set it.
-COMMON_SETTINGS = ("model", "past", "context", "horizon", "test_horizon", "train_stride",
+COMMON_SETTINGS = ("model", "past", "context", "horizon", "test_horizon",
                    "dev_stride", "test_stride", "iters", "lr", "batch_size",
                    "log2_hidden_size", "num_layers", "seed", "steps_per_hour")
 

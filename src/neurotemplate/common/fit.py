@@ -22,7 +22,7 @@ from __future__ import annotations
 import math
 from copy import deepcopy
 from dataclasses import dataclass
-from typing import Callable, Iterable, Optional
+from typing import Callable, Iterable, Iterator
 
 import torch
 
@@ -87,7 +87,7 @@ def _loss_scale(loss: torch.Tensor) -> float:
     return scale
 
 
-def fit(problem, optimizer, next_batch: Callable[[], dict], dev_batches: Iterable[dict], *,
+def fit(problem, optimizer, train_batches: Iterator[dict], dev_batches: Iterable[dict], *,
         iters: int, eval_every: int, final_ratio: float, device,
         progress: Progress, logger=None) -> Fitted:
     """Train `problem` for `iters` steps, leaving its best weights loaded."""
@@ -102,7 +102,7 @@ def fit(problem, optimizer, next_batch: Callable[[], dict], dev_batches: Iterabl
     progress.start(iters)
     for step in range(1, iters + 1):
         problem.train()
-        output = problem(move_to_device(next_batch(), device))
+        output = problem(move_to_device(next(train_batches), device))
         loss = output["train_loss"]
         if scale is None:
             scale = _loss_scale(loss)

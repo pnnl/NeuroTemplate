@@ -35,7 +35,7 @@ its memory can run past its window during a rollout, but it still takes the same
 window. The only thing statefulness costs the caller is a reset at each sequence
 boundary, which make_reset_init() wires into the System.
 
-Training windows start `cfg.train_stride` apart.
+Training windows start at any row of the records (`common.sampler`).
 """
 
 import warnings

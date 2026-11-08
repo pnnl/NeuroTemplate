@@ -19,7 +19,8 @@ from pandas import DataFrame
 
 from neurotemplate._typing import beartype
 
-from neurotemplate.common.data_utils import NormStats, cycle_batches, get_loader
+from neurotemplate.common.data_utils import NormStats, get_sw_dict_multi, model_window_keys
+from neurotemplate.common.sampler import WindowSampler, fixed_batches
 from neurotemplate.common.fit import fit
 from neurotemplate.common.progress import Progress
 from neurotemplate.common.tracking import RunLog, save_checkpoint
@@ -95,7 +96,7 @@ def build_trainer(
     logger: Optional[RunLog] = None,
 ) -> tuple:
     """
-    The Problem, its optimizer and the train and dev loaders.
+    The Problem, its optimizer, the training draws and the dev batches.
 
     The Problem contains:
       - A SystemPreview node for autoregressive rollout
@@ -129,21 +130,16 @@ def build_trainer(
 
     optimizer = torch.optim.Adam(_parameter_groups(problem, cfg), lr=cfg.lr)
 
-    train_loader = get_loader(
-        dfs=train_dfs, cfg=cfg, nm_mapping=nm_mapping,
-        name="train",
-        steps=cfg.history_steps + cfg.horizon_steps,
-    )
-    dev_loader = get_loader(
-        dfs=dev_dfs, cfg=cfg, nm_mapping=nm_mapping,
-        name="dev",
-        steps=cfg.history_steps + cfg.horizon_steps,
-        stride=cfg.dev_stride_steps,
-    )
+    steps = cfg.history_steps + cfg.horizon_steps
+    train_batches = WindowSampler(train_dfs, model_window_keys(cfg, nm_mapping, steps), steps,
+                                  cfg.batch_size, cfg.seed, cfg.device)
+    dev_data = get_sw_dict_multi(dev_dfs, cfg, nm_mapping, steps, cfg.dev_stride_steps)
+    dev_data.pop("source_idx")
+    dev_batches = fixed_batches(dev_data, cfg.batch_size, "dev")
     if cfg.lr > 0:
-        check_parameters_reach_loss(problem, next(iter(train_loader)))
+        check_parameters_reach_loss(problem, next(train_batches))
 
-    return problem, optimizer, train_loader, dev_loader
+    return problem, optimizer, train_batches, dev_batches
 
 
 def _parameter_groups(problem: Problem, cfg: ModelingConfig) -> list[dict]:
@@ -201,7 +197,7 @@ def fit_dynamics(
 
     Returns (trained_system, best_dev_loss).
     """
-    problem, optimizer, train_loader, dev_loader = build_trainer(
+    problem, optimizer, train_batches, dev_batches = build_trainer(
         cfg=cfg,
         train_dfs=train_dfs,
         dev_dfs=dev_dfs,
@@ -220,7 +216,7 @@ def fit_dynamics(
             logger.log_weights(problem)
             save_checkpoint(logger, problem.state_dict())
         return system, None
-    fitted = fit(problem, optimizer, cycle_batches(train_loader), dev_loader,
+    fitted = fit(problem, optimizer, train_batches, dev_batches,
                  iters=cfg.iters, eval_every=cfg.eval_every, final_ratio=cfg.lr_final / cfg.lr,
                  device=cfg.device, progress=Progress(cfg.progress), logger=logger)
     if logger is not None:

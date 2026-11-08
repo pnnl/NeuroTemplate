@@ -30,7 +30,7 @@ R is the record's columns no role claims that the run names, windowed by the sam
 `sliding_windows` call as the rest. It is a key the rollout never writes, so it passes
 through SystemPreview untouched and never reaches the dynamics, whose Node reads only
 yn, U and D. A draw (`cfg.draws`) is the record again with some columns replaced, one
-more pass over the training windows.
+more record in the pool training windows are drawn from (`common.sampler`).
 
 The closed-loop System rolls out with start_iter = Hmax - 1 and an explicit
 nsteps = P, so predicted yn occupies indices [Hmax : Hmax+P].
@@ -49,11 +49,10 @@ from __future__ import annotations
 import torch
 from pandas import DataFrame
 
-from neurotemplate.nm.dataset import DictDataset
-
 from neurotemplate.common.data_utils import (
     check_complete, get_data, get_data_splits, sliding_windows,
 )
+from neurotemplate.common.sampler import WindowSampler, fixed_batches
 from neurotemplate.control.losses import (
     POWER, ROLE_KEYS, Objective, check_weights, resolve_objective,
 )
@@ -151,6 +150,23 @@ def forecast_tail(cfg) -> int:
     return max(tail, cfg.horizon_steps) if cfg.policy == "mpc" else tail
 
 
+def window_keys(cfg, sysid_cfg, nm_mapping: dict[str, list[str]], P: int) -> tuple[dict, int]:
+    """Each key of a closed-loop window as its columns and how many of the window's
+    rows it holds (see the module docstring), and W, the window's length."""
+    _, _, hmax = horizons(cfg, sysid_cfg)
+    W = hmax + P + forecast_tail(cfg)
+    keys = {
+        "yn": (nm_mapping["Y"], hmax),
+        "U": (nm_mapping["U"], hmax - 1),   # one shorter: see module docstring
+        "D": (nm_mapping["D"], W),
+        "t": (nm_mapping["t"], W),
+    }
+    r_columns = resolve_objective(cfg, nm_mapping).r_columns
+    if r_columns:
+        keys["R"] = (r_columns, W)
+    return keys, W
+
+
 @beartype
 def build_window_dict(
     df: DataFrame,
@@ -162,22 +178,9 @@ def build_window_dict(
 ) -> dict:
     """Lean closed-loop window dict for one frame (see the module docstring
     for the keys)."""
-    _, _, hmax = horizons(cfg, sysid_cfg)
-    W = hmax + P + forecast_tail(cfg)
-    device = sysid_cfg.device
-
-    Y = sliding_windows(df, nm_mapping["Y"], W, stride, device)
-    U = sliding_windows(df, nm_mapping["U"], W, stride, device)
-    out = {
-        "yn": Y[:, :hmax, :].contiguous(),
-        "U": U[:, :hmax - 1, :].contiguous(),   # one shorter: see module docstring
-        "D": sliding_windows(df, nm_mapping["D"], W, stride, device),
-        "t": sliding_windows(df, nm_mapping["t"], W, stride, device),
-    }
-    r_columns = resolve_objective(cfg, nm_mapping).r_columns
-    if r_columns:
-        out["R"] = sliding_windows(df, r_columns, W, stride, device)
-    return out
+    keys, W = window_keys(cfg, sysid_cfg, nm_mapping, P)
+    return {key: sliding_windows(df, columns, W, stride, sysid_cfg.device)[:, :rows, :].contiguous()
+            for key, (columns, rows) in keys.items()}
 
 
 @beartype
@@ -211,6 +214,25 @@ def build_window_dict_multi(
     return out
 
 
+#: Generated start states, for the bench on the example's thermal plant: each training
+#: window's last measured zone temperature, uniform in this box, in °C (`box_start`).
+START_BOX = {"Zone [°C]": (18.0, 30.0)}
+
+
+def box_start(batch: dict, y_names: list[str], generator: torch.Generator) -> dict:
+    """`batch` with each window's history of a START_BOX column shifted by a constant, so
+    that its last row lands uniform in the box whatever that window's weather. The history
+    keeps its recorded shape, so a filter places the hidden nodes from it as from a real one.
+    Weather, references and the command history stay as recorded."""
+    yn = batch["yn"].clone()
+    for name, (low, high) in START_BOX.items():
+        j = y_names.index(name)
+        target = low + (high - low) * torch.rand(yn.shape[0], generator=generator,
+                                                 device=yn.device)
+        yn[:, :, j] += (target - yn[:, -1, j])[:, None]
+    return {**batch, "yn": yn}
+
+
 @beartype
 def build_loaders(
     cfg,
@@ -219,24 +241,18 @@ def build_loaders(
     train_dfs: list[DataFrame],
     dev_dfs: list[DataFrame],
 ):
-    """(train_loader, dev_loader), windows starting `cfg.train_stride` and
-    `cfg.dev_stride` apart.
+    """(train_batches, dev_batches): random windows of the training records, drawn
+    afresh at every step, and the dev records' windows `cfg.dev_stride` apart, fixed.
 
-    `train_dfs` / `dev_dfs` are always lists (length >= 1). With multiple
-    files per split, windows are pooled but no window spans two files.
+    With multiple files per split, no window spans two files.
     """
-    gen = torch.Generator(device=sysid_cfg.device)
-    gen.manual_seed(cfg.seed)
-
-    def loader(dfs, name, shuffle, stride):
-        data = build_window_dict_multi(
-            dfs, cfg, sysid_cfg, nm_mapping, P=cfg.horizon_steps, stride=stride,
-        )
-        ds = DictDataset(data, name=name)
-        return torch.utils.data.DataLoader(
-            ds, batch_size=cfg.batch_size, collate_fn=ds.collate_fn,
-            shuffle=shuffle, generator=gen, drop_last=False,
-        )
-
-    return (loader(train_dfs, "train", True, cfg.train_stride_steps),
-            loader(dev_dfs, "dev", False, cfg.dev_stride_steps))
+    keys, W = window_keys(cfg, sysid_cfg, nm_mapping, cfg.horizon_steps)
+    sampler = WindowSampler(train_dfs, keys, W, cfg.batch_size, cfg.seed, sysid_cfg.device)
+    # Start states read from the records, or generated in START_BOX: swap the comment to
+    # compare the two (training_status.md, step 2).
+    train = sampler
+    # train = (box_start(batch, nm_mapping["Y"], sampler.generator) for batch in sampler)
+    dev = build_window_dict_multi(dev_dfs, cfg, sysid_cfg, nm_mapping, P=cfg.horizon_steps,
+                                  stride=cfg.dev_stride_steps)
+    dev.pop("source_idx")
+    return train, fixed_batches(dev, cfg.batch_size, "dev")

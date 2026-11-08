@@ -6,8 +6,6 @@ from typing import Optional, TypedDict
 
 import pandas as pd
 import torch
-from neurotemplate.nm.dataset import DictDataset
-
 from neurotemplate.common.data_file import load_data_file
 
 from neurotemplate._typing import beartype
@@ -346,15 +344,24 @@ def sliding_windows(
     return x.index_select(0, idx.flatten()).reshape(starts.shape[0], steps, x.shape[1])
 
 
+def model_window_keys(cfg, nm_mapping: dict[str, list[str]], steps: int) -> dict:
+    """Each key of a model's window, as its columns and how many of the window's rows it
+    holds: Y, U, D and t all of them, and `yn` the first `history_steps` of Y, the
+    measurements a rollout starts from."""
+    keys = {key: (nm_mapping[key], steps) for key in ("t", "Y", "U", "D")}
+    keys["yn"] = (nm_mapping["Y"], cfg.history_steps)
+    return keys
+
+
 @beartype
 def get_sw_dict(
     df: pd.DataFrame,
     cfg,
     nm_mapping: dict[str, list[str]],
-    steps: Optional[int] = None,
-    stride: Optional[int] = None,
+    steps: Optional[int],
+    stride: int,
 ) -> dict:
-    """Sliding-window Y/U/D/t tensors for one normalized dataframe.
+    """Sliding-window tensors for one normalized dataframe (`model_window_keys`).
 
     Args:
         df: Full normalized dataframe used to build sliding windows.
@@ -362,17 +369,14 @@ def get_sw_dict(
         nm_mapping: Column mapping that defines Y/U/D/t extraction order.
         steps: window length. None uses history_steps + horizon; a
             negative value means one window spanning the whole frame.
-        stride: rows between window starts. None uses `cfg.train_stride_steps`.
+        stride: rows between window starts.
     """
     if steps is None:
         steps = cfg.history_steps + cfg.horizon_steps
     elif steps < 0:
         steps = df.shape[0]
-    stride = stride or cfg.train_stride_steps
-
-    Y, U, D, t = [sliding_windows(df, nm_mapping[key], steps, stride, cfg.device)
-                  for key in ("Y", "U", "D", "t")]
-    return {"t": t, "Y": Y, "U": U, "D": D, "yn": Y[:, :cfg.history_steps, :]}
+    return {key: sliding_windows(df, columns, steps, stride, cfg.device)[:, :rows, :]
+            for key, (columns, rows) in model_window_keys(cfg, nm_mapping, steps).items()}
 
 
 @beartype
@@ -380,8 +384,8 @@ def get_sw_dict_multi(
     dfs: list[pd.DataFrame],
     cfg,
     nm_mapping: dict[str, list[str]],
-    steps: Optional[int] = None,
-    stride: Optional[int] = None,
+    steps: Optional[int],
+    stride: int,
 ) -> dict:
     """Build per-file sliding windows and concatenate along the batch dim.
 
@@ -431,61 +435,6 @@ def get_sw_dict_multi(
         for i, p in enumerate(parts)
     ])
     return out
-
-
-# Build a DictDataset DataLoader for a split.
-@beartype
-def get_loader(
-    dfs: list[pd.DataFrame],
-    cfg,
-    nm_mapping: dict[str, list[str]],
-    name: str,
-    steps: Optional[int] = None,
-    stride: Optional[int] = None,
-):
-    """
-    Args:
-        dfs: One or more normalized dataframes for this split. Each is
-            windowed in isolation and the resulting tensors are stacked,
-            so no window spans two source files.
-        cfg providing batch_size, device placement, and RNG seed.
-        nm_mapping: Column mapping that defines Y/U/D/t extraction order.
-        name: Split name stored on the DictDataset for logging/debugging.
-        steps: Optional override for window length (None uses history_steps + horizon).
-        stride: Optional override for rows between window starts.
-    """
-
-    data = get_sw_dict_multi(dfs, cfg, nm_mapping, steps, stride)
-
-    dataset = DictDataset(data, name=name)
-
-    # On cfg.device, which resolve_device also made torch's default device:
-    # the sampler's randperm runs there, and needs a generator that matches.
-    generator = torch.Generator(device=cfg.device)
-    generator.manual_seed(cfg.seed)
-
-    loader = torch.utils.data.DataLoader(
-        dataset, batch_size=cfg.batch_size,
-        collate_fn=dataset.collate_fn, shuffle=True,
-        generator=generator,
-        drop_last=False,
-    )
-
-    return loader
-
-
-def cycle_batches(loader):
-    """`next_batch()` for `fit`: the loader's batches, over and over."""
-    batches = iter(loader)
-
-    def next_batch() -> dict:
-        nonlocal batches
-        try:
-            return next(batches)
-        except StopIteration:
-            batches = iter(loader)
-            return next(batches)
-    return next_batch
 
 
 # Convert windowed tensors back to a DataFrame.

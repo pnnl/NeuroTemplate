@@ -226,8 +226,7 @@ on yours.
    a day by default for a network, which was plenty on the buildings measured, and it is
    long enough when a longer one stops changing the day-ahead error. The thermal blocks
    are not in the `past` table. `horizon` long enough for one rollout to hold an action and
-   its payoff. `train_stride` sets how far apart training windows start, a quarter of a
-   horizon by default.
+   its payoff. Training windows start at any row, drawn afresh at every step.
    Training moves every parameter inside its box; the reportcard prints the time constants
    beside the ladder's and flags one that left its error bars.
 6. **Meters in their own block** (`model: mlp`), `driven_by` the heat so they see the step

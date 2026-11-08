@@ -16,7 +16,7 @@ def model_cfg(**over) -> ModelingConfig:
     cfg.steps_per_hour = 12.0
     cfg.past, cfg.context = 0, 0
     cfg.horizon, cfg.test_horizon = steps(48), steps(287)
-    cfg.train_stride, cfg.dev_stride, cfg.test_stride = steps(4), steps(4), steps(288)
+    cfg.dev_stride, cfg.test_stride = steps(4), steps(288)
     cfg.log2_hidden_size = 3
     cfg.num_layers = 1
     cfg.device = torch.device("cpu")

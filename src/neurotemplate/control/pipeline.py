@@ -16,7 +16,6 @@ import torch
 from matplotlib import rc_context
 
 from neurotemplate.common.fit import fit
-from neurotemplate.common.data_utils import cycle_batches
 
 from neurotemplate.common.data_utils import NormStats, axis_label
 from neurotemplate.common.progress import Progress
@@ -71,8 +70,8 @@ class ControlResults:
 def train_policy(
     cfg,
     problem,
-    train_loader,
-    dev_loader,
+    train_batches,
+    dev_batches,
     logger=None,
 ) -> tuple[object, float, float]:
     """Returns (trained closed-loop System, best_dev_loss, train_time_s)."""
@@ -85,7 +84,7 @@ def train_policy(
     optimizer = torch.optim.Adam(trainable, lr=cfg.lr)
 
     t0 = tic()
-    fitted = fit(problem, optimizer, cycle_batches(train_loader), dev_loader,
+    fitted = fit(problem, optimizer, train_batches, dev_batches,
                  iters=cfg.iters, eval_every=cfg.eval_every, final_ratio=cfg.lr_final / cfg.lr,
                  device=cfg.device, progress=Progress(cfg.progress), logger=logger)
     train_time_s = tic() - t0

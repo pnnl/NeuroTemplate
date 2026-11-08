@@ -68,9 +68,8 @@ class ControlConfig(TimedWindows):
     # each step plans ahead (every D and reference column's `future` must reach it).
     # Unset, 48 steps.
     horizon: Optional[Time] = None
-    # Time between the starts of training windows, and of dev windows. Unset, a quarter
-    # of a horizon, and a whole one.
-    train_stride: Optional[Time] = None
+    # Time between the starts of dev windows; unset, a horizon. Training windows start at
+    # any row of the records, drawn afresh at every step (`common.sampler`).
     dev_stride: Optional[Time] = None
     # What the policy reads, any column of the record, listed only if it is read:
     # `{column: {past: n, future: m}}`, steps before and after the current one. A

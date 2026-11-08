@@ -120,9 +120,8 @@ class ModelingConfig(TimedWindows):
     progress: str = "summary"
     # How far a training or dev rollout predicts, past its history. Unset, 48 steps.
     horizon: Optional[Time] = None
-    # Time between the starts of training windows, and of dev windows. Unset, a quarter
-    # of a horizon, and a whole one.
-    train_stride: Optional[Time] = None
+    # Time between the starts of dev windows; unset, a horizon. Training windows start at
+    # any row of the records, drawn afresh at every step (`common.sampler`).
     dev_stride: Optional[Time] = None
 
     # ---- TEST ----------------------------------------------------------------

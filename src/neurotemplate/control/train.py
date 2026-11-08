@@ -71,7 +71,7 @@ from neurotemplate.hooks import CONTROL_SNAPSHOT, load_control_hooks, snapshot_h
 #: What each run names even when you left it alone. Everything else sits in
 #: `nt docs config`, and appears on "You set" only when you set it.
 COMMON_SETTINGS = ("sysid_run_id", "policy", "policy_window", "horizon", "test_horizon",
-                   "train_stride", "dev_stride", "test_stride", "reference_scale", "iters",
+                   "dev_stride", "test_stride", "reference_scale", "iters",
                    "lr", "batch_size", "log2_policy_hidden", "policy_layers", "seed")
 
 
@@ -129,7 +129,7 @@ def train_control(cfg: ControlConfig,
     norm_stats = extend_norm_stats(objective, cfg, sysid_stats)
     if cfg.progress != "silent":
         print(settings_report(cfg, given, COMMON_SETTINGS))
-    train_loader, dev_loader = build_loaders(
+    train_batches, dev_batches = build_loaders(
         cfg, sysid_cfg, nm_mapping, train_dfs, dev_dfs,
     )
 
@@ -162,7 +162,7 @@ def train_control(cfg: ControlConfig,
     # One forward pass before training: which term is actually being
     # optimised, and does the power term have an interior minimum at all.
     # Both answers cost seconds here and an iteration each if skipped.
-    balance_batch = next(iter(train_loader))
+    balance_batch = next(train_batches)
     balance_out = run_objective_pass(problem, balance_batch)
     balance = objective_balance(loss, balance_out)
     power = power_term(cfg, nm_mapping)
@@ -183,7 +183,7 @@ def train_control(cfg: ControlConfig,
         best_dev = train_time_s = trained_balance = None
         if trains:
             cl_system, best_dev, train_time_s = train_policy(
-                cfg, problem, train_loader, dev_loader, logger=logger,
+                cfg, problem, train_batches, dev_batches, logger=logger,
             )
             # The same batch through the trained policy: the shares a weight can
             # be tuned against.

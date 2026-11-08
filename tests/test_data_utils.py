@@ -11,7 +11,9 @@ from neurotemplate.common.data_utils import (
     compute_norm_stats,
     get_sw_dict,
     get_sw_dict_multi,
+    model_window_keys,
 )
+from neurotemplate.common.sampler import WindowSampler
 
 
 @pytest.fixture
@@ -39,7 +41,6 @@ def cfg():
     c = dict_to_dataclass({
         "past": {"y0": "15m", "y1": "15m", "u0": "15m", "d0": "15m"},
         "horizon": "30m",
-        "train_stride": "20m",
         "steps_per_hour": 12.0,
         "device": "cpu",
         "progress": "silent",
@@ -64,7 +65,7 @@ def test_column_overrides_apply_per_column_norm(synthetic_df):
 
 def test_sliding_window_shapes(synthetic_df, nm_mapping, cfg):
     """history_steps + horizon = 10 rows, a stride of 4."""
-    data = get_sw_dict(synthetic_df, cfg, nm_mapping)
+    data = get_sw_dict(synthetic_df, cfg, nm_mapping, None, 4)
     n_rows = len(synthetic_df)
     steps = cfg.history_steps + cfg.horizon_steps
     expected_windows = (n_rows - steps) // cfg.history_steps + 1
@@ -80,7 +81,7 @@ def test_sliding_window_shapes(synthetic_df, nm_mapping, cfg):
 
 def test_sliding_window_stride(synthetic_df, nm_mapping, cfg):
     """Each window starts one stride after the previous."""
-    data = get_sw_dict(synthetic_df, cfg, nm_mapping)
+    data = get_sw_dict(synthetic_df, cfg, nm_mapping, None, cfg.history_steps)
     # First window starts at row 0; second at row history_steps
     if data["Y"].shape[0] >= 2:
         first = data["Y"][0, 0, 0].item()
@@ -112,9 +113,17 @@ def _two_synthetic_dfs(n=100):
 
 def test_multi_file_windows_never_cross_boundary(nm_mapping, cfg):
     """A cross-file window would contain a > 900-wide value gap in y0;
-    every per-file window has y0 spanning < 100."""
+    every per-file window has y0 spanning < 100. The fixed windows and the
+    training sampler's random ones alike."""
     dfs = _two_synthetic_dfs(n=100)
-    data = get_sw_dict_multi(dfs, cfg, nm_mapping)
+    steps = cfg.history_steps + cfg.horizon_steps
+    sampler = WindowSampler(dfs, model_window_keys(cfg, nm_mapping, steps), steps, 256, 0, "cpu")
+    for _ in range(4):
+        Y = next(sampler)["Y"]
+        spans = Y[:, :, 0].max(dim=1).values - Y[:, :, 0].min(dim=1).values
+        assert (spans < 200).all(), f"a drawn window crosses the file boundary: {spans}"
+
+    data = get_sw_dict_multi(dfs, cfg, nm_mapping, None, 4)
     Y = data["Y"]  # [n_windows, steps, 2]
     spans = Y[:, :, 0].max(dim=1).values - Y[:, :, 0].min(dim=1).values
     assert (spans < 200).all(), f"some windows cross the file boundary: {spans}"

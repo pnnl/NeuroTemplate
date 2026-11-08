@@ -177,9 +177,6 @@ def steps_as_time(steps: int, steps_per_hour: float) -> Time:
 DEFAULT_PAST_STEPS = 3
 DEFAULT_HORIZON_STEPS = 48
 DEFAULT_TEST_HORIZON_STEPS = 288
-#: Training windows start a quarter of a horizon apart: enough windows without
-#: near-identical ones. Dev and test windows do not overlap.
-TRAIN_STRIDES_PER_HORIZON = 4
 
 
 class TimedWindows:
@@ -189,7 +186,6 @@ class TimedWindows:
     steps_per_hour: Optional[float]
     horizon: Optional[Time]
     test_horizon: Optional[Time]
-    train_stride: Optional[Time]
     dev_stride: Optional[Time]
     test_stride: Optional[Time]
 
@@ -210,8 +206,6 @@ class TimedWindows:
                     "The shortest test file is too short to hold a test rollout after its "
                     "history; use a longer file, or a shorter `past` or `context`.")
             self.test_horizon = self._time(min(DEFAULT_TEST_HORIZON_STEPS, longest_test_horizon))
-        if self.train_stride is None:
-            self.train_stride = self._time(max(1, self.horizon_steps // TRAIN_STRIDES_PER_HORIZON))
         if self.dev_stride is None:
             self.dev_stride = self.horizon
         if self.test_stride is None:
@@ -226,10 +220,6 @@ class TimedWindows:
         return self._steps("test_horizon")
 
     @property
-    def train_stride_steps(self) -> int:
-        return self._steps("train_stride")
-
-    @property
     def dev_stride_steps(self) -> int:
         return self._steps("dev_stride")
 
@@ -240,13 +230,13 @@ class TimedWindows:
     def _check_common_windows(self) -> None:
         """Every window a whole number of steps, and positive: run once the data has set
         the timestep and the defaults have been filled."""
-        for name in ("horizon", "test_horizon", "train_stride", "dev_stride", "test_stride"):
+        for name in ("horizon", "test_horizon", "dev_stride", "test_stride"):
             if self._steps(name) <= 0:
                 raise ValueError(f"{name} must be positive, got {getattr(self, name)}")
 
     def _check_common_times(self) -> None:
         """Every set window spelled as a time: before any data has loaded."""
-        for name in ("horizon", "test_horizon", "train_stride", "dev_stride", "test_stride"):
+        for name in ("horizon", "test_horizon", "dev_stride", "test_stride"):
             if getattr(self, name) is not None:
                 time_microseconds(getattr(self, name), name)
 

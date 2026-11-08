@@ -1,5 +1,7 @@
 """The training loop's budget, schedule and rollback (`common.fit`)."""
 
+import itertools
+
 import pytest
 import torch
 
@@ -33,7 +35,7 @@ def test_fit_runs_its_budget_on_the_schedule_and_rolls_back_a_collapse():
     devs = [1.0, high, high, 1.0, high, high, high, high, 0.5, 0.5]
     problem = Scripted(devs)
     optimizer = torch.optim.Adam(problem.parameters(), lr=0.1)
-    fitted = fit(problem, optimizer, lambda: {}, [{}], iters=10, eval_every=1,
+    fitted = fit(problem, optimizer, itertools.repeat({}), [{}], iters=10, eval_every=1,
                  final_ratio=0.01, device="cpu", progress=Progress("silent"))
     assert fitted.rollbacks == [3, 6, 8]
     assert fitted.best_dev == 0.5
