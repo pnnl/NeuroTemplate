@@ -46,7 +46,6 @@ from neurotemplate.nm import blocks
 
 from neurotemplate.common.data_utils import NormStats
 from neurotemplate.control.losses import bound_columns, resolve_objective
-from neurotemplate.modeling import windows
 
 from neurotemplate._typing import beartype
 
@@ -216,10 +215,13 @@ class _PerStepBounds(nn.Module):
         return torch.stack(base, dim=-1)
 
 
+Span = tuple[int, int, int]   # a column's (past, future, stride), in steps
+
+
 def _window_table(cfg, nm_mapping: dict[str, list[str]],
-                  r_columns: list[str]) -> dict[str, list[Optional[tuple[int, int]]]]:
-    """`cfg.policy_window` as `(past, future)` per column, None for a column the policy
-    does not read, per input key, in the order each key carries its columns.
+                  r_columns: list[str]) -> dict[str, list[Optional[Span]]]:
+    """`cfg.policy_window` as `(past, future, stride)` per column, None for a column the
+    policy does not read, per input key, in the order each key carries its columns.
 
     A Y column takes no `future` (it is not measured yet), nor does a U column (it is
     the policy's own output); any other column needs one, because how far ahead to look
@@ -242,17 +244,17 @@ def _window_table(cfg, nm_mapping: dict[str, list[str]],
         raise ValueError("policy_window lists no Y column, so the policy could not see the "
                          f"plant at all. Y: {nm_mapping['Y']}.")
     window = cfg.window_steps
-    return {key: [(window[c]["past"], window[c].get("future", 0))
+    return {key: [(window[c]["past"], window[c].get("future", 0), window[c].get("stride", 1))
                   if c in window else None for c in cols]
             for key, cols in columns.items()}
 
 
-def _reads(key: str, span: Optional[tuple[int, int]]) -> bool:
+def _reads(key: str, span: Optional[Span]) -> bool:
     """A U column's window ends at the previous step, so `past: 0` holds no row."""
     return span is not None and (key != "U" or span[0] > 0)
 
 
-def _input_keys(table: dict[str, list[Optional[tuple[int, int]]]]) -> list[str]:
+def _input_keys(table: dict[str, list[Optional[Span]]]) -> list[str]:
     """The policy's positional inputs: the keys it reads a column of."""
     return [key for key in ("yn", "U", "D", "R")
             if any(_reads(key, span) for span in table[key])]
@@ -275,7 +277,7 @@ def unread_columns(cfg, nm_mapping: dict[str, list[str]], r_columns: list[str]) 
             if c not in read]
 
 
-def _input_window(key: str, spans: list[Optional[tuple[int, int]]]) -> dict:
+def _input_window(key: str, spans: list[Optional[Span]]) -> dict:
     """The input_map entry for one key: the deepest `past` and `future` it reads.
 
     A U window ends at the current step like every other, but U holds only
@@ -283,21 +285,30 @@ def _input_window(key: str, spans: list[Optional[tuple[int, int]]]) -> dict:
     `nearest` copy of the previous command; `_key_gather` drops it.
     """
     listed = [span for span in spans if span is not None]
-    return {"past": max(past for past, _ in listed),
-            "future": 0 if key == "U" else max(future for _, future in listed),
+    return {"past": max(past for past, _, _ in listed),
+            "future": 0 if key == "U" else max(future for _, future, _ in listed),
             "pad_mode": "nearest"}
 
 
-def _key_gather(key: str, spans: list[Optional[tuple[int, int]]]) -> list[int]:
-    """Indices narrowing one key's window to each column's own steps:
-    `t` relative to the current step with `-past <= t <= future`, and
-    `-past <= t <= -1` for U. A column the policy does not read keeps no row."""
+def _key_gather(key: str, spans: list[Optional[Span]]) -> list[int]:
+    """Indices narrowing one key's flat window, row `t` of column `j` at
+    `t * width + j`, to each column's own steps: `t` relative to the current
+    step with `-past <= t <= future`, every `stride`th of the future ones, and
+    `-past <= t <= -1` for U. Row by row, oldest first, in column order. A column
+    the policy does not read keeps no row."""
     window = _input_window(key, spans)
-    now = window["past"]
-    keep = tuple((j, now - span[0], now - 1 if key == "U" else now + span[1])
-                 for j, span in enumerate(spans) if span is not None)
-    rows = window["past"] + 1 + window["future"]
-    return windows.window_gather((len(spans),), (rows,), (keep,))
+    now, width = window["past"], len(spans)
+    indices = []
+    for row in range(window["past"] + 1 + window["future"]):
+        ahead = row - now
+        for j, span in enumerate(spans):
+            if span is None:
+                continue
+            past, future, stride = span
+            last = -1 if key == "U" else future
+            if -past <= ahead <= last and (ahead <= 0 or ahead % stride == 0):
+                indices.append(row * width + j)
+    return indices
 
 
 def _bounds_follow_device(net: nn.Module) -> nn.Module:

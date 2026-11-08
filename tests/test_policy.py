@@ -27,10 +27,12 @@ def _windows(s):
 def test_key_gather_keeps_each_columns_declared_steps():
     # D, col0 {past 2, future 0}, col1 {past 2, future 2}: a 5-row window,
     # both columns on the 3 past/current rows, col1 alone on the 2 future.
-    assert _key_gather("D", [(2, 0), (2, 2)]) == [0, 1, 2, 3, 4, 5, 7, 9]
+    assert _key_gather("D", [(2, 0, 1), (2, 2, 1)]) == [0, 1, 2, 3, 4, 5, 7, 9]
     # U ends at the previous step: col0 {past 2} keeps rows 0 and 1 of a
     # 3-row window, never the current row's padded copy; col1 {past 0} none.
-    assert _key_gather("U", [(2, 0), (0, 0)]) == [0, 2]
+    assert _key_gather("U", [(2, 0, 1), (0, 0, 1)]) == [0, 2]
+    # A stride of 2 over a 4-step future: now, 2 and 4 ahead.
+    assert _key_gather("D", [(0, 4, 2)]) == [0, 2, 4]
 
 
 def test_a_uniform_window_builds_no_gather():
@@ -70,6 +72,16 @@ def test_per_column_preview_reaches_only_the_declared_column():
     perturbed_outdoor = D.clone()
     perturbed_outdoor[:, (d_steps - 1) * nd + nm["D"].index(outdoor)] += 5.0
     assert not torch.allclose(net(yn, perturbed_outdoor, R), base)
+
+    # A stride of 2 reads the outdoor forecast now and 2 ahead, and not 1 ahead.
+    from control_fixtures import steps
+    cfg.policy_window[outdoor]["stride"] = steps(2)
+    strided = build_policy(cfg, sysid_cfg, nm, ns).callable.eval()
+    base = strided(yn, D, R)
+    for ahead, reaches in ((1, False), (2, True)):
+        moved = D.clone()
+        moved[:, (h_ctrl - 1 + ahead) * nd + nm["D"].index(outdoor)] += 5.0
+        assert torch.allclose(strided(yn, moved, R), base) != reaches, ahead
 
 
 def test_the_reference_reaches_the_policy_and_changes_what_it_commands():

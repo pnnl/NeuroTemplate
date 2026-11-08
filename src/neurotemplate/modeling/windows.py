@@ -8,7 +8,7 @@ window, each of them time-ordered oldest-first.
     [ y_0 .. y_{a-1} | u_0 .. u_{b-1} | d_0 .. d_{c-1} ]      steps = (a, b, c)
 
 Reading each column at its own lag out of that layout is one question, asked by
-the learned families and the policy, so the arithmetic lives here once.
+every learned family, so the arithmetic lives here once.
 
 These are pure position calculations: they depend only on (widths, steps),
 never on the data, so blocks compute them once at construction.

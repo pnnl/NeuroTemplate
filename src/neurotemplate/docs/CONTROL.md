@@ -60,7 +60,7 @@ policy_window:                       # syntax, not values
   "Zone Temperature": {past: 15m}
   "Cooling Setpoint": {past: 5m}
   "Outdoor Temperature": {past: 0, future: 1h}
-  "Tariff":           {past: 0, future: 4h}
+  "Tariff":           {past: 0, future: 4h, stride: 30m}
 ```
 
 The policy reads what this lists, for any role, and nothing else: each run prints what it leaves
@@ -69,7 +69,9 @@ does not use. Unset, it reads the regulated outputs and the `D` columns 3 steps 
 command, and each `D` and reference column a horizon ahead. `past` is how far before the current
 step; `future` how far after it, and only a forecast has one. No `future` may exceed `horizon`,
 since nothing past a training rollout is scored. A `D` or reference column requires one, and a `Y`
-column cannot take one. Every step's preview reads real rows of the record, to the rollout's last
+column cannot take one. A forecast's `stride` thins its future to every so many steps: the tariff
+above is read now and at 8 points ahead, rather than at all 48 rows. Unset, every row is read.
+Every step's preview reads real rows of the record, to the rollout's last
 step, so a file needs those rows. A `U` column's window ends at the previous step, the last command
 applied: `past: 0` there means the policy does not read it; with `past: 5m` it sees the move a
 `first_difference` row is pricing. The deepest `past`, with the surrogate's history, sets how many

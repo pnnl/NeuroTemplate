@@ -21,7 +21,7 @@ from neurotemplate.common.config import (
 from neurotemplate.modeling.config import warn_deep_window
 
 #: The keys a `policy_window` entry may set.
-WINDOW_KEYS = ("past", "future")
+WINDOW_KEYS = ("past", "future", "stride")
 
 #: One solve, for `policy: mpc` and `nt control gap` alike (`control.solver`): Adam at
 #: `lr`, a share of each command's range per step, stopped once `patience` steps pass
@@ -75,8 +75,10 @@ class ControlConfig(TimedWindows):
     # `{column: {past: n, future: m}}`, steps before and after the current one. A
     # Y or U column takes no `future` (not yet measured, or the policy's own output);
     # any other column requires one. A U column's window ends at the previous step, the
-    # last command applied, so `past: 0` means the policy does not read it. See
-    # control.policy.build_policy. A trained policy's package takes only what is listed.
+    # last command applied, so `past: 0` means the policy does not read it. A forecast's
+    # `stride` thins its future to every so many steps: `{past: 0, future: 6h, stride:
+    # 45m}` reads now and 8 rows ahead. Unset, every row. See control.policy.build_policy.
+    # A trained policy's package takes only what is listed.
     # Unset: the regulated outputs and the D columns 3 steps back, the last command, and
     # each D and reference column a horizon ahead.
     policy_window: dict[str, dict[str, Time]] = field(default_factory=dict)
@@ -246,6 +248,13 @@ class ControlConfig(TimedWindows):
                 f"{self.horizon_steps}: nothing past a training rollout is scored, so "
                 "the policy would read a preview it is never rewarded for using. Make "
                 "`horizon` at least the deepest `future`.")
+        strides = {column: entry["stride"] for column, entry in self.window_steps.items()
+                   if "stride" in entry}
+        if any(stride < 1 for stride in strides.values()):
+            raise ValueError(f"policy_window strides must be at least a step: {strides}.")
+        if strides and self.policy == "mpc":
+            raise ValueError(f"policy: mpc plans over every row of its forecasts, so a "
+                             f"`stride` would be ignored; drop it from {sorted(strides)}.")
         warn_deep_window("the policy's history_steps", self.history_steps)
 
     @property
@@ -267,12 +276,15 @@ class ControlConfig(TimedWindows):
 
 
 def check_policy_window(table: dict) -> None:
-    """Each entry is `{past: time[, future: time]}`."""
+    """Each entry is `{past: time[, future: time[, stride: time]]}`."""
     for column, entry in table.items():
         if not isinstance(entry, dict) or "past" not in entry or set(entry) - set(WINDOW_KEYS):
             raise ValueError(
                 f"policy_window[{column!r}] must be a mapping with `past` and "
-                f"optionally `future`, got {entry!r}")
+                f"optionally `future` and its `stride`, got {entry!r}")
+        if "stride" in entry and "future" not in entry:
+            raise ValueError(f"policy_window[{column!r}] has a `stride` but no `future`: a "
+                             "stride thins a forecast's future rows.")
         for key, value in entry.items():
             time_microseconds(value, f"policy_window[{column!r}][{key!r}]")
 

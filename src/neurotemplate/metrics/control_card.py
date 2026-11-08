@@ -157,6 +157,7 @@ def _controller_section(arch: dict) -> str:
         f"{arch['outsize']} outputs",
         "- Window, steps before / after now (a U column's ends at the last command):",
         *_grouped({col: f"past {e['past']}" + (f", future {e['future']}" if "future" in e else "")
+                   + (f" every {e['stride']}" if "stride" in e else "")
                    for col, e in arch["window"].items()}),
     ]
     return _section("Controller", "\n".join(lines + _bounds_lines(arch)))
