@@ -6,8 +6,8 @@ What a training run prints, at one of four levels (`cfg.progress`):
     live     one line rewritten in place at every evaluation, then the summary
     log      the same line printed as a new line, then the summary
 
-The end summary says where the best dev loss was and how often training rolled
-back, which is what the loss trajectory says that changes what to do next.
+The end summary says where the best dev loss was, which is the one thing the loss
+trajectory says that changes what to do next.
 """
 
 from __future__ import annotations
@@ -57,14 +57,7 @@ class Progress:
             else:
                 print(line, flush=True)
 
-    def rolled_back(self, step: int, dev: float) -> None:
-        if self.level == "silent":
-            return
-        end = "\n" if self.level == "live" else ""
-        print(f"{end}step {step}: dev {dev:.4g} against a best of {self.best_dev:.4g}; "
-              "rolled back to the best weights.", flush=True)
-
-    def finish(self, rollbacks: list[int]) -> None:
+    def finish(self) -> None:
         if self.best_step is None:
             raise RuntimeError(
                 f"No finite dev loss in {self.evaluations} evaluations, so there is no best "
@@ -74,7 +67,6 @@ class Progress:
             return
         if self.level == "live":
             print()
-        rolled = f"; rolled back {len(rollbacks)} time(s)" if rollbacks else ""
         print(f"Training finished. Best dev loss {self.best_dev:.4g} at step "
-              f"{self.best_step} of {self.iters}{rolled}; "
+              f"{self.best_step} of {self.iters}; "
               f"{_duration(perf_counter() - self.begin)}.", flush=True)

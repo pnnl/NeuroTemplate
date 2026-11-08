@@ -12,7 +12,6 @@ from neurotemplate.common.config import (
     check_non_negative,
     check_one_of,
     check_positive,
-    check_training,
     default_savedir,
     time_microseconds,
     time_steps,
@@ -106,16 +105,12 @@ class ModelingConfig(TimedWindows):
     physical_lr: float = 0.05
 
     # ---- TRAIN ---------------------------------------------------------------
-    # Gradient steps: a fixed budget, with the best weights on dev kept. Provisional
-    # until a plant bench sets it.
+    # Gradient steps: a fixed budget, the dev set scored 20 times and the best kept.
     iters: int = 3000
-    # Steps between scorings of the dev set.
-    eval_every: int = 100
     # The peak rate: it ramps up over the first 5% of the steps, then follows a cosine
-    # down to `lr_final` (`common.fit`). `lr: 0` trains nothing and keeps the model as built.
+    # down to a hundredth of it (`common.fit`). `lr: 0` trains nothing and keeps the
+    # model as built.
     lr: float = 1e-3
-    # Where the cosine ends.
-    lr_final: float = 1e-5
     # What training prints: silent | summary | live | log (`common.progress`).
     progress: str = "summary"
     # How far a training or dev rollout predicts, past its history. Unset, 48 steps.
@@ -174,7 +169,7 @@ class ModelingConfig(TimedWindows):
             "ensemble_seeds",
         ]:
             check_positive(self, name)
-        check_training(self)
+        check_positive(self, "iters")
         if self.threads is not None:
             check_positive(self, "threads")
 

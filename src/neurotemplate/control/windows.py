@@ -53,6 +53,7 @@ from neurotemplate.common.data_utils import (
     check_complete, get_data, get_data_splits, sliding_windows,
 )
 from neurotemplate.common.sampler import WindowSampler, fixed_batches
+from neurotemplate.modeling.dynamics import rc_network_zones
 from neurotemplate.control.losses import (
     POWER, ROLE_KEYS, Objective, check_weights, resolve_objective,
 )
@@ -214,18 +215,37 @@ def build_window_dict_multi(
     return out
 
 
-#: Generated start states, for the bench on the example's thermal plant: each training
-#: window's last measured zone temperature, uniform in this box, in °C (`box_start`).
-START_BOX = {"Zone [°C]": (18.0, 30.0)}
+def fill_start_box(cfg, dyn_sys, nm_mapping: dict[str, list[str]], frames: list[DataFrame]) -> None:
+    """`cfg.start_box` as `{column: [low, high]}`, written back so the run logs it: unset,
+    every `rc_network` zone; `records`, the column's range in the training frames."""
+    if cfg.start_box is None:
+        cfg.start_box = {column: "records" for column in rc_network_zones(dyn_sys)}
+    wrong = [column for column in cfg.start_box if column not in nm_mapping["Y"]]
+    if wrong:
+        raise ValueError(f"start_box names {wrong}, which are not the surrogate's Y columns "
+                         f"{nm_mapping['Y']}: only a measured output has a start to draw.")
+
+    def recorded(column: str) -> list[float]:
+        return [min(float(frame[column].min()) for frame in frames),
+                max(float(frame[column].max()) for frame in frames)]
+    cfg.start_box = {column: recorded(column) if side == "records" else [float(v) for v in side]
+                     for column, side in cfg.start_box.items()}
 
 
-def box_start(batch: dict, y_names: list[str], generator: torch.Generator) -> dict:
-    """`batch` with each window's history of a START_BOX column shifted by a constant, so
-    that its last row lands uniform in the box whatever that window's weather. The history
+def box_start(batch: dict, y_names: list[str], box: dict[str, list[float]],
+              generator: torch.Generator) -> dict:
+    """`batch` with each window's history of a boxed column shifted by a constant, so
+    that its last row lands uniform in the box, whatever that window's weather. The history
     keeps its recorded shape, so a filter places the hidden nodes from it as from a real one.
-    Weather, references and the command history stay as recorded."""
+    Heat, power, weather, references and the command history stay as recorded: the draw
+    pushes the controller into states the records never visited, at the price of some
+    physical inconsistency between them.
+
+    For a system highly sensitive to its initial conditions, that price may be too high:
+    set `start_box: {}` and every start is read from the records.
+    """
     yn = batch["yn"].clone()
-    for name, (low, high) in START_BOX.items():
+    for name, (low, high) in box.items():
         j = y_names.index(name)
         target = low + (high - low) * torch.rand(yn.shape[0], generator=generator,
                                                  device=yn.device)
@@ -243,16 +263,25 @@ def build_loaders(
 ):
     """(train_batches, dev_batches): random windows of the training records, drawn
     afresh at every step, and the dev records' windows `cfg.dev_stride` apart, fixed.
+    Both start where `cfg.start_box` says (`fill_start_box` has resolved it).
 
     With multiple files per split, no window spans two files.
     """
     keys, W = window_keys(cfg, sysid_cfg, nm_mapping, cfg.horizon_steps)
     sampler = WindowSampler(train_dfs, keys, W, cfg.batch_size, cfg.seed, sysid_cfg.device)
-    # Start states read from the records, or generated in START_BOX: swap the comment to
-    # compare the two (training_status.md, step 2).
-    train = sampler
-    # train = (box_start(batch, nm_mapping["Y"], sampler.generator) for batch in sampler)
     dev = build_window_dict_multi(dev_dfs, cfg, sysid_cfg, nm_mapping, P=cfg.horizon_steps,
                                   stride=cfg.dev_stride_steps)
     dev.pop("source_idx")
-    return train, fixed_batches(dev, cfg.batch_size, "dev")
+    dev_batches = fixed_batches(dev, cfg.batch_size, "dev")
+    if cfg.start_box is None:
+        raise ValueError("start_box is unresolved: call fill_start_box first.")
+    if not cfg.start_box:
+        return sampler, dev_batches
+    # Dev draws its starts once, from its own seed, so every evaluation scores the same ones.
+    dev_generator = torch.Generator(device=sysid_cfg.device)
+    dev_generator.manual_seed(cfg.seed + 1)
+    dev_batches = [box_start(batch, nm_mapping["Y"], cfg.start_box, dev_generator)
+                   for batch in dev_batches]
+    train = (box_start(batch, nm_mapping["Y"], cfg.start_box, sampler.generator)
+             for batch in sampler)
+    return train, dev_batches

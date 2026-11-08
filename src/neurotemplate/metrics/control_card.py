@@ -327,7 +327,7 @@ def _response_section(results) -> Optional[str]:
 
 def _hyperparameters_line(cfg) -> str:
     return _section("Hyperparameters", (
-        f"lr {cfg.lr} to {cfg.lr_final} · batch {cfg.batch_size} · {cfg.iters} steps · "
+        f"lr {cfg.lr} · batch {cfg.batch_size} · {cfg.iters} steps · "
         f"test stride {cfg.test_stride} · seed {cfg.seed}"))
 
 

@@ -3,6 +3,7 @@ The gating integration test: policy + frozen dynamics roll out with correct
 shapes, and gradients reach ONLY the policy (dynamics stays frozen).
 """
 
+import pytest
 import torch
 
 from neurotemplate.control.windows import (
@@ -189,3 +190,29 @@ def test_the_last_steps_preview_reads_real_forecast_rows():
     out = build_closed_loop(s["dyn_node"], policy, cfg, sysid_cfg)(windows)
     assert out["yn"].shape[1] == rollout
     assert out["D"].shape[1] == out["t"].shape[1] == rollout
+
+
+def test_start_box_draws_only_what_it_lists_and_keeps_each_history_shape():
+    from neurotemplate.control.windows import box_start, fill_start_box
+    s = full_setup()
+    cfg, nm, frame = s["cfg"], s["nm"], s["frame"]
+    zone = nm["Y"][0]
+
+    cfg.start_box = None                 # an mlp surrogate has no rc_network zone
+    fill_start_box(cfg, s["dyn_sys"], nm, [frame])
+    assert cfg.start_box == {}
+    cfg.start_box = {zone: "records"}
+    fill_start_box(cfg, s["dyn_sys"], nm, [frame])
+    assert cfg.start_box == {zone: [frame[zone].min(), frame[zone].max()]}
+    cfg.start_box = {nm["U"][0]: [0.0, 1.0]}
+    with pytest.raises(ValueError, match="not the surrogate's Y"):
+        fill_start_box(cfg, s["dyn_sys"], nm, [frame])
+
+    windows = build_window_dict(frame, cfg, s["sysid_cfg"], nm, P=4, stride=1)
+    generator = torch.Generator().manual_seed(0)
+    drawn = box_start(windows, nm["Y"], {zone: [40.0, 41.0]}, generator)
+    last = drawn["yn"][:, -1, 0]
+    assert ((last >= 40.0) & (last <= 41.0)).all()
+    shift = drawn["yn"][:, :, 0] - windows["yn"][:, :, 0]
+    assert torch.allclose(shift, shift[:, :1].expand_as(shift))     # one constant per window
+    assert torch.equal(drawn["yn"][:, :, 1:], windows["yn"][:, :, 1:])   # the rest as recorded

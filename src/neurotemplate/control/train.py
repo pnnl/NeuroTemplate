@@ -40,7 +40,7 @@ from neurotemplate.control.losses import (
     extend_norm_stats, fill_reference_scale, resolve_objective,
 )
 from neurotemplate.control.windows import (
-    build_loaders, horizons, load_control_splits, shortest_test_rollout,
+    build_loaders, fill_start_box, horizons, load_control_splits, shortest_test_rollout,
 )
 from neurotemplate.control.controller import build_controller, describe_controller
 from neurotemplate.control.policy import unread_columns
@@ -71,7 +71,7 @@ from neurotemplate.hooks import CONTROL_SNAPSHOT, load_control_hooks, snapshot_h
 #: What each run names even when you left it alone. Everything else sits in
 #: `nt docs config`, and appears on "You set" only when you set it.
 COMMON_SETTINGS = ("sysid_run_id", "policy", "policy_window", "horizon", "test_horizon",
-                   "dev_stride", "test_stride", "reference_scale", "iters",
+                   "dev_stride", "test_stride", "reference_scale", "start_box", "iters",
                    "lr", "batch_size", "log2_policy_hidden", "policy_layers", "seed")
 
 
@@ -126,6 +126,7 @@ def train_control(cfg: ControlConfig,
     cfg.fill_common_windows(shortest_test_rollout(cfg, sysid_cfg, test_dfs))
     cfg.check_windows()
     fill_reference_scale(objective, cfg, train_dfs)
+    fill_start_box(cfg, dyn_sys, nm_mapping, train_dfs)
     norm_stats = extend_norm_stats(objective, cfg, sysid_stats)
     if cfg.progress != "silent":
         print(settings_report(cfg, given, COMMON_SETTINGS))

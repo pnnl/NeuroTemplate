@@ -5,5 +5,4 @@ losses:
   comfort_upper: {column: "Band High", target: "Zone Temperature", map: nrelu, norm: 1}
 gains: {comfort_lower: 1.0, comfort_upper: 1.0}
 iters: 4
-eval_every: 2
 run: debug

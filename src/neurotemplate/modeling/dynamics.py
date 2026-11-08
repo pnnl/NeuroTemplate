@@ -312,6 +312,16 @@ class Blocks(nn.Module):
         return torch.cat(outs, dim=-1).index_select(1, self._to_y_order)
 
 
+def rc_network_zones(dyn_sys) -> list[str]:
+    """The Y columns `rc_network` blocks predict: zone temperatures, the states a
+    thermal model carries. None for any other family, or a model of your own."""
+    core = getattr(contract_model(dyn_sys), "core", None)
+    if not isinstance(core, Blocks):
+        return []
+    return [name for spec, family in zip(core.specs, core.families) if family == "rc_network"
+            for name in spec.y_names]
+
+
 # ── Model description (for reportcard) ───────────────────────────
 
 def _count_params(module: nn.Module) -> int:

@@ -1,11 +1,11 @@
-"""The training loop's budget, schedule and rollback (`common.fit`)."""
+"""The training loop's budget and schedule (`common.fit`)."""
 
 import itertools
 
 import pytest
 import torch
 
-from neurotemplate.common.fit import COLLAPSE, fit, schedule
+from neurotemplate.common.fit import EVALUATIONS, FINAL_SHARE, fit, schedule
 from neurotemplate.common.progress import Progress
 
 
@@ -23,21 +23,18 @@ class Scripted(torch.nn.Module):
         return {"dev_loss": torch.tensor(next(self.devs))}
 
 
-def test_fit_runs_its_budget_on_the_schedule_and_rolls_back_a_collapse():
-    share = schedule(100, final_ratio=0.01)
+def test_fit_runs_its_budget_on_the_schedule_and_keeps_the_best_dev():
+    share = schedule(100)
     assert share(0) == pytest.approx(1 / 5)       # ramps over 5% of the steps
     assert share(4) == pytest.approx(1.0)         # to the peak
-    assert share(99) == pytest.approx(0.01, abs=1e-3)
+    assert share(99) == pytest.approx(FINAL_SHARE, abs=1e-3)
 
-    # Above COLLAPSE times the best at two evaluations running rolls back, and the
-    # count starts again after each.
-    high = COLLAPSE * 1.1
-    devs = [1.0, high, high, 1.0, high, high, high, high, 0.5, 0.5]
+    # One evaluation per step at this budget; the best is the one kept, not the last.
+    devs = [3.0, 2.0, 0.5] + [1.0] * (EVALUATIONS - 3)
     problem = Scripted(devs)
     optimizer = torch.optim.Adam(problem.parameters(), lr=0.1)
-    fitted = fit(problem, optimizer, itertools.repeat({}), [{}], iters=10, eval_every=1,
-                 final_ratio=0.01, device="cpu", progress=Progress("silent"))
-    assert fitted.rollbacks == [3, 6, 8]
+    fitted = fit(problem, optimizer, itertools.repeat({}), [{}], iters=EVALUATIONS,
+                 device="cpu", progress=Progress("silent"))
     assert fitted.best_dev == 0.5
-    # The schedule kept its place through the rollbacks.
-    assert optimizer.param_groups[0]["lr"] == pytest.approx(0.1 * schedule(10, 0.01)(10))
+    assert torch.equal(problem.weight.detach(), fitted.best_state["weight"])
+    assert optimizer.param_groups[0]["lr"] == pytest.approx(0.1 * schedule(EVALUATIONS)(EVALUATIONS))

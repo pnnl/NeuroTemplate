@@ -29,10 +29,10 @@ def test_training_that_cannot_return_a_trained_model_stops_with_a_reason():
     progress.start(9)
     progress.update(1, 1.0, float("inf"))
     with pytest.raises(RuntimeError, match="No finite dev loss"):
-        progress.finish([])
+        progress.finish()
 
     progress.update(2, 1.0, 0.5)
-    progress.finish([])
+    progress.finish()
 
 
 def test_a_run_of_the_other_kind_or_outside_the_store_says_so(tmp_path, monkeypatch):

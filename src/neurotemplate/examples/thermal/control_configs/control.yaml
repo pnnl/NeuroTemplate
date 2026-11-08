@@ -3,7 +3,6 @@
 policy: mlp
 horizon: 12h
 iters: 120
-eval_every: 10
 batch_size: 32
 policy_window:
   "Zone [°C]": {past: 15m}

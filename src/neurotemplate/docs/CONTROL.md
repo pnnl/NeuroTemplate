@@ -84,6 +84,24 @@ it counts down over the horizon, so the policy learns what the end of a rollout 
 objective. On dev, on test and when exported it stays a whole horizon, as for a controller that
 decides again at every step; the exported package takes no input for it.
 
+## Where training starts: `start_box`
+
+```yaml
+start_box:                            # syntax, not values
+  "Zone 1 [°C]": [16, 32]             # drawn in this box
+  "Zone 2 [°C]": records              # drawn over its range in the training records
+```
+
+Each training and dev rollout takes its weather, references and command history from a window of the
+record. A column `start_box` lists starts somewhere else: its history is shifted by a constant so its last
+row lands uniform in the box, whatever that window's weather, which puts the controller in states the
+record never visited. Unset, every `rc_network` zone is drawn over its recorded range, and the run prints
+the box; `{}` starts every rollout as recorded. List only states: a temperature, not the heat or power a
+thermostat or meter produces from it, which stay as recorded. A black-box model's columns are drawn only
+if listed. Test always starts as recorded, as a deployed controller does. Some physical inconsistency
+between a drawn state and its recorded neighbours is the price; for a system highly sensitive to its
+initial conditions, set `{}`.
+
 ## Grid response: energy, cost and peak
 
 Energy, cost and peak are three reductions of one signal, `power`, which

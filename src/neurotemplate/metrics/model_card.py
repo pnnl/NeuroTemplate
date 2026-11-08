@@ -528,7 +528,7 @@ def _hyperparameters_line(cfg: ModelingConfig) -> str:
     gains = ", ".join(f"{name} {gain}" for name, gain in
                       (("ref", cfg.ref_gain), ("grad", cfg.grad_gain)) if gain != 0)
     return _section("Hyperparameters", (
-        f"lr {cfg.lr} to {cfg.lr_final} · batch {cfg.batch_size} · {cfg.iters} steps · horizon "
+        f"lr {cfg.lr} · batch {cfg.batch_size} · {cfg.iters} steps · horizon "
         f"{cfg.horizon} · test horizon {cfg.test_horizon} · seed {cfg.seed} · "
         f"loss gains {gains or 'none'}"))
 

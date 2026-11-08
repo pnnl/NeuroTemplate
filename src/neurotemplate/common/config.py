@@ -282,17 +282,6 @@ def check_positive(obj: Any, name: str) -> None:
 PROGRESS_LEVELS = ("silent", "summary", "live", "log")
 
 
-def check_training(cfg) -> None:
-    """The budget and schedule both configs share (`common.fit`). At `lr: 0` nothing
-    trains, so `lr_final` is not read."""
-    check_positive(cfg, "iters")
-    check_positive(cfg, "eval_every")
-    check_non_negative(cfg, "lr_final")
-    if cfg.lr > 0 and cfg.lr_final > cfg.lr:
-        raise ValueError(f"lr_final ({cfg.lr_final}) is above lr ({cfg.lr}): the schedule "
-                         "decays from lr to lr_final.")
-
-
 def check_non_negative(obj: Any, name: str) -> None:
     x = getattr(obj, name)
     if x < 0:

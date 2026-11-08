@@ -48,6 +48,8 @@ def test_the_thermal_example_runs_model_control_and_export_with_zero_edits(
     out = capsys.readouterr().out
     assert "You set:" in out and "iters: 4" in out and "Defaults used:" in out
     assert "Not read by the policy" in out and HEAT in out
+    # Unset, the start box is the rc_network zone over its recorded range, never the heat.
+    assert f"start_box: {{'{ZONE}': [" in out
     nt(["export", "policy", "--run_id", _latest_run(), "--out", "delivery"])
     inputs = json.loads((tmp_path / "project/delivery/policy/policy.json").read_text())["inputs"]
     assert inputs["y"]["columns"] == [ZONE]          # no heat or meter for anyone to rebuild

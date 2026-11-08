@@ -13,7 +13,6 @@ from neurotemplate.common.config import (
     TimedWindows,
     check_one_of,
     check_positive,
-    check_training,
     default_savedir,
     time_microseconds,
     time_steps,
@@ -116,18 +115,19 @@ class ControlConfig(TimedWindows):
     # holds cooling at least 1 above heating at every step.
     control_bounds: dict[str, list] = field(default_factory=dict)
 
+    # What training and dev rollouts start from: `{Y column: [low, high]}` draws that
+    # column's last measured value uniform in the box, whatever the window's weather;
+    # `{Y column: records}`, over its range in the training records. Columns not listed
+    # start as recorded. Unset, every `rc_network` zone over its recorded range; `{}`,
+    # every column as recorded. Test always starts as recorded (`control.windows`).
+    start_box: Optional[dict] = None
+
     # ── Training ─────────────────────────────────────────────────
-    # Gradient steps: a fixed budget, with the best weights on dev kept. Provisional
-    # until a plant bench sets it.
+    # Gradient steps: a fixed budget, the dev set scored 20 times and the best kept.
     iters: int = 3000
-    # Steps between scorings of the dev set.
-    eval_every: int = 100
     # The peak rate: it ramps up over the first 5% of the steps, then follows a cosine
-    # down to `lr_final` (`common.fit`).
-    # The paper's 5e-3 saturated the example's policy within its ramp.
+    # down to a hundredth of it (`common.fit`).
     lr: float = 1e-3
-    # Where the cosine ends.
-    lr_final: float = 1e-5
     # What training prints: silent | summary | live | log (`common.progress`).
     progress: str = "summary"
 
@@ -182,6 +182,13 @@ class ControlConfig(TimedWindows):
         check_policy_window(self.policy_window)
         self._check_common_times()
 
+        for column, side in (self.start_box or {}).items():
+            box = (isinstance(side, list) and len(side) == 2
+                   and all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in side)
+                   and side[0] < side[1])
+            if side != "records" and not box:
+                raise ValueError(f"start_box[{column!r}] is `[low, high]` with low below high, "
+                                 f"or `records`; got {side!r}.")
         for name, scale in self.reference_scale.items():
             if not isinstance(scale, (int, float)) or scale <= 0:
                 raise ValueError(
@@ -197,7 +204,7 @@ class ControlConfig(TimedWindows):
             "lr",
         ]:
             check_positive(self, name)
-        check_training(self)
+        check_positive(self, "iters")
         if self.threads is not None:
             check_positive(self, "threads")
 
