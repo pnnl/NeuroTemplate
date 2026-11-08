@@ -155,7 +155,9 @@ def evaluate_closed_loop(
 
 def rollout_with_commands(cl_system, data: dict) -> tuple[dict, list]:
     """The closed loop's rollout on `data`, and at every step the windows its
-    controller (the loop's first node) was handed and the command it issued."""
+    controller (the loop's first node) was handed and the command it issued. In eval
+    mode, as deployed: the policy's time to go stays a whole horizon."""
+    cl_system.eval()
     seen = []
     handle = cl_system.nodes[0].callable.register_forward_hook(
         lambda _m, args, out: seen.append(([a.detach() for a in args], out.detach())))

@@ -119,8 +119,9 @@ def test_a_policy_reads_what_its_window_lists_and_names_the_rest():
     from neurotemplate.control.policy import read_columns, unread_columns
     assert read_columns(cfg, nm, r_columns)["yn"] == [ZONE]
     assert FAN_P in unread_columns(cfg, nm, r_columns) and SETPT in unread_columns(cfg, nm, r_columns)
-    # past 2 + 1 of the zone, past 0 + 1 + future 1 of one D, one row of each band edge.
+    # past 2 + 1 of the zone, past 0 + 1 + future 1 of one D, one row of each band edge,
+    # and time to go.
     net = next(m for m in policy.callable.modules() if isinstance(m, _NormalizedNet))
-    assert net.base.in_features == 3 + 2 + 2
+    assert net.base.in_features == 3 + 2 + 2 + 1
     u = build_closed_loop(s["dyn_node"], policy, cfg, sysid_cfg)(_windows(s))["U"]
     assert torch.isfinite(u).all()

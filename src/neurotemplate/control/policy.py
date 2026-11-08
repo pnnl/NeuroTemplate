@@ -34,6 +34,7 @@ selects a dynamics family on the sys-id side:
 
 from __future__ import annotations
 
+import math
 from graphlib import CycleError, TopologicalSorter
 from typing import Optional
 
@@ -71,13 +72,21 @@ class _NormalizedNet(nn.Module):
     `index_select` against registered buffers — same discipline as
     `BlockStack` (modeling/dynamics.py): no data-dependent control flow.
 
+    The net also reads the steps its rollout has left, τ, as `2 log τ / log N − 1`
+    over the training horizon N, as in the amortized-weights paper: from 1 at the
+    first step of a training rollout to −1 at its last. Evaluated, τ stays N, as a
+    controller that replans every step always has a whole horizon ahead; so dev,
+    test and the exported graph, traced in eval, all see the constant 1.
+
     The output is the net's own: normalised U, inside the net's bounds.
     """
 
     def __init__(self, base: nn.Module, stats: list[tuple[torch.Tensor, torch.Tensor]],
-                 gathers: dict[int, torch.Tensor]):
+                 gathers: dict[int, torch.Tensor], horizon: int):
         super().__init__()
         self.base = base
+        self.horizon = horizon
+        self.steps_taken = 0
         for i, (shift, stretch) in enumerate(stats):
             self.register_buffer(f"_shift_{i}", shift, persistent=False)
             self.register_buffer(f"_stretch_{i}", stretch, persistent=False)
@@ -96,7 +105,23 @@ class _NormalizedNet(nn.Module):
             if i in self.indices:
                 x = x.index_select(-1, getattr(self, f"_gather_{i}"))
             normalized.append(x)
+        normalized.append(self._time_to_go(args[0]))
         return self.base(*normalized)
+
+    def _time_to_go(self, like: torch.Tensor) -> torch.Tensor:
+        """τ's encoding for this step, one column; counts the step."""
+        tau = max(self.horizon - self.steps_taken, 1) if self.training else self.horizon
+        self.steps_taken += 1
+        share = math.log(tau) / math.log(self.horizon) if self.horizon > 1 else 1.0
+        return torch.full((like.shape[0], 1), 2 * share - 1, dtype=like.dtype, device=like.device)
+
+    # The rollout-state protocol (`contract.stateful_blocks`), so that the closed loop's
+    # reset starts the count again at every rollout. A count is no tensor to carry.
+    def rollout_state(self) -> None:
+        return None
+
+    def set_rollout_state(self, state: None) -> None:
+        self.steps_taken = 0
 
 
 def _current(x: torch.Tensor, block: int, width: int) -> torch.Tensor:
@@ -365,7 +390,7 @@ def build_policy(
                          "has to be handed them: list them in policy_window.")
     input_map = {key: _input_window(key, table[key]) for key in keys}
     key_gathers = {key: _key_gather(key, table[key]) for key in keys}
-    insize = sum(len(indices) for indices in key_gathers.values())
+    insize = sum(len(indices) for indices in key_gathers.values()) + 1   # + time to go
 
     # The fixed range, physical, and the same in the net's normalised units.
     u_cols = nm_mapping["U"]
@@ -385,7 +410,7 @@ def build_policy(
         if key_gathers[key] != list(range(width)):
             gathers[i] = torch.tensor(key_gathers[key], dtype=torch.long, device=device)
     net = _NormalizedNet(net, [_column_stats(norm_stats, columns[key], device)
-                               for key in keys], gathers)
+                               for key in keys], gathers, cfg.horizon_steps)
 
     net = _Commands(net, u_shift, u_stretch)
     net = with_control_bounds(net, cfg, nm_mapping, keys, input_map, umin, umax).to(device)
@@ -508,7 +533,8 @@ def describe_policy(
 
     The window table is reported alongside `insize` so a reader can re-check
     the sum — past + 1 + future per listed Y, D and reference column, past per
-    listed U column — by eye: a wrong window is otherwise an invisible failure.
+    listed U column, and 1 for time to go — by eye: a wrong window is otherwise
+    an invisible failure.
     """
     # Unwrap: Node -> [_PerStepBounds] -> _Commands -> _NormalizedNet -> MLP_bounds
     raw = policy_node.callable
@@ -528,7 +554,7 @@ def describe_policy(
         "bound_method": cfg.policy_bound_method,
         "insize": int(net.in_features),
         "outsize": int(net.out_features),
-        "inputs": list(policy_node.input_keys),
+        "inputs": [*policy_node.input_keys, "time to go"],
         "ny": len(nm_mapping["Y"]),
         "window": {c: dict(entry) for c, entry in cfg.policy_window.items()},
         "hsizes": [int(lin.out_features) for lin in net.linear[:-1]],

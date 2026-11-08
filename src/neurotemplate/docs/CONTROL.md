@@ -74,8 +74,13 @@ step, so a file needs those rows. A `U` column's window ends at the previous ste
 applied: `past: 0` there means the policy does not read it; with `past: 5m` it sees the move a
 `first_difference` row is pricing. The deepest `past`, with the surrogate's history, sets how many
 recorded steps seed each rollout. Training windows start at any row of the records, drawn afresh at
-every step, and dev windows `dev_stride` apart, a whole horizon by default. The reportcard lists the table and the input
-width it gives.
+every step, and dev windows `dev_stride` apart, a whole horizon by default. The reportcard lists the
+table and the input width it gives.
+
+Beside what it lists, the network reads one more input: the steps its rollout has left. In training
+it counts down over the horizon, so the policy learns what the end of a rollout does to the
+objective. On dev, on test and when exported it stays a whole horizon, as for a controller that
+decides again at every step; the exported package takes no input for it.
 
 ## Grid response: energy, cost and peak
 

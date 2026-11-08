@@ -57,7 +57,7 @@ def test_per_column_preview_reaches_only_the_declared_column():
     D = torch.randn(2, d_steps * nd)
     R = torch.randn(2, N_REF)
 
-    net = policy.callable
+    net = policy.callable.eval()   # time to go held, so repeated calls compare
     base = net(yn, D, R)
 
     # Last (deepest-future) timestep: irr never declared a preview, so a
@@ -133,3 +133,23 @@ def test_bounds_respected_for_every_family_and_method(family, method):
     tol = 1e-4
     assert torch.all(U >= umin - tol)
     assert torch.all(U <= umax + tol)
+
+
+def test_time_to_go_counts_down_a_training_rollout_and_holds_a_horizon_in_eval():
+    s = full_setup()
+    policy = build_policy(s["cfg"], s["sysid_cfg"], s["nm"], s["norm_stats"])
+    net = next(m for m in policy.callable.modules() if isinstance(m, _NormalizedNet))
+    like, N = torch.zeros(2, 1), s["cfg"].horizon_steps
+
+    def encodings(calls):
+        return [net._time_to_go(like)[0, 0].item() for _ in range(calls)]
+
+    net.train()
+    net.set_rollout_state(None)
+    run = encodings(N + 2)
+    assert run[0] == pytest.approx(1.0) and run[N - 1] == pytest.approx(-1.0)
+    assert run[N:] == pytest.approx([-1.0, -1.0])     # past the horizon, it holds at the last
+    net.set_rollout_state(None)                        # the closed loop's reset, per rollout
+    assert encodings(1) == pytest.approx([1.0])
+    net.eval()
+    assert encodings(3) == pytest.approx([1.0] * 3)
