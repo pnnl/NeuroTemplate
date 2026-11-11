@@ -25,7 +25,7 @@ the split, which exports unverified only when the user says so, and then
 ships nothing to validate. And the shipped C runner, built and run against a
 package holding both a model and a policy, then an unverified model.
 
-The C cases need onnx2c (with the keepdims=0 reduction fix) and make on
+The C cases need onnx2c (upstream, 3e6e214 or later) and make on
 PATH, and are skipped without them.
 """
 

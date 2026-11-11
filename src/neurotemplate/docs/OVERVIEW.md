@@ -84,6 +84,7 @@ flags. The `train` commands read a YAML config and share these flags:
 ## Development
 
 ```bash
+git clone https://github.com/pnnl/NeuroTemplate neurotemplate && cd neurotemplate
 uv sync --extra dev
 uv run pytest tests/
 ```

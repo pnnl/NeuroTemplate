@@ -68,20 +68,19 @@ The export calls onnx2c, which you build from source and put on PATH, or
 name with `--onnx2c`. It also compiles the generated C with the host's
 compiler (`cc`, or `CC`) to verify it. The export never installs either one.
 
-The C format is pinned to one onnx2c commit, `e2ee84b`: upstream plus the
-fix for reductions with `keepdims=0`, which is a pull request upstream at
-the time of writing. The export reads the commit from `onnx2c -v` and refuses
-any other, printing these steps. Building needs cmake and protobuf
+Build onnx2c from upstream's default branch; it needs cmake and protobuf
 (`brew install cmake protobuf`, or your platform's packages):
 
 ```bash
-git clone https://github.com/EladMichael/onnx2c && cd onnx2c
-git checkout e2ee84b0f6451835fc6749b298c85c0af475220c && git submodule update --init
+git clone https://github.com/kraiskil/onnx2c && cd onnx2c
+git submodule update --init
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build --target onnx2c
 ```
 
-Then put `build/onnx2c` on PATH. The pin lives in
-[export/ccode.py](../export/ccode.py) (`ONNX2C_COMMIT`).
+Then put `build/onnx2c` on PATH. A build older than upstream commit
+`3e6e214` (the fix for reductions with `keepdims=0`) generates C that disagrees
+with the model on graphs that use such a reduction; the export's agreement
+check refuses it, and a fresh build fixes it.
 
 ## What the package holds
 

@@ -29,6 +29,11 @@ dependencies = [
     "torch>=2.9.0",
 ]
 
+[project.urls]
+Homepage = "https://github.com/pnnl/NeuroTemplate"
+Repository = "https://github.com/pnnl/NeuroTemplate"
+Issues = "https://github.com/pnnl/NeuroTemplate/issues"
+
 [project.scripts]
 # Single dispatcher: `nt <group> <verb>`. See neurotemplate/cli.py for the
 # command table (nt model train, nt control train, ...).
