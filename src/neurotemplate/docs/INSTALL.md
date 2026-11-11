@@ -1,8 +1,9 @@
 # Installing NeuroTemplate
 
 NeuroTemplate is installed as a dependency of an application repo, which
-holds your data, hook files and configs. New library features arrive by
-bumping the version the application pins.
+holds your data, hook files and configs. The library is installed from the
+tip of `main` on [GitHub](https://github.com/pnnl/NeuroTemplate), which is
+kept stable to develop against.
 
 It needs Python 3.10 or newer. These instructions use
 [uv](https://docs.astral.sh/uv/); plain pip works too.
@@ -13,12 +14,34 @@ From an empty directory:
 
 ```bash
 uv init my_app && cd my_app
-uv add "NeuroTemplate @ git+ssh://git@tanuki-data.pnnl.gov/buildings-technology/neurotemplate.git@v0.2"
+uv add "NeuroTemplate @ git+https://github.com/pnnl/NeuroTemplate"
 uv run nt init
 ```
 
 `uv add` puts one command, `nt`, on the environment's `PATH`; `nt init` writes
 the application (below).
+
+**The application stays on the commit it installed.** `uv.lock` records the
+commit of `main` that `uv add` resolved, so every `uv sync` installs the same
+library until you move it. To take the current `main`:
+
+```bash
+uv lock --upgrade-package neurotemplate && uv sync
+```
+
+A trained run keeps a copy of its hooks file but not of the library:
+reloading it after an upgrade runs the new library, so upgrade between
+comparisons, not in the middle of one.
+
+**Neuromancer is pinned to one git commit.** If the application lists its
+own Neuromancer source, such as a local checkout, point it at the same
+commit or drop it. Otherwise `uv sync` refuses with conflicting URLs for
+`neuromancer`.
+
+**Importing the library sets `NUMBA_DISABLE_JIT=1`** unless the environment
+sets it. Neuromancer imports pyts, which compiles numba kernels at import
+(20-60 s) for a plot this library never draws. Your own numba code in the same
+process then runs uncompiled; `NUMBA_DISABLE_JIT=0` keeps the JIT.
 
 ### Optional extras
 
@@ -27,12 +50,18 @@ the application (below).
 | `prep` | statsmodels | `neurotemplate.prep.smooth`, the gap smoother ([MODELING.md](MODELING.md#preparing-the-record)) |
 | `dev` | pytest, `prep` | working on the library itself |
 
-Ask for one as `"NeuroTemplate[prep] @ git+ssh://..."`.
+Ask for one as `"NeuroTemplate[prep] @ git+https://github.com/pnnl/NeuroTemplate"`.
 
 ### Against a local checkout
 
-To develop the library and an application together, point the dependency at
-an editable checkout:
+To develop the library and an application together, clone it beside the
+application:
+
+```bash
+git clone https://github.com/pnnl/NeuroTemplate neurotemplate
+```
+
+and point the application's dependency at the editable checkout:
 
 ```toml
 [tool.uv.sources]
@@ -75,4 +104,5 @@ store, unless `MLFLOW_TRACKING_URI` (or, from Python,
 An exported model or policy does not need this library at all. Depending
 on how it was exported, it needs numpy and onnxruntime, numpy and torch, or
 only a C compiler. See [EXPORT.md](EXPORT.md). The C format also needs
-[onnx2c](https://github.com/kraiskil/onnx2c) on the machine that exports.
+onnx2c, built from upstream, on the machine that exports;
+[EXPORT.md](EXPORT.md#the-c-format-needs-onnx2c) has the steps.

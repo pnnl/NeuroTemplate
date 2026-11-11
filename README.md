@@ -7,13 +7,15 @@ core began as a copy of [Neuromancer](https://github.com/pnnl/neuromancer)'s.
 
 ```bash
 uv init my_app && cd my_app
-uv add "NeuroTemplate @ git+ssh://git@tanuki-data.pnnl.gov/buildings-technology/neurotemplate.git@v0.2"
+uv add "NeuroTemplate @ git+https://github.com/pnnl/NeuroTemplate"
 uv run nt example thermal   # see it work: a project on synthetic data, zero edits
 uv run nt init              # data.yaml, hook menus, configs, data/, AGENTS.md
 # put train.csv, dev.csv, test.csv in data/
 uv run nt guide
 ```
 
+That installs the tip of `main`, which is kept stable to develop against; `uv.lock`
+keeps the application on that commit until `uv lock --upgrade-package neurotemplate`.
 [INSTALL.md](src/neurotemplate/docs/INSTALL.md) has the details. The command is `nt`; the
 Python package is `neurotemplate`, so `import neurotemplate`, not `import nt`.
 

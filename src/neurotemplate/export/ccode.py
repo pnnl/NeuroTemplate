@@ -4,9 +4,10 @@ a C header and the shipped C runtime (`export/c/`).
 
 onnx2c (https://github.com/kraiskil/onnx2c) turns one ONNX graph into one C
 file: the weights as constant arrays, the forward pass as straight-line
-functions, no heap and no I/O. It is the user's to build; the export only
-looks for it, at the commit `ONNX2C_COMMIT` names, and refuses any other. It
-needs a static graph, so `prepare` fixes the batch at 1 and lets onnxruntime
+functions, no heap and no I/O. It is the user's to build from upstream
+`master`; the export only looks for it. A build that predates the fix for
+keepdims=0 reductions (upstream 3e6e214) generates C that disagrees with the
+model, which the export's agreement check refuses. It needs a static graph, so `prepare` fixes the batch at 1 and lets onnxruntime
 fold everything that is then constant, and drops two attributes the dynamo
 exporter writes that onnx2c refuses to parse.
 """
@@ -14,7 +15,6 @@ exporter writes that onnx2c refuses to parse.
 from __future__ import annotations
 
 import os
-import re
 import shutil
 import subprocess
 import sys
@@ -27,12 +27,9 @@ import onnxruntime as ort
 #: The shipped C runtime: the drivers, validate.c and example.c.
 SOURCES = Path(__file__).parent / "c"
 
-#: The onnx2c the C format is verified against: upstream 271d0e5 plus a fix
-#: for keepdims=0 reductions, which upstream onnx2c declares with the wrong
-#: shape. docs/EXPORT.md repeats both; change them together, and use upstream
-#: once it carries the fix.
-ONNX2C_REPOSITORY = "https://github.com/EladMichael/onnx2c"
-ONNX2C_COMMIT = "e2ee84b0f6451835fc6749b298c85c0af475220c"
+#: Where to build onnx2c from: upstream, its default branch. docs/EXPORT.md
+#: repeats the build steps; change them together.
+ONNX2C_REPOSITORY = "https://github.com/kraiskil/onnx2c"
 
 #: Digits onnx2c prints each weight with. Nine round-trips any float32
 #: exactly; onnx2c's default of 20 only makes the source longer.
@@ -46,23 +43,16 @@ def library_name() -> str:
 
 def check_tools(onnx2c: str) -> None:
     """Fail fast, before any tracing, when a tool the C format needs is
-    missing, or onnx2c is not the pinned commit."""
-    short = ONNX2C_COMMIT[:7]
-    needed = (f"Exporting with --format c requires onnx2c at commit {short} on "
-              f"PATH, or named with --onnx2c. To build it (needs cmake and "
-              f"protobuf):\n"
+    missing."""
+    needed = (f"Exporting with --format c requires onnx2c on PATH, or named "
+              f"with --onnx2c. To build it (needs cmake and protobuf):\n"
               f"  git clone {ONNX2C_REPOSITORY} && cd onnx2c\n"
-              f"  git checkout {ONNX2C_COMMIT} && git submodule update --init\n"
+              f"  git submodule update --init\n"
               f"  cmake -S . -B build -DCMAKE_BUILD_TYPE=Release && "
               f"cmake --build build --target onnx2c\n"
               f"then put build/onnx2c on PATH.")
     if shutil.which(onnx2c) is None:
         raise FileNotFoundError(f"onnx2c not found ({onnx2c!r}). {needed}")
-    version = subprocess.run([onnx2c, "-v"], capture_output=True, text=True).stdout
-    found = re.search(r"Commit: (\w+)", version)
-    if found is None or not ONNX2C_COMMIT.startswith(found.group(1)):
-        raise RuntimeError(f"{onnx2c} reports {version.strip()!r}, not commit "
-                           f"{short}. {needed}")
     if shutil.which(compiler()) is None:
         raise FileNotFoundError(f"no C compiler ({compiler()!r}); the C format "
                                 "compiles its graphs to verify them. Set CC.")
