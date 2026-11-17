@@ -1,6 +1,0 @@
-# Everything else is a default the run prints; `nt docs config` lists what can be set.
-model: rc_network
-past: {"Power [kW]": 0}
-horizon: 12h
-epochs: 30
-batch_size: 32

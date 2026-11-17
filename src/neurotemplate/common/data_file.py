@@ -76,25 +76,38 @@ def load_data_file(path: Union[str, Path]) -> DataFile:
                     {role: list(columns.get(role) or []) for role in ROLES})
 
 
-def _listing(columns: list[str]) -> str:
-    """Every column as `data.yaml`'s `columns`, ready to paste and sort into roles."""
-    lines = ["columns:", "  Y:"]
-    lines += [f'    - "{c}"' for c in columns]
-    return "\n".join(lines + ["  U: []", "  D: []"])
+#: The roles with nothing in them: pasted unedited, the next run stops here again.
+_EMPTY_ROLES = "columns:\n  Y: []\n  U: []\n  D: []"
+
+
+def _no_roles_yet(data_file: DataFile, columns: list[str]) -> str:
+    """The record's columns, then an empty `columns` template, then what to do.
+
+    The names are bare lines, not YAML, and the template is empty, so neither runs
+    if pasted as it is: a model trained on every column in Y is not a first draft
+    worth an hour. The instructions come last, where a long column list leaves the
+    screen."""
+    return "\n".join([
+        f"The record's {len(columns)} columns:", "",
+        *(f"  {c}" for c in columns), "",
+        f"{data_file.path} assigns no columns yet. Replace its `columns: {{}}` with",
+        "", _EMPTY_ROLES, "",
+        "and move each column above into its role, as a list: `Y: [a, b]`.",
+        "  Y: what the model predicts",
+        "  U: what a controller writes",
+        "  D: what is known without the plant, from a schedule or a forecast",
+        "A column you leave out is simply not read.",
+    ])
 
 
 def nm_mapping(data_file: DataFile, record_columns: list[str]) -> dict[str, list[str]]:
     """`{"Y", "U", "D", "t"}` from `data_file`, every name checked against the record's
     columns and every problem listed at once. With no roles assigned at all this is the
-    first thing a project hits, so it stops and prints what to paste."""
+    first thing a project hits, so it stops and lists the columns to sort."""
     available = [c for c in record_columns if c != TIME_COLUMN]
     named = [c for role in ROLES for c in data_file.columns[role]]
     if not named:
-        raise SystemExit(
-            f"{data_file.path} assigns no columns yet. The record has {len(available)}; "
-            "paste this over `columns` and move each to its role. Y is what the model "
-            "predicts, U what a controller writes, D what is known without the plant, and "
-            f"a column you leave out is simply not read.\n\n{_listing(available)}")
+        raise SystemExit(_no_roles_yet(data_file, available))
     problems = []
     unknown = [c for c in named if c not in record_columns]
     if unknown:

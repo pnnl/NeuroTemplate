@@ -1,8 +1,8 @@
 # NeuroTemplate: an overview
 
-What the library does, a session end to end, and every command. The guided flow
-(`nt guide`, or [GUIDE.md](../GUIDE.md)) is where to start; this page and the other
-references (`nt docs`) are what it points into.
+What the library does, a session end to end, and every command. The guides `nt init`
+writes into a project's `guides/` folder are where to start; this page and the other
+references (`nt docs`) are what they point into.
 
 | To | Read |
 |---|---|
@@ -40,10 +40,10 @@ scaffolded by `nt init`. Each run is tracked in MLflow and leaves a markdown rep
 ```bash
 nt init my_app && cd my_app/
 # data/: train.csv, dev.csv, test.csv
-nt model train                     # lists the record's columns for data.yaml, then, with roles:
-nt model train                     # ... Finished run: <model_run>
-# control_configs/control.yaml: your objective
-nt control train                   # the latest model run. ... Finished control run: <policy_run>
+nt model train      # lists the record's columns for data.yaml
+nt model train      # with roles: ... --run_id <model_run>
+# control_configs/custom.yaml: your objective
+nt control train --config custom   # ... Finished control run: <policy_run>
 nt export model  --run_id <model_run> --data data/test.csv --out delivery
 nt export policy --run_id <policy_run> --out delivery
 ```
@@ -56,9 +56,7 @@ show the calls.
 
 | Command | Purpose |
 |---|---|
-| `nt example thermal [dir]` | a working project on synthetic data, zero edits |
 | `nt init [dir]` | start an application: `data.yaml`, the hook menus, the configs, `data/` and `AGENTS.md` |
-| `nt guide [step]` | the guided flow, one step at a time, and the guides beside it |
 | `nt docs [name]` | these references, each hook (`nt docs hooks`), and every config field (`nt docs config`) |
 | `nt model train` | train a surrogate |
 | `nt model load` | score a trained surrogate on other data |
@@ -84,7 +82,8 @@ flags. The `train` commands read a YAML config and share these flags:
 ## Development
 
 ```bash
-git clone https://github.com/pnnl/NeuroTemplate neurotemplate && cd neurotemplate
+git clone https://github.com/pnnl/NeuroTemplate neurotemplate
+cd neurotemplate
 uv sync --extra dev
 uv run pytest tests/
 ```

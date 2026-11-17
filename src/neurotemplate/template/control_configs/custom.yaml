@@ -1,0 +1,10 @@
+# Your settings for `nt control train`. control.yaml beside this file has every
+# setting at its default: copy the ones you want to change into this file and
+# edit them here. A setting not here takes its default, and the objective,
+# `losses` and `gains`, has none: copy it too. Run it with
+#
+#   nt control train --config custom
+#
+# Each run prints what you set apart from the defaults it used. To keep one
+# change per run, copy this file to c01.yaml, c02.yaml, ... and run
+# `--config c01`.

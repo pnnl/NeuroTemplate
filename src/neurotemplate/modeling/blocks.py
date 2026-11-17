@@ -33,9 +33,11 @@ What a block owns
          thermal families act on it (conduction to the outdoors, a capacity
          that follows it); others see the column as an ordinary input.
   scale  what sets a thermal zone's units: `{input or parameter: value}`, what
-         `nt data ladder` pins, e.g. `{"Heat [kW]": 1.0}` for a heat in kW, or
-         `{"C_Ti": 2.0}`. Temperature alone places only gain / C. It makes the
-         block a thermal zone that the ladder reads; see `ladder`.
+         `nt data ladder` pins. Temperature alone places only gain / C. Absent,
+         the zone's one heat input (its `driven_by` column, else its one U) is
+         a heat in kW, pinned at 1 (`zone_scale`); declare it for anything else,
+         e.g. `{"Power [kW]": 3.0}` for a power behind a COP of 3, or
+         `{"C_Ti": 2.0}` for a capacitance from design data.
   solar  the one D column that is solar irradiance, if any: the input the
          ladder may also route into the mass or the envelope.
   driven_by
@@ -107,8 +109,10 @@ envelopes have different priors, and the block is where a zone is declared.
 
 from __future__ import annotations
 
+import json
 from collections import Counter
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Optional
 
 from neurotemplate._typing import beartype
@@ -392,6 +396,40 @@ def build_blocks(
         ))
     _check_one_hinge_per_column(blocks)
     return run_order(blocks)
+
+
+def declaration(block: Block, family: str, fit: str) -> dict:
+    """The block's `params[family]`. A string is the path of a JSON file
+    holding it, such as the one `fit` writes, read now: when the model is
+    built, not when `block_mapping` runs, so the fit that writes the file can
+    read the same blocks before it exists."""
+    where = f"{family} block {block.name!r}"
+    decl = block.params.get(family)
+    if decl is None:
+        raise ValueError(f"{where}: params has no `{family}` entry. Run `{fit}` and "
+                         f"give the file it writes: {{{family!r}: 'ladder/....json'}}")
+    if not isinstance(decl, str):
+        return decl
+    path = Path(decl)
+    if not path.exists():
+        raise ValueError(f"{where}: {decl} not found. Run `{fit}` first; if it ran and "
+                         "skipped this block, its data cannot place one, so give the "
+                         "block another `model`.")
+    try:
+        return json.loads(path.read_text())
+    except json.JSONDecodeError as e:
+        raise ValueError(f"{where}: {decl} is not valid JSON: {e}") from None
+
+
+def zone_scale(block: Block) -> tuple[Optional[dict[str, float]], list[str]]:
+    """`(scale, candidates)`: the block's declared `scale`, or else its one heat
+    input pinned at 1, a heat in kW. The heat is the `driven_by` column (a
+    thermostat's output), else the U; with more than one candidate, or none,
+    the scale is None and `candidates` says what to choose from."""
+    if block.scale is not None:
+        return dict(block.scale), []
+    candidates = list(block.driven_by) or list(block.u_names)
+    return ({candidates[0]: 1.0} if len(candidates) == 1 else None), candidates
 
 
 def run_order(blocks: list[Block]) -> list[Block]:

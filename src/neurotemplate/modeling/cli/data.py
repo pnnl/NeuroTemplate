@@ -7,7 +7,7 @@ have, so nothing applies them automatically.
 
 Usage:
     nt data ladder --config model_configs/modeling.yaml [--zone COL] [--dt 30min] \
-        [--candidate mine.json]
+        [--candidate mine.json] [-v]
     nt data thermostat --config model_configs/modeling.yaml \
         --cooling "Cooling Setpoint [°C]" --heating "Heating Setpoint [°C]"
 """
@@ -33,7 +33,7 @@ from neurotemplate.hooks import load_modeling_hooks
 from neurotemplate.modeling import ladder
 from neurotemplate.modeling import network as nw
 from neurotemplate.modeling import thermostat as th
-from neurotemplate.modeling.blocks import build_blocks
+from neurotemplate.modeling.blocks import build_blocks, declaration, zone_scale
 from neurotemplate.modeling.config import ModelingConfig
 from neurotemplate.modeling.ladder import Rung
 from neurotemplate.modeling.network import Fit
@@ -64,13 +64,18 @@ class ThermalZone:
             problems.append(f"Y must be the zone temperature alone; got {list(block.y_names)}")
         if block.ambient is None:
             problems.append("no `ambient`: the outdoor temperature every network conducts to")
+        scale, candidates = zone_scale(block)
+        if scale is None:
+            problems.append(
+                f"which input is the heat? {candidates or 'it has no U or driven_by'}. "
+                "Declare `scale`, e.g. {'Heat [kW]': 1.0} for a heat in kW")
         if problems:
             raise SystemExit(f"thermal block {block.name!r}: " + "; ".join(problems))
         inputs = [c for c in block.driven_by + block.u_names + block.d_names
                   if c not in (block.ambient, block.solar)]
-        drives = tuple(c for c in inputs if c in block.driven_by or c in block.scale)
+        drives = tuple(c for c in inputs if c in block.driven_by or c in scale)
         return cls(block.name, block.y_names[0], block.ambient, block.solar, drives,
-                   tuple(c for c in inputs if c not in drives), dict(block.scale),
+                   tuple(c for c in inputs if c not in drives), scale,
                    tuple(block.driven_by))
 
     def network(self, rung: Rung):
@@ -114,6 +119,10 @@ def ladder_main() -> None:
     flags.add_argument("--candidate", type=str, action="append", default=[],
                        help="A JSON file holding a network declaration of your own, fitted "
                             "and compared beside the ladder's rungs (repeatable).")
+    flags.add_argument("-v", "--verbose", action="store_true",
+                       help="The full card: every rung's fit, dev RMSE and the notes on "
+                            "it. Without it, the chosen network and the file it wrote. "
+                            "--candidate implies it.")
     cfg, args = load_config_from_cli(
         sys.argv[1:], cls=ModelingConfig, config_dir=MODEL_CONFIG_DIR,
         default_config_path=MODEL_CONFIG_DIR / "modeling.yaml",
@@ -124,20 +133,24 @@ def ladder_main() -> None:
     nm_mapping = resolve_nm_mapping(cfg, train_raws[0])
     blocks = build_blocks(nm_mapping, resolve_block_spec(hooks, nm_mapping, cfg),
                           every_y_claimed=False)
-    zones = [ThermalZone.from_block(b) for b in blocks if b.scale is not None]
+    # A block is fitted when it says where its network goes: `params: {rc_network: ...}`.
+    zones = [ThermalZone.from_block(b) for b in blocks if "rc_network" in b.params]
     if args.zone is not None:
         zones = [z for z in zones if z.zone == args.zone]
     if not zones:
         raise SystemExit(
-            "No thermal block to fit. A thermal block declares its zone temperature as Y, "
-            "`ambient` (and `solar`, if any) among its D, and `scale`, what sets its units; "
-            "see `nt guide thermal-zone`.")
+            "No block to fit: the ladder fits each block whose `params` names an "
+            "`rc_network` file, e.g. `\"params\": {\"rc_network\": \"ladder/zone.json\"}`, "
+            "with its zone temperature as Y, its heat in kW as U (or `driven_by`), and "
+            "`ambient` among its D; see guides/2-rc-network.md.")
     _warn_signed_gains(zones, train_raws)
 
     every = _parse_dt_steps(args.dt, freq_s)
     coarse_h, fine_h = every * freq_s / 3600.0, freq_s / 3600.0
     candidates = {Path(path).stem: json.loads(Path(path).read_text())
                   for path in args.candidate}
+    # A candidate is there to be compared, which only the full card does.
+    verbose = args.verbose or bool(candidates)
 
     cache: dict[tuple[str, str], Fit] = {}
 
@@ -154,46 +167,75 @@ def ladder_main() -> None:
                     for z, p in zip(group, parents or [None] * len(group))]
         return fit_rung
 
+    def select(group: list[ThermalZone], **kw):
+        try:
+            return ladder.forward_select(fit_rung_for(group), **kw)
+        except nw.FitFailed:
+            # Only the first rung's failure reaches here; a later one is skipped.
+            raise SystemExit(
+                f"{', '.join(z.zone for z in group)}: even the one-node network (Ti) "
+                "could not be fitted; its likelihood went non-finite. Check the zone's "
+                "columns for gaps, a constant stretch, or values far off the others' "
+                "scale, and its `scale` entries.") from None
+
     out_dir = Path("ladder")
     out_dir.mkdir(exist_ok=True)
-    picks = {}
+    fitted, skipped_blocks = [], []
     for zone in zones:
-        selection = ladder.forward_select(fit_rung_for([zone]), solar=zone.solar is not None)
-        picks[zone.block] = selection.chosen
+        selection = select([zone], solar=zone.solar is not None)
         candidate_fits = {}
         for name, decl in candidates.items():
             network, boxes, noise = nw.parse_declaration(decl, name)
             candidate_fits[name] = fit_zone(
                 zone, network, {**nw.box_centres(boxes), **noise})
-        _print_ladder_card(zone, selection, candidate_fits, dev_raws, every, coarse_h,
-                           fine_h, len(train_raws), out_dir)
+        chosen = selection.fits[selection.chosen][0]
+        path = out_dir / f"{zone.block}.json"
+        # No time constant placed: the temperature never moved enough to show
+        # one, and the file would hold boxes wide enough to mean nothing.
+        # A stale file from an earlier run must not stand in for it.
+        skipped = all(math.isinf(se) for se in chosen.taus_se_h)
+        if skipped:
+            path.unlink(missing_ok=True)
+        else:
+            path.write_text(json.dumps(nw.declaration(chosen), indent=2, ensure_ascii=False))
+            fitted.append(zone)
+        if skipped:
+            skipped_blocks.append(zone.block)
+        if verbose:
+            _print_ladder_card(zone, selection, candidate_fits, dev_raws, every, coarse_h,
+                               fine_h, len(train_raws), None if skipped else path)
+        elif skipped:
+            print(f"{zone.zone}: {SKIPPED}")
+        else:
+            print(f"{zone.zone}: → {selection.chosen}   time constants {_taus_text(chosen)}")
+            for note in _failed_notes(selection):
+                print(f"  {note}")
 
-    if len(zones) > 1:
-        shared = ladder.forward_select(fit_rung_for(zones),
-                                       solar=all(z.solar is not None for z in zones),
-                                       bic=True)
-        print(f"\nShared across {len(zones)} zones: {shared.chosen}  "
-              f"(likelihoods summed, and the summed BIC must fall too; per zone: "
-              + ", ".join(f"{b} {r}" for b, r in picks.items()) + ")")
-        for note in _selection_notes(shared):
-            print(f"  {note}")
-        for zone, fit in zip(zones, shared.fits[shared.chosen]):
-            if picks[zone.block] != shared.chosen:
-                path = out_dir / f"{zone.block}.shared.json"
-                path.write_text(json.dumps(nw.declaration(fit), indent=2, ensure_ascii=False))
-                print(f"  {zone.block} at {shared.chosen}: {path}")
+    if fitted:
+        print(f"params in {out_dir}/*.json")
+    if skipped_blocks:
+        # Said once more at the end: on many zones the per-zone lines scroll past.
+        print(f"Skipped {len(skipped_blocks)} of {len(zones)} blocks (no params file; give "
+              f"each another model): {', '.join(skipped_blocks)}")
+    if not verbose:
+        print("Rerun with -v for the full card: every rung's fit, dev RMSE and notes.")
+
+
+#: A zone whose chosen network places no time constant.
+SKIPPED = ("insufficient data variation for RC model fit, skipped (no params file; "
+           "give the block another model)")
 
 
 def _print_ladder_card(zone: ThermalZone, selection, candidate_fits: dict, dev_raws,
                        every: int, coarse_h: float, fine_h: float, n_files: int,
-                       out_dir: Path) -> None:
+                       path: Optional[Path]) -> None:
     fits = {name: fs[0] for name, fs in selection.fits.items()}
     fits.update(candidate_fits)
     n_obs = next(iter(fits.values())).n_obs
-    print(f"\n{zone.zone}   coarse dt {coarse_h * 60:g} min, {n_obs:,} train steps"
+    print(f"\n{zone.zone}: fitted on {n_obs:,} train steps of {coarse_h * 60:g} min"
           + (f" in {n_files} files" if n_files > 1 else ""))
-    print(f"  {'rung':<14}{'states':>6}{'params':>7}{'log L':>10}{'p vs parent':>13}"
-          f"{'BIC':>10}{'whiteness':>11}   1 h / 24 h RMSE on dev")
+    print(f"  {'rung':<12}{'params':>6}{'log L':>9}{'p vs parent':>13}{'BIC':>8}"
+          f"{'white':>7}  RMSE 1 h / 24 h")
     lags = ladder.whiteness_lags(coarse_h)
     for name, fit in fits.items():
         parent = selection.parents.get(name)
@@ -208,12 +250,11 @@ def _print_ladder_card(zone: ThermalZone, selection, candidate_fits: dict, dev_r
         scores = [s for s in scores if s is not None]
         rmse = (f"{sum(s[0] for s in scores) / len(scores):.3f} / "
                 f"{sum(s[1] for s in scores) / len(scores):.3f}" if scores else "dev too short")
-        label = name + ("  (yours)" if name in candidate_fits else "")
-        print(f"  {label:<14}{len(fit.network.nodes):>6}{fit.n_params:>7}"
-              f"{fit.log_likelihood:>10.1f}{p:>13}{fit.bic:>10.1f}{white:>11}   {rmse}")
+        label = name + (" (yours)" if name in candidate_fits else "")
+        print(f"  {label:<12}{fit.n_params:>6}{fit.log_likelihood:>9.1f}{p:>13}"
+              f"{fit.bic:>8.1f}{white:>7}  {rmse}")
     chosen = fits[selection.chosen]
-    taus = ", ".join(f"{t:.3g} h ± {s:.2g}" for t, s in zip(chosen.taus_h, chosen.taus_se_h))
-    print(f"  → {selection.chosen}   time constants {taus}")
+    print(f"  → {selection.chosen}   time constants {_taus_text(chosen)}")
     by_bic = min(fits, key=lambda n: fits[n].bic)
     if by_bic != selection.chosen:
         print(f"  BIC prefers {by_bic}; the likelihood-ratio tests stop at {selection.chosen}.")
@@ -224,22 +265,35 @@ def _print_ladder_card(zone: ThermalZone, selection, candidate_fits: dict, dev_r
               "closed-loop data that is often the controller answering the zone's own "
               "error, or a daily driver no input carries; add the latter as a "
               "non-negative D column (an occupancy or schedule indicator) and rerun.")
-    path = out_dir / f"{zone.block}.json"
-    path.write_text(json.dumps(nw.declaration(chosen), indent=2, ensure_ascii=False))
-    print(f"  snippet: {path}  — the block's params `rc_network`; edit it as you like.")
-    print("  p vs parent: the likelihood-ratio test against the rung it extends. "
-          "Whiteness: Ljung–Box on the innovations over "
-          f"{ladder.WHITENESS_HOURS:g} h; small means time structure the network "
-          "leaves out.")
+    if path is None:
+        print(f"  {SKIPPED}")
+    else:
+        print(f"  wrote: {path}  — the block takes it as "
+              f"`\"params\": {{\"rc_network\": \"{path}\"}}`; edit it as you like.")
+    print("  p vs parent: under 0.05, the rung earned its extra node over the one it "
+          "extends (a likelihood-ratio test). white: under 0.05, the one-step errors "
+          f"still follow a pattern over {ladder.WHITENESS_HOURS:g} h that the network "
+          "misses (Ljung–Box). RMSE: forecast error on dev, an hour and a day ahead.")
+
+
+def _taus_text(fit: Fit) -> str:
+    return ", ".join(f"{t:.3g} h ± {s:.2g}" for t, s in zip(fit.taus_h, fit.taus_se_h))
 
 
 def _p_text(p: float) -> str:
     return "<0.001" if p < 0.001 else f"{p:.3f}"
 
 
+def _failed_notes(selection) -> list[str]:
+    """The extensions left out because their fit failed."""
+    return [f"Could not fit {', '.join(step.failed)} (the likelihood went non-finite); "
+            f"left out of the selection from {step.parent}."
+            for step in selection.steps if step.failed]
+
+
 def _selection_notes(selection) -> list[str]:
-    """The extensions left out because they add a mode the data cannot place."""
-    return [f"Not selected from {step.parent}: {', '.join(step.unidentified)} — each adds "
+    """The extensions left out: a failed fit, or a mode the data cannot place."""
+    return _failed_notes(selection) + [f"Not selected from {step.parent}: {', '.join(step.unidentified)} — each adds "
             "a mode this record does not place (an infinite error bar, or slower than "
             "the record is long)." for step in selection.steps if step.unidentified]
 
@@ -252,14 +306,15 @@ def _fit_notes(fit: Fit) -> list[str]:
     if fit.unplaced_modes:
         notes.append(
             "Not placed by this record: " + ", ".join(f"{t:.3g} h" for t in fit.unplaced_modes)
-            + f" (fitted on {fit.record_h:.0f} h). A node that slow is decoupled from "
-            "ambient over the record; on closed-loop data, where the HVAC holds the zone, "
-            "the envelope often cannot be identified. Keep the snippet's wide box, or set "
-            "the value from design data.")
+            + f" (fitted on {fit.record_h:.0f} h in {fit.step_h * 60:g} min steps). A node "
+            "slower than the record is decoupled from ambient over it, which on closed-loop "
+            "data, where the HVAC holds the zone, is often the envelope; one faster than the "
+            "step cannot be seen at all. Keep the file's wide box, or set the value from "
+            "design data.")
     limit = nw.at_limit(fit)
     if limit:
         notes.append(f"At a limit (zero or infinity): {limit}. A gain there is left out "
-                     "of the snippet, so remove that column from the block's `D`; a noise there is a node the network needs no push for.")
+                     "of the file, so remove that column from the block's `D`; a noise there is a node the network needs no push for.")
     wide = [k for k, se in fit.log_se.items() if se > 1.0 and k not in limit]
     if wide:
         notes.append(f"Barely placed (error bar wider than ×e): {wide}.")
@@ -279,11 +334,10 @@ def _fit_notes(fit: Fit) -> list[str]:
 def _declared_network(block) -> tuple:
     """The block's declared network, at the centre of its boxes, and the lowest
     zone capacitance its box allows."""
-    decl = block.params.get("rc_network")
-    if decl is None:
-        raise SystemExit(
-            f"thermal block {block.name!r} declares no network. Run `nt data ladder`, and "
-            "put its snippet in the block's params as `rc_network`.")
+    try:
+        decl = declaration(block, "rc_network", "nt data ladder")
+    except ValueError as e:
+        raise SystemExit(str(e)) from None
     network, boxes, noise = nw.parse_declaration(decl, block.name)
     return network, {**nw.box_centres(boxes), **noise}, boxes[f"C_{network.zone}"][0]
 
@@ -312,9 +366,15 @@ def thermostat_main() -> None:
     nm_mapping = resolve_nm_mapping(cfg, train_raws[0])
     every_block = build_blocks(nm_mapping, resolve_block_spec(hooks, nm_mapping, cfg),
                                every_y_claimed=False)
-    blocks = [b for b in every_block if b.scale is not None]
+    blocks = [b for b in every_block if "rc_network" in b.params]
     if args.zone is not None:
         blocks = [b for b in blocks if ThermalZone.from_block(b).zone == args.zone]
+    elif len(blocks) > 1:
+        # The zone whose heat comes from the block those setpoints belong to.
+        def follows(b):
+            return any(heat in p.y_names and all(c in p.u_names for c in setpoints.values())
+                       for heat in b.driven_by for p in every_block)
+        blocks = [b for b in blocks if follows(b)] or blocks
     if len(blocks) != 1:
         raise SystemExit(f"--zone must pick one thermal block; found "
                          f"{[b.name for b in blocks]}.")
@@ -328,7 +388,7 @@ def thermostat_main() -> None:
     producer = next((b for b in every_block if heat in b.y_names), None)
     if producer is None:
         raise SystemExit(f"No block produces {heat!r}, the heat block {block.name!r} is driven by. "
-                         "Declare its thermostat block; see `nt guide thermal-zone`.")
+                         "Declare its thermostat block; see guides/4-thermostat.md.")
     missing = [c for c in setpoints.values() if c not in producer.u_names]
     if missing:
         raise SystemExit(f"setpoint(s) {missing} are not U columns of block {producer.name!r}, "
@@ -347,20 +407,24 @@ def thermostat_main() -> None:
                                        fine_h)
               for name, fit in selection.fits.items()}
 
-    print(f"\n{zone.zone} ← {', '.join(f'{s} {c!r}' for s, c in setpoints.items())}"
-          f"   one-step fit on {selection.fits[selection.chosen].n_obs:,} train steps; "
-          f"24 h rollouts on dev through the declared network")
-    print(f"  {'form':<30}{'params':>7}{'log L':>11}{'p vs parent':>13}{'BIC':>11}"
-          f"   zone / heat RMSE: all, " + ", ".join(th.REGIMES))
+    print(f"\n{zone.zone} ← {', '.join(f'{s} {c!r}' for s, c in setpoints.items())}: "
+          f"fitted on {selection.fits[selection.chosen].n_obs:,} train steps, scored "
+          f"by 24 h rollouts on dev through the zone's network")
+    print(f"  {'form':<30}{'params':>6}{'p vs parent':>12}{'BIC':>10}  RMSE zone / heat")
     for name, fit in selection.fits.items():
         parent = selection.parents.get(name)
         p = ("—" if parent is None else _p_text(ladder.lr_p_value(
             selection.fits[parent].log_likelihood, selection.fits[parent].n_params,
             fit.log_likelihood, fit.n_params)))
-        print(f"  {name:<30}{fit.n_params:>7}{fit.log_likelihood:>11.1f}{p:>13}"
-              f"{fit.bic:>11.1f}   {_score_text(scores[name])}")
+        score = scores[name]
+        rmse = "dev too short" if score is None else _score_text({"all": score["all"]})
+        print(f"  {name:<30}{fit.n_params:>6}{p:>12}{fit.bic:>10.1f}  {rmse}")
     chosen = selection.fits[selection.chosen]
     print(f"  → {selection.chosen}")
+    if scores[selection.chosen] is not None:
+        print("  By regime, zone / heat: " + ", ".join(
+            f"{regime} {_score_text({regime: score})}"
+            for regime, score in scores[selection.chosen].items() if regime != "all"))
     twin = selection.fits[selection.latched]
     if twin.bic < chosen.bic:
         print(f"  BIC prefers its latched form, {selection.latched}.")
@@ -373,19 +437,21 @@ def thermostat_main() -> None:
                   f"{scores[best]['all'][0]:.3f} against {scores[selection.chosen]['all'][0]:.3f}).")
     unplaced = [k for k, se in chosen.se.items() if math.isinf(se)]
     if unplaced:
-        print(f"  Not placed by this record: {unplaced}. The snippet leaves an offset or "
-              "slope null and a scale's box a factor of 1000 wide: declare those from what "
-              "you know of the equipment, in the snippet, as a [low, high] box or a number "
+        print(f"  Not placed by this record: {unplaced}. The file leaves an offset or "
+              "slope null and a scale's box a factor of 1000 wide: set those from what "
+              "you know of the equipment, in the file, as a [low, high] box or a number "
               "(`\"heating\": {\"capacity\": [40, 60], ...}`, from a design capacity).")
     out_dir = Path("ladder")
     out_dir.mkdir(exist_ok=True)
     path = out_dir / f"{producer.name}.thermostat.json"
     path.write_text(json.dumps(th.declaration(chosen, setpoints, lowest_c / fine_h), indent=2,
                                ensure_ascii=False))
-    print(f"  snippet: {path}  — block {producer.name!r}'s params `thermostat`.")
-    print("  Regimes by the measured heat: satisfied under a tenth of the active side's "
-          "capacity, saturated over nine tenths. The one-step fit predicts the heat over "
-          "each step from the row that starts it.")
+    print(f"  wrote: {path}  — block {producer.name!r} takes it as "
+          f"`\"params\": {{\"thermostat\": \"{path}\"}}`.")
+    print("  p vs parent: under 0.05, the form earned its extra parameters over the one "
+          "it extends. RMSE: a day-ahead forecast's error on dev, of the zone and of the "
+          "heat. Regimes, by the measured heat: satisfied under a tenth of the active "
+          "side's capacity, saturated over nine tenths, tracking between.")
 
 
 def _thermostat_scores(fit, network, values, zone: ThermalZone, heat: str,

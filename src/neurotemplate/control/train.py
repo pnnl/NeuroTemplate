@@ -6,7 +6,7 @@ command line:
     from neurotemplate.control.config import ControlConfig
     from neurotemplate.control.train import train_control
 
-    cfg = load_config("control_configs/control.yaml", ControlConfig,
+    cfg = load_config("control_configs/custom.yaml", ControlConfig,
                       {"sysid_run_id": run.run_id})
     policy_run = train_control(cfg)
     policy_run.run_id, policy_run.results.comfort_violation_rate
@@ -27,7 +27,6 @@ from neurotemplate._typing import beartype
 
 import mlflow
 
-from neurotemplate.common.config import fields_set, settings_report
 from neurotemplate.metrics.card import RESULTS_DIR
 from neurotemplate.metrics.run_summary import write_run_summary
 from neurotemplate.common.tracking import save_checkpoint, tracked_run
@@ -43,13 +42,11 @@ from neurotemplate.control.windows import (
     build_loaders, horizons, load_control_splits, shortest_test_rollout,
 )
 from neurotemplate.control.controller import build_controller, describe_controller
-from neurotemplate.control.policy import unread_columns
 from neurotemplate.metrics.sensitivity import command_sensitivity
 from neurotemplate.control.closed_loop import (
     build_closed_loop, build_control_loss, build_problem, power_term,
 )
 from neurotemplate.metrics.objective import (
-    format_objective_report,
     objective_balance,
     objective_notes,
     objective_to_dict,
@@ -66,13 +63,6 @@ from neurotemplate.control.pipeline import (
     plot_closed_loop,
 )
 from neurotemplate.hooks import CONTROL_SNAPSHOT, load_control_hooks, snapshot_hooks
-
-
-#: What each run names even when you left it alone. Everything else sits in
-#: `nt docs config`, and appears on "You set" only when you set it.
-COMMON_SETTINGS = ("sysid_run_id", "policy", "policy_window", "horizon", "test_horizon",
-                   "train_stride", "dev_stride", "test_stride", "reference_scale", "epochs",
-                   "lr", "batch_size", "log2_policy_hidden", "policy_layers", "seed")
 
 
 @dataclass
@@ -96,7 +86,6 @@ def train_control(cfg: ControlConfig,
     `config_path` is the file `cfg` came from, recorded in the run summary;
     None for a config built in code.
     """
-    given = fields_set(cfg)
     cfg = deepcopy(cfg)
     cfg.validate()
     cfg.device = resolve_device(cfg.device)
@@ -127,8 +116,6 @@ def train_control(cfg: ControlConfig,
     cfg.check_windows()
     fill_reference_scale(objective, cfg, train_dfs)
     norm_stats = extend_norm_stats(objective, cfg, sysid_stats)
-    if cfg.progress != "silent":
-        print(settings_report(cfg, given, COMMON_SETTINGS))
     train_loader, dev_loader = build_loaders(
         cfg, sysid_cfg, nm_mapping, train_dfs, dev_dfs,
     )
@@ -149,10 +136,6 @@ def train_control(cfg: ControlConfig,
                       "cannot learn or plan that command.")
 
     trains = cfg.policy != "mpc"   # MPC plans through the surrogate; nothing to train
-    if trains and cfg.progress != "silent":
-        unread = unread_columns(cfg, nm_mapping, objective.r_columns)
-        if unread:
-            print(f"Not read by the policy (not in policy_window): {unread}")
     policy_node = build_controller(cfg, sysid_cfg, nm_mapping, norm_stats, dyn_node)
     arch = describe_controller(policy_node, cfg, sysid_cfg, nm_mapping)
     cl_system = build_closed_loop(dyn_node, policy_node, cfg, sysid_cfg)
@@ -169,8 +152,6 @@ def train_control(cfg: ControlConfig,
     power_diag = (power_diagnostics(power, balance_out, hmax)
                   if power is not None and objective.reads_power else None)
     notes = objective_notes(objective, cfg)
-    if cfg.progress != "silent":
-        print(format_objective_report(balance, power_diag, notes, trains))
 
     cfg.run = ("DPC " if trains else "MPC ") + cfg.run
     term_keys = [term.key for term in objective.terms]
@@ -189,9 +170,6 @@ def train_control(cfg: ControlConfig,
             # be tuned against.
             trained_balance = objective_balance(
                 loss, run_objective_pass(problem, balance_batch))
-            if cfg.progress in ("live", "log"):
-                print("Objective shares after training: " + ", ".join(
-                    f"{t.name} {t.share * 100:.0f}%" for t in trained_balance.terms))
         else:
             save_checkpoint(logger, problem.state_dict())
             policy_node.callable.solves.clear()   # count the evaluation's solves only

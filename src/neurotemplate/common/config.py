@@ -173,7 +173,7 @@ def steps_as_time(steps: int, steps_per_hour: float) -> Time:
 
 
 #: What a window left unset comes to, in steps of the data so it is always a whole number
-#: of them. One place, printed by every run (`settings_report`).
+#: of them. One place.
 DEFAULT_PAST_STEPS = 3
 DEFAULT_HORIZON_STEPS = 48
 DEFAULT_TEST_HORIZON_STEPS = 288
@@ -208,7 +208,7 @@ class TimedWindows:
             if longest_test_horizon < 1:
                 raise ValueError(
                     "The shortest test file is too short to hold a test rollout after its "
-                    "history; use a longer file, or a shorter `past` or `context`.")
+                    "history; use a longer file, or a shorter `past` or `spinup`.")
             self.test_horizon = self._time(min(DEFAULT_TEST_HORIZON_STEPS, longest_test_horizon))
         if self.train_stride is None:
             self.train_stride = self._time(max(1, self.horizon_steps // TRAIN_STRIDES_PER_HORIZON))
@@ -251,29 +251,10 @@ class TimedWindows:
                 time_microseconds(getattr(self, name), name)
 
 
-def fields_set(cfg) -> set[str]:
-    """The fields of `cfg` that differ from the dataclass's default: what the caller
-    chose, read before a run fills in what it did not."""
-    fresh = type(cfg)()
-    return {f.name for f in fields(cfg)
-            if f.name != "savedir" and getattr(cfg, f.name) != getattr(fresh, f.name)}
-
-
-def _setting(cfg, name: str) -> str:
-    value = getattr(cfg, name)
-    if isinstance(value, dict) and len(value) > 3:
-        return f"{name}: {len(value)} entries"
-    return f"{name}: {value}"
-
-
-def settings_report(cfg, given: set[str], common: tuple[str, ...]) -> str:
-    """Two lines: what the caller set, and what the library chose. `common` is what is
-    worth naming when left alone; a setting nobody set outside it stays out of the way,
-    and `--print-config` has them all."""
-    you_set = [_setting(cfg, name) for name in sorted(given)]
-    defaults = [_setting(cfg, name) for name in common if name not in given]
-    return ("You set: " + (" · ".join(you_set) or "nothing") + "\n"
-            + "Defaults used: " + (" · ".join(defaults) or "none"))
+def config_line(cli: argparse.Namespace) -> str:
+    """Which config a command ran, and the `--set` overrides on top of it."""
+    overrides = f" with {', '.join(cli.set)}" if cli.set else ""
+    return f"Config: {cli.config}{overrides}"
 
 
 def default_savedir(prefix: str = "temp") -> str:

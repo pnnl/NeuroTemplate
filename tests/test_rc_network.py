@@ -120,6 +120,26 @@ def test_an_extension_whose_new_mode_the_data_cannot_place_is_not_selected():
     assert selection.steps[0].best == "TiTe"
 
 
+def test_an_extension_whose_fit_fails_is_left_out_and_the_ladder_goes_on():
+    from types import SimpleNamespace
+
+    def stub(ll, n_params):
+        return SimpleNamespace(log_likelihood=ll, n_params=n_params, unplaced_modes=[],
+                               bic=-2 * ll)
+
+    fits = {"Ti": stub(0.0, 4), "TiTe": stub(50.0, 8), "TiTmTe": stub(51.0, 12)}
+
+    def fit_rung(rung, parents):
+        if rung.name not in fits:
+            raise nw.FitFailed(f"{rung.name}: the fit ran into non-finite values")
+        return [fits[rung.name]]
+
+    selection = ladder.forward_select(fit_rung, solar=False)
+    assert selection.chosen == "TiTe"
+    assert selection.steps[0].failed == ["TiTm"]
+    assert "TiTm" not in selection.fits and "TiTm" not in selection.steps[0].candidates
+
+
 def test_a_declaration_round_trips_with_its_boxes_and_pins():
     net = Rung(mass=True).network((HEAT,), None, (), {HEAT: 1.0})
     decl = {"nodes": {"Ti": [1.0, 2.0], "Tm": 20.0},
@@ -184,18 +204,20 @@ def test_the_zone_filters_and_steps_exactly_as_the_ladder_does():
     assert math.isclose(float(next_zone[0]), float(expected[0]), abs_tol=1e-4)
 
 
-def _two_blocks(decl, thermostat_decl, history_steps=60):
+def _two_blocks(decl, thermostat_decl, history_steps=60, room_d=("out",)):
     from neurotemplate.modeling.blocks import build_blocks
     from neurotemplate.modeling.dynamics import get_dynamics
     from model_fixtures import model_cfg, unit_stats
 
-    mapping = {"Y": ["zone", HEAT], "U": ["sp"], "D": ["out"], "t": ["sec_elapsed"]}
+    mapping = {"Y": ["zone", HEAT], "U": ["sp"], "D": list(room_d), "t": ["sec_elapsed"]}
     spec = {"hvac": {"Y": [HEAT], "U": ["sp"], "D": [], "reads": ["zone"], "model": "thermostat",
                      "params": {"thermostat": thermostat_decl}},
-            "room": {"Y": ["zone"], "U": [], "D": ["out"], "driven_by": [HEAT], "ambient": "out",
-                     "scale": {HEAT: 1.0}, "model": "rc_network", "params": {"rc_network": decl}}}
-    cfg = model_cfg(model="rc_network", past={"zone": 0, HEAT: 0, "sp": 0, "out": 0},
-                    context=f"{history_steps * 30}m" if history_steps else 0,
+            "room": {"Y": ["zone"], "U": [], "D": list(room_d), "driven_by": [HEAT],
+                     "ambient": "out", "scale": {HEAT: 1.0}, "model": "rc_network",
+                     "params": {"rc_network": decl}}}
+    cfg = model_cfg(model="rc_network",
+                    past={"zone": 0, HEAT: 0, "sp": 0, **{c: 0 for c in room_d}},
+                    spinup=f"{history_steps * 30}m" if history_steps else 0,
                     steps_per_hour=1 / DT_H)
     assert [b.name for b in build_blocks(mapping, spec)] == ["hvac", "room"]
     return get_dynamics(cfg, mapping, unit_stats(mapping), block_spec=spec)
@@ -241,6 +263,28 @@ def test_a_capacity_near_zero_leaves_every_gradient_finite():
     assert torch.equal(th._floored_width(width), width)     # above the floor, nothing changes
 
 
+def test_a_d_column_the_ladder_left_out_is_ignored_with_a_note():
+    """A loop gives every zone the same D; the ladder may fit the sun at zero in one.
+    That zone ignores it rather than refusing, and says so."""
+    decl = {"nodes": {"Ti": 1.0}, "edges": {"Ti-ambient": 2.0},
+            "inputs": {HEAT: {"Ti": 1.0}}, "noise": {"Ti": 0.1, "sensor": 0.1}}
+    with pytest.warns(UserWarning, match=r"does not use D \['sun'\]"):
+        system = _two_blocks(decl, {"cooling": {"setpoint": "sp", "gain": 4.0, "capacity": 6.0},
+                                    "form": "tracker", "gain_limit": 40.0},
+                             room_d=("out", "sun"))
+    room = next(m for m in system.modules() if type(m).__name__ == "ZoneBlock")
+    assert room.inputs == [HEAT]
+
+
+def test_a_heat_the_network_leaves_out_is_still_refused():
+    """A U or `driven_by` the zone ignores would be a lever with no effect."""
+    decl = {"nodes": {"Ti": 1.0}, "edges": {"Ti-ambient": 2.0},
+            "inputs": {"sun": {"Ti": 1.0}}, "noise": {"Ti": 0.1, "sensor": 0.1}}
+    with pytest.raises(ValueError, match=r"does not use \['Heat \[kW\]'\]"):
+        _two_blocks(decl, {"cooling": {"setpoint": "sp", "gain": 4.0, "capacity": 6.0},
+                           "form": "tracker", "gain_limit": 40.0}, room_d=("out", "sun"))
+
+
 def test_a_network_that_pins_nothing_is_refused():
     """Temperature alone places only gain / C: nothing pinned, nothing physical."""
     decl = {"nodes": {"Ti": [0.5, 2.0]}, "edges": {"Ti-ambient": [1.0, 4.0]},
@@ -253,7 +297,7 @@ def test_a_network_that_pins_nothing_is_refused():
 def test_hidden_nodes_without_context_are_refused():
     decl = {"nodes": {"Ti": 1.0, "Tm": 10.0}, "edges": {"Ti-Tm": 1.0, "Ti-ambient": 2.0},
             "inputs": {HEAT: {"Ti": 1.0}}, "noise": {"Ti": 0.1, "Tm": 0.1, "sensor": 0.1}}
-    with pytest.raises(ValueError, match="context"):
+    with pytest.raises(ValueError, match="spinup"):
         _two_blocks(decl, {"cooling": {"setpoint": "sp", "gain": 4.0, "capacity": 6.0},
                            "form": "tracker", "gain_limit": 40.0}, history_steps=0)
 
@@ -361,3 +405,55 @@ def test_a_family_finds_only_its_own_params():
     spec["room"]["params"] = {"rc_netwrok": decl}
     with pytest.raises(ValueError, match="rc_netwrok"):
         build(model="mlp")
+
+
+def test_params_can_name_the_file_a_fit_writes(tmp_path, monkeypatch):
+    """A path is read when the model is built, so the fit can run first."""
+    import json
+    decl = {"nodes": {"Ti": 1.0}, "edges": {"Ti-ambient": 2.0}, "inputs": {HEAT: {"Ti": 1.0}},
+            "noise": {"Ti": 0.1, "sensor": 0.1}}
+    from neurotemplate.modeling.dynamics import get_dynamics
+    from model_fixtures import model_cfg, unit_stats
+    monkeypatch.chdir(tmp_path)
+    mapping = {"Y": ["zone"], "U": [HEAT], "D": ["out"], "t": ["sec_elapsed"]}
+    spec = {"room": {"Y": ["zone"], "U": [HEAT], "D": ["out"], "ambient": "out",
+                     "model": "rc_network", "scale": {HEAT: 1.0},
+                     "params": {"rc_network": "ladder/room.json"}}}
+    cfg = model_cfg(past={c: 0 for c in ("zone", HEAT, "out")}, steps_per_hour=1 / DT_H)
+    with pytest.raises(ValueError, match="ladder/room.json not found. Run `nt data ladder`"):
+        get_dynamics(cfg, mapping, unit_stats(mapping), block_spec=spec)
+    (tmp_path / "ladder").mkdir()
+    (tmp_path / "ladder" / "room.json").write_text(json.dumps(decl))
+    get_dynamics(cfg, mapping, unit_stats(mapping), block_spec=spec)
+
+
+def test_a_mode_faster_than_a_step_is_not_placed():
+    """A capacitance fitted to nothing shows as a time constant far under the
+    sampling step; no record at that step can see it, and training cannot step
+    through it, so the ladder must not select the network that adds it."""
+    from types import SimpleNamespace
+    from neurotemplate.modeling.network import Fit
+    fit = SimpleNamespace(taus_h=[1e-6, 0.4, 40.0, 900.0], taus_se_h=[1e-4, 0.1, 5.0, 50.0],
+                          record_h=500.0, step_h=0.5)
+    assert Fit.unplaced_modes.fget(fit) == [1e-6, 900.0]
+
+
+def test_a_zone_without_scale_takes_its_one_heat_in_kw():
+    """Absent `scale`, the one `driven_by` heat, else the one U, is pinned at 1;
+    with a choice to make, nothing is assumed."""
+    from neurotemplate.modeling.blocks import build_blocks, zone_scale
+
+    mapping = {"Y": ["zone", HEAT], "U": ["sp", "blind"], "D": ["out"], "t": ["sec_elapsed"]}
+    spec = {"hvac": {"Y": [HEAT], "U": ["sp"], "D": [], "reads": ["zone"]},
+            "room": {"Y": ["zone"], "U": ["blind"], "D": ["out"], "driven_by": [HEAT],
+                     "ambient": "out"}}
+    blocks = {b.name: b for b in build_blocks(mapping, spec)}
+    assert zone_scale(blocks["room"]) == ({HEAT: 1.0}, [HEAT])
+    spec["room"].pop("driven_by")
+    spec["room"]["U"] = ["blind", "sp"]
+    spec.pop("hvac")
+    mapping["Y"] = ["zone"]
+    room = build_blocks(mapping, spec)[0]
+    assert zone_scale(room) == (None, ["sp", "blind"])
+    spec["room"]["scale"] = {"blind": 2.0}
+    assert zone_scale(build_blocks(mapping, spec)[0]) == ({"blind": 2.0}, [])

@@ -78,8 +78,9 @@ This reads nothing and writes `data.yaml` with its paths and no columns, both ho
 both config directories, a smoke-run config per side, an empty `data/`, and `AGENTS.md` (with a
 `CLAUDE.md` pointing at it) for an agent working in the directory. It writes nothing if any of
 those files exists. Put the record in `data/` as `train.csv`, `dev.csv` and `test.csv`, split in
-time order; `nt model train` then lists its columns, ready to paste into `data.yaml`. `nt guide setup`
-has the rest. To see it all work first, `nt example thermal` writes a project on synthetic data.
+time order; `nt model train` then lists its columns, to sort into roles in `data.yaml`. The project's
+`guides/` folder has the rest, starting with `1-first-model.md`. To practise first, `uv run python guides/make_data.py` writes a
+simulated record that every guide's examples run on.
 
 Run `nt` from the application's root. The library finds
 `nt_model.py` and `nt_control.py` there, or wherever

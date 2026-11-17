@@ -243,13 +243,6 @@ def read_columns(cfg, nm_mapping: dict[str, list[str]],
             for key in _input_keys(table)}
 
 
-def unread_columns(cfg, nm_mapping: dict[str, list[str]], r_columns: list[str]) -> list[str]:
-    """The columns the surrogate or the objective names that the policy does not read."""
-    read = {c for cols in read_columns(cfg, nm_mapping, r_columns).values() for c in cols}
-    return [c for c in nm_mapping["Y"] + nm_mapping["U"] + nm_mapping["D"] + r_columns
-            if c not in read]
-
-
 def _input_window(key: str, spans: list[Optional[tuple[int, int]]]) -> dict:
     """The input_map entry for one key: the deepest `past` and `future` it reads.
 

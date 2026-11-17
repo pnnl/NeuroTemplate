@@ -979,13 +979,3 @@ def checks_to_dict(results: list[ScenarioResult]) -> dict:
 @beartype
 def readouts_to_dict(readouts: list[ReadoutSummary]) -> dict:
     return {r.key: r.to_dict() for r in readouts}
-
-
-@beartype
-def format_checks(results: list[ScenarioResult]) -> str:
-    """Plain-text version for stdout."""
-    lines = ["Physics checks (synthetic scenarios):"]
-    for r in results:
-        mark = "ok  " if r.passed else "FAIL"
-        lines.append(f"  [{mark}] {r.key}: {r.headline}")
-    return "\n".join(lines)

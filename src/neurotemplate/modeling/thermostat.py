@@ -290,6 +290,10 @@ class Selection:
     latched: Optional[str]       # the latched form of the chosen one, by BIC against it
 
 
+def _unplaced(fit: ThermostatFit) -> int:
+    return sum(math.isinf(se) for se in fit.se.values())
+
+
 def forward_select(sides: tuple[str, ...], records: list[Record], latched: bool = True,
                    p_stop: float = 0.05) -> Selection:
     """The ladder's forward selection over tracker forms, then the chosen
@@ -306,7 +310,13 @@ def forward_select(sides: tuple[str, ...], records: list[Record], latched: bool 
         for form in candidates:
             fits[form.name] = fit(form, sides, records, seed=fits[current.name].values)
             parents[form.name] = current.name
-        best = max(candidates, key=lambda f: fits[f.name].log_likelihood)
+        # As the RC ladder does: a form whose new parameters the record cannot
+        # place is no improvement, whatever its likelihood says.
+        placed = [f for f in candidates
+                  if _unplaced(fits[f.name]) <= _unplaced(fits[current.name])]
+        if not placed:
+            break
+        best = max(placed, key=lambda f: fits[f.name].log_likelihood)
         parent, child = fits[current.name], fits[best.name]
         if lr_p_value(parent.log_likelihood, parent.n_params,
                       child.log_likelihood, child.n_params) > p_stop:

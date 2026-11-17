@@ -9,7 +9,8 @@ physical units in and give physical units out; whatever they do inside
 graphs.
 
 ```bash
-nt export model  --run_id <model_run>  --data data/test.csv --out delivery --format onnx
+nt export model  --run_id <model_run> --data data/test.csv \
+                 --out delivery --format onnx
 nt export policy --run_id <policy_run> --out delivery --format onnx
 ```
 
@@ -74,7 +75,8 @@ Build onnx2c from upstream's default branch; it needs cmake and protobuf
 ```bash
 git clone https://github.com/kraiskil/onnx2c && cd onnx2c
 git submodule update --init
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build --target onnx2c
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build --target onnx2c
 ```
 
 Then put `build/onnx2c` on PATH. A build older than upstream commit
@@ -144,12 +146,16 @@ arm64. Torch and C packages have been verified on macOS arm64 only.
 from runtime import Model, Policy
 
 model = Model("model")
-forecast = model.predict(frame)       # {output column: array}, open loop after warm-up
-state = model.warmup(history)         # the last history_steps rows of every column
-state = model.step(state, inputs)     # one step; inputs holds every u and d column
+# {output column: array}, open loop after warm-up
+forecast = model.predict(frame)
+# the last history_steps rows of every column
+state = model.warmup(history)
+# one step; inputs holds every u and d column
+state = model.step(state, inputs)
 
 policy = Policy("policy")
-command = policy.act(y, u_history, d, r)  # {u column: value}; only the inputs policy.json lists
+# {u column: value}; it reads only the inputs policy.json lists
+command = policy.act(y, u_history, d, r)
 ```
 
 That is the same in every format. A policy that reads past commands takes

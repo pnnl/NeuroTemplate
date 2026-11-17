@@ -17,8 +17,8 @@ The rungs (node names as in the paper):
     +Am/Ae  solar into the mass or envelope too, one more aperture
     +Ria    a direct zone–ambient edge beside the envelope
 
-What the block's `scale` names is pinned at its value: a heat in kW at 1, or a
-C from design data. Temperature alone places only gain / C, so without a pin C,
+What the block's `scale` names is pinned at its value: by default its one heat,
+in kW, at 1 (`blocks.zone_scale`), or a C from design data. Temperature alone places only gain / C, so without a pin C,
 R and every gain are placed only up to a common factor. Every other input (solar,
 an occupancy schedule, a heat whose gain is the fit) enters the zone through a
 fitted gain.
@@ -30,13 +30,14 @@ boundary, as in the paper.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from typing import Callable, Optional
 
 import torch
 
 from neurotemplate.modeling.network import (
-    AMBIENT, DTYPE, Fit, Network, Series, drive_matrix, filtered_states, rollout)
+    AMBIENT, DTYPE, Fit, FitFailed, Network, Series, drive_matrix, filtered_states,
+    rollout)
 
 #: The forward selection's stopping rule: the best extension must beat its
 #: parent at this level.
@@ -144,6 +145,8 @@ class Step:
     #: Candidates left out because they add a mode the data cannot place in
     #: some zone (see `Fit.unplaced_modes`).
     unidentified: list[str]
+    #: Candidates whose fit failed (`FitFailed`): left out, like the unidentified.
+    failed: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -175,16 +178,15 @@ def _identified(child: list[Fit], parent: list[Fit]) -> bool:
 
 
 def forward_select(fit_rung: Callable[[Rung, Optional[list[Fit]]], list[Fit]],
-                   solar: bool, p_stop: float = P_STOP, bic: bool = False) -> Selection:
+                   solar: bool, p_stop: float = P_STOP) -> Selection:
     """Forward selection from `Ti`. `fit_rung(rung, parent_fits)` fits one
     rung on every zone, seeded from its parent's fits, and returns one fit
     per zone; the likelihoods add over zones, so one zone and several
     sharing a rung run the same selection.
 
     An extension is admissible only if it adds no mode the data cannot place
-    in any zone. With `bic`, the best one must also lower the summed BIC: a
-    likelihood summed over many zones clears the ratio test for almost any
-    extra parameter, which the penalty per parameter and observation does not.
+    in any zone, and only if its fit succeeded (`FitFailed` from `fit_rung`
+    leaves it out); the first rung, `Ti`, must fit.
     """
     start = Rung()
     fits = {start.name: fit_rung(start, None)}
@@ -194,30 +196,33 @@ def forward_select(fit_rung: Callable[[Rung, Optional[list[Fit]]], list[Fit]],
     def total(name):
         return sum(f.log_likelihood for f in fits[name])
 
-    def summed_bic(name):
-        return sum(f.bic for f in fits[name])
-
     while True:
         candidates = current.extensions(solar)
         if not candidates:
             break
+        failed = []
         for rung in candidates:
             if rung.name not in fits:
-                fits[rung.name] = fit_rung(rung, fits[current.name])
+                try:
+                    fits[rung.name] = fit_rung(rung, fits[current.name])
+                except FitFailed:
+                    failed.append(rung.name)
+                    continue
                 rungs[rung.name] = rung
                 parents[rung.name] = current.name
+        candidates = [r for r in candidates if r.name not in failed]
         admissible = [r for r in candidates
                       if _identified(fits[r.name], fits[current.name])]
         unidentified = [r.name for r in candidates if r not in admissible]
         scores = {r.name: total(r.name) for r in candidates}
         if not admissible:
-            steps.append(Step(current.name, scores, None, 1.0, unidentified))
+            steps.append(Step(current.name, scores, None, 1.0, unidentified, failed))
             break
         best = max(admissible, key=lambda r: total(r.name))
         p = lr_p_value(total(current.name), sum(f.n_params for f in fits[current.name]),
                        total(best.name), sum(f.n_params for f in fits[best.name]))
-        steps.append(Step(current.name, scores, best.name, p, unidentified))
-        if p > p_stop or (bic and summed_bic(best.name) >= summed_bic(current.name)):
+        steps.append(Step(current.name, scores, best.name, p, unidentified, failed))
+        if p > p_stop:
             break
         current = best
     return Selection(fits, rungs, parents, steps, current.name)

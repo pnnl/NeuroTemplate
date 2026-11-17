@@ -36,7 +36,7 @@ from pandas import DataFrame
 from neurotemplate._typing import beartype
 
 from neurotemplate.modeling.config import ModelingConfig
-from neurotemplate.common.data_file import ROLES, load_data_file, nm_mapping as read_roles, unclaimed
+from neurotemplate.common.data_file import ROLES, load_data_file, nm_mapping as read_roles
 from neurotemplate.common.data_utils import (
     check_complete,
     compute_norm_stats,
@@ -61,7 +61,7 @@ from neurotemplate.metrics.rollout import (
 )
 from neurotemplate.metrics.card import RESULTS_DIR, write_reportcard as _write_reportcard
 from neurotemplate.modeling.contract import contract_model
-from neurotemplate.modeling.dynamics import describe_dynamics, fill_context
+from neurotemplate.modeling.dynamics import describe_dynamics, fill_spinup
 from neurotemplate.modeling.plotting import plot_predictions, plot_synthetic
 from neurotemplate.metrics.model_card import (
     EnsembleSpread,
@@ -76,7 +76,6 @@ from neurotemplate.metrics.physics import (
     SynthSpec,
     build_scenarios,
     checks_to_dict,
-    format_checks,
     readouts_to_dict,
     run_scenarios,
 )
@@ -133,11 +132,8 @@ def prepare_data(cfg: ModelingConfig, hooks) -> PreparedData:
     nm_mapping = resolve_nm_mapping(cfg, train_raws[0])
     for name, dfs in (("train", train_raws), ("dev", dev_raws), ("test", test_raws)):
         check_complete(dfs, [c for role in ROLES for c in nm_mapping[role]], name)
-    left_out = unclaimed(nm_mapping, list(train_raws[0].columns))
-    if left_out and cfg.progress != "silent":
-        print(f"Not read by the model (no role in data.yaml): {left_out}")
     block_spec = resolve_block_spec(hooks, nm_mapping, cfg)
-    fill_context(cfg, nm_mapping, block_spec)
+    fill_spinup(cfg, nm_mapping, block_spec)
     cfg.fill_windows(min(len(df) for df in test_raws))
     cfg.check_windows()
 
@@ -154,9 +150,6 @@ def prepare_data(cfg: ModelingConfig, hooks) -> PreparedData:
         # Before the first epoch, not after the last: the checks run once
         # training is over, and `build_scenarios` re-validates on reload.
         synth_cfg.validate(nm_mapping)
-    elif cfg.progress != "silent":
-        print("No physics checks will run: define `synth_cfg` in nt_model.py "
-              "(`nt docs synth_cfg`).")
     return PreparedData(
         train_dfs=train_raws,
         dev_dfs=dev_raws,
@@ -398,8 +391,6 @@ def _run_physics_checks(
         return None
 
     outcome = run_scenarios(scenarios)
-    if cfg.progress in ("live", "log"):
-        print(format_checks(outcome.verdicts))
 
     if cfg.plot:
         synth_dir = plot_run_dir / "synthetic"

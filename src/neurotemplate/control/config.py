@@ -34,7 +34,7 @@ class ControlConfig(TimedWindows):
     """Knobs for loading a frozen surrogate and training a DPC policy."""
 
     # ── Sys-id model to control against ──────────────────────────
-    # MLflow run id of the trained dynamics surrogate. Unset, the latest finished one.
+    # The model run to control against. Empty: the latest finished one.
     sysid_run_id: str = ""
     # Optional override for the run's artifacts directory.
     run_dir: Optional[str] = None
@@ -46,6 +46,7 @@ class ControlConfig(TimedWindows):
     # names that are not the surrogate's — a comfort band, a tariff — are columns no role
     # claims in that record: they reach the policy and the loss, never the surrogate.
     data_file: str = "data.yaml"
+    # Training windows per optimizer step.
     batch_size: int = 256
     # The same record against another band or tariff. Each file replaces the columns
     # it shares with the record it matches by timestamp, and adds a pass over the
@@ -55,21 +56,21 @@ class ControlConfig(TimedWindows):
     # Divisor per reference column that bounds no Y column (a tariff, a power
     # cap), so the policy sees an O(1) input. Pure scaling, no shift, so a
     # zero stays a zero. A column that bounds a Y column uses that column's
-    # normalisation instead, and must not be listed here. Unset, its largest
-    # magnitude in the training record.
+    # normalisation instead, and must not be listed here. A column not listed:
+    # its largest magnitude in the training record.
     reference_scale: dict[str, float] = field(default_factory=dict)
 
-    # Optional path or dotted module name for the control hooks file.
-    # If unset, the library looks for `nt_control.py` in CWD.
+    # The control hooks file, as a path or a module name. null: `nt_control.py`
+    # in the working directory.
     user_hooks_path: Optional[str] = None
 
     # ── Control horizon / policy window ──────────────────────────
-    # How far a training rollout predicts, past its history; for `policy: mpc`, how far
-    # each step plans ahead (every D and reference column's `future` must reach it).
-    # Unset, 48 steps.
+    # How far ahead a training rollout predicts; for `policy: mpc`, how far each
+    # step plans (every D and reference column's `future` must reach it).
+    # null: 48 steps.
     horizon: Optional[Time] = None
-    # Time between the starts of training windows, and of dev windows. Unset, a quarter
-    # of a horizon, and a whole one.
+    # Time between the starts of training windows, and of dev windows.
+    # null: a quarter of `horizon`, and a whole `horizon`.
     train_stride: Optional[Time] = None
     dev_stride: Optional[Time] = None
     # What the policy reads, any column of the record, listed only if it is read:
@@ -78,14 +79,18 @@ class ControlConfig(TimedWindows):
     # any other column requires one. A U column's window ends at the previous step, the
     # last command applied, so `past: 0` means the policy does not read it. See
     # control.policy.build_policy. A trained policy's package takes only what is listed.
-    # Unset: the regulated outputs and the D columns 3 steps back, the last command, and
-    # each D and reference column a horizon ahead.
+    # Empty: the regulated outputs and the D columns 3 steps back, the last command,
+    # and each D and reference column a horizon ahead.
     policy_window: dict[str, dict[str, Time]] = field(default_factory=dict)
 
     # ── Objective ────────────────────────────────────────────────
-    # A table of loss terms over named columns, and one gain per term — see
-    # control.losses for how an entry is read. Two flat dicts, so a gain can be
-    # swept with --set without restating the table.
+    # A table of loss terms over named columns, and one gain per term, under the
+    # same names. A term is `{column: Band Low, target: Zone, map: relu, norm: 1}`:
+    # a `relu` term is a lower bound on `target`, an `nrelu` one an upper bound,
+    # and `{column: power, norm: 1, weight: Tariff}` prices what `power_channels`
+    # meters. A band or a tariff is a column of the record no role claims. See
+    # `nt docs control` for every map. Two flat dicts, so a gain can be swept
+    # with --set without restating the table.
     losses: dict[str, dict] = field(default_factory=dict)
     gains: dict[str, float] = field(default_factory=dict)
 
@@ -96,10 +101,12 @@ class ControlConfig(TimedWindows):
     # can learn from the surrogate that the plant does not share. "mpc" trains
     # nothing: it plans through the surrogate at every step (control.mpc).
     policy: str = "linear"
+    # The hidden layers' activation.
     policy_nonlin: str = "gelu"
     # How the network output is squashed into [umin, umax]: "sigmoid_scale"
     # (smooth, never exactly reaches the limits) or "relu_clamp" (hard clip).
     policy_bound_method: str = "sigmoid_scale"
+    # The hidden layers' width, as a power of two (3 is 8 units), and how many.
     log2_policy_hidden: int = 3
     policy_layers: int = 1
     # Each solve of `policy: mpc` and of `nt control gap`; see SOLVER_DEFAULTS. Name
@@ -116,25 +123,31 @@ class ControlConfig(TimedWindows):
     control_bounds: dict[str, list] = field(default_factory=dict)
 
     # ── Training ─────────────────────────────────────────────────
+    # The most epochs a run trains; early stopping usually ends it sooner.
     epochs: int = 300
     # What training prints: silent | summary | live | log (`common.progress`).
     progress: str = "summary"
     # How often `live` and `log` update, in epochs.
     update_every: int = 10
+    # Early stopping: past the first `warmup` epochs, a run stops once `patience`
+    # epochs pass without a better dev loss, and keeps the best model.
     warmup: int = 5
     patience: int = 25
+    # The learning rate of the policy's weights (Adam).
     lr: float = 0.001
 
     # ── Evaluation (long closed-loop rollout) ────────────────────
-    # How far a test rollout runs, past its history, and how far apart they start.
-    # Unset, 288 steps or what the shortest test file holds, and not overlapping.
+    # How far ahead a test rollout runs, and how far apart they start.
+    # null: 288 steps, or as much as the shortest test file holds; and end to end.
     test_horizon: Optional[Time] = None
     test_stride: Optional[Time] = None
 
     # ── Runtime ──────────────────────────────────────────────────
     # Timesteps per hour: the surrogate's, set when it loads.
     steps_per_hour: Optional[float] = None
+    # -1 draws a seed from the clock; any other value repeats a run's draws.
     seed: int = -1
+    # cpu, cuda or mps. null: cuda if available, else cpu.
     device: Optional[str] = None
     # Torch CPU threads for this run; None means one per core. These models are
     # small enough that one thread was fastest for every family and batch size
@@ -143,9 +156,12 @@ class ControlConfig(TimedWindows):
 
     # ── Logging ──────────────────────────────────────────────────
     savedir: str = field(default_factory=default_savedir)
+    # Where runs are recorded (an MLflow tracking URI), the experiment they go
+    # under, and a name to tell this run by.
     location: str = "sqlite:///mlflow.db"
     exp: str = "DPC Training"
     run: str = ""
+    # Where a run's plots go, and whether it draws them.
     plots_dir: str = "plots"
     plot: bool = True
 

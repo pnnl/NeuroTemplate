@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+from pathlib import Path
 
 from neurotemplate.control.load import load_trained_policy
 from neurotemplate.control.pipeline import evaluate_closed_loop
@@ -54,7 +55,8 @@ def main() -> None:
     path.parent.mkdir(exist_ok=True)
     path.write_text(report, encoding="utf-8")
     print(report)
-    print(f"Written: {path}")
+    shown = path.relative_to(Path.cwd()) if path.is_relative_to(Path.cwd()) else path
+    print(f"Written:\n  {shown}")
 
 
 if __name__ == "__main__":
