@@ -59,7 +59,7 @@ QUICK = ["--set", "epochs=2", "--set", "plot=false"]
 def practice_project(tmp_path, monkeypatch):
     """`nt init`, then the project's own `guides/make_data.py`, run as guide 1 says."""
     monkeypatch.chdir(tmp_path)
-    nt(["init"])
+    nt(["init", "--no-warmup"])
     subprocess.run([sys.executable, "guides/make_data.py"], check=True, capture_output=True)
     return tmp_path
 

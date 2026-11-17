@@ -19,6 +19,7 @@ Relative paths are read from the directory the file is in.
 
 from __future__ import annotations
 
+import csv
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Union
@@ -31,6 +32,8 @@ ROLES = ("Y", "U", "D")
 SPLITS = ("train", "dev", "test")
 #: What the CSV loader adds to every record: elapsed seconds, `t` in every window.
 TIME_COLUMN = "sec_elapsed"
+#: The names the CSV loader takes as a record's time column, in any case.
+TIME_NAMES = ("timestamp", "time", "date", "datetime")
 
 
 @dataclass(frozen=True)
@@ -115,6 +118,34 @@ def nm_mapping(data_file: DataFile, record_columns: list[str]) -> dict[str, list
         raise ValueError(f"{data_file.path}:\n  - " + "\n  - ".join(problems)
                          + f"\nThe record has: {available}")
     return {**data_file.columns, "t": [TIME_COLUMN]}
+
+
+def _header_columns(path: str) -> Union[list[str], None]:
+    """The columns the loader would give `path`, from its header row alone: the time
+    column swapped for `TIME_COLUMN`. None when the header leaves that in doubt (no
+    file, no time column, a name twice or blank, which pandas renames), so the full
+    load reports it its own way."""
+    try:
+        with open(path, newline="", encoding="utf-8-sig") as f:
+            header = next(csv.reader(f))
+    except (OSError, UnicodeDecodeError, StopIteration, csv.Error):
+        return None
+    times = [c for c in header if c.lower() in TIME_NAMES]
+    if not times or not all(header) or len(set(header)) != len(header):
+        return None
+    header.remove(times[0])
+    return [*header, TIME_COLUMN]
+
+
+def check_roles(path: Union[str, Path]) -> None:
+    """`data.yaml`'s roles against the training record's header, the way `nm_mapping`
+    checks them, before a run imports the libraries it trains with. An unassigned
+    record or a misnamed column is the first thing a project hits, and on a fresh
+    install those imports take a minute; this answers in a second."""
+    data_file = load_data_file(path)
+    columns = _header_columns(data_file.train[0])
+    if columns is not None:
+        nm_mapping(data_file, columns)
 
 
 def unclaimed(nm: dict[str, list[str]], record_columns: list[str]) -> list[str]:

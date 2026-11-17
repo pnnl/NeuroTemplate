@@ -19,7 +19,8 @@ uv run nt init
 ```
 
 `uv add` puts one command, `nt`, on the environment's `PATH`; `nt init` writes
-the application (below).
+the application (below), then loads the libraries once, which takes a minute or two
+on a fresh install, so the first runs don't. `nt init --no-warmup` skips that.
 
 **The application stays on the commit it installed.** `uv.lock` records the
 commit of `main` that `uv add` resolved, so every `uv sync` installs the same
