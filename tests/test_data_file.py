@@ -23,11 +23,18 @@ def test_a_split_is_a_path_or_a_list_read_from_beside_the_file(tmp_path):
     assert data.columns == {"Y": ["Zone"], "U": [], "D": []}
 
 
-def test_with_no_roles_it_stops_and_lists_every_column_ready_to_paste(tmp_path):
+def test_with_no_roles_it_lists_the_columns_then_an_empty_template_then_what_to_do(tmp_path):
     with pytest.raises(SystemExit, match="assigns no columns") as stop:
         nm_mapping(_write(tmp_path), RECORD)
-    pasted = yaml.safe_load(str(stop.value).split("\n\n")[-1])
-    assert pasted == {"columns": {"Y": RECORD[:-1], "U": [], "D": []}}
+    message = str(stop.value)
+    lines = message.splitlines()
+    # Every column, as a bare line, before anything else.
+    assert [f"  {c}" for c in RECORD[:-1]] == lines[2:2 + len(RECORD) - 1]
+    # The template assigns nothing: pasted unedited, the next run stops again.
+    template = message.split("\n\n")[-2]
+    assert yaml.safe_load(template) == {"columns": {"Y": [], "U": [], "D": []}}
+    # The instructions are last, below the list.
+    assert lines[-1] == "A column you leave out is simply not read."
 
 
 def test_a_column_no_role_claims_is_allowed_and_listed(tmp_path):

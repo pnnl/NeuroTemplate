@@ -21,7 +21,7 @@ class GRUBlock(nn.Module):
     hidden state exactly once:
 
       - Cold (no hidden state): consume its `steps` newest rows, so the state
-        summarises the full context before the first prediction.
+        summarises the full window before the first prediction.
       - Warm: the earlier rows are already in the hidden state, so consume only
         the newest.
 

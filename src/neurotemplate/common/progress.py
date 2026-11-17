@@ -2,12 +2,12 @@
 What a training run prints, at one of four levels (`cfg.progress`):
 
     silent   nothing
-    summary  seconds per epoch after the first, then the end summary
-    live     one line rewritten in place every `update_every` epochs, then the summary
-    log      the same line printed as a new line every `update_every` epochs, then the summary
+    summary  seconds per epoch after the first, then the last epoch's line
+    live     one line rewritten in place every `update_every` epochs, ending on the last
+    log      the same line printed as a new line every `update_every` epochs, and the last
 
-The end summary says why training stopped and where the best dev loss was, which
-is the one thing the loss trajectory says that changes what to do next.
+The last epoch's line carries the best dev loss and its epoch; whether the model is
+any good is the reportcard's to say.
 """
 
 from __future__ import annotations
@@ -61,15 +61,19 @@ class Progress(Callback):
             print(f"{per_epoch:.1f} s per epoch; {trainer.epochs} epochs at most: "
                   f"about {_duration(per_epoch * trainer.epochs)}. `progress: log` prints each "
                   "epoch.", flush=True)
-        if self.level in ("live", "log") and (
-                self.epochs_run == 1 or self.epochs_run % self.update_every == 0):
-            line = (f"epoch {self.epochs_run}/{trainer.epochs}  train {train:.4g}  "
-                    f"dev {dev:.4g}  best {self.best_dev:.4g} "
-                    f"@ {self.best_epoch}  {per_epoch:.1f} s/epoch")
-            if self.level == "live":
-                print(f"\r{line}\033[K", end="", flush=True)
-            else:
-                print(line, flush=True)
+        self.line = (f"epoch {self.epochs_run}/{trainer.epochs}  train {train:.4g}  "
+                     f"dev {dev:.4g}  best {self.best_dev:.4g} "
+                     f"@ {self.best_epoch}  {per_epoch:.1f} s/epoch")
+        self.printed = (self.level in ("live", "log") and (
+            self.epochs_run == 1 or self.epochs_run % self.update_every == 0))
+        if self.printed:
+            self._print(self.line)
+
+    def _print(self, line: str) -> None:
+        if self.level == "live":
+            print(f"\r{line}\033[K", end="", flush=True)
+        else:
+            print(line, flush=True)
 
     def end_train(self, trainer, output) -> None:
         if self.best_epoch is None:
@@ -79,14 +83,7 @@ class Progress(Callback):
                 "split blow up or read a missing value.")
         if self.level == "silent":
             return
+        if not self.printed:
+            self._print(self.line)
         if self.level == "live":
             print()
-        best = self.best_epoch
-        if trainer.badcount > trainer.patience:
-            why = f"stopped by patience at epoch {self.epochs_run}"
-        else:
-            # Patience never ran out, so the dev loss was still improving.
-            why = (f"reached the {trainer.epochs}-epoch cap before patience "
-                   f"({trainer.patience}) ran out; more epochs may help")
-        print(f"Training {why}. Best dev loss {self.best_dev:.4g} at epoch {best}; "
-              f"{_duration(perf_counter() - self.start)}.", flush=True)

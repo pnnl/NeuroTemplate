@@ -8,9 +8,10 @@ Two blocks that know nothing of each other. An `rc_network` block's Y is the
 zone temperature and nothing else, and its network's inputs are whatever
 columns the declaration names: a `driven_by` column (the heat a thermostat
 block produced this step), a U (a commanded heat) or a D (solar, a schedule).
-Its window is the run's `context`, the history its filter places the
+Its window is the run's `spinup`, the history its filter places the
 hidden nodes from. `ambient` is the outdoor temperature the network conducts
-to, and at least one of its parameters is pinned: `scale` says which.
+to, and at least one of its parameters is pinned: by default its heat's
+gain at 1 (a heat in kW), or what `scale` says (`blocks.zone_scale`).
 
 A `thermostat` block's Y is the heat, its U the setpoints it follows, and it
 `reads` the zone as of the current row.
@@ -22,12 +23,13 @@ takes no residual.
 
 from __future__ import annotations
 
+import warnings
 from typing import Optional
 
 import torch
 import torch.nn as nn
 
-from neurotemplate.modeling.blocks import Block
+from neurotemplate.modeling.blocks import Block, declaration
 from neurotemplate.modeling.thermal import RCZone, thermostat
 
 
@@ -87,26 +89,32 @@ class ZoneBlock(_Physical):
                             "A heat behind a thermostat is its own `thermostat` block")
         if block.ambient is None:
             problems.append("declare `ambient`, the outdoor temperature it conducts to")
-        if block.scale is None:
-            problems.append("declare `scale`, what sets its units: the input or parameter "
-                            "pinned, and its value, e.g. {'Heat [kW]': 1.0}")
         stray_reads = [c for c in block.read_names if c not in block.driven_by]
         if stray_reads or block.inputs:
             problems.append(f"`reads` {stray_reads} and `inputs` have no meaning here: its "
                             "network says where every column goes")
-        if "rc_network" not in block.params:
-            problems.append("params has no `rc_network` entry: its declaration, from `nt data "
-                            "ladder`")
         if problems:
             raise ValueError(f"rc_network block {block.name!r}: " + "; ".join(problems))
         self.zone_name, self.ambient = block.y_names[0], block.ambient
+        decl = declaration(block, "rc_network", "nt data ladder")
+        # A D column the network leaves out is one the ladder fitted at zero: the
+        # block's D is shared by every zone a loop writes, so drop it here rather than
+        # make each zone's D follow its file. A U or `driven_by` it leaves out stays
+        # refused (by RCZone): a lever the zone ignores is a mistake, not a fit.
+        declared = set(decl.get("inputs", {})) if isinstance(decl.get("inputs"), dict) else None
+        unused = ([] if declared is None else
+                  [c for c in block.d_names if c != block.ambient and c not in declared])
+        if unused:
+            warnings.warn(f"rc_network block {block.name!r}: its network does not use D "
+                          f"{unused} (`nt data ladder` leaves out an input whose gain fits "
+                          "at zero); the zone ignores them.", stacklevel=2)
         self.inputs = [c for c in block.driven_by + block.u_names + block.d_names
-                       if c != block.ambient]
-        self.zone = RCZone(block.params["rc_network"], self.inputs, window, dt_h, block.name)
+                       if c != block.ambient and c not in unused]
+        self.zone = RCZone(decl, self.inputs, window, dt_h, block.name)
         problems = _refuse_scale_mismatch(block, self.zone.network)
         if len(self.zone.network.nodes) > 1 and window < 2:
             problems.append(
-                "it has hidden nodes, and `context` is what places them: the history "
+                "it has hidden nodes, and `spinup` is what places them: the history "
                 "history its filter runs over. There is no default; it is long enough when a "
                 "longer one stops changing the day-ahead error")
         if problems:
@@ -135,13 +143,11 @@ class ThermostatBlock(_Physical):
         if len(block.read_names) != 1 or block.driven_by:
             problems.append("`reads` must be the zone temperature it closes on, as of the "
                             f"current row; got {list(block.read_names)}")
-        if "thermostat" not in block.params:
-            problems.append("params has no `thermostat` entry: its declaration, from `nt data "
-                            "thermostat`")
         if problems:
             raise ValueError(f"thermostat block {block.name!r}: " + "; ".join(problems))
         self.heat_name, self.zone_name = block.y_names[0], block.read_names[0]
-        self.hvac = thermostat(block.params["thermostat"], block.name)
+        self.hvac = thermostat(declaration(block, "thermostat", "nt data thermostat"),
+                               block.name)
         self.outdoor: Optional[str] = block.ambient if self.hvac.form.outdoor else None
         if sorted(self.hvac.setpoints) != sorted(block.u_names):
             problems.append(f"its setpoints {self.hvac.setpoints} must be the block's U "

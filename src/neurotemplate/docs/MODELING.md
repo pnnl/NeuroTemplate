@@ -29,7 +29,7 @@ nt model train --config model_configs/debug.yaml            # a smoke run first
 nt model train --set epochs=200 --set ensemble_seeds=3      # one-off overrides
 ```
 
-## What the model reads: `past` and `context`
+## What the model reads: `past` and `spinup`
 
 `past` is how far before the current step the model reads: one time for every column, or
 a table, a column it does not name reading the current row only. Unset, 3 steps.
@@ -46,7 +46,7 @@ maps read, each column at its own lag. A `gru` reads one lag for every column it
 because its window is its warm-up. The build refuses a lag no block actually reads, and a hinged
 setpoint lagged further back than its zone. The reportcard lists the lags each block reads.
 
-`context` is the record a model that keeps state starts from, beyond what `past` asks: an
+`spinup` is the record a model that keeps state starts from, beyond what `past` asks: an
 `rc_network`'s filter places its hidden nodes from it. Unset, a day for a model with an
 `rc_network` block, nothing otherwise. The thermal blocks are not in the table.
 
@@ -73,8 +73,8 @@ sections of the reportcard before planning against one.
 ### rc_network and thermostat: a thermal zone you can read
 
 ```
-    setpoints ─[thermostat block]→ heat ─[rc_network block]→ zone temperature
-                    heat from a U ───────[rc_network block]→ zone temperature
+setpoints ─[thermostat block]→ heat ─[rc_network block]→ zone temperature
+                heat from a U ───────[rc_network block]→ zone temperature
 ```
 
 Two blocks, each one signal, neither knowing the other exists. What the zone is
@@ -88,12 +88,16 @@ or metered electric power through a gain that is its COP.
 - **`thermostat`.** `Y` is the heat, `U` the setpoints it follows, `reads` the zone,
   `D` and `ambient` the outdoor temperature, which some of its forms read.
 
-**`scale` says what sets the units, and is required.** Scaling every C and gain up
-and every R down by the same factor leaves every prediction where it was, so
-temperature alone places only gain / C. `{"Delivered Heat": 1.0}` pins a heat's
-gain at 1, which makes C and R physical, so an estimated heat off by a fifth puts C
-and R off by a fifth. `{"C_Ti": ...}` pins a capacitance from design data instead,
-and leaves a power's gain to fit as a COP. A network that pins nothing is refused.
+**The heat is in kW.** Scaling every C and gain up and every R down by the same
+factor leaves every prediction where it was, so temperature alone places only
+gain / C. A zone's one heat input (its `driven_by` column, else its one U) is
+therefore taken as kW reaching the zone, its gain pinned at 1, which makes C (kWh/K)
+and R (K/kW) physical; a heat off by a fifth puts C and R off by a fifth. `scale`
+overrides it: `{"Power [kW]": 3.0}` for a power behind a known COP of 3,
+`{"C_Ti": ...}` for a capacitance from design data (the power's gain is then fitted,
+as a COP), and any zone with more than one heat candidate must declare it. The
+fit's starting values assume kW, so keep the heat in kW rather than rescaling it
+here. A network that pins nothing is refused.
 Everything inside is physical:
 
 - **The network** is capacitances (kWh/K) and resistances (K/kW) between the
@@ -106,7 +110,7 @@ Everything inside is physical:
   gain is held under its `gain_limit`, `C_zone / dt`, the bound past which the
   discrete loop would ring.
 - **The hidden nodes are filtered, not guessed.** The first call of a rollout runs
-  a Kalman filter over the `context` window, driven by the recorded inputs,
+  a Kalman filter over the `spinup` window, driven by the recorded inputs,
   and leaves every node where the record puts it. After that the zone needs one
   row: the nodes carry over.
 
@@ -115,14 +119,13 @@ from guesses:
 
 - `nt data ladder` fits a ladder of networks (Bacher & Madsen 2011) to the
   record by maximum likelihood at a coarse step, 30 min by default, and
-  picks one by likelihood-ratio tests. Its card prints every rung's
+  picks one by likelihood-ratio tests. It prints the chosen network, its time constants and the file it saved; with `-v`, its card prints every rung's
   likelihood, BIC, whiteness and 24 h error on dev, and the snippet it saves
   holds each C and R as a box from its error bar. An agent's own network
-  (`--candidate file.json`) goes through the same tests. It reads every block
-  that declares `scale`, and needs no setpoints. It does not select a node the record cannot place: an infinite error bar,
-  or a time constant longer than the record. Across several zones the
-  summed BIC must fall as well as the ratio test pass, since a likelihood
-  summed over many zones passes it for almost any parameter. Every gain
+  (`--candidate file.json`) goes through the same tests. It fits every block
+  whose `params` names an `rc_network` file, and needs no setpoints. It does not select a node the record cannot place: an infinite error bar,
+  or a time constant longer than the record. Each zone is selected on its
+  own, so zones can end up with different networks. Every gain
   input is fitted ≥ 0: give it as non-negative indicators or schedules.
 - `nt data thermostat --cooling COL --heating COL` fits the thermostat's
   forms one step at a time and rolls each out 24 h on dev through the
@@ -131,18 +134,19 @@ from guesses:
 
 ```python
 "hvac": {"Y": ["Delivered Heat [kW]"], "U": ["Cooling SP", "Heating SP"],
-         "D": ["Outdoor Temp"], "ambient": "Outdoor Temp", "reads": ["Zone Temp"],
-         "model": "thermostat",
-         "params": {"thermostat": json.load(open("ladder/hvac.thermostat.json"))}},
-"zone": {"Y": ["Zone Temp"], "U": [], "D": ["Outdoor Temp", "Solar", "Occupied"],
+         "D": ["Outdoor Temp"], "ambient": "Outdoor Temp",
+         "reads": ["Zone Temp"], "model": "thermostat",
+         "params": {"thermostat": "ladder/hvac.thermostat.json"}},
+"zone": {"Y": ["Zone Temp"], "U": [],
+         "D": ["Outdoor Temp", "Solar", "Occupied"],
          "driven_by": ["Delivered Heat [kW]"], "model": "rc_network",
-         "ambient": "Outdoor Temp", "solar": "Solar", "scale": {"Delivered Heat [kW]": 1.0},
-         "params": {"rc_network": json.load(open("ladder/zone.json"))}},
+         "ambient": "Outdoor Temp", "solar": "Solar",
+         "params": {"rc_network": "ladder/zone.json"}},
 # commanded: the heat is the zone's U, and there is no thermostat block
 "zone": {"Y": ["Zone Temp"], "U": ["Heat Command [kW]"],
          "D": ["Outdoor Temp", "Solar", "Occupied"], "model": "rc_network",
-         "ambient": "Outdoor Temp", "solar": "Solar", "scale": {"Heat Command [kW]": 1.0},
-         "params": {"rc_network": json.load(open("ladder/zone.json"))}},
+         "ambient": "Outdoor Temp", "solar": "Solar",
+         "params": {"rc_network": "ladder/zone.json"}},
 ```
 
 `ladder/zone.json`, what `nt data ladder` writes and `params: {rc_network: ...}` takes. Each
@@ -177,11 +181,12 @@ how one model holds, for example, a thermostat, an `rc_network` zone and an
 ```python
 def block_mapping(nm_mapping, cfg):
     return {
-        "hvac":  {"Y": ["Delivered Heat"], "U": ["Cooling Setpoint"], "reads": ["Zone Temperature"],
-                  "model": "thermostat", ...},
-        "zone":  {"Y": ["Zone Temperature"], "U": [], "driven_by": ["Delivered Heat"],
-                  "model": "rc_network", ...},
-        "power": {"Y": ["Total Power"], "U": [], "driven_by": ["Delivered Heat"],
+        "hvac":  {"Y": ["Delivered Heat"], "U": ["Cooling Setpoint"],
+                  "reads": ["Zone Temperature"], "model": "thermostat", ...},
+        "zone":  {"Y": ["Zone Temperature"], "U": [],
+                  "driven_by": ["Delivered Heat"], "model": "rc_network", ...},
+        "power": {"Y": ["Total Power"], "U": [],
+                  "driven_by": ["Delivered Heat"],
                   "model": "mlp", "predicts": "value"},
     }
 ```
@@ -225,7 +230,7 @@ physics instead of having to learn it:
 | Declaration | Acts in | Does |
 |---|---|---|
 | `inputs: {setpoint: {target: zone, map: nrelu}}` | every family | the setpoint hinge: replaces a setpoint with the thermostat's clamped error against the block's own state, `relu(zone − setpoint)` for `nrelu` and `relu(setpoint − zone)` for `relu`, computed from the model's own prediction during a rollout. A setpoint above the zone is then free in the surrogate, as it is in the plant. The gradient stays alive on the inactive side, so a controller can learn to leave it. |
-| `ambient`, `scale`, `solar` | `rc_network`, `thermostat` | the outdoor temperature the network conducts to, what sets its units, the irradiance the ladder may route into more than one node |
+| `ambient`, `scale`, `solar` | `rc_network`, `thermostat` | the outdoor temperature the network conducts to, what sets its units (default: its one heat input, in kW), the irradiance the ladder may route into more than one node |
 
 Nothing is inferred from column names. A declaration changes the
 physics but not the shapes, so a wrong one shows only in the reportcard.
@@ -266,14 +271,16 @@ class Building(nn.Module):
         super().__init__()
         self.columns = nm_mapping
         self.hvac = thermostat(json.load(open("ladder/hvac.thermostat.json")))
-        self.zone = RCZone(json.load(open("ladder/zone.json")), ["Heat"], window, dt_h)
+        zone = json.load(open("ladder/zone.json"))
+        self.zone = RCZone(zone, ["Heat"], window, dt_h)
 
     def forward(self, y, u, d):
         c = named_columns(self.columns, y, u, d)
         heat = self.hvac(u[:, -1], c["Zone"][:, -1])
         # A meter reports a step late; `heat` is the step being taken.
         held = torch.cat([c["Heat"][:, 1:], heat[:, None]], dim=1)
-        return torch.stack([self.zone(c["Zone"], c["Outdoor"], held), heat], dim=-1)
+        zone = self.zone(c["Zone"], c["Outdoor"], held)
+        return torch.stack([zone, heat], dim=-1)
 ```
 
 - It is one `torch.nn.Module` over every column, so `block_mapping` returns
@@ -362,7 +369,8 @@ belongs in your prep script.
 ## Rescoring, scripting
 
 ```bash
-nt model load --run_id <run> --data data/next_week.csv    # score a run on other data
+# Score a run on other data.
+nt model load --run_id <run> --data data/next_week.csv
 ```
 
 From Python, each command is one call, and a training call opens and closes

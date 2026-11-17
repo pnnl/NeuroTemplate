@@ -37,7 +37,7 @@ Issues = "https://github.com/pnnl/NeuroTemplate/issues"
 [project.scripts]
 # Single dispatcher: `nt <group> <verb>`. See neurotemplate/cli.py for the
 # command table (nt model train, nt control train, ...).
-nt = "neurotemplate.cli:main"
+nt = "neurotemplate.cli:run"
 
 [build-system]
 requires = ["hatchling"]

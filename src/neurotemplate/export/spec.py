@@ -18,7 +18,7 @@ from typing import Optional
 
 from neurotemplate.export.state import StateSlot
 from neurotemplate.export.trace import OPSET
-from neurotemplate.modeling.dynamics import describe_dynamics
+from neurotemplate.modeling.dynamics import describe_dynamics, model_label
 
 #: Must match `runtime.FORMAT`; the runtime refuses any other value.
 FORMAT = 3
@@ -60,7 +60,7 @@ def build_spec(*, export_id: str, run_id: str, cfg, dyn_sys,
             "note": "documentation only; the runtime never reads this section",
             **describe_dynamics(dyn_sys, cfg),
         },
-        "trained_from": {"run_id": run_id, "model": cfg.model},
+        "trained_from": {"run_id": run_id, "model": model_label(dyn_sys, cfg)},
     }
 
 

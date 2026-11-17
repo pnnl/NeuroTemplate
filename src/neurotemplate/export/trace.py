@@ -21,12 +21,17 @@ export, rather than on a consumer's machine.
 
 from __future__ import annotations
 
+import logging
 import warnings
 from pathlib import Path
 
 import onnx
 import torch
 import torch.nn as nn
+
+# The ONNX exporter warns, once per op, that torchvision is not installed: its
+# detection ops are never traced here.
+logging.getLogger("torch.onnx._internal.exporter._registration").setLevel(logging.ERROR)
 
 #: The opset every exported graph targets.
 OPSET = 18

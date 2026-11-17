@@ -128,8 +128,9 @@ def parse_losses(losses: dict, gains: dict) -> list[LossTerm]:
     Whether the names exist is a question for `resolve_objective`, which has
     the surrogate's columns.
     """
-    _require(bool(losses), "losses is empty: declare at least one control "
-             "objective term (see control.yaml's OBJECTIVE section).")
+    _require(bool(losses), "The objective is empty: a control run needs at least one "
+             "term in `losses` and its gain in `gains`. `nt docs config` shows how a term "
+             "is written, and `nt docs control` every kind.")
     missing = sorted(set(losses) - set(gains))
     extra = sorted(set(gains) - set(losses))
     _require(not missing, f"losses {missing} have no entry in gains.")

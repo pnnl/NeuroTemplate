@@ -49,6 +49,4 @@ def main() -> None:
         raise SystemExit(f"nt init: {exc}") from exc
     for f in files:
         print(f"  wrote {target / f}")
-    print(f"\nPut your train.csv, dev.csv and test.csv in {target / 'data'}/, then run "
-          "`nt model train`: it lists the record's columns for data.yaml. `nt guide setup` "
-          "has the rest.")
+    print(f"\nStart with {target / 'guides' / '1-first-model.md'}.")

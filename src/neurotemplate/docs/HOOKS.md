@@ -35,17 +35,19 @@ def block_mapping(nm_mapping, cfg):
     return {
         "hvac_a": {"Y": ["Zone A Heat [kW]"],
                    "U": ["Zone A Cool SP [degC]", "Zone A Heat SP [degC]"],
-                   "D": ["Outdoor Temp [degC]"], "ambient": "Outdoor Temp [degC]",
+                   "D": ["Outdoor Temp [degC]"],
+                   "ambient": "Outdoor Temp [degC]",
                    "reads": ["Zone A Temp [degC]"], "model": "thermostat",
-                   "params": {"thermostat": json.load(open("ladder/hvac_a.thermostat.json"))}},
+                   "params": {"thermostat": "ladder/hvac_a.thermostat.json"}},
         "zone_a": {"Y": ["Zone A Temp [degC]"], "U": [],
                    "D": ["Outdoor Temp [degC]", "Solar [W/m2]", "Occupied [-]"],
                    "driven_by": ["Zone A Heat [kW]"], "model": "rc_network",
                    "ambient": "Outdoor Temp [degC]", "solar": "Solar [W/m2]",
-                   "scale": {"Zone A Heat [kW]": 1.0},
-                   "params": {"rc_network": json.load(open("ladder/zone_a.json"))}},
-        "meter":  {"Y": ["Total Power [kW]"], "U": [], "D": ["Outdoor Temp [degC]"],
-                   "driven_by": ["Zone A Heat [kW]"], "model": "mlp", "predicts": "value"},
+                   "params": {"rc_network": "ladder/zone_a.json"}},
+        "meter":  {"Y": ["Total Power [kW]"], "U": [],
+                   "D": ["Outdoor Temp [degC]"],
+                   "driven_by": ["Zone A Heat [kW]"],
+                   "model": "mlp", "predicts": "value"},
     }
 ```
 
@@ -59,9 +61,10 @@ one block.
 
 `rc_network` is a thermal zone: Y the zone temperature alone, its inputs a `driven_by` column (the
 heat a `thermostat` block produces), a U (a commanded heat) or a D, `ambient` the outdoor temperature
-it conducts to. **`scale` is required and says what sets the units**, since temperature alone places
-only gain / C: `{heat column: 1.0}` for a heat in kW, or `{"C_Ti": value}` to fit a power's gain as a
-COP. `thermostat` is Y the heat, U its setpoints, `reads` the zone, `ambient` the outdoor temperature
+it conducts to. Its heat input is in kW: temperature alone places only gain / C, so the one
+heat (the `driven_by` column, else the one U) has its gain pinned at 1. `scale` overrides that:
+`{power column: COP}` for a power behind a known COP, or `{"C_Ti": value}` to fit a power's gain as
+a COP; a zone with more than one heat candidate must declare it. `thermostat` is Y the heat, U its setpoints, `reads` the zone, `ambient` the outdoor temperature
 (in its D), which some of its forms read.
 
 `params` maps a family to its declaration, every value a scalar (pinned) or [lo, hi] (fitted inside);
@@ -74,8 +77,10 @@ shapes, against the block's own predicted state:
 
 ```python
 "zone_b": {..., "inputs": {
-    "Zone B Cool SP [degC]": {"target": "Zone B Temp [degC]", "map": "nrelu"},   # relu(zone - setpoint)
-    "Zone B Heat SP [degC]": {"target": "Zone B Temp [degC]", "map": "relu"},    # relu(setpoint - zone)
+    # relu(zone - setpoint)
+    "Zone B Cool SP [degC]": {"target": "Zone B Temp [degC]", "map": "nrelu"},
+    # relu(setpoint - zone)
+    "Zone B Heat SP [degC]": {"target": "Zone B Temp [degC]", "map": "relu"},
 }}
 ```
 
@@ -85,7 +90,8 @@ setpoint as a smooth, always-active push, and a controller trained on it inherit
 ## custom_models
 
 ```python
-def custom_models() -> dict[str, Callable[[cfg, nm_mapping, norm_stats], torch.nn.Module]]
+def custom_models() -> dict[
+    str, Callable[[cfg, nm_mapping, norm_stats], torch.nn.Module]]
 ```
 
 Any torch module that honours the model contract gets training, the physics checks, reload, control
@@ -104,8 +110,8 @@ def custom_models():
 State that outlives the window goes through `rollout_state()` / `set_rollout_state(state)`, one
 `[batch, width]` tensor, None when cold (seed it from the window then). Keep the model's code, and
 any starting values, in this file: the run keeps a copy of it. The library's parts are yours to wire:
-`modeling.thermal`, `modeling.families`, `modeling.stepper`. `nt guide own-model` has the decisions;
-`nt docs modeling` the full contract.
+`modeling.thermal`, `modeling.families`, `modeling.stepper`. `nt docs modeling` ("Your own model") has
+the decisions and the full contract.
 
 ## output_heads
 
@@ -120,8 +126,8 @@ default. Reach for another only when a channel really is bounded:
 from neurotemplate.modeling.heads import BoundedHead, HeadStack, RegressionHead
 
 def output_heads(nm_mapping, norm_stats):
-    heads = [BoundedHead(0.0, float("inf")) if "Power" in c else RegressionHead()
-             for c in nm_mapping["Y"]]
+    heads = [BoundedHead(0.0, float("inf")) if "Power" in c
+             else RegressionHead() for c in nm_mapping["Y"]]
     return HeadStack(heads, nm_mapping["Y"])
 ```
 
@@ -161,7 +167,8 @@ Without this hook they do not run, and the run says so.
 from neurotemplate.metrics.physics import SynthSpec
 
 def synth_cfg(nm_mapping, norm_stats):
-    cool_sp, zone = "Zone Cooling Setpoint [degC]", "Zone Air Temperature [degC]"
+    cool_sp = "Zone Cooling Setpoint [degC]"
+    zone = "Zone Air Temperature [degC]"
     return SynthSpec(
         states=[zone],
         ambient="Ambient Temperature [degC]",
@@ -195,7 +202,8 @@ two is worth noting and moving past.
 ## sub_plot
 
 ```python
-def sub_plot(df_true: pd.DataFrame, column_name: str) -> tuple[list[str], list[dict]] | None
+def sub_plot(df_true: pd.DataFrame, column_name: str
+             ) -> tuple[list[str], list[dict]] | None
 ```
 
 What goes on a second axis under the plot of `column_name`: the covariates you want to eyeball. Return
@@ -226,12 +234,13 @@ def power_channels(nm_mapping):
 ```
 
 What the policy learns from is this signal's gradient, so the meters must respond to the commands: model
-them in a block that sees the actuation (`nt guide thermal-zone`, step 6).
+them in a block that sees the actuation (`guides/9-saving-money.md` in a project, step 1).
 
 ## power_metric
 
 ```python
-def power_metric(yn: Tensor, U: Tensor, D: Tensor, nm_mapping: dict) -> Tensor    # [batch, time]
+def power_metric(yn: Tensor, U: Tensor, D: Tensor,
+                 nm_mapping: dict) -> Tensor    # [batch, time]
 ```
 
 Instantaneous power per timestep, in place of the sum of `power_channels`: what a loss term naming

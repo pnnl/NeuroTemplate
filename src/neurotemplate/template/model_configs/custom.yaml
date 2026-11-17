@@ -1,0 +1,9 @@
+# Your settings for `nt model train`. modeling.yaml beside this file has every
+# setting at its default: copy the ones you want to change into this file and
+# edit them here. A setting not here takes its default. Run it with
+#
+#   nt model train --config custom
+#
+# Each run prints what you set apart from the defaults it used. To keep one
+# change per run, copy this file to m01.yaml, m02.yaml, ... and run
+# `--config m01`.

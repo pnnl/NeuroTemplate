@@ -1,1 +1,0 @@
-src/neurotemplate/GUIDE.md

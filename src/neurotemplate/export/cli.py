@@ -30,6 +30,7 @@ from neurotemplate.export.dynamics import export_model
 from neurotemplate.export.package import GRAPH_SUFFIX
 from neurotemplate.export.policy import export_policy
 from neurotemplate.export.trace import EXPORTERS
+from neurotemplate.modeling.dynamics import model_label
 from neurotemplate.modeling.load import load_trained_dynamics
 
 
@@ -93,7 +94,7 @@ def model_main() -> None:
         onnx2c=args.onnx2c,
     )
 
-    print(f"exported run {args.run_id} ({cfg.model}) as {_how(args)}")
+    print(f"exported run {args.run_id} ({model_label(dyn_sys, cfg)}) as {_how(args)}")
     if result.agreement is None:
         print("  UNVERIFIED: the trained model blew up on --data; the package "
               "says so (model.json `verified: false`) and ships no fixture")
