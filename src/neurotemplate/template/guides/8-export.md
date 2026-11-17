@@ -2,7 +2,7 @@
 
 An export turns a trained controller, or a model, into a small package that
 runs without this library: hand it to a colleague, or put it on a device.
-Start from a trained controller (`6-first-controller.md`).
+Start from a trained controller (`7-first-controller.md`).
 
 1. **Find the run id.** Every training run ends with a line like
    `Finished control run: <run id>`. It's also on the run's page in

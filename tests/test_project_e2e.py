@@ -45,7 +45,7 @@ def _assign(columns: dict) -> None:
 
 
 def _add_band() -> None:
-    """6-first-controller.md, step 1: the band in every split, in no role."""
+    """7-first-controller.md, step 1: the band in every split, in no role."""
     for split in ("train", "dev", "test"):
         df = pd.read_csv(f"data/{split}.csv")
         df["Band Low"], df["Band High"] = 21.0, 24.0
@@ -80,7 +80,7 @@ def test_the_guides_run_as_written_from_a_first_model_to_an_export(practice_proj
     _assign({"Y": [ZONE], "U": [HEAT], "D": [OUTDOOR, SOLAR]})
     nt(["model", "train", *QUICK])
 
-    # 6-first-controller.md: the band in the record, the objective in custom.yaml.
+    # 7-first-controller.md: the band in the record, the objective in custom.yaml.
     _add_band()
     with open("control_configs/custom.yaml", "a") as custom:
         custom.write("\nlosses:\n"
@@ -90,7 +90,7 @@ def test_the_guides_run_as_written_from_a_first_model_to_an_export(practice_proj
                      "gains: {too_cold: 10.0, too_hot: 10.0, smooth: 0.1}\n")
     nt(["control", "train", "--config", "custom", *QUICK])   # takes the latest model run
 
-    # 7-export.md.
+    # 8-export.md.
     nt(["export", "policy", "--run_id", _latest_run(), "--out", "delivery"])
     inputs = json.loads((practice_project / "delivery/policy/policy.json").read_text())["inputs"]
     assert inputs["y"]["columns"] == [ZONE]

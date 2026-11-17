@@ -1,9 +1,9 @@
 # A controller that saves money
 
-Advanced. Your first controller holds a band (`6-first-controller.md`). This
+Advanced. Your first controller holds a band (`7-first-controller.md`). This
 one also pays for energy, and when the price changes over the day it learns
 to pre-cool or pre-heat ahead of the expensive hours. It needs a model that
-predicts power and passes its physics checks (`8-physics-checks.md`).
+predicts power and passes its physics checks (`9-physics-checks.md`).
 
 You need, beside your first controller's columns:
 

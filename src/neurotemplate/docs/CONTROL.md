@@ -23,8 +23,8 @@ lists every setting; `nt docs hooks` the hooks, all optional, of which `power_ch
 a `power` term needs. Column roles come from the surrogate, and the record from `data.yaml`.
 
 ```bash
-nt control train --config control_configs/debug.yaml
 nt control train --set sysid_run_id=<another model run>
+nt control train --config debug   # 2 epochs, to the end
 ```
 
 ## The objective is a table over named columns
@@ -231,7 +231,7 @@ is wrong about the plant. It is solved as MPC's plans are (the `solver` block) f
 controller's own commands and random ones, each window keeping its best; the report says how far the starts
 landed apart and whether every window stopped before the cap.
 
-A project's `guides/9-saving-money.md` walks the run-by-run ladder: the band terms only, the full
+A project's `guides/10-saving-money.md` walks the run-by-run ladder: the band terms only, the full
 objective, its price-blind twin.
 
 Each optional capability is off until you ask for it:

@@ -2,7 +2,7 @@
 
 A controller learns to set the U columns so the model's predictions do what
 you ask: here, hold a zone inside a comfort band without jumpy commands. It
-practises on the model, not on the building, so start from a trained model
+practices on the model, not on the building, so start from a trained model
 you trust (`1-first-model.md`). It uses the latest one.
 
 1. **Add the band to your data**, if it isn't there. The objective reads its
@@ -55,13 +55,13 @@ Good to know:
 
 - **Commands stay inside what the data recorded.** The controller can't
   ask for more heat than the record ever saw. To set your own limits, use
-  `control_bounds` (`9-saving-money.md` has an example).
+  `control_bounds` (`10-saving-money.md` has an example).
 - **What it reads:** by default the zone, its last command, and the
   weather and band a few hours ahead. `policy_window` changes that
-  (`9-saving-money.md`).
+  (`10-saving-money.md`).
 
 Next:
 
-- ship it: `7-export.md`
+- ship it: `8-export.md`
 - pay for energy, and shift load ahead of expensive hours:
-  `9-saving-money.md`
+  `10-saving-money.md`

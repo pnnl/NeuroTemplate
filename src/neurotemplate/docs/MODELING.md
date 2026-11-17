@@ -25,9 +25,13 @@ Column roles, in `data.yaml`. That is all a run needs: the default black box run
 every setting. Each run prints what you set apart from the defaults it used.
 
 ```bash
-nt model train --config model_configs/debug.yaml            # a smoke run first
-nt model train --set epochs=200 --set ensemble_seeds=3      # one-off overrides
+nt model train --set epochs=200 --set ensemble_seeds=3   # one-off overrides
+nt model train --config debug                            # 2 epochs, to the end
 ```
+
+A misnamed column or a bad hook stops any run in its first seconds. `debug.yaml` is for
+code that runs only at the end, after training: a `sub_plot` hook, the physics scenarios
+a `synth_cfg` sets up, or the library's own plotting and saving.
 
 ## What the model reads: `past` and `spinup`
 

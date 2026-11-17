@@ -14,7 +14,7 @@ good it is. Run every command from this folder. If `nt` is not found, put
    named `timestamp`, `time`, `date` or `datetime`. If your files have
    different names or paths, just change the paths in `data.yaml`.
 
-   **To practise first**, make a record instead:
+   **To practice first**, make a record instead:
 
    ```
    uv run python guides/make_data.py
@@ -31,10 +31,10 @@ good it is. Run every command from this folder. If `nt` is not found, put
    nt model train
    ```
 
-   It stops and prints every column, then an empty `columns:` block.
+   It stops and prints every column.
 
-3. **Assign the columns.** Paste that block over `columns: {}` in `data.yaml`
-   and put each column you want in one list:
+3. **Assign the columns.** In `data.yaml`, under `columns`, put each column
+   you want in one list:
 
    ```yaml
    columns:
@@ -50,14 +50,7 @@ good it is. Run every command from this folder. If `nt` is not found, put
    Leave a column out and the model ignores it. Put a name with brackets, a
    colon or a `#` in quotes: `"Zone Temp [°C]"`.
 
-4. **Smoke test.** Two passes over the data: seconds, and it catches every
-   misspelled name. Its numbers mean nothing yet.
-
-   ```
-   nt model train --config debug
-   ```
-
-5. **Train.**
+4. **Train.**
 
    ```
    nt model train --set progress=log
@@ -71,7 +64,7 @@ good it is. Run every command from this folder. If `nt` is not found, put
    forecast that nothing changes from the last reading. Skill is the share
    of that error the model removes: 0.3 is 30% less. Above 0 beats it.
 
-6. **Look at the results.**
+5. **Look at the results.**
 
    ```
    uv run mlflow ui
@@ -81,7 +74,7 @@ good it is. Run every command from this folder. If `nt` is not found, put
    Artifacts for the plots and `reportcard.md`. The Verdict at the top of
    the reportcard sums it up.
 
-7. **Change a setting.** `model_configs/modeling.yaml` lists every setting at
+6. **Change a setting.** `model_configs/modeling.yaml` lists every setting at
    its default, with a note on each. Copy the ones you want into
    `model_configs/custom.yaml`, edit them there, and run:
 
@@ -100,7 +93,8 @@ Where next:
 - several zones, or a model in parts: `5-multi-block.md`. It needs only
   this guide: the model you just trained already predicts every zone you
   list as a Y.
-- a controller: `6-first-controller.md`
+- the same steps from a Python script: `6-scripting.md`
+- a controller: `7-first-controller.md`
 
 Good to know:
 

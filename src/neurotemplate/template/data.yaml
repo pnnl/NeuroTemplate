@@ -3,8 +3,11 @@
 train: data/train.csv
 dev: data/dev.csv
 test: data/test.csv
-# `nt model train` lists the record's columns while this is empty, to sort into roles.
+# `nt model train` lists the record's columns while these are empty, to sort into roles.
 # Y: what the model predicts. U: what a controller writes. D: what is known without
 # the plant. A column left out is not read by the model; a band or a tariff sits in the
 # record that way, and the controller's objective just names it.
-columns: {}
+columns:
+  Y: []
+  U: []
+  D: []

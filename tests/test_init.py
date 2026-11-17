@@ -32,8 +32,8 @@ def test_every_template_file_is_tracked_so_a_build_from_git_ships_it():
 
 
 def test_the_guides_ship_in_reading_order_and_fit_a_terminal():
-    guides = sorted((TEMPLATE / "guides").glob("*.md"))
-    assert [g.name[0] for g in guides] == [str(n) for n in range(1, 10)]
+    guides = sorted((TEMPLATE / "guides").glob("*.md"), key=lambda g: int(g.name.split("-")[0]))
+    assert [int(g.name.split("-")[0]) for g in guides] == list(range(1, 11))
     for guide in guides:
         for number, line in enumerate(guide.read_text(encoding="utf-8").splitlines(), 1):
             assert len(line) <= 80, f"{guide.name}:{number}"

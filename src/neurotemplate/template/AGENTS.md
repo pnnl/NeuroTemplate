@@ -20,9 +20,9 @@ active.
 | `model_configs/custom.yaml` | the settings you change, copied from `modeling.yaml` (`--config custom`) |
 | `control_configs/control.yaml` | every control setting at its default, the objective empty |
 | `control_configs/custom.yaml` | the objective, and the settings you change (`--config custom`) |
-| `*/debug.yaml` | a two-epoch smoke run per side |
+| `*/debug.yaml` | a two-epoch run per side, through to the reportcard |
 | `data/` | the record, split in time order into `train.csv`, `dev.csv`, `test.csv` |
-| `guides/` | short how-tos, in order: first model, RC network, RC ladder, thermostat, blocks, controller, export, physics checks, saving money |
+| `guides/` | short how-tos, in order: first model, RC network, RC ladder, thermostat, blocks, scripting, controller, export, physics checks, saving money |
 | `guides/make_data.py` | writes a simulated practice record into `data/`; the guides' examples use its columns |
 
 The hook file names and the two config directory names are fixed: `nt` imports and
@@ -42,8 +42,11 @@ The data cannot say these; ask before the first real run:
   writing a hook; do not write hooks from memory of another version.
 - **The examples are syntax.** Column names and numbers in them come from the
   practice record (`guides/make_data.py`), not this plant, and gains do not port.
-- **Smoke-run first**, with each side's `debug.yaml`. `nt model train --print-config`
-  checks a config without running anything.
+- **A misnamed column or a bad config fails in the first seconds of any run**, so
+  there is no need for a trial run first. `nt model train --print-config` checks a
+  config without running anything. After writing a hook that runs only at the end of
+  a run (`sub_plot`, or the scenarios a `synth_cfg` sets up), run `--config debug` once:
+  two epochs, through to the reportcard.
 - **Each run prints what you set apart from the defaults it used.** Read it.
 - **One change per run, a numbered config per run** (`model_configs/m01.yaml`,
   `m02.yaml`, ...). Two to four model iterations, each decided from the
