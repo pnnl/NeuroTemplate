@@ -8,7 +8,7 @@ import pandas as pd
 import torch
 from neuromancer.dataset import DictDataset
 
-from neurotemplate.common.data_file import load_data_file
+from neurotemplate.common.data_file import TIME_NAMES, load_data_file
 
 from neurotemplate._typing import beartype
 
@@ -43,9 +43,7 @@ def read_timestamped_csv(path: str) -> pd.DataFrame:
     """
     df = pd.read_csv(path)
 
-    time_candidates = [
-        "timestamp", "time", "date", "datetime"
-    ]
+    time_candidates = list(TIME_NAMES)
 
     t_col = next((c for c in df.columns if c.lower() in time_candidates), None)
 

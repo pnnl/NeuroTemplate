@@ -8,7 +8,7 @@ runs without this library. Built on
 ```bash
 uv init my_app && cd my_app
 uv add "NeuroTemplate @ git+https://github.com/pnnl/NeuroTemplate"
-uv run nt init                     # data.yaml, hook menus, configs, data/, guides/
+uv run nt init                     # data.yaml, hook menus, configs, data/, guides/ (a minute)
 uv run python guides/make_data.py  # a practice record, to try the guides on first
 # then open guides/1-first-model.md
 ```

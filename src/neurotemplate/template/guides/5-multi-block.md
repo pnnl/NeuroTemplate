@@ -112,7 +112,7 @@ and so on. It finds the zone from the setpoints.
 ## Connecting blocks
 
 - `"reads": [column]` gives a block another block's Y as an input, as of the
-  step before. Use it for a zone that feels its neighbour.
+  step before. Use it for a zone that feels its neighbor.
 - `"driven_by": [column]` gives it another block's Y from this same step.
   Use it for a meter driven by the heat a thermostat block produces, or the
   zone in `4-thermostat.md`.

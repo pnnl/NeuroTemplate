@@ -15,14 +15,18 @@ import sys
 from neurotemplate._typing import beartype
 
 from neurotemplate.common.config import config_line, load_config_from_cli, MODEL_CONFIG_DIR
-from neurotemplate.common.tracking import artifact_file
+from neurotemplate.common.data_file import check_roles
 from neurotemplate.modeling.config import ModelingConfig
-from neurotemplate.modeling.train import train_model
+
+# torch, neuromancer and mlflow are imported in `main`, after the column roles are
+# checked: on a fresh install they take a minute to load, and an unassigned or
+# misspelled column should not wait on them.
 
 
 def print_finished(run_id: str) -> None:
     """The closing lines of a training run: where to look next. Whether the
     model is any good is the reportcard's to say, not a few lines here."""
+    from neurotemplate.common.tracking import artifact_file
     # A path or a command on a line of its own, so it is never broken mid-way.
     print(f"Reportcard:\n  {artifact_file(run_id, 'reportcard.md')}")
     print("MLflow UI:\n  uv run mlflow ui")
@@ -39,6 +43,8 @@ def main() -> None:
     )
     if cfg.progress != "silent":
         print(config_line(cli))
+    check_roles(cfg.data_file)
+    from neurotemplate.modeling.train import train_model
     result = train_model(cfg, config_path=cli.config)
     if cfg.progress != "silent":
         print_finished(result.run_id)

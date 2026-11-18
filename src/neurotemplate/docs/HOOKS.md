@@ -234,7 +234,7 @@ def power_channels(nm_mapping):
 ```
 
 What the policy learns from is this signal's gradient, so the meters must respond to the commands: model
-them in a block that sees the actuation (`guides/9-saving-money.md` in a project, step 1).
+them in a block that sees the actuation (`guides/10-saving-money.md` in a project, step 1).
 
 ## power_metric
 
