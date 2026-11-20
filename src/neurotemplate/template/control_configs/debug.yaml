@@ -1,8 +1,8 @@
 # A 4-step run that exercises the whole control pipeline: nt control train --config control_configs/debug.yaml
 # Copy the objective from your real config.
 losses:
-  comfort_lower: {column: "Band Low", target: "Zone Temperature", map: relu, norm: 1}
-  comfort_upper: {column: "Band High", target: "Zone Temperature", map: nrelu, norm: 1}
+  comfort_lower: {column: "Band Low", target: "Zone 1 Temp", map: relu, norm: 1}
+  comfort_upper: {column: "Band High", target: "Zone 1 Temp", map: nrelu, norm: 1}
 gains: {comfort_lower: 1.0, comfort_upper: 1.0}
 iters: 4
 run: debug

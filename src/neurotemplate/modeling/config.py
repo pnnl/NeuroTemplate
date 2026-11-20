@@ -19,8 +19,8 @@ from neurotemplate.common.config import (
 
 # History-window warning threshold for a window's depth in steps (the
 # surrogate's `history_steps`, the policy's deepest `past + 1`). Past this
-# many steps, a longer context window costs more memory per batch, and once
-# it exceeds `horizon` it hands the model, at rollout time, context
+# many steps, a longer history window costs more memory per batch, and once
+# it exceeds `horizon` it hands the model, at rollout time, history
 # it never saw during training. Advisory only — the right window length is
 # dataset-specific, so validate() warns rather than rejects. Twelve is a
 # reasonable ceiling for buildings on 5-minute data, not a limit the library
@@ -43,7 +43,7 @@ def warn_deep_window(name: str, steps: int) -> None:
     if steps > HISTORY_WARN_THRESHOLD:
         warnings.warn(
             f"{name}={steps} is above the usual ceiling of "
-            f"{HISTORY_WARN_THRESHOLD}. A longer context window costs "
+            f"{HISTORY_WARN_THRESHOLD}. A longer history window costs "
             "more memory per batch, and once it exceeds `horizon` "
             "it hands the model, at rollout time, history it never saw "
             "during training. Not rejected outright — the right window "
@@ -62,26 +62,28 @@ class ModelingConfig(TimedWindows):
     data_file: str = "data.yaml"
     # Optional JSON mapping used by data_utils.get_grad_masks (None disables grads).
     grad_path: Optional[str] = None
-    # DataLoader batch size used in data_utils.get_loader.
+    # Training windows per optimizer step.
     batch_size: int = 256
     # Normalization strategy: min_max | abs_max | z_score | None.
     norm_type: Optional[str] = "z_score"
-    # Optional path or dotted module name for the modeling hooks file.
-    # If unset, the library looks for `nt_model.py` in CWD.
+    # The modeling hooks file, as a path or a module name. null: `nt_model.py` in
+    # the working directory.
     user_hooks_path: Optional[str] = None
 
     # ---- MODEL ---------------------------------------------------------------
     # A built-in family (mlp, nssm, lssm, gru, rc_network), or a name in the hooks
     # file's custom_models() (see modeling.contract).
     model: str = "nssm"
-    # How far before the current step the model reads: one time for every column, or
-    # `{column: time}`, a column not named reading the current row only. Each learned
-    # map reads only its columns' own lags (see dynamics.column_lags). Unset, 3 steps.
+    # How far back each prediction looks: the model's inputs are the rows from
+    # `past` ago up to now. One time for every column, or `{column: time}` per
+    # column, where a column not named is read at the current row only.
+    # null: 3 steps (15m on 5-minute data).
     past: Union[Time, dict[str, Time], None] = None
-    # History every model is handed, beyond what `past` asks: what a model that keeps
-    # state starts from. An `rc_network`'s filter runs over this window to place its
-    # hidden nodes. Unset, 24h when a block is an rc_network, and otherwise nothing.
-    context: Optional[Time] = None
+    # Measured history a model with internal state runs over before it predicts,
+    # not inputs: an `rc_network` settles its hidden temperatures on it.
+    # null: 24h if any block is an rc_network, else 0.
+    spinup: Optional[Time] = None
+    # A network's width, as a power of two (6 is 64 units), and its layers.
     log2_hidden_size: int = 6
     num_layers: int = 3
     # A model's output is the change from the last row (`increment`) or the next
@@ -105,31 +107,35 @@ class ModelingConfig(TimedWindows):
     physical_lr: float = 0.05
 
     # ---- TRAIN ---------------------------------------------------------------
-    # Gradient steps: a fixed budget, the dev set scored 20 times and the best kept.
+    # How many steps a run trains. It scores dev 20 times along the way and keeps
+    # the best model.
     iters: int = 3000
-    # The peak rate: it ramps up over the first 5% of the steps, then follows a cosine
-    # down to a hundredth of it (`common.fit`). `lr: 0` trains nothing and keeps the
-    # model as built.
+    # The learning rate of a network's weights (Adam), at its peak: it ramps up
+    # over the first 5% of the steps, then eases down to a hundredth of it.
+    # 0 trains nothing and keeps the model as built.
     lr: float = 1e-3
     # What training prints: silent | summary | live | log (`common.progress`).
     progress: str = "summary"
-    # How far a training or dev rollout predicts, past its history. Unset, 48 steps.
+    # How far ahead a training or dev rollout predicts. null: 48 steps.
     horizon: Optional[Time] = None
-    # Time between the starts of dev windows; unset, a horizon. Training windows start at
-    # any row of the records, drawn afresh at every step (`common.sampler`).
+    # Time between the starts of dev windows. Training windows start at any row
+    # of the records, drawn afresh at every step. null: a whole `horizon`.
     dev_stride: Optional[Time] = None
 
     # ---- TEST ----------------------------------------------------------------
-    # How far a test rollout predicts, past its history, and how far apart they start.
-    # Unset, 288 steps or what the shortest test file holds, and not overlapping.
+    # How far ahead a test rollout predicts, and how far apart they start.
+    # null: 288 steps, or as much as the shortest test file holds; and end to end.
     test_horizon: Optional[Time] = None
     test_stride: Optional[Time] = None
 
     # ---- LOSS ----------------------------------------------------------------
+    # The weight on the prediction error, beside `grad_gain`'s penalty.
     ref_gain: float = 1.0
 
     # ---- RUNTIME -------------------------------------------------------------
+    # -1 draws a seed from the clock; any other value repeats a run's draws.
     seed: int = -1
+    # cpu, cuda or mps. null: cuda if available, else cpu.
     device: Optional[str] = None
     # Torch CPU threads for this run; None means one per core. These models are
     # small enough that one thread was fastest for every family and batch size
@@ -145,9 +151,12 @@ class ModelingConfig(TimedWindows):
 
     # ---- LOGGING -------------------------------------------------------------
     savedir: str = field(default_factory=default_savedir)
+    # Where runs are recorded (an MLflow tracking URI), the experiment they go
+    # under, and a name to tell this run by.
     location: str = "sqlite:///mlflow.db"
     exp: str = "Model Training"
     run: str = ""
+    # Where a run's plots go, and whether it draws them.
     plots_dir: str = "plots"
     plot: bool = True
 
@@ -194,8 +203,8 @@ class ModelingConfig(TimedWindows):
             check_lag_table("past", self.past)
         elif self.past is not None:
             time_microseconds(self.past, "past")
-        if self.context is not None:
-            time_microseconds(self.context, "context")
+        if self.spinup is not None:
+            time_microseconds(self.spinup, "spinup")
         self._check_common_times()
 
         if (self.grad_gain > 0) and (self.grad_path is None):
@@ -203,16 +212,16 @@ class ModelingConfig(TimedWindows):
 
     def fill_windows(self, shortest_test_rows: int) -> None:
         """What each unset window comes to, written back so the run logs it: once the
-        data has set the timestep and `context` has been decided (`dynamics`)."""
+        data has set the timestep and `spinup` has been decided (`dynamics`)."""
         if self.past is None:
             self.past = self._time(DEFAULT_PAST_STEPS)
-        self.context = 0 if self.context is None else self.context
+        self.spinup = 0 if self.spinup is None else self.spinup
         self.fill_common_windows(shortest_test_rows - self.history_steps)
 
     def check_windows(self) -> None:
         """Every window a whole number of steps: run once the data has set the timestep."""
         self._check_common_windows()
-        # Only what a learned map reads: `context` is what a model starts from, not
+        # Only what a learned map reads: `spinup` is what a model starts from, not
         # inputs to a network.
         warn_deep_window("past", self.deepest_lag + 1)
 
@@ -229,15 +238,15 @@ class ModelingConfig(TimedWindows):
         return max((time_steps(v, self.steps_per_hour, "past") for v in values), default=0)
 
     @property
-    def context_steps(self) -> int:
-        return self._steps("context") if self.context is not None else 0
+    def spinup_steps(self) -> int:
+        return self._steps("spinup") if self.spinup is not None else 0
 
     @property
     def history_steps(self) -> int:
         """Rows of every column the model is handed: the deepest lag plus the
-        current step, or `context` if that is more. Data windows, the
+        current step, or `spinup` if that is more. Data windows, the
         seeded history and the model export all run at this depth."""
-        return max(self.deepest_lag + 1, self.context_steps)
+        return max(self.deepest_lag + 1, self.spinup_steps)
 
     def asdict(self) -> dict:
         return asdict(self)

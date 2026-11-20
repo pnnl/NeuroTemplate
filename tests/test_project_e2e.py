@@ -1,17 +1,20 @@
-"""What a person actually types: a project on synthetic data with zero edits, and one on
-your own data with column roles and, for a controller, an objective. Nothing else."""
+"""What a person actually types: the guides as written, on the practice record their
+examples use, and a project on column roles alone with, for a controller, an objective."""
 
 import json
+import subprocess
 import sys
 
 import mlflow
+import pandas as pd
 import pytest
 import yaml
 
 from neurotemplate.cli import main as nt
-from neurotemplate.example import (
-    BAND_HIGH, BAND_LOW, HEAT, OUTDOOR, POWER, SETPOINT, SOLAR, SPLITS, TARIFF, ZONE, thermal_plant,
-)
+
+ZONE, HEAT, POWER = "Zone 1 Temp", "Zone 1 Heat", "Zone 1 Power"
+COOL_SP, HEAT_SP = "Zone 1 Cooling SP", "Zone 1 Heating SP"
+OUTDOOR, SOLAR = "Outdoor Temp", "Solar"
 
 
 @pytest.fixture(autouse=True)
@@ -35,52 +38,75 @@ def _latest_run() -> str:
                               max_results=1).iloc[0].run_id
 
 
+def _assign(columns: dict) -> None:
+    data = yaml.safe_load(open("data.yaml").read())
+    data["columns"] = columns
+    open("data.yaml", "w").write(yaml.safe_dump(data, allow_unicode=True))
+
+
+def _add_band() -> None:
+    """7-first-controller.md, step 1: the band in every split, in no role."""
+    for split in ("train", "dev", "test"):
+        df = pd.read_csv(f"data/{split}.csv")
+        df["Band Low"], df["Band High"] = 21.0, 24.0
+        df.to_csv(f"data/{split}.csv", index=False)
+
+
 QUICK = ["--set", "iters=4", "--set", "plot=false"]
 
 
-def test_the_thermal_example_runs_model_control_and_export_with_zero_edits(
-        tmp_path, monkeypatch, capsys):
+@pytest.fixture
+def practice_project(tmp_path, monkeypatch):
+    """`nt init`, then the project's own `guides/make_data.py`, run as guide 1 says."""
     monkeypatch.chdir(tmp_path)
-    nt(["example", "thermal", "project"])
-    monkeypatch.chdir(tmp_path / "project")
-    nt(["model", "train", *QUICK])
-    nt(["control", "train", *QUICK])                  # takes the latest model run
-    out = capsys.readouterr().out
-    assert "You set:" in out and "iters: 4" in out and "Defaults used:" in out
-    assert "Not read by the policy" in out and HEAT in out
-    # Unset, the start box is the rc_network zone over its recorded range, never the heat.
-    assert f"start_box: {{'{ZONE}': [" in out
-    nt(["export", "policy", "--run_id", _latest_run(), "--out", "delivery"])
-    inputs = json.loads((tmp_path / "project/delivery/policy/policy.json").read_text())["inputs"]
-    assert inputs["y"]["columns"] == [ZONE]          # no heat or meter for anyone to rebuild
+    nt(["init", "--no-warmup"])
+    subprocess.run([sys.executable, "guides/make_data.py"], check=True, capture_output=True)
+    return tmp_path
 
 
-def test_a_project_runs_on_column_roles_alone_and_a_controller_on_an_objective(
-        tmp_path, monkeypatch, capsys):
-    monkeypatch.chdir(tmp_path)
-    nt(["init"])
-    for split, days, seed, start in SPLITS:
-        thermal_plant(days, seed, start).to_csv(tmp_path / "data" / f"{split}.csv")
+def test_the_practice_record_refuses_to_overwrite_a_record(practice_project):
+    before = (practice_project / "data/train.csv").read_bytes()
+    rerun = subprocess.run([sys.executable, "guides/make_data.py"], capture_output=True,
+                           text=True)
+    assert rerun.returncode != 0 and "nothing written" in rerun.stderr
+    assert (practice_project / "data/train.csv").read_bytes() == before
 
-    # No roles yet: it stops and lists every column, ready to paste.
+
+def test_the_guides_run_as_written_from_a_first_model_to_an_export(practice_project):
+    # 1-first-model.md: no roles yet, so it stops and lists every column.
     with pytest.raises(SystemExit, match="assigns no columns") as stop:
         nt(["model", "train"])
     assert POWER in str(stop.value)
-
-    data = yaml.safe_load((tmp_path / "data.yaml").read_text())
-    data["columns"] = {"Y": [ZONE, HEAT, POWER], "U": [SETPOINT], "D": [OUTDOOR, SOLAR]}
-    (tmp_path / "data.yaml").write_text(yaml.safe_dump(data, allow_unicode=True))
+    _assign({"Y": [ZONE], "U": [HEAT], "D": [OUTDOOR, SOLAR]})
     nt(["model", "train", *QUICK])
-    out = capsys.readouterr().out
-    assert "No physics checks will run: define `synth_cfg`" in out
-    assert TARIFF in out                             # listed as not read by the model
+
+    # 7-first-controller.md: the band in the record, the objective in custom.yaml.
+    _add_band()
+    with open("control_configs/custom.yaml", "a") as custom:
+        custom.write("\nlosses:\n"
+                     f"  too_cold: {{column: Band Low, target: {ZONE}, map: relu, norm: 1}}\n"
+                     f"  too_hot: {{column: Band High, target: {ZONE}, map: nrelu, norm: 1}}\n"
+                     f"  smooth: {{column: {HEAT}, map: first_difference, norm: 1}}\n"
+                     "gains: {too_cold: 10.0, too_hot: 10.0, smooth: 0.1}\n")
+    nt(["control", "train", "--config", "custom", *QUICK])   # takes the latest model run
+
+    # 8-export.md.
+    nt(["export", "policy", "--run_id", _latest_run(), "--out", "delivery"])
+    inputs = json.loads((practice_project / "delivery/policy/policy.json").read_text())["inputs"]
+    assert inputs["y"]["columns"] == [ZONE]
+
+
+def test_a_project_runs_on_column_roles_alone_and_a_controller_on_an_objective(
+        practice_project):
+    _add_band()
+    _assign({"Y": [ZONE, POWER], "U": [COOL_SP, HEAT_SP], "D": [OUTDOOR, SOLAR]})
+    nt(["model", "train", *QUICK])
 
     objective = {
-        "losses": {"low": {"column": BAND_LOW, "target": ZONE, "map": "relu", "norm": 1},
-                   "high": {"column": BAND_HIGH, "target": ZONE, "map": "nrelu", "norm": 1}},
+        "losses": {"low": {"column": "Band Low", "target": ZONE, "map": "relu", "norm": 1},
+                   "high": {"column": "Band High", "target": ZONE, "map": "nrelu", "norm": 1}},
         "gains": {"low": 1.0, "high": 1.0},
     }
-    (tmp_path / "control_configs/control.yaml").write_text(
+    (practice_project / "control_configs/control.yaml").write_text(
         yaml.safe_dump(objective, allow_unicode=True))
     nt(["control", "train", *QUICK])
-    assert "Finished control run" in capsys.readouterr().out

@@ -21,22 +21,15 @@ from typing import Optional
 
 from neurotemplate._typing import beartype
 
-from neurotemplate.common.config import fields_set, settings_report
 from neurotemplate.metrics.run_summary import write_run_summary
 from neurotemplate.common.tracking import tracked_run
 from neurotemplate.hooks import MODELING_SNAPSHOT, load_modeling_hooks, snapshot_hooks
 from neurotemplate.modeling.config import ModelingConfig
-from neurotemplate.modeling.dynamics import family_lines
+from neurotemplate.modeling.dynamics import block_families, family_lines
 from neurotemplate.modeling.experiment import resolve_device, set_seeds, set_threads
 from neurotemplate.modeling.pipeline import (
     TrainedModel, prepare_data, run_summary_metrics, train_and_evaluate,
 )
-
-#: What each run names even when you left it alone. Everything else sits in
-#: `nt docs config`, and appears on "You set" only when you set it.
-COMMON_SETTINGS = ("model", "past", "context", "horizon", "test_horizon",
-                   "dev_stride", "test_stride", "iters", "lr", "batch_size",
-                   "log2_hidden_size", "num_layers", "seed", "steps_per_hour")
 
 #: Loss terms echoed to stdout at each evaluation, and the substrings of the metric
 #: keys logged to MLflow.
@@ -56,7 +49,6 @@ def train_model(cfg: ModelingConfig,
     `config_path` is the file `cfg` came from, recorded in the run summary;
     None for a config built in code.
     """
-    given = fields_set(cfg)
     cfg = deepcopy(cfg)
     cfg.validate()
     cfg.device = resolve_device(cfg.device)
@@ -65,12 +57,12 @@ def train_model(cfg: ModelingConfig,
     hooks = load_modeling_hooks(cfg)
 
     data = prepare_data(cfg, hooks)
-    if cfg.progress != "silent":
-        print(settings_report(cfg, given, COMMON_SETTINGS))
+    families = block_families(cfg, data.nm_mapping, data.block_spec)
     if data.block_spec and cfg.progress != "silent":
         print("Blocks:\n" + "\n".join(family_lines(cfg, data.nm_mapping, data.block_spec)))
 
-    cfg.run = cfg.model.upper() + " " + cfg.run
+    names = dict.fromkeys(family.upper() for _, family, _ in families)
+    cfg.run = " + ".join(names) + " " + cfg.run
 
     with tracked_run(cfg, stdout=STDOUT_METRICS, logout=LOGGED_METRICS) as logger:
         snapshot_hooks(hooks, MODELING_SNAPSHOT, logger)

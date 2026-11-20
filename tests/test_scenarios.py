@@ -116,9 +116,10 @@ def test_a_policy_reads_what_its_window_lists_and_names_the_rest():
     policy = build_policy(cfg, sysid_cfg, nm, ns)
     assert policy.input_keys == ["yn", "D", "R"]
     r_columns = resolve_objective(cfg, nm).r_columns
-    from neurotemplate.control.policy import read_columns, unread_columns
-    assert read_columns(cfg, nm, r_columns)["yn"] == [ZONE]
-    assert FAN_P in unread_columns(cfg, nm, r_columns) and SETPT in unread_columns(cfg, nm, r_columns)
+    from neurotemplate.control.policy import read_columns
+    read = read_columns(cfg, nm, r_columns)
+    assert read["yn"] == [ZONE]
+    assert not any(c in cols for cols in read.values() for c in (FAN_P, SETPT))
     # past 2 + 1 of the zone, past 0 + 1 + future 1 of one D, one row of each band edge,
     # and time to go.
     net = next(m for m in policy.callable.modules() if isinstance(m, _NormalizedNet))

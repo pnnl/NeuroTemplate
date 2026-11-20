@@ -10,7 +10,8 @@ every term's contribution and share.
 
 The shares are reported, not judged. A band term is a hinge and reads zero while the
 band holds, so a controller keeping comfort shows cost near 100%, which is the good
-case. A share cannot tell you the trade; the blind twin in `nt guide control` does.
+case. A share cannot tell you the trade; the blind twin, the same run with the price
+gain at 0, does.
 
 The worked example: a power proxy of `(cooling_setpoint - outdoor)^2` that
 came out at 1.7x the entire comfort objective. The numbers were on screen from
@@ -217,27 +218,3 @@ def objective_to_dict(balance: ObjectiveBalance,
         "frac_power_dead": None if power is None else power.frac_dead,
         "notes": list(notes or []),
     }
-
-
-@beartype
-def format_objective_report(balance: ObjectiveBalance,
-                            power: Optional[PowerDiagnostics] = None,
-                            notes: Optional[list[str]] = None,
-                            trains: bool = True) -> str:
-    """Plain-text version for stdout, printed before training starts.
-    `trains` is False for a controller that trains nothing (MPC)."""
-    when = "before training" if trains else "through the controller"
-    lines = [f"Objective term balance (one batch, {when}):"]
-    for t in balance.terms:
-        ratio = "inf" if t.ratio_to_rest == float("inf") else f"{t.ratio_to_rest:.2f}x"
-        lines.append(f"  {t.name:<22s} {t.value:>12.4g}  "
-                     f"{t.share * 100:>3.0f}%  {ratio:>8s} the rest")
-    if power is not None:
-        lines.append(f"  power exactly zero on {power.frac_zero * 100:.1f}% of "
-                     "scored steps")
-        lines.append(f"  ...of which {power.frac_dead * 100:.1f}% of all steps "
-                     "also pass no gradient back (a clamp on the power path: "
-                     "a negative power head, or relu/clamp_min in power_metric)")
-    for note in notes or []:
-        lines.append(f"  NOTE: {note}")
-    return "\n".join(lines)

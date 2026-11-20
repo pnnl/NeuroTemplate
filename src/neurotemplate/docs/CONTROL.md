@@ -16,14 +16,15 @@ A user who wants to compare to a rule can do that themselves.
 
 ## What you provide
 
-An objective, in `control_configs/control.yaml`. That and the column roles are all a run needs:
+An objective, in `control_configs/custom.yaml`, run with `nt control train --config custom`.
+That and the column roles are all a run needs:
 the latest model run is its surrogate, and everything else is a default it prints. `nt docs config`
 lists every setting; `nt docs hooks` the hooks, all optional, of which `power_channels` is the one
 a `power` term needs. Column roles come from the surrogate, and the record from `data.yaml`.
 
 ```bash
-nt control train --config control_configs/debug.yaml
 nt control train --set sysid_run_id=<another model run>
+nt control train --config debug   # 4 steps, to the end
 ```
 
 ## The objective is a table over named columns
@@ -87,16 +88,16 @@ decides again at every step; the exported package takes no input for it.
 ## Where training starts: `start_box`
 
 ```yaml
-start_box:                            # syntax, not values
-  "Zone 1 [°C]": [16, 32]             # drawn in this box
-  "Zone 2 [°C]": records              # drawn over its range in the training records
+start_box:                 # syntax, not values
+  "Zone 1 [°C]": [16, 32]  # drawn in this box
+  "Zone 2 [°C]": records   # drawn over its range in the training records
 ```
 
 Each training and dev rollout takes its weather, references and command history from a window of the
 record. A column `start_box` lists starts somewhere else: its history is shifted by a constant so its last
 row lands uniform in the box, whatever that window's weather, which puts the controller in states the
-record never visited. Unset, every `rc_network` zone is drawn over its recorded range, and the run prints
-the box; `{}` starts every rollout as recorded. List only states: a temperature, not the heat or power a
+record never visited. Unset, every `rc_network` zone is drawn over its recorded range;
+`{}` starts every rollout as recorded. List only states: a temperature, not the heat or power a
 thermostat or meter produces from it, which stay as recorded. A black-box model's columns are drawn only
 if listed. Test always starts as recorded, as a deployed controller does. Some physical inconsistency
 between a drawn state and its recorded neighbours is the price; for a system highly sensitive to its
@@ -177,7 +178,8 @@ keeps the two from crossing; where no band separates them, a side naming the oth
 ```yaml
 control_bounds:
   "Heating Setpoint": [15.0, 22.0]
-  "Cooling Setpoint": [["Heating Setpoint", 1.0], 30.0]   # at least 1 above heating
+  # at least 1 above heating
+  "Cooling Setpoint": [["Heating Setpoint", 1.0], 30.0]
 ```
 
 Bounds that read other commands are mapped after them, in whatever order
@@ -254,8 +256,8 @@ is wrong about the plant. It is solved as MPC's plans are (the `solver` block) f
 controller's own commands and random ones, each window keeping its best; the report says how far the starts
 landed apart and whether every window stopped before the cap.
 
-`nt guide control` is the run-by-run ladder (the band terms only, the full objective, its price-blind twin)
-and how to read the plots.
+A project's `guides/10-saving-money.md` walks the run-by-run ladder: the band terms only, the full
+objective, its price-blind twin.
 
 Each optional capability is off until you ask for it:
 
@@ -273,8 +275,8 @@ from neurotemplate.control.config import ControlConfig
 from neurotemplate.control.load import load_trained_policy
 from neurotemplate.control.train import train_control
 
-cfg = load_config("control_configs/control.yaml", ControlConfig)
-run = train_control(cfg)              # run.run_id, run.results (the test closed loop)
+cfg = load_config("control_configs/custom.yaml", ControlConfig)
+run = train_control(cfg)  # run.run_id, run.results (the test closed loop)
 policy_node, cl_system, cfg, sysid_cfg, nm_mapping, norm_stats = (
     load_trained_policy(run.run_id))
 ```
@@ -291,10 +293,12 @@ for example the same week with the price peak moved, point its `data_file` at a
 from neurotemplate.control.pipeline import evaluate_closed_loop
 from neurotemplate.control.windows import load_control_splits
 
-_, cl_system, cfg, sysid_cfg, nm_mapping, norm_stats = load_trained_policy(run_id)
+_, cl_system, cfg, sysid_cfg, nm_mapping, norm_stats = (
+    load_trained_policy(run_id))
 cfg.data_file = "data_shifted.yaml"
 _, _, test_dfs = load_control_splits(cfg, nm_mapping)
 results, _ = evaluate_closed_loop(cfg, sysid_cfg, cl_system, test_dfs,
                                   nm_mapping, norm_stats)
-results.energy.weighted_energy["Tariff"]   # one entry per weight a power term names
+# one entry per weight a power term names
+results.energy.weighted_energy["Tariff"]
 ```

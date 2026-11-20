@@ -1,3 +1,117 @@
-# Settings for `nt model train`. Nothing is needed here: the column roles are in data.yaml, and each
-# run prints the defaults it used. `nt docs config` lists every field, and any of them can go here or
-# in `--set key=value`.
+# Every setting for `nt model train`, at its default: what a run with no
+# --config reads. It is the reference; change a setting in custom.yaml.
+# `nt docs config` explains each field; a window is a time: 5h, 20m, 6s.
+
+# ---- Data --------------------------------------------------------------------
+# The record and its column roles (`common.data_file`). With several files in a
+# split, windows are pooled and no rollout window spans two files.
+data_file: data.yaml
+# Optional JSON mapping used by data_utils.get_grad_masks (None disables grads).
+grad_path: null
+# Training windows per optimizer step.
+batch_size: 256
+# Normalization strategy: min_max | abs_max | z_score | None.
+norm_type: z_score
+# The modeling hooks file, as a path or a module name.
+# null: `nt_model.py` in the working directory.
+user_hooks_path: null
+
+# ---- Model -------------------------------------------------------------------
+# A built-in family (mlp, nssm, lssm, gru, rc_network), or a name in the hooks
+# file's custom_models() (see modeling.contract).
+model: nssm
+# How far back each prediction looks: the model's inputs are the rows from
+# `past` ago up to now. One time for every column, or `{column: time}` per
+# column, where a column not named is read at the current row only.
+# null: 3 steps (15m on 5-minute data).
+past: null
+# Measured history a model with internal state runs over before it predicts, not
+# inputs: an `rc_network` settles its hidden temperatures on it.
+# null: 24h if any block is an rc_network, else 0.
+spinup: null
+# A network's width, as a power of two (6 is 64 units), and its layers.
+log2_hidden_size: 6
+num_layers: 3
+# A model's output is the change from the last row (`increment`) or the next
+# `value`. A block may say otherwise for itself.
+predicts: increment
+# One block's family, from here: `{block name: family}`. It wins over the
+# block's own `model` in block_mapping, which wins over `model` above; every run
+# prints which family each block took and from where.
+block_models: {}
+
+# ---- Physical Parameters -----------------------------------------------------
+# A grey box's physical parameters (an rc_network's C, R, gains and thermostat)
+# are declared per block, as boxes in the block_mapping hook's `params`. Here:
+# their learning rate. Adam moves a raw parameter by about `lr` per update, and
+# a box position has the whole box to cover where a network weight moves by
+# thousandths; at `lr` they stall.
+physical_lr: 0.05
+
+# ---- Train -------------------------------------------------------------------
+# How many steps a run trains. It scores dev 20 times along the way and keeps
+# the best model.
+iters: 3000
+# The learning rate of a network's weights (Adam), at its peak: it ramps up over
+# the first 5% of the steps, then eases down to a hundredth of it. 0 trains
+# nothing and keeps the model as built.
+lr: 0.001
+# What training prints: silent | summary | live | log (`common.progress`).
+progress: summary
+# How far ahead a training or dev rollout predicts.
+# null: 48 steps.
+horizon: null
+# Time between the starts of dev windows. Training windows start at any row of
+# the records, drawn afresh at every step.
+# null: a whole `horizon`.
+dev_stride: null
+
+# ---- Test --------------------------------------------------------------------
+# How far ahead a test rollout predicts, and how far apart they start.
+# null: 288 steps, or as much as the shortest test file holds; and end to end.
+test_horizon: null
+test_stride: null
+
+# ---- Loss --------------------------------------------------------------------
+# The weight on the prediction error, beside `grad_gain`'s penalty.
+ref_gain: 1.0
+
+# ---- Runtime -----------------------------------------------------------------
+# -1 draws a seed from the clock; any other value repeats a run's draws.
+seed: -1
+# cpu, cuda or mps.
+# null: cuda if available, else cpu.
+device: null
+# Torch CPU threads for this run; None means one per core. These models are
+# small enough that one thread was fastest for every family and batch size
+# measured.
+threads: 1
+# How many independently-seeded models train_and_evaluate trains (each at
+# cfg.seed + i) and evaluates, reporting the min/median/max spread across them
+# instead of a single seed's draw. 1 reproduces today's single-model behaviour
+# exactly. Only the primary (offset-0) model's weights are logged, plotted, and
+# rendered on the reportcard — the ensemble adds error bars around that one
+# artifact, it does not change what you get.
+ensemble_seeds: 1
+
+# ---- Logging -----------------------------------------------------------------
+# Where runs are recorded (an MLflow tracking URI), the experiment they go
+# under, and a name to tell this run by.
+location: sqlite:///mlflow.db
+exp: Model Training
+run: ''
+# Where a run's plots go, and whether it draws them.
+plots_dir: plots
+plot: true
+
+# ---- Physics -----------------------------------------------------------------
+# grad_* weights a training penalty; synth_* only sizes the post-training
+# physics assertions, which always run when synth_cfg returns a spec.
+grad_gain: 0.0
+grad_n_samples: 128
+synth_n_scenarios: 32
+# Scenario horizon in HOURS, converted to steps against the data's own sampling
+# frequency. A step count means nothing without knowing the timestep, and for a
+# reachability bound the horizon is load-bearing.
+synth_hours: 4.0
+synth_n_plot: 4

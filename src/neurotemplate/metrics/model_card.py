@@ -210,6 +210,9 @@ def _verdict_section(
                            for check, rs in by_check.items())
         passed = sum(r.passed for r in physics)
         lines.append(f"- **Physics:** {passed} of {len(physics)} checks pass ({counts}).")
+    else:
+        lines.append("- **Physics:** no checks ran: define `synth_cfg` in nt_model.py "
+                     "(`nt docs synth_cfg`).")
     lines.append(
         f"- **Rollout:** {len(flagged)} channel(s) ramp or drift past "
         f"{DRIFT_RATIO_WARN:g}× the truth over {test_horizon} (Rollout)."

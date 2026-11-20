@@ -8,12 +8,22 @@ hand them a double that records instead of opening an MLflow run.
 
 from __future__ import annotations
 
+import logging
 import shutil
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator, Optional, Protocol, Union, runtime_checkable
 
+import mlflow
+
 from neurotemplate.nm.loggers import MLFlowLogger
+
+# MLflow narrates its own bookkeeping at INFO: forty lines of database migration
+# on a project's first run, and a line for each experiment it creates. None of it
+# is the user's to act on; its warnings still show. After `import mlflow`, which
+# sets these levels itself.
+for _name in ("mlflow", "alembic"):
+    logging.getLogger(_name).setLevel(logging.WARNING)
 
 
 @runtime_checkable
@@ -98,15 +108,15 @@ def tracked_run(
 
 
 def artifact_file(run_id: str, name: str) -> Path:
-    """Where a finished run's artifact `name` is on disk, for a closing summary.
+    """Where a finished run's artifact `name` is on disk, for a closing summary:
+    relative to the working directory when it is under it, as it is in a project.
 
     Training writes the reportcard in a scratch `savedir` that the run removes
     once it is logged, so the artifact directory is the one place it stays.
     """
-    import mlflow
-
     uri = mlflow.get_run(run_id).info.artifact_uri
-    return Path(uri.removeprefix("file://")) / name
+    path = Path(uri.removeprefix("file://")) / name
+    return path.relative_to(Path.cwd()) if path.is_relative_to(Path.cwd()) else path
 
 
 #: The one checkpoint a run carries: the trained Problem's state_dict.

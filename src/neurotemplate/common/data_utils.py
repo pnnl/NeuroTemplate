@@ -6,7 +6,7 @@ from typing import Optional, TypedDict
 
 import pandas as pd
 import torch
-from neurotemplate.common.data_file import load_data_file
+from neurotemplate.common.data_file import TIME_NAMES, load_data_file
 
 from neurotemplate._typing import beartype
 
@@ -41,9 +41,7 @@ def read_timestamped_csv(path: str) -> pd.DataFrame:
     """
     df = pd.read_csv(path)
 
-    time_candidates = [
-        "timestamp", "time", "date", "datetime"
-    ]
+    time_candidates = list(TIME_NAMES)
 
     t_col = next((c for c in df.columns if c.lower() in time_candidates), None)
 
@@ -186,9 +184,13 @@ def load_split(paths: list[str], name: str) -> tuple[list[pd.DataFrame], float]:
     freq: Optional[float] = None
     for i, path in enumerate(paths):
         if not Path(path).exists():
+            folder = Path(path).parent
+            found = sorted(p.name for p in folder.glob("*.csv")) if folder.is_dir() else []
+            there = (f" {folder}/ holds: {', '.join(found)}; point data.yaml at one."
+                     if found else "")
             raise FileNotFoundError(
                 f"{name} data file not found: {path} (relative paths are read "
-                f"from the working directory, {Path.cwd()})"
+                f"from the working directory, {Path.cwd()}).{there}"
             )
         df, f = get_data(path)
         if freq is None:
@@ -336,7 +338,7 @@ def sliding_windows(
         raise ValueError(
             f"Data has {x.shape[0]} rows but a window needs {steps}. Use a "
             "longer file or shorten the window (`horizon`, `test_horizon`, `past`, "
-            "`context`, and for a policy the deepest `future` it previews)."
+            "`spinup`, and for a policy the deepest `future` it previews)."
         )
     # Row w of `idx` holds the row numbers of window w: its start plus 0..steps-1.
     starts = torch.arange(0, x.shape[0] - steps + 1, stride, device=device)
@@ -423,7 +425,7 @@ def get_sw_dict_multi(
             raise ValueError(
                 f"File {i} has {df.shape[0]} rows but window length is "
                 f"{resolved_steps}. Use a longer file or shorten the "
-                "window (`horizon`, `test_horizon`, `past`, `context`)."
+                "window (`horizon`, `test_horizon`, `past`, `spinup`)."
             )
 
     parts = [get_sw_dict(df, cfg, nm_mapping, resolved_steps, stride) for df in dfs]

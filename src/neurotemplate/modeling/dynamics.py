@@ -29,7 +29,7 @@ over all of Y and a split are the same code, and any family can sit in any block
 `cfg.past` sets each column's lag, the steps before the current one a learned
 map reads: any lag for `mlp`, `nssm` and `lssm`, one lag for every column a `gru`
 reads (its window is its warm-up). A thermal block's window is not in the table:
-an `rc_network` reads the whole window, `cfg.context` deep, for its filter,
+an `rc_network` reads the whole window, `cfg.spinup` deep, for its filter,
 and a `thermostat` the current row. A stateful block additionally keeps state so
 its memory can run past its window during a rollout, but it still takes the same
 window. The only thing statefulness costs the caller is a reset at each sequence
@@ -133,7 +133,7 @@ def _check_lags_consumed(blocks: list[Block], families: list[str], lags: list[La
         if not readers and history[column] != 0:
             raise ValueError(
                 f"past[{column!r}] is {history[column]} steps, but no learned block reads "
-                "it. A thermal block's window is `context`, not this table. If "
+                "it. A thermal block's window is `spinup`, not this table. If "
                 "nothing on the control side needs it either (the policy, a loss weight, "
                 "power_metric, the plots), take it out of `columns` in data.yaml; otherwise "
                 "list it at 0."
@@ -212,16 +212,16 @@ FAMILIES: dict[str, Callable] = {
 VALID_MODEL_NAMES = tuple(FAMILIES)
 
 
-def fill_context(cfg: ModelingConfig, nm_mapping: dict[str, list[str]],
+def fill_spinup(cfg: ModelingConfig, nm_mapping: dict[str, list[str]],
                  block_spec: Optional[dict[str, dict]]) -> None:
-    """`context`, when unset: a day when a block is an rc_network, whose filter places its
+    """`spinup`, when unset: a day when a block is an rc_network, whose filter places its
     hidden nodes from it, and nothing otherwise. A day is plenty for buildings measured
     so far, and it costs records, so a model that keeps no such state is not charged it."""
-    if cfg.context is None:
+    if cfg.spinup is None:
         filtered = cfg.model in VALID_MODEL_NAMES and any(
             resolve_family(cfg, block)[0] == "rc_network"
             for block in build_blocks(nm_mapping, block_spec))
-        cfg.context = "24h" if filtered else 0
+        cfg.spinup = "24h" if filtered else 0
 
 
 def resolve_family(cfg: ModelingConfig, block: Block) -> tuple[str, str]:
@@ -239,11 +239,28 @@ def family_lines(cfg: ModelingConfig, nm_mapping: dict[str, list[str]],
                  block_spec: Optional[dict[str, dict]]) -> list[str]:
     """One line per block: the family it takes, and which declaration said so,
     since a family can be set in three places."""
-    lines = []
-    for block in build_blocks(nm_mapping, block_spec):
-        family, source = resolve_family(cfg, block)
-        lines.append(f"  block {block.name!r}: {family} (from {source})")
-    return lines
+    return [f"  block {name!r}: {family} (from {source})"
+            for name, family, source in block_families(cfg, nm_mapping, block_spec)]
+
+
+@beartype
+def block_families(cfg: ModelingConfig, nm_mapping: dict[str, list[str]],
+                   block_spec: Optional[dict[str, dict]]) -> list[tuple[str, str, str]]:
+    """`(block, family, where it came from)` for each block; one entry, from
+    `model`, when there is no `block_mapping`."""
+    if not block_spec:
+        return [("model", cfg.model, "model")]
+    return [(block.name, *resolve_family(cfg, block))
+            for block in build_blocks(nm_mapping, block_spec)]
+
+
+def model_label(dyn_sys: nn.Module, cfg: ModelingConfig) -> str:
+    """The families a built model's blocks took, joined: `cfg.model` only names
+    the family of blocks that set none."""
+    for module in dyn_sys.modules():
+        if isinstance(module, Blocks):
+            return " + ".join(dict.fromkeys(module.families))
+    return cfg.model
 
 
 class Blocks(nn.Module):
@@ -261,7 +278,7 @@ class Blocks(nn.Module):
 
     A core with a `rows_wanted()` method says how many of the newest rows it reads
     on this call (None for all), and is handed only those: a warm thermal zone
-    carries its state and reads one row of a window as long as its context.
+    carries its state and reads one row of a window as long as its spinup.
     """
 
     def __init__(self, blocks: list[Block], families: list[str], lags: list[Lags],

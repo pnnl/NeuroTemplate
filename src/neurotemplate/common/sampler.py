@@ -32,7 +32,7 @@ class WindowSampler:
             raise ValueError(
                 f"Every record must hold a whole window of {steps} rows; these hold "
                 f"{short or 'nothing'}. Use longer files or shorten the window (`horizon`, "
-                "`past`, `context`, and for a policy the deepest `future` it previews).")
+                "`past`, `spinup`, and for a policy the deepest `future` it previews).")
         self.rows = {key: rows for key, (_, rows) in keys.items()}
         self.data = {key: torch.cat([torch.tensor(frame[columns].to_numpy(), dtype=torch.float32)
                                      for frame in frames]).to(device)

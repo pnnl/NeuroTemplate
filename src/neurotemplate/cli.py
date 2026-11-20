@@ -14,17 +14,18 @@ mirror the package layout:
     nt control gap          # neurotemplate.control.cli.gap (the best plan, beside a controller)
     nt export model         # neurotemplate.export.cli (trained dynamics -> ONNX package)
     nt export policy        # neurotemplate.export.cli (trained DPC policy -> ONNX package)
-    nt guide [step]         # neurotemplate.guide (the guided flow; takes no verb)
-    nt docs [name]          # neurotemplate.guide (the references; takes no verb)
+    nt docs [name]          # neurotemplate.reference (the references; takes no verb)
     nt init [dir]           # neurotemplate.init (a new application from the template; takes no verb)
-    nt example thermal [dir]  # neurotemplate.example (a working project on synthetic data)
 """
 from __future__ import annotations
 
+import os
 import sys
 import warnings
 from importlib import import_module
 from typing import Optional
+
+from neurotemplate.common.terminal import install
 
 # (group, verb) -> "module:function", the single source of truth for the
 # commands; the help text is derived from it.
@@ -43,10 +44,9 @@ COMMANDS: dict[tuple[str, str], str] = {
 
 def _help_text() -> str:
     lines = ["Usage: nt <group> <verb> [args...]", "",
-             "See it work:     `nt example thermal`, a project on synthetic data, zero edits.",
-             "Your own data:   `nt init`, then `nt guide`, the flow one step at a time.",
-             "", "Commands:", "  nt example thermal [dir]", "  nt init [dir]",
-             "  nt guide [step]", "  nt docs [name]"]
+             "Start:   `nt init`, then its guides/1-first-model.md.",
+             "", "Commands:", "  nt init [dir]",
+             "  nt docs [name]"]
     for group, verb in COMMANDS:
         lines.append(f"  nt {group} {verb}")
     lines.append("")
@@ -57,12 +57,6 @@ def _help_text() -> str:
 def main(argv: Optional[list[str]] = None) -> None:
     argv = list(sys.argv[1:] if argv is None else argv)
 
-    # Reports print symbols (Δ, ⚠, −) that Windows' default cp1252 cannot
-    # encode when stdout is a pipe or a log file; a console already takes UTF-8.
-    # Line buffering keeps a redirected log (`nt ... > run.log`) current
-    # instead of dumping training progress in blocks minutes apart.
-    sys.stdout.reconfigure(encoding="utf-8", line_buffering=True)
-    sys.stderr.reconfigure(encoding="utf-8")
     # Dependencies' import-time noise (a deprecated alias) is not the user's
     # to act on, and every line of it lands in an agent's context. The
     # library's own warnings, and the user's hooks', still show.
@@ -74,14 +68,8 @@ def main(argv: Optional[list[str]] = None) -> None:
         print(_help_text())
         return
 
-    if argv[0] == "guide":
-        from neurotemplate.guide import main as guide_main
-        sys.argv = ["nt guide", *argv[1:]]
-        guide_main()
-        return
-
     if argv[0] == "docs":
-        from neurotemplate.guide import docs_main
+        from neurotemplate.reference import docs_main
         sys.argv = ["nt docs", *argv[1:]]
         docs_main()
         return
@@ -93,14 +81,22 @@ def main(argv: Optional[list[str]] = None) -> None:
         return
 
     if argv[0] == "example":
-        from neurotemplate.example import main as example_main
-        sys.argv = ["nt example", *argv[1:]]
-        example_main()
-        return
+        raise SystemExit("nt: `nt example` is gone. Run `nt init`, then "
+                         "`uv run python guides/make_data.py` for a practice record "
+                         "that every guide runs on.")
+
+    if argv[0] == "guide":
+        raise SystemExit("nt: `nt guide` is gone: the guides are files now, in your "
+                         "project's guides/ folder. Start with guides/1-first-model.md.")
+
+    if argv[0] not in {group for group, _ in COMMANDS}:
+        print(_help_text(), file=sys.stderr)
+        raise SystemExit(f"nt: unknown command '{argv[0]}'.")
 
     if len(argv) < 2:
         print(_help_text(), file=sys.stderr)
-        raise SystemExit(f"nt: '{argv[0]}' needs a verb (e.g. `nt {argv[0]} train`).")
+        verbs = ", ".join(verb for group, verb in COMMANDS if group == argv[0])
+        raise SystemExit(f"nt: '{argv[0]}' needs a verb: {verbs}.")
 
     group, verb = argv[0], argv[1]
     target = COMMANDS.get((group, verb))
@@ -117,5 +113,27 @@ def main(argv: Optional[list[str]] = None) -> None:
     func()
 
 
+def run() -> None:
+    """The `nt` command: `main` with the process's output set up for a terminal."""
+    # Reports print symbols (Δ, ⚠, −) that Windows' default cp1252 cannot
+    # encode when stdout is a pipe or a log file; a console already takes UTF-8.
+    # Line buffering keeps a redirected log (`nt ... > run.log`) current
+    # instead of dumping training progress in blocks minutes apart.
+    sys.stdout.reconfigure(encoding="utf-8", line_buffering=True)
+    sys.stderr.reconfigure(encoding="utf-8")
+    # Every line at most 80 columns, through to the error printed at exit.
+    install()
+    try:
+        main()
+    except (ValueError, FileNotFoundError) as e:
+        # The library's refusals are written to be read: a wrong column name, a
+        # missing file, a config that does not add up. The traceback only
+        # buries them; NT_TRACEBACK=1 brings it back.
+        if os.environ.get("NT_TRACEBACK"):
+            raise
+        sys.stdout.flush()
+        raise SystemExit(f"\nnt: {e}\n(NT_TRACEBACK=1 shows where it came from.)") from None
+
+
 if __name__ == "__main__":
-    main()
+    run()

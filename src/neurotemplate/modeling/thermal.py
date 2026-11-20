@@ -58,10 +58,14 @@ class RCZone(nn.Module):
         declared = [c for c, _ in self.network.inputs]
         if sorted(set(declared)) != sorted(inputs):
             unused = sorted(set(inputs) - set(declared))
-            raise ValueError(f"RCZone {name!r} is handed {sorted(inputs)}, but its network "
-                             f"declares {sorted(set(declared))}. A column its network does not "
-                             f"use, here {unused}, comes out of the block's `D` (`nt data "
-                             "ladder` leaves out an input whose gain fits at zero).")
+            missing = sorted(set(declared) - set(inputs))
+            raise ValueError(
+                f"RCZone {name!r} is handed {sorted(inputs)}, but its network declares "
+                f"{sorted(set(declared))}. "
+                + (f"Give the block {missing}, which its network reads. " if missing else "")
+                + (f"Its network does not use {unused}: a heat or command the zone ignores "
+                   "is no lever. Take it out of the block, or rerun `nt data ladder`."
+                   if unused else ""))
         # A column may enter several nodes: the drive has one column per entry.
         self._order = [inputs.index(c) for c in declared]
         self.window, self.dt_h = window, dt_h

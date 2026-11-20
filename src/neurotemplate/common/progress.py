@@ -38,8 +38,10 @@ class Progress:
         if self.level == "silent":
             return
         per_step = perf_counter() - self.begin
+        hint = " `progress: log` prints each evaluation." if self.level == "summary" else ""
         print(f"{per_step:.2f} s per step; {self.iters} steps: about "
-              f"{_duration(per_step * self.iters)}, before the dev evaluations.", flush=True)
+              f"{_duration(per_step * self.iters)}, before the dev evaluations.{hint}",
+              flush=True)
 
     def update(self, step: int, train: float, dev: float) -> None:
         self.evaluations += 1

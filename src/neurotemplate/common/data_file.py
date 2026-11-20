@@ -19,6 +19,7 @@ Relative paths are read from the directory the file is in.
 
 from __future__ import annotations
 
+import csv
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Union
@@ -31,6 +32,8 @@ ROLES = ("Y", "U", "D")
 SPLITS = ("train", "dev", "test")
 #: What the CSV loader adds to every record: elapsed seconds, `t` in every window.
 TIME_COLUMN = "sec_elapsed"
+#: The names the CSV loader takes as a record's time column, in any case.
+TIME_NAMES = ("timestamp", "time", "date", "datetime")
 
 
 @dataclass(frozen=True)
@@ -76,25 +79,32 @@ def load_data_file(path: Union[str, Path]) -> DataFile:
                     {role: list(columns.get(role) or []) for role in ROLES})
 
 
-def _listing(columns: list[str]) -> str:
-    """Every column as `data.yaml`'s `columns`, ready to paste and sort into roles."""
-    lines = ["columns:", "  Y:"]
-    lines += [f'    - "{c}"' for c in columns]
-    return "\n".join(lines + ["  U: []", "  D: []"])
+def _no_roles_yet(data_file: DataFile, columns: list[str]) -> str:
+    """The record's columns, then what to do with them.
+
+    The names are bare lines, not YAML, so the list cannot be pasted in as a role: a
+    model trained on every column in Y is not a first draft worth an hour. The
+    instructions come last, where a long column list leaves the screen."""
+    return "\n".join([
+        f"The record's {len(columns)} columns:", "",
+        *(f"  {c}" for c in columns), "",
+        f"{data_file.path} assigns no columns yet. In its `columns`, move each column",
+        "above into its role, as a list: `Y: [a, b]`.",
+        "  Y: what the model predicts",
+        "  U: what a controller writes",
+        "  D: what is known without the plant, from a schedule or a forecast",
+        "A column you leave out is simply not read.",
+    ])
 
 
 def nm_mapping(data_file: DataFile, record_columns: list[str]) -> dict[str, list[str]]:
     """`{"Y", "U", "D", "t"}` from `data_file`, every name checked against the record's
     columns and every problem listed at once. With no roles assigned at all this is the
-    first thing a project hits, so it stops and prints what to paste."""
+    first thing a project hits, so it stops and lists the columns to sort."""
     available = [c for c in record_columns if c != TIME_COLUMN]
     named = [c for role in ROLES for c in data_file.columns[role]]
     if not named:
-        raise SystemExit(
-            f"{data_file.path} assigns no columns yet. The record has {len(available)}; "
-            "paste this over `columns` and move each to its role. Y is what the model "
-            "predicts, U what a controller writes, D what is known without the plant, and "
-            f"a column you leave out is simply not read.\n\n{_listing(available)}")
+        raise SystemExit(_no_roles_yet(data_file, available))
     problems = []
     unknown = [c for c in named if c not in record_columns]
     if unknown:
@@ -108,6 +118,34 @@ def nm_mapping(data_file: DataFile, record_columns: list[str]) -> dict[str, list
         raise ValueError(f"{data_file.path}:\n  - " + "\n  - ".join(problems)
                          + f"\nThe record has: {available}")
     return {**data_file.columns, "t": [TIME_COLUMN]}
+
+
+def _header_columns(path: str) -> Union[list[str], None]:
+    """The columns the loader would give `path`, from its header row alone: the time
+    column swapped for `TIME_COLUMN`. None when the header leaves that in doubt (no
+    file, no time column, a name twice or blank, which pandas renames), so the full
+    load reports it its own way."""
+    try:
+        with open(path, newline="", encoding="utf-8-sig") as f:
+            header = next(csv.reader(f))
+    except (OSError, UnicodeDecodeError, StopIteration, csv.Error):
+        return None
+    times = [c for c in header if c.lower() in TIME_NAMES]
+    if not times or not all(header) or len(set(header)) != len(header):
+        return None
+    header.remove(times[0])
+    return [*header, TIME_COLUMN]
+
+
+def check_roles(path: Union[str, Path]) -> None:
+    """`data.yaml`'s roles against the training record's header, the way `nm_mapping`
+    checks them, before a run imports the libraries it trains with. An unassigned
+    record or a misnamed column is the first thing a project hits, and on a fresh
+    install those imports take a minute; this answers in a second."""
+    data_file = load_data_file(path)
+    columns = _header_columns(data_file.train[0])
+    if columns is not None:
+        nm_mapping(data_file, columns)
 
 
 def unclaimed(nm: dict[str, list[str]], record_columns: list[str]) -> list[str]:

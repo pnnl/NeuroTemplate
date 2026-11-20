@@ -19,7 +19,20 @@ uv run nt init
 ```
 
 `uv add` puts one command, `nt`, on the environment's `PATH`; `nt init` writes
-the application (below).
+the application (below), then loads the libraries once, which takes a minute or two
+on a fresh install, so the first runs don't. `nt init --no-warmup` skips that.
+
+**The application stays on the commit it installed.** `uv.lock` records the
+commit of `main` that `uv add` resolved, so every `uv sync` installs the same
+library until you move it. To take the current `main`:
+
+```bash
+uv lock --upgrade-package neurotemplate && uv sync
+```
+
+A trained run keeps a copy of its hooks file but not of the library:
+reloading it after an upgrade runs the new library, so upgrade between
+comparisons, not in the middle of one.
 
 **The application stays on the commit it installed.** `uv.lock` records the
 commit of `main` that `uv add` resolved, so every `uv sync` installs the same
@@ -68,8 +81,9 @@ This reads nothing and writes `data.yaml` with its paths and no columns, both ho
 both config directories, a smoke-run config per side, an empty `data/`, and `AGENTS.md` (with a
 `CLAUDE.md` pointing at it) for an agent working in the directory. It writes nothing if any of
 those files exists. Put the record in `data/` as `train.csv`, `dev.csv` and `test.csv`, split in
-time order; `nt model train` then lists its columns, ready to paste into `data.yaml`. `nt guide setup`
-has the rest. To see it all work first, `nt example thermal` writes a project on synthetic data.
+time order; `nt model train` then lists its columns, to sort into roles in `data.yaml`. The project's
+`guides/` folder has the rest, starting with `1-first-model.md`. To practise first, `uv run python guides/make_data.py` writes a
+simulated record that every guide's examples run on.
 
 Run `nt` from the application's root. The library finds
 `nt_model.py` and `nt_control.py` there, or wherever

@@ -366,6 +366,8 @@ class Fit:
     converged: bool
     #: Hours of record the fit saw, summed over its series.
     record_h: float
+    #: The sampling step the fit saw, in hours.
+    step_h: float = 0.0
 
     @property
     def bic(self) -> float:
@@ -374,10 +376,12 @@ class Fit:
     @property
     def unplaced_modes(self) -> list[float]:
         """The time constants the data does not place: an infinite error bar,
-        or slower than the record is long, which no record can measure. A
-        node that slow is decoupled from ambient over this record."""
+        slower than the record is long, or faster than a tenth of a step, which
+        no record at this sampling can measure. A node that slow is decoupled
+        from ambient over this record; one that fast is a capacitance gone to
+        zero, which training cannot step through."""
         return [t for t, se in zip(self.taus_h, self.taus_se_h)
-                if math.isinf(se) or t > self.record_h]
+                if math.isinf(se) or t > self.record_h or t < self.step_h / 10]
 
 
 def default_start(network: Network) -> dict[str, float]:
@@ -397,6 +401,10 @@ def default_start(network: Network) -> dict[str, float]:
         else:
             start[name] = 0.1
     return start
+
+
+class FitFailed(ValueError):
+    """The likelihood or its curvature went non-finite: no fit to report."""
 
 
 #: The optimizer sees each log-parameter through `LOG_LIMIT · tanh(θ / LOG_LIMIT)`,
@@ -442,11 +450,23 @@ def fit(network: Network, data: list[Series], start: Optional[dict[str, float]] 
         if not torch.isfinite(loss):
             return torch.tensor(1e12, dtype=DTYPE)
         loss.backward()
+        # A finite loss can still carry a NaN gradient (an eigen-decomposition
+        # at a repeated root); one NaN step would leave every parameter NaN.
+        if not torch.isfinite(raw.grad).all():
+            optimizer.zero_grad()
+            return torch.tensor(1e12, dtype=DTYPE)
         return loss
 
     optimizer.step(closure)
     converged = optimizer.state[raw]["n_iter"] < max_iter
-    return summarize(network, squash(raw).detach(), data, converged)
+    theta = squash(raw).detach()
+    if not torch.isfinite(theta).all():
+        raise FitFailed(f"{network.name}: the fit ran into non-finite values")
+    try:
+        return summarize(network, theta, data, converged)
+    except torch.linalg.LinAlgError:
+        raise FitFailed(f"{network.name}: the likelihood's curvature is not finite "
+                        "at the fit") from None
 
 
 #: A log-parameter within this of `LOG_LIMIT` has run off to zero or infinity
@@ -523,6 +543,7 @@ def summarize(network: Network, theta: torch.Tensor, data: list[Series],
         innovations=innovations,
         converged=converged,
         record_h=sum((series.y.shape[0] - 1) * series.dt_h for series in data),
+        step_h=min(series.dt_h for series in data),
     )
 
 

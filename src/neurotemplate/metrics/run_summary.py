@@ -1,7 +1,7 @@
 """
 Machine-readable run summary, written into each run's MLflow artifacts.
 
-Run identity and config claims otherwise travel from a `Finished run:` line
+Run identity and config claims otherwise travel from a run id printed
 on stdout, through a reader, into a hand-typed deliverable — and every hop
 is lossy. `run_summary.json` lets a downstream reader copy a block instead
 of retyping one, so an audit compares a value to itself.

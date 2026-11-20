@@ -8,10 +8,9 @@ core began as a copy of [Neuromancer](https://github.com/pnnl/neuromancer)'s.
 ```bash
 uv init my_app && cd my_app
 uv add "NeuroTemplate @ git+https://github.com/pnnl/NeuroTemplate"
-uv run nt example thermal   # see it work: a project on synthetic data, zero edits
-uv run nt init              # data.yaml, hook menus, configs, data/, AGENTS.md
-# put train.csv, dev.csv, test.csv in data/
-uv run nt guide
+uv run nt init                     # data.yaml, hook menus, configs, data/, guides/ (a minute)
+uv run python guides/make_data.py  # a practice record, to try the guides on first
+# then open guides/1-first-model.md
 ```
 
 That installs the tip of `main`, which is kept stable to develop against; `uv.lock`
@@ -19,9 +18,9 @@ keeps the application on that commit until `uv lock --upgrade-package neurotempl
 [INSTALL.md](src/neurotemplate/docs/INSTALL.md) has the details. The command is `nt`; the
 Python package is `neurotemplate`, so `import neurotemplate`, not `import nt`.
 
-**Start with `nt guide`** (the same text is [GUIDE.md](GUIDE.md)). It is the whole
-flow in four short steps, each a few decisions and the command whose output settles
-them, and each step names the reference or the hook to open when you need more.
-Guides for one kind of system or one way of working sit beside it: a thermal zone,
-a model of your own, MPC. The references are `nt docs`, the same text as
+**Start with `guides/1-first-model.md`**, which `nt init` writes into your
+project ([the same files](src/neurotemplate/template/guides/)). Each guide is a
+few minutes of steps for one thing: a first model, an RC network for a zone, a
+thermostat, several zones, a first controller, an export, physics checks, a
+controller that pays for energy. The references are `nt docs`, the same text as
 [src/neurotemplate/docs/](src/neurotemplate/docs/).

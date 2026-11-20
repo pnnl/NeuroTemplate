@@ -1,15 +1,13 @@
 # Ignore markdown reports, except the user docs
 *.md
 !/README.md
-!/GUIDE.md
 !/src/neurotemplate/docs/*.md
 !/src/neurotemplate/template/*.md
-!/src/neurotemplate/GUIDE.md
+!/src/neurotemplate/template/guides/*.md
 
 # Ignore configuration files, except the template's
 *.yaml
 !/src/neurotemplate/template/**/*.yaml
-!/src/neurotemplate/examples/**/*.yaml
 
 # Results directories and files
 mlruns/
